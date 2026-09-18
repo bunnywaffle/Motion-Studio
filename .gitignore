@@ -1,0 +1,34 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# OS & temporary files
+.DS_Store
+Thumbs.db
+nul
+run.log
+*.exe
+retest.obj
+@AutomationLog.txt
+.pi/
+.ruff_cache/
+
+# Unrelated workspace projects and legacy folders
+/Blender/
+/GIMP-Content-Aware-Fill/
+/Gimp/
+/Projects/
+/boundless-bite/
+/flux-files-gpui/
+/gimp theme/
+/gimp-3d-view/
+/gimp_adjustment/
+/gimp_color_match/
+/gimp_comfy/
+/gimp_rembg/
+/gimp_sd_cpp/
+/godot-composer/
+/modern-file-manager/
+/pi-desktop/
+/test/
+/tetris/

@@ -1,0 +1,66 @@
+use project::{BlendMode, Layer, LayerSource, Property, TimeCode, Transform};
+
+/// A node in the compositor scene graph, representing a layer with its transform, visual properties,
+/// and hierarchical parenting connections.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SceneNode {
+    pub id: String,
+    pub name: String,
+    pub layer_index: usize,
+    pub source: LayerSource,
+    pub transform: Transform,
+    pub opacity: Property<f32>,
+    pub blend_mode: BlendMode,
+    pub visible: bool,
+    pub locked: bool,
+    pub in_point: TimeCode,
+    pub out_point: TimeCode,
+    pub parent_id: Option<String>,
+    pub children_ids: Vec<String>,
+}
+
+impl SceneNode {
+    /// Create a SceneNode from an existing Layer and its composition layer stack index.
+    pub fn from_layer(layer: &Layer, layer_index: usize) -> Self {
+        Self {
+            id: layer.id.clone(),
+            name: layer.name.clone(),
+            layer_index,
+            source: layer.source.clone(),
+            transform: layer.transform.clone(),
+            opacity: layer.opacity.clone(),
+            blend_mode: layer.blend_mode,
+            visible: layer.visible,
+            locked: layer.locked,
+            in_point: layer.in_point,
+            out_point: layer.out_point,
+            parent_id: layer.parent_id.clone(),
+            children_ids: Vec::new(),
+        }
+    }
+
+    /// Check if this node is active at the specified timecode (in_point <= time < out_point).
+    pub fn is_active_at(&self, time: &TimeCode) -> bool {
+        time.frames() >= self.in_point.frames() && time.frames() < self.out_point.frames()
+    }
+
+    /// Check if this node is both active and marked visible at the specified timecode.
+    pub fn is_visible_at(&self, time: &TimeCode) -> bool {
+        self.visible && self.is_active_at(time)
+    }
+
+    /// Return true if this node has a parent node.
+    pub fn has_parent(&self) -> bool {
+        self.parent_id.is_some()
+    }
+
+    /// Return true if this node is a root node (no parent).
+    pub fn is_root(&self) -> bool {
+        self.parent_id.is_none()
+    }
+
+    /// Return true if this node has no children.
+    pub fn is_leaf(&self) -> bool {
+        self.children_ids.is_empty()
+    }
+}

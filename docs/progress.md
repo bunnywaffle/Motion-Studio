@@ -1,0 +1,95 @@
+# Progress Log
+
+## Phase 0: Repository and Build System
+
+- [x] **Task 0.1: Create the Rust workspace**
+  - Created root `Cargo.toml` workspace.
+  - Created binary crate `crates/application`.
+  - Verified clean workspace compilation (`cargo check --workspace`).
+  - Added documentation files (`current-state.md`, `architecture.md`, `progress.md`).
+- [x] **Task 0.2: Add GPUI Kit**
+  - Added `gpui-kit = "0.6.1"` to root `[workspace.dependencies]`.
+  - Added `gpui-kit.workspace = true` to `crates/application/Cargo.toml`.
+  - Verified clean compilation with `cargo check --workspace`.
+- [x] **Task 0.3: Create a native window**
+  - Bootstrapped GPUI application in `crates/application/src/main.rs` with `gpui_kit::application()` and `gpui_kit::init(cx)`.
+  - Configured Dark mode via `Theme::change(ThemeMode::Dark, None, cx)` and consumed theme tokens dynamically via `ActiveTheme`.
+  - Opened native window with `cx.open_window(WindowOptions::default(), ...)` hosting `Root::new(...)` and `AppView`.
+  - Added real headless tests with `#[gpui_kit::test]` exercising window initialization, view tree, event loop pump, and dark theme contrast.
+  - Verified clean build and tests (`cargo check --workspace`, `cargo build --workspace`, `cargo test --workspace`).
+- [x] **Task 0.4: Create the basic dock layout**
+  - Integrated GPUI Kit's built-in docking system (`DockArea`, `DockSkin`, `DockPlacement`, `DockLayout`, `Panel`, `BasePanel`, `panel_handle`).
+  - Configured four After Effects-style dock regions: Left (Project / Assets, 280px), Center (Composition Viewer), Right (Properties / Effects, 300px), and Bottom (Timeline, 260px).
+  - Created initial placeholder panels implementing `BasePanel` and `Panel` (`ProjectPanel`, `CompositionViewerPanel`, `PropertiesPanel`, `TimelinePanel`).
+  - Wired `DockArea` into `AppView` with window activation on creation (`window.activate_window()`).
+  - Added automated tests with `#[gpui_kit::test]` covering bootstrap, dark theme, dock layout regions, panel attachments, toggle/resize, real frame render with panel visibility and spatial bounds, panel focus dispatch, and compact window dimensions.
+  - Verified clean build and 8 tests passing (`cargo check --workspace`, `cargo build --workspace`, `cargo test --workspace`).
+- [x] **Task 0.5: Create placeholder panels**
+  - Implemented the 5 placeholder panels specified in Section 25: `ProjectPanel`, `CompositionViewerPanel`, `PropertiesPanel`, `TimelinePanel`, and `EffectsPanel`.
+  - Configured dock layout integration: Left dock (`Project`), Center dock (`Composition`), Right dock tab group (`Properties` and `Effects` tabs), and Bottom dock (`Timeline`).
+  - Implemented clean domain-appropriate UI placeholders with GPUI Kit component styling (`ActiveTheme`, layout primitives `div`, `v_flex`, `h_flex`, `StyledExt`):
+    - `ProjectPanel`: Search bar, action buttons, table column headers, mock asset items (Composition, Video, Image, Audio), and item count status footer (`project_assets`).
+    - `CompositionViewerPanel`: Viewport controls bar, 16:9 aspect-ratio composition canvas frame, resolution/channel indicators, timecode, and status footer (`composition_viewer`).
+    - `PropertiesPanel`: Selected layer header, full transform inspector fields (Position, Scale, Rotation, Opacity, Anchor Point), and layer switches/modes (`properties_inspector`).
+    - `EffectsPanel`: Search bar and categorized built-in effects list (`effects_categories`) across 5 categories (Blur & Sharpen, Color Correction, Distort, Generate, Transition; 18 built-in effects).
+    - `TimelinePanel`: Digital timecode readout, transport controls (Play/Pause, Loop, Skip), work area markers, time ruler with second intervals, and multi-layer track lane representations (`timeline`).
+  - Each panel implements `BasePanel`, `Panel`, `Focusable`, `EventEmitter<PanelEvent>`, and `Render` with `.id(...)`, `.test_support()`, and `.track_focus(&self.focus_handle)`.
+  - Added automated tests verifying all 5 panels attached to dock, genuine bidirectional tab switching between Properties and Effects using `select_panel`, spatial layout invariants, focus dispatch for all 5 panels, panel metadata, standalone panel rendering, compact window handling, and effects panel categories and tab flow.
+  - Verified clean build and 12 tests passing with 0 errors and 0 warnings (`cargo check --workspace`, `cargo build --workspace`, `cargo test --workspace`).
+- [x] **Task 0.6: Compile and launch**
+  - Verified native compilation and launch capability.
+- [x] **Task 0.7: Create the project state structures**
+  - Created pure Rust crate `crates/project` decoupled from UI (`gpui-kit` is not a dependency).
+  - Registered `crates/project` as member and dependency in root `Cargo.toml`.
+  - Implemented core domain models:
+    - `Project`: versioned root container (`format_version`, `id`, `name`, `compositions`, `assets`, `settings`).
+    - `Composition`: (`id`, `name`, `width`, `height`, `frame_rate`, `duration`, `background_color`, `layers`, `markers`).
+    - `Layer`: (`id`, `name`, `source`, `transform`, `opacity`, `blend_mode`, `visible`, `locked`, `in_point`, `out_point`, `parent_id`, `markers`).
+    - `LayerSource`: `Solid`, `Image`, `Video`, `Text`, `Shape` (Rectangle, Ellipse, Path), `NestedComposition`, and `Procedural`.
+    - `Property<T>`: generic animatable property system with defaults, resetting, and deref semantics.
+    - `Transform`: spatial transformations with anchor point, position, scale, and rotation.
+    - `Asset`: media asset tracking with file extension type inference (`Image`, `Video`, `Audio`, `Font`, `Vector`, `Other`).
+    - Supporting types: `BlendMode` (19 modes, `ALL` slice), `Color` (RGBA float, hex parsing, NaN-safe clamping), `TimeCode` (frame timing, timecode strings, arithmetic, negative timecode support), `Marker`, `Vec2`.
+    - Comprehensive integrity validation: layer ordering, timing bounds, parent cycle detection, asset tracking, deep parenting chains (depth 100), and recursive nested composition cycle detection (depth 60).
+  - Added 22 unit tests in `crates/project` covering all model types and invariants.
+  - All 34 workspace tests passing with 0 errors and 0 warnings.
+- [x] **Task 0.8: Add project serialization**
+  - Added `serde = { version = "1.0", features = ["derive"] }` and `serde_json = "1.0"` to workspace dependencies and `crates/project`.
+  - Implemented `Serialize` and `Deserialize` across all domain structures in `crates/project`:
+    - `Project`: Conforms to Section 16 format (`format_version`, `project: { id, name }`, `compositions`, `assets`, `settings`) while providing dual compatibility for flat format deserialization.
+    - `ProjectSettings`: Working color space, audio sample rate, start timecode.
+    - `Composition`: Canvas dimensions, frame rate, duration, background color, layer list, timeline markers.
+    - `Layer`: Polymorphic layer sources (`Solid`, `Image`, `Video`, `Text`, `Shape`, `NestedComposition`, `Procedural`), transform, opacity, blend modes, timing, parent reference, layer markers.
+    - `ShapeType`: Vector shape types (`Rectangle`, `Ellipse`, `Path`).
+    - `Transform` and `Property<T>`: Animatable property serialization with default values and animation flags.
+    - `Vec2`, `Color`, `TimeCode`, `Marker`.
+    - `BlendMode`: Serializes to canonical snake_case identifiers; deserializes flexibly from snake_case, spaces, hyphens, and mixed casing across all 19 modes.
+    - `Asset` and `AssetType`: File path and asset classification serialization.
+  - Added project convenience methods: `to_json`, `to_json_pretty`, `from_json`, `save_to_file`, and `load_from_file`.
+  - Added serialization and I/O variants to `ProjectError`.
+  - Added 6 automated unit tests in `crates/project` verifying Section 16 JSON schema format, full roundtrip across all 9 layer source variants, flat format compatibility, case-insensitive blend mode parsing, file save/load roundtrip, and malformed JSON error handling.
+  - Workspace compiles and passes all checks cleanly with **40 total tests passing** (12 in `application`, 28 in `project`).
+
+---
+
+## Phase 1: Core Engine Architecture
+
+- [x] **Task 1.1: Design and implement the scene graph representation**
+  - Created pure Rust crate `crates/compositor` registered in workspace root `Cargo.toml`.
+  - Implemented `SceneNode`: layer data mapping with stack index, transform, source, timing, blend mode, and hierarchy connections (`parent_id`, `children_ids`).
+  - Implemented `SceneGraph` modeling the dual relationships of motion graphics compositions:
+    - **Topological Evaluation Order**: Resolves parent-child spatial dependencies so that parents are guaranteed to evaluate before children, irrespective of timeline stack position.
+    - **Composite Order (Painter's Algorithm)**: Bottom-to-top rendering order where lower layers are rasterized first and upper layers composite over them.
+    - **Timeline Layer Stacking**: Original layer stack order preserving timeline UI visual arrangement.
+  - Implemented comprehensive hierarchy queries: `get_parent`, `get_children`, `get_ancestor_chain`, `get_descendants` (BFS), `depth_of`, and `root_nodes`.
+  - Implemented timecode activity and visibility filtering (`active_nodes_at`, `render_order_at`).
+  - Implemented cycle detection, self-parenting prevention, and missing parent validation with `SceneGraphError`.
+  - Added constructors `SceneGraph::from_composition` and `SceneGraph::from_project`.
+  - Added 9 unit tests in `crates/compositor` covering empty graphs, multi-layer graphs, topological sort invariants, deep chains (depth 50), branching trees, cycle detection, stack vs. composite ordering, and timecode filtering.
+  - All **49 tests** across the workspace passing cleanly with 0 errors and 0 warnings.
+- [ ] **Task 1.2: Implement the layer stack evaluation model**
+- [ ] **Task 1.3: Implement the transform hierarchy and matrix concatenation**
+- [ ] **Task 1.4: Implement the animatable property system and interpolation**
+- [ ] **Task 1.5: Implement timeline time-to-frame conversion and playback clock**
+- [ ] **Task 1.6: Implement composition nesting and pre-comp evaluation**
+- [ ] **Task 1.7: Create headless composition evaluation tests**
