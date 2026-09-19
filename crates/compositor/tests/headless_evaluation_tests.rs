@@ -771,44 +771,73 @@ fn test_full_tree_point_and_bounds_mapping() {
     let mut project = Project::with_defaults("Full Tree Point Mapping Project");
     let fps = 30.0;
     let tc0 = TimeCode::from_frames(0, fps);
+    let tc120 = TimeCode::from_frames(120, fps);
     let tc150 = TimeCode::from_frames(150, fps);
 
-    // Comp C (Innermost):
-    // Contains "c_parent" at (60, 40), rot 30 deg, scale (120%, 120%), anchor (10, 10)
-    // Contains "c_leaf" parented to "c_parent" at (25, -15), rot -15 deg, scale (80%, 150%), anchor (5, 5)
+    // Comp C (Innermost, 500x500):
+    // Contains "c_parent" with keyframed transform animations (Position, Rotation, Scale, Anchor Point)
+    // Contains "c_leaf" parented to "c_parent" with keyframed transform animations
     let mut comp_c = Composition::new("comp_c", "Comp C", 500, 500, fps, tc150);
     let mut c_parent = project::Layer::solid("c_parent", "C Parent", Color::BLUE, 100, 100, tc0, tc150);
-    c_parent.transform.position.set_value(Vec2::new(60.0, 40.0));
-    c_parent.transform.rotation.set_value(30.0);
+    c_parent.transform.position.add_keyframe(Keyframe::bezier(
+        tc0,
+        Vec2::new(60.0, 40.0),
+        None,
+        Some(KeyframeTangent::ease_in_out_out()),
+    ));
+    c_parent.transform.position.add_keyframe(Keyframe::bezier(
+        tc120,
+        Vec2::new(140.0, 90.0),
+        Some(KeyframeTangent::ease_in_out_in()),
+        None,
+    ));
+    c_parent.transform.rotation.add_keyframe(Keyframe::linear(tc0, 30.0));
+    c_parent.transform.rotation.add_keyframe(Keyframe::linear(tc120, 120.0));
     c_parent.transform.scale.set_value(Vec2::new(120.0, 120.0));
     c_parent.transform.anchor_point.set_value(Vec2::new(10.0, 10.0));
 
     let mut c_leaf = project::Layer::solid("c_leaf", "C Leaf", Color::GREEN, 50, 50, tc0, tc150);
     c_leaf.set_parent(Some("c_parent"));
-    c_leaf.transform.position.set_value(Vec2::new(25.0, -15.0));
-    c_leaf.transform.rotation.set_value(-15.0);
+    c_leaf.transform.position.add_keyframe(Keyframe::linear(tc0, Vec2::new(25.0, -15.0)));
+    c_leaf.transform.position.add_keyframe(Keyframe::linear(tc120, Vec2::new(50.0, 20.0)));
+    c_leaf.transform.rotation.add_keyframe(Keyframe::linear(tc0, -15.0));
+    c_leaf.transform.rotation.add_keyframe(Keyframe::linear(tc120, 45.0));
     c_leaf.transform.scale.set_value(Vec2::new(80.0, 150.0));
     c_leaf.transform.anchor_point.set_value(Vec2::new(5.0, 5.0));
 
     comp_c.add_layer(c_parent).unwrap();
     comp_c.add_layer(c_leaf).unwrap();
 
-    // Comp B (Middle):
-    // Nests comp_c at (150, 200), rot 45 deg, scale (150%, 100%), anchor (50, 50)
+    // Comp B (Middle, 800x800):
+    // Nests comp_c with animated position, rotation, and scale
     let mut comp_b = Composition::new("comp_b", "Comp B", 800, 800, fps, tc150);
     let mut b_nest = project::Layer::nested_composition("b_nest_c", "Nested C", "comp_c", tc0, tc150);
-    b_nest.transform.position.set_value(Vec2::new(150.0, 200.0));
-    b_nest.transform.rotation.set_value(45.0);
+    b_nest.transform.position.add_keyframe(Keyframe::linear(tc0, Vec2::new(150.0, 200.0)));
+    b_nest.transform.position.add_keyframe(Keyframe::linear(tc120, Vec2::new(220.0, 180.0)));
+    b_nest.transform.rotation.add_keyframe(Keyframe::linear(tc0, 45.0));
+    b_nest.transform.rotation.add_keyframe(Keyframe::linear(tc120, 90.0));
     b_nest.transform.scale.set_value(Vec2::new(150.0, 100.0));
     b_nest.transform.anchor_point.set_value(Vec2::new(50.0, 50.0));
     comp_b.add_layer(b_nest).unwrap();
 
-    // Comp A (Root):
-    // Nests comp_b at (300, 150), rot -20 deg, scale (110%, 90%), anchor (100, 100)
+    // Comp A (Root, 1920x1080):
+    // Nests comp_b with animated position, rotation, and scale
     let mut comp_a = Composition::hd_1080p_30fps("comp_a", "Comp A", 5.0);
     let mut a_nest = project::Layer::nested_composition("a_nest_b", "Nested B", "comp_b", tc0, tc150);
-    a_nest.transform.position.set_value(Vec2::new(300.0, 150.0));
-    a_nest.transform.rotation.set_value(-20.0);
+    a_nest.transform.position.add_keyframe(Keyframe::bezier(
+        tc0,
+        Vec2::new(300.0, 150.0),
+        None,
+        Some(KeyframeTangent::ease_in_out_out()),
+    ));
+    a_nest.transform.position.add_keyframe(Keyframe::bezier(
+        tc120,
+        Vec2::new(450.0, 300.0),
+        Some(KeyframeTangent::ease_in_out_in()),
+        None,
+    ));
+    a_nest.transform.rotation.add_keyframe(Keyframe::linear(tc0, -20.0));
+    a_nest.transform.rotation.add_keyframe(Keyframe::linear(tc120, 40.0));
     a_nest.transform.scale.set_value(Vec2::new(110.0, 90.0));
     a_nest.transform.anchor_point.set_value(Vec2::new(100.0, 100.0));
     comp_a.add_layer(a_nest).unwrap();
@@ -818,59 +847,114 @@ fn test_full_tree_point_and_bounds_mapping() {
     project.add_composition(comp_c).unwrap();
 
     let evaluator = LayerStackEvaluator::new();
-    let stack_a = evaluator
-        .evaluate_composition(&project, "comp_a", &tc0)
-        .expect("Evaluate full tree");
 
-    // Retrieve leaf layer flattened representation
-    let flat_leaf = stack_a
-        .get_flattened_layer("c_leaf")
-        .expect("Leaf exists in flattened render list");
-
-    assert_eq!(flat_leaf.layer_path, vec!["a_nest_b", "b_nest_c", "c_leaf"]);
-    assert_eq!(flat_leaf.nesting_depth, 2);
-
-    // Verify deep layer root matrix equals flattened layer matrix
-    let deep_matrix = stack_a
-        .deep_layer_root_matrix(&["a_nest_b", "b_nest_c", "c_leaf"])
-        .expect("Deep layer root matrix");
-    assert!(flat_leaf.root_world_matrix.approx_eq(&deep_matrix, 1e-5));
-
-    // Test bidirectional point mapping for multiple points on c_leaf
     let local_points = [
         Vec2::ZERO,
-        Vec2::new(5.0, 5.0),  // Anchor point
+        Vec2::new(5.0, 5.0),   // Anchor point
         Vec2::new(50.0, 50.0), // Opposite corner
         Vec2::new(-20.0, 35.0),
+        Vec2::new(25.0, 10.0),
     ];
 
-    for local_pt in local_points {
-        // Forward: Local point on c_leaf -> Root composition viewport
-        let root_pt = flat_leaf.local_to_root_point(local_pt);
+    let mut mapped_origin_per_frame = Vec::new();
 
-        // Backward: Root viewport -> Local point on c_leaf
-        let recovered = flat_leaf
-            .root_to_local_point(root_pt)
-            .expect("Invertible transform");
+    // Evaluate across multiple animated timeline positions
+    for frame_idx in [0, 30, 60, 90, 120] {
+        let t = TimeCode::from_frames(frame_idx, fps);
+        let stack_a = evaluator
+            .evaluate_composition(&project, "comp_a", &t)
+            .unwrap_or_else(|e| panic!("Evaluate comp_a at frame {frame_idx}: {e}"));
+
+        // Retrieve leaf layer flattened representation
+        let flat_leaf = stack_a
+            .get_flattened_layer("c_leaf")
+            .expect("Leaf exists in flattened render list");
+
+        assert_eq!(flat_leaf.layer_path, vec!["a_nest_b", "b_nest_c", "c_leaf"]);
+        assert_eq!(flat_leaf.nesting_depth, 2);
+
+        // Verify deep layer root matrix equals flattened layer root world matrix
+        let deep_matrix = stack_a
+            .deep_layer_root_matrix(&["a_nest_b", "b_nest_c", "c_leaf"])
+            .expect("Deep layer root matrix");
+        assert!(
+            flat_leaf.root_world_matrix.approx_eq(&deep_matrix, 1e-4),
+            "deep_matrix != root_world_matrix at frame {frame_idx}"
+        );
+
+        // Verify exact hierarchical matrix concatenation across nesting boundaries:
+        // M_root = M_root(a_nest_b) * M_comp_b(b_nest_c) * M_comp_c(c_parent) * M_local(c_leaf)
+        let a_eval = stack_a.get_layer("a_nest_b").unwrap();
+        let b_eval = a_eval.nested_evaluation().unwrap();
+        let b_layer = b_eval.inner_stack.get_layer("b_nest_c").unwrap();
+        let c_eval = b_layer.nested_evaluation().unwrap();
+        let c_parent_eval = c_eval.inner_stack.get_layer("c_parent").unwrap();
+        let c_leaf_eval = c_eval.inner_stack.get_layer("c_leaf").unwrap();
+
+        let expected_concatenated = a_eval.world_matrix()
+            * b_layer.world_matrix()
+            * c_parent_eval.world_matrix()
+            * c_leaf_eval.local_matrix();
 
         assert!(
-            local_pt.distance_to(recovered) < 1e-3,
-            "Point mapping roundtrip failed for {:?}: got {:?}",
-            local_pt,
-            recovered
+            flat_leaf.root_world_matrix.approx_eq(&expected_concatenated, 1e-3),
+            "Concatenation mismatch at frame {frame_idx}"
         );
+
+        // Test bidirectional point mapping across animated parent/nesting transforms
+        for &local_pt in &local_points {
+            let root_pt = flat_leaf.local_to_root_point(local_pt);
+            let recovered = flat_leaf
+                .root_to_local_point(root_pt)
+                .expect("Invertible transform");
+
+            assert!(
+                local_pt.distance_to(recovered) < 1e-3,
+                "Point mapping roundtrip failed at frame {frame_idx} for {:?}: got {:?}",
+                local_pt,
+                recovered
+            );
+        }
+
+        // Verify root bounding box dynamically encloses all 4 corners of the 50x50 solid
+        let root_bounds = flat_leaf.root_bounds(50.0, 50.0);
+        assert!(root_bounds.width() > 0.0);
+        assert!(root_bounds.height() > 0.0);
+
+        let corners = [
+            Vec2::new(0.0, 0.0),
+            Vec2::new(50.0, 0.0),
+            Vec2::new(50.0, 50.0),
+            Vec2::new(0.0, 50.0),
+        ];
+        for corner in corners {
+            let root_corner = flat_leaf.local_to_root_point(corner);
+            let eps = 1e-2;
+            assert!(
+                root_corner.x >= root_bounds.min.x - eps
+                    && root_corner.x <= root_bounds.max.x + eps
+                    && root_corner.y >= root_bounds.min.y - eps
+                    && root_corner.y <= root_bounds.max.y + eps,
+                "Root bounds {:?} does not enclose corner {:?} -> root {:?} at frame {frame_idx}",
+                root_bounds,
+                corner,
+                root_corner
+            );
+        }
+
+        let root_origin = flat_leaf.local_to_root_point(Vec2::ZERO);
+        mapped_origin_per_frame.push(root_origin);
     }
 
-    // Verify root bounds calculation for 50x50 solid
-    let root_bounds = flat_leaf.root_bounds(50.0, 50.0);
-    assert!(root_bounds.width() > 0.0);
-    assert!(root_bounds.height() > 0.0);
-    // Transformed anchor point must be contained inside root bounds
-    let root_anchor = flat_leaf.local_to_root_point(Vec2::new(5.0, 5.0));
-    assert!(
-        root_bounds.contains_point(root_anchor),
-        "Root bounds does not contain transformed anchor point"
-    );
+    // Verify that coordinates actually changed over time due to animated transforms
+    for i in 1..mapped_origin_per_frame.len() {
+        assert!(
+            mapped_origin_per_frame[i - 1].distance_to(mapped_origin_per_frame[i]) > 5.0,
+            "Mapped points did not animate between evaluation frames: {:?} vs {:?}",
+            mapped_origin_per_frame[i - 1],
+            mapped_origin_per_frame[i]
+        );
+    }
 }
 
 // 7. Robust error handling: cycles in parenting, circular nested compositions,
@@ -919,7 +1003,25 @@ fn test_robust_error_handling_and_boundary_conditions() {
         Err(SceneGraphError::ParentNotFound { .. })
     ));
 
-    // 4. Circular nested compositions: Comp 1 -> Comp 2 -> Comp 3 -> Comp 1
+    // 4. Missing layer/node reference in SceneGraph queries
+    let mut comp_valid = Composition::hd_1080p_30fps("valid", "Valid", 5.0);
+    comp_valid
+        .add_layer(project::Layer::solid("s", "S", Color::RED, 100, 100, tc0, tc150))
+        .unwrap();
+    let graph_valid = SceneGraph::from_composition(&comp_valid).unwrap();
+
+    let err_missing_node = graph_valid.get_evaluated_transform("ghost_node").unwrap_err();
+    assert!(matches!(
+        err_missing_node,
+        SceneGraphError::NodeNotFound(ref id) if id == "ghost_node"
+    ));
+    let err_missing_at = graph_valid.get_evaluated_transform_at("ghost_node", &tc0).unwrap_err();
+    assert!(matches!(
+        err_missing_at,
+        SceneGraphError::NodeNotFound(ref id) if id == "ghost_node"
+    ));
+
+    // 5. Circular nested compositions: Comp 1 -> Comp 2 -> Comp 3 -> Comp 1
     let mut project_nested_cycle = Project::with_defaults("Nested Cycle Project");
     let mut c1 = Composition::hd_1080p_30fps("c1", "Comp 1", 5.0);
     let mut c2 = Composition::hd_1080p_30fps("c2", "Comp 2", 5.0);
@@ -942,7 +1044,7 @@ fn test_robust_error_handling_and_boundary_conditions() {
         SceneGraphError::CircularNestedComposition { ref composition_id, .. } if composition_id == "c1"
     ));
 
-    // 5. Missing composition reference
+    // 6. Missing composition reference
     let mut project_missing = Project::with_defaults("Missing Comp Proj");
     let mut c_root = Composition::hd_1080p_30fps("c_root", "Root", 5.0);
     c_root
@@ -958,7 +1060,7 @@ fn test_robust_error_handling_and_boundary_conditions() {
         SceneGraphError::CompositionNotFound(ref id) if id == "ghost_comp"
     ));
 
-    // 6. Max nesting depth exceeded
+    // 7. Max nesting depth exceeded
     let strict_eval = LayerStackEvaluator::new().with_max_nesting_depth(2);
     let mut proj_deep = Project::with_defaults("Deep Limit Proj");
     let mut d4 = Composition::hd_1080p_30fps("d4", "D4", 5.0);
@@ -981,14 +1083,26 @@ fn test_robust_error_handling_and_boundary_conditions() {
         SceneGraphError::MaxNestingDepthExceeded { depth: 3, max_depth: 2 }
     ));
 
-    // 7. Out-of-bounds frame requests:
-    // A: Negative frame number
-    let mut comp_valid = Composition::hd_1080p_30fps("valid", "Valid", 5.0);
-    comp_valid
-        .add_layer(project::Layer::solid("s", "S", Color::RED, 100, 100, tc0, tc150))
-        .unwrap();
-    let graph_valid = SceneGraph::from_composition(&comp_valid).unwrap();
+    // 8. Missing track matte source layer reference: graceful fallback without panics
+    let mut comp_broken_matte = Composition::hd_1080p_30fps("comp_bm", "Broken Matte", 5.0);
+    let mut l_target = project::Layer::solid("l_target", "Target", Color::RED, 100, 100, tc0, tc150);
+    l_target.set_matte(TrackMatteMode::Alpha, Some("phantom_matte_source"));
+    comp_broken_matte.add_layer(l_target).unwrap();
+    let graph_bm = SceneGraph::from_composition(&comp_broken_matte).unwrap();
+    let stack_bm = evaluator.evaluate(&graph_bm, &tc0);
+    let eval_target = stack_bm.get_layer("l_target").unwrap();
+    assert_eq!(eval_target.matte_source_id, None);
+    assert!(eval_target.is_active);
+    assert!(eval_target.is_visible);
+    assert_eq!(stack_bm.render_list, vec!["l_target"]);
 
+    // Missing layer deep lookup query returns None safely
+    assert!(stack_bm.get_layer("ghost_layer").is_none());
+    assert!(stack_bm.get_layer_deep(&["l_target", "ghost_layer"]).is_none());
+    assert!(stack_bm.deep_layer_root_matrix(&["l_target", "ghost_layer"]).is_none());
+
+    // 9. Out-of-bounds frame requests & subframe boundaries:
+    // A: Negative frame number
     let neg_time = TimeCode::from_frames(-100, fps);
     let stack_neg = evaluator.evaluate(&graph_valid, &neg_time);
     assert_eq!(stack_neg.active_count(), 0);
@@ -999,6 +1113,18 @@ fn test_robust_error_handling_and_boundary_conditions() {
     let stack_huge = evaluator.evaluate(&graph_valid, &huge_time);
     assert_eq!(stack_huge.active_count(), 0);
     assert!(stack_huge.render_list.is_empty());
+
+    // C: Last active frame just before out_point
+    let last_active = TimeCode::from_frames(149, fps);
+    let stack_last = evaluator.evaluate(&graph_valid, &last_active);
+    assert_eq!(stack_last.active_count(), 1);
+    assert!(stack_last.get_layer("s").unwrap().is_active);
+
+    // D: Exact out_point (half-open [in, out) makes frame 150 inactive)
+    let exact_out = TimeCode::from_frames(150, fps);
+    let stack_out = evaluator.evaluate(&graph_valid, &exact_out);
+    assert_eq!(stack_out.active_count(), 0);
+    assert!(stack_out.render_list.is_empty());
 }
 
 // 8. Performance & Throughput Profiling Test:
@@ -1127,6 +1253,10 @@ fn test_performance_high_throughput_composition_evaluation() {
 
         // Verify active layers evaluated properly without breaking invariant
         debug_assert!(stack.active_count() > 0);
+
+        // Also resolve flattened render passes as required for timeline scrubbing rasterization
+        let flattened = stack.flattened_render_list();
+        debug_assert!(!flattened.is_empty());
     }
 
     let elapsed = start_time.elapsed();
