@@ -1,4 +1,4 @@
-use project::{BlendMode, Layer, LayerSource, Property, TimeCode, Transform};
+use project::{BlendMode, Layer, LayerSource, Property, TimeCode, TrackMatteMode, Transform};
 
 /// A node in the compositor scene graph, representing a layer with its transform, visual properties,
 /// and hierarchical parenting connections.
@@ -13,6 +13,9 @@ pub struct SceneNode {
     pub blend_mode: BlendMode,
     pub visible: bool,
     pub locked: bool,
+    pub solo: bool,
+    pub matte_mode: TrackMatteMode,
+    pub matte_layer_id: Option<String>,
     pub in_point: TimeCode,
     pub out_point: TimeCode,
     pub parent_id: Option<String>,
@@ -32,6 +35,9 @@ impl SceneNode {
             blend_mode: layer.blend_mode,
             visible: layer.visible,
             locked: layer.locked,
+            solo: layer.solo,
+            matte_mode: layer.matte_mode,
+            matte_layer_id: layer.matte_layer_id.clone(),
             in_point: layer.in_point,
             out_point: layer.out_point,
             parent_id: layer.parent_id.clone(),
@@ -62,5 +68,15 @@ impl SceneNode {
     /// Return true if this node has no children.
     pub fn is_leaf(&self) -> bool {
         self.children_ids.is_empty()
+    }
+
+    /// Return true if this node has solo mode enabled.
+    pub const fn is_solo(&self) -> bool {
+        self.solo
+    }
+
+    /// Return true if track matte is active on this node.
+    pub const fn has_matte(&self) -> bool {
+        self.matte_mode.is_enabled()
     }
 }

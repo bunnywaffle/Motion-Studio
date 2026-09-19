@@ -5,6 +5,7 @@ pub mod composition;
 pub mod error;
 pub mod layer;
 pub mod marker;
+pub mod matte;
 pub mod project;
 pub mod property;
 pub mod timecode;
@@ -19,6 +20,7 @@ pub use composition::Composition;
 pub use error::{ColorError, ProjectError, TimeCodeError, ValidationError};
 pub use layer::{Layer, LayerSource, ShapeType};
 pub use marker::Marker;
+pub use matte::TrackMatteMode;
 pub use project::{Project, ProjectSettings, CURRENT_FORMAT_VERSION};
 pub use property::Property;
 pub use timecode::TimeCode;
@@ -1072,5 +1074,34 @@ mod tests {
 
         let res = Project::from_json(bad_json);
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_track_matte_and_solo_serialization_roundtrip() {
+        let mut project = Project::new("proj_matte_test", "Matte and Solo Test");
+        let mut comp = Composition::hd_1080p_30fps("comp_m", "Matte Comp", 5.0);
+        let tc0 = TimeCode::zero(30.0);
+        let tc100 = TimeCode::from_frames(100, 30.0);
+
+        let l_matte = Layer::solid("l_src", "Matte Source", Color::WHITE, 200, 200, tc0, tc100)
+            .with_solo(true);
+
+        let l_masked = Layer::solid("l_target", "Masked Layer", Color::RED, 1920, 1080, tc0, tc100)
+            .with_matte(TrackMatteMode::AlphaInverted, Some("l_src"));
+
+        comp.add_layer(l_matte).unwrap();
+        comp.add_layer(l_masked).unwrap();
+        project.add_composition(comp).unwrap();
+
+        // Roundtrip
+        let json = project.to_json_pretty().expect("Serialize");
+        let restored = Project::from_json(&json).expect("Deserialize");
+        assert_eq!(project, restored);
+
+        let r_comp = restored.get_composition("comp_m").unwrap();
+        assert!(r_comp.layers[0].is_solo());
+        assert_eq!(r_comp.layers[1].matte_mode, TrackMatteMode::AlphaInverted);
+        assert_eq!(r_comp.layers[1].matte_layer_id.as_deref(), Some("l_src"));
+        assert!(r_comp.layers[1].has_matte());
     }
 }

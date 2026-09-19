@@ -38,15 +38,15 @@
   - Polymorphic layer types serialize with `{"type": "..."}` discriminant tagging.
   - Project file operations provided: `to_json()`, `to_json_pretty()`, `from_json()`, `save_to_file()`, and `load_from_file()`.
 - Pure Rust composition evaluation engine initiated under `crates/compositor`:
-  - `SceneNode`: Maps composition layer data with stack order index, transform, source, timing, blend mode, and hierarchy connections (`parent_id`, `children_ids`).
+  - `SceneNode`: Maps composition layer data with stack order index, transform, source, timing, blend mode, solo, matte mode, and hierarchy connections (`parent_id`, `children_ids`).
   - `SceneGraph`: Hierarchical scene graph representation with dual ordering systems:
     - **Topological Evaluation Order**: Resolves parent-child spatial dependencies so that parents are guaranteed to evaluate before children.
     - **Composite Order (Painter's Algorithm)**: Bottom-to-top rendering order where lower layers are rasterized first and upper layers composite over them.
     - **Timeline Layer Stacking**: Original layer stack order preserving timeline UI visual arrangement.
-  - Hierarchy query methods: `get_parent`, `get_children`, `get_ancestor_chain`, `get_descendants` (BFS), `depth_of`, and `root_nodes`.
-  - Timecode activity and visibility filtering (`active_nodes_at`, `render_order_at`).
-  - Cycle detection, self-parenting prevention, and missing parent validation with `SceneGraphError`.
-- Full automated test suite passing with **49 tests** across the workspace (12 application tests + 28 project unit tests + 9 compositor unit tests).
+  - `TrackMatteMode`: Full track matte modeling (`None`, `Alpha`, `AlphaInverted`, `Luma`, `LumaInverted`) with serialization and predicate helpers.
+  - `LayerStackEvaluator`: Evaluates composition layers at any timeline `TimeCode`, enforcing exact `[in_point, out_point)` boundary intervals, solo suppression/preservation, track matte pairing (explicit and adjacent), opacity clamping/normalization, and painter's composite render list generation.
+  - `EvaluatedStack` & `EvaluatedLayer`: Comprehensive frame evaluation context with timing offsets, layer states, and filter queries.
+- Full automated test suite passing with **55 tests** across the workspace (12 application tests + 29 project unit tests + 14 compositor unit tests).
 - Workspace compiles, builds, and passes all checks cleanly with 0 errors and 0 warnings (`cargo check --workspace`, `cargo build --workspace`, `cargo test --workspace`, and `cargo clippy --workspace --all-targets -- -D warnings`).
 
 ## What Is Currently Being Developed
@@ -57,8 +57,9 @@
 
 ## Next Single Task
 
-### Task 1.2: Implement the layer stack evaluation model
+### Task 1.3: Implement the transform hierarchy and matrix concatenation
 
-- Implement the layer evaluation pipeline that processes layers in the composition according to the scene graph.
-- Support evaluating layer states at specific timeline positions, taking into account in/out points, track matte, and opacity.
-- Add unit tests verifying layer evaluation at varied timecodes, boundary conditions, and disabled/hidden layer handling.
+- Implement 2D affine transform matrix math (`glam::Affine2` or internal $3\times3$ transform matrices).
+- Evaluate world transform matrices by concatenating parent-child transform chains in topological evaluation order.
+- Add anchor point offsetting, position translation, scale, and rotation composition.
+- Add unit tests verifying transform concatenation, local-to-world point mapping, and deep hierarchy transformations.

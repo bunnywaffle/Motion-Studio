@@ -87,7 +87,23 @@
   - Added constructors `SceneGraph::from_composition` and `SceneGraph::from_project`.
   - Added 9 unit tests in `crates/compositor` covering empty graphs, multi-layer graphs, topological sort invariants, deep chains (depth 50), branching trees, cycle detection, stack vs. composite ordering, and timecode filtering.
   - All **49 tests** across the workspace passing cleanly with 0 errors and 0 warnings.
-- [ ] **Task 1.2: Implement the layer stack evaluation model**
+- [x] **Task 1.2: Implement the layer stack evaluation model**
+  - Added `TrackMatteMode` enum (`None`, `Alpha`, `AlphaInverted`, `Luma`, `LumaInverted`) to `crates/project/src/matte.rs` with serialization and predicate helpers.
+  - Extended `Layer` with `solo: bool`, `matte_mode: TrackMatteMode`, and `matte_layer_id: Option<String>`, preserving 100% backward compatibility.
+  - Implemented `EvaluatedLayer` in `crates/compositor/src/evaluation.rs`:
+    - Tracks active state, visibility, solo state, local opacity (0..=100), effective opacity (0.0..=1.0), matte pairing, matte source flag, and frame/second offsets relative to in-point.
+  - Implemented `EvaluatedStack` in `crates/compositor/src/evaluation.rs`:
+    - Contains evaluated layer collection, composition timing context, and painter's composite render list.
+    - Query methods: `get_layer`, `active_layers`, `visible_layers`, `render_layers`, `has_solo`, `active_count`, `render_count`.
+  - Implemented `LayerStackEvaluator`:
+    - Evaluates layer states at any timeline `TimeCode`.
+    - Handles exact boundary conditions using half-open interval `[in_point, out_point)`.
+    - Resolves Solo modes: when solo layers are active, non-solo layers are suppressed, while matte sources for soloed layers are preserved.
+    - Resolves Track Matte pairing: supports both explicit matte layer IDs and adjacent stack layers (the layer immediately above), with optional matte source consumption.
+    - Generates painter's composite render order (`render_list`) excluding consumed matte sources.
+  - Added 5 unit tests in `crates/compositor` covering exact boundary conditions, opacity clamping, solo modes, adjacent track matte pairing, explicit matte targeting, and matte consumption.
+  - Added unit test in `crates/project` verifying serialization roundtrip of solo and track matte configurations.
+  - Workspace compiles cleanly with **55 total tests passing** (12 in `application`, 29 in `project`, 14 in `compositor`) and 0 clippy warnings.
 - [ ] **Task 1.3: Implement the transform hierarchy and matrix concatenation**
 - [ ] **Task 1.4: Implement the animatable property system and interpolation**
 - [ ] **Task 1.5: Implement timeline time-to-frame conversion and playback clock**

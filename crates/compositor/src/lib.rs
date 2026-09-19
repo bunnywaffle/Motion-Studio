@@ -1,8 +1,10 @@
 pub mod error;
+pub mod evaluation;
 pub mod graph;
 pub mod node;
 
 pub use error::SceneGraphError;
+pub use evaluation::{EvaluatedLayer, EvaluatedStack, LayerStackEvaluator};
 pub use graph::SceneGraph;
 pub use node::SceneNode;
 
@@ -362,5 +364,205 @@ mod tests {
 
         let err = SceneGraph::from_project(&project, "missing_comp");
         assert!(matches!(err, Err(SceneGraphError::CompositionNotFound(ref id)) if id == "missing_comp"));
+    }
+
+    #[test]
+    fn test_evaluator_exact_boundary_conditions() {
+        let mut comp = Composition::hd_1080p_30fps("comp_bound", "Boundary Test", 10.0);
+        // Layer spanning exactly frame 30 to frame 60 (half-open [30, 60))
+        let layer = Layer::solid(
+            "l_span",
+            "Span Layer",
+            Color::RED,
+            100,
+            100,
+            TimeCode::from_frames(30, 30.0),
+            TimeCode::from_frames(60, 30.0),
+        );
+        comp.add_layer(layer).unwrap();
+
+        let graph = SceneGraph::from_composition(&comp).unwrap();
+        let evaluator = LayerStackEvaluator::new();
+
+        // Frame 29 (just before in_point): inactive
+        let stack_29 = evaluator.evaluate(&graph, &TimeCode::from_frames(29, 30.0));
+        let l_29 = stack_29.get_layer("l_span").unwrap();
+        assert!(!l_29.is_active);
+        assert!(!l_29.is_visible);
+        assert_eq!(l_29.effective_opacity, 0.0);
+        assert!(stack_29.render_list.is_empty());
+
+        // Frame 30 (exact in_point): active!
+        let stack_30 = evaluator.evaluate(&graph, &TimeCode::from_frames(30, 30.0));
+        let l_30 = stack_30.get_layer("l_span").unwrap();
+        assert!(l_30.is_active);
+        assert!(l_30.is_visible);
+        assert_eq!(l_30.effective_opacity, 1.0);
+        assert_eq!(l_30.time_offset_frames, 0);
+        assert_eq!(l_30.time_offset_seconds, 0.0);
+        assert_eq!(stack_30.render_list, vec!["l_span"]);
+
+        // Frame 59 (last active frame before out_point): active!
+        let stack_59 = evaluator.evaluate(&graph, &TimeCode::from_frames(59, 30.0));
+        let l_59 = stack_59.get_layer("l_span").unwrap();
+        assert!(l_59.is_active);
+        assert_eq!(l_59.time_offset_frames, 29);
+        assert_eq!(stack_59.render_list, vec!["l_span"]);
+
+        // Frame 60 (exact out_point): inactive! (half-open [in, out) convention)
+        let stack_60 = evaluator.evaluate(&graph, &TimeCode::from_frames(60, 30.0));
+        let l_60 = stack_60.get_layer("l_span").unwrap();
+        assert!(!l_60.is_active);
+        assert!(!l_60.is_visible);
+        assert_eq!(l_60.effective_opacity, 0.0);
+        assert!(stack_60.render_list.is_empty());
+    }
+
+    #[test]
+    fn test_evaluator_hidden_and_opacity_clamping() {
+        let mut comp = Composition::hd_1080p_30fps("comp_opacity", "Opacity Test", 5.0);
+        let tc0 = TimeCode::zero(30.0);
+        let tc150 = TimeCode::from_frames(150, 30.0);
+
+        let mut l_50 = Layer::solid("l_50", "50% Opacity", Color::RED, 100, 100, tc0, tc150);
+        l_50.opacity.set_value(50.0);
+
+        let mut l_hidden = Layer::solid("l_hidden", "Hidden", Color::BLUE, 100, 100, tc0, tc150);
+        l_hidden.visible = false;
+
+        let mut l_over = Layer::solid("l_over", "Over 100%", Color::GREEN, 100, 100, tc0, tc150);
+        l_over.opacity.set_value(150.0);
+
+        comp.add_layer(l_50).unwrap();
+        comp.add_layer(l_hidden).unwrap();
+        comp.add_layer(l_over).unwrap();
+
+        let graph = SceneGraph::from_composition(&comp).unwrap();
+        let evaluator = LayerStackEvaluator::new();
+        let stack = evaluator.evaluate(&graph, &TimeCode::from_frames(10, 30.0));
+
+        let eval_50 = stack.get_layer("l_50").unwrap();
+        assert_eq!(eval_50.local_opacity, 50.0);
+        assert!((eval_50.effective_opacity - 0.5).abs() < 1e-6);
+
+        let eval_hidden = stack.get_layer("l_hidden").unwrap();
+        assert!(!eval_hidden.is_visible);
+        assert_eq!(eval_hidden.effective_opacity, 0.0);
+
+        let eval_over = stack.get_layer("l_over").unwrap();
+        assert_eq!(eval_over.local_opacity, 100.0); // clamped to 100
+        assert_eq!(eval_over.effective_opacity, 1.0);
+
+        // Hidden layer excluded from render_list
+        assert!(!stack.render_list.contains(&"l_hidden".to_string()));
+        assert_eq!(stack.render_count(), 2);
+    }
+
+    #[test]
+    fn test_evaluator_solo_modes() {
+        let mut comp = Composition::hd_1080p_30fps("comp_solo", "Solo Test", 5.0);
+        let tc0 = TimeCode::zero(30.0);
+        let tc150 = TimeCode::from_frames(150, 30.0);
+
+        let l1 = Layer::solid("l1", "Layer 1", Color::RED, 100, 100, tc0, tc150);
+        let mut l2 = Layer::solid("l2", "Layer 2", Color::GREEN, 100, 100, tc0, tc150);
+        let l3 = Layer::solid("l3", "Layer 3", Color::BLUE, 100, 100, tc0, tc150);
+
+        // Solo Layer 2
+        l2.set_solo(true);
+
+        comp.add_layer(l1).unwrap();
+        comp.add_layer(l2).unwrap();
+        comp.add_layer(l3).unwrap();
+
+        let graph = SceneGraph::from_composition(&comp).unwrap();
+        let evaluator = LayerStackEvaluator::new();
+        let stack = evaluator.evaluate(&graph, &TimeCode::from_frames(10, 30.0));
+
+        // When l2 is soloed, l1 and l3 are suppressed
+        assert!(!stack.get_layer("l1").unwrap().is_visible);
+        assert!(stack.get_layer("l2").unwrap().is_visible);
+        assert!(!stack.get_layer("l3").unwrap().is_visible);
+
+        assert_eq!(stack.render_list, vec!["l2"]);
+    }
+
+    #[test]
+    fn test_evaluator_track_matte_pairing_and_consumption() {
+        use project::TrackMatteMode;
+
+        let mut comp = Composition::hd_1080p_30fps("comp_matte", "Matte Test", 5.0);
+        let tc0 = TimeCode::zero(30.0);
+        let tc150 = TimeCode::from_frames(150, 30.0);
+
+        // Visual stack in timeline:
+        // [Index 0] Matte Source (e.g. circle shape)
+        // [Index 1] Video/Texture Layer (masked by Matte Source)
+        // [Index 2] Background Layer
+        let matte_layer = Layer::solid("matte_src", "Matte Shape", Color::WHITE, 200, 200, tc0, tc150);
+        let mut masked_layer = Layer::solid("masked_clip", "Video Texture", Color::RED, 1920, 1080, tc0, tc150);
+        // Adjacent track matte: masked_clip uses matte_src (the layer above it)
+        masked_layer.set_matte(TrackMatteMode::Alpha, None::<String>);
+
+        let bg_layer = Layer::solid("bg", "Background", Color::BLACK, 1920, 1080, tc0, tc150);
+
+        comp.add_layer(matte_layer).unwrap();
+        comp.add_layer(masked_layer).unwrap();
+        comp.add_layer(bg_layer).unwrap();
+
+        let graph = SceneGraph::from_composition(&comp).unwrap();
+        let evaluator = LayerStackEvaluator::new();
+        let stack = evaluator.evaluate(&graph, &TimeCode::from_frames(10, 30.0));
+
+        let eval_matte = stack.get_layer("matte_src").unwrap();
+        let eval_masked = stack.get_layer("masked_clip").unwrap();
+
+        // Matte relationship resolved
+        assert_eq!(eval_masked.matte_mode, TrackMatteMode::Alpha);
+        assert_eq!(eval_masked.matte_source_id.as_deref(), Some("matte_src"));
+        assert!(eval_matte.is_matte_source);
+
+        // Painter's composite render list:
+        // bg (index 2) -> masked_clip (index 1)
+        // Note: matte_src (index 0) is consumed as a mask, so it is NOT rendered directly!
+        assert_eq!(stack.render_list, vec!["bg", "masked_clip"]);
+
+        // When consume_matte_sources = false, matte_src is also included in direct render
+        let mut non_consuming_evaluator = LayerStackEvaluator::new();
+        non_consuming_evaluator.consume_matte_sources = false;
+        let stack_all = non_consuming_evaluator.evaluate(&graph, &TimeCode::from_frames(10, 30.0));
+        assert_eq!(stack_all.render_list, vec!["bg", "masked_clip", "matte_src"]);
+    }
+
+    #[test]
+    fn test_evaluator_explicit_track_matte_targeting() {
+        use project::TrackMatteMode;
+
+        let mut comp = Composition::hd_1080p_30fps("comp_exp_matte", "Explicit Matte", 5.0);
+        let tc0 = TimeCode::zero(30.0);
+        let tc150 = TimeCode::from_frames(150, 30.0);
+
+        // Target matte layer located elsewhere in the stack (non-adjacent)
+        let l1 = Layer::solid("l1", "Layer 1", Color::RED, 100, 100, tc0, tc150);
+        let l2 = Layer::solid("l2", "Layer 2", Color::GREEN, 100, 100, tc0, tc150);
+        let mut l3 = Layer::solid("l3", "Layer 3", Color::BLUE, 100, 100, tc0, tc150);
+
+        // l3 explicitly targets l1 as its Luma matte
+        l3.set_matte(TrackMatteMode::Luma, Some("l1"));
+
+        comp.add_layer(l1).unwrap();
+        comp.add_layer(l2).unwrap();
+        comp.add_layer(l3).unwrap();
+
+        let graph = SceneGraph::from_composition(&comp).unwrap();
+        let evaluator = LayerStackEvaluator::new();
+        let stack = evaluator.evaluate(&graph, &TimeCode::from_frames(10, 30.0));
+
+        let eval_l3 = stack.get_layer("l3").unwrap();
+        assert_eq!(eval_l3.matte_mode, TrackMatteMode::Luma);
+        assert_eq!(eval_l3.matte_source_id.as_deref(), Some("l1"));
+
+        let eval_l1 = stack.get_layer("l1").unwrap();
+        assert!(eval_l1.is_matte_source);
     }
 }

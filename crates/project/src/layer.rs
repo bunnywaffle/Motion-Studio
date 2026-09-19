@@ -2,6 +2,7 @@ use crate::blend_mode::BlendMode;
 use crate::color::Color;
 use crate::error::ValidationError;
 use crate::marker::Marker;
+use crate::matte::TrackMatteMode;
 use crate::property::Property;
 use crate::timecode::TimeCode;
 use crate::transform::Transform;
@@ -90,6 +91,12 @@ pub struct Layer {
     pub visible: bool,
     #[serde(default)]
     pub locked: bool,
+    #[serde(default)]
+    pub solo: bool,
+    #[serde(default)]
+    pub matte_mode: TrackMatteMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matte_layer_id: Option<String>,
     pub in_point: TimeCode,
     pub out_point: TimeCode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -116,6 +123,9 @@ impl Layer {
             blend_mode: BlendMode::Normal,
             visible: true,
             locked: false,
+            solo: false,
+            matte_mode: TrackMatteMode::None,
+            matte_layer_id: None,
             in_point,
             out_point,
             parent_id: None,
@@ -329,6 +339,39 @@ impl Layer {
     /// Check if the layer is currently locked.
     pub const fn is_locked(&self) -> bool {
         self.locked
+    }
+
+    /// Check if the layer has solo enabled.
+    pub const fn is_solo(&self) -> bool {
+        self.solo
+    }
+
+    /// Set whether the layer is soloed.
+    pub fn set_solo(&mut self, solo: bool) {
+        self.solo = solo;
+    }
+
+    /// Builder to set solo mode.
+    pub fn with_solo(mut self, solo: bool) -> Self {
+        self.solo = solo;
+        self
+    }
+
+    /// Check if track matte is enabled on this layer.
+    pub const fn has_matte(&self) -> bool {
+        self.matte_mode.is_enabled()
+    }
+
+    /// Configure track matte mode and optional matte layer ID.
+    pub fn set_matte(&mut self, mode: TrackMatteMode, matte_layer_id: Option<impl Into<String>>) {
+        self.matte_mode = mode;
+        self.matte_layer_id = matte_layer_id.map(Into::into);
+    }
+
+    /// Builder to set track matte mode and optional matte layer ID.
+    pub fn with_matte(mut self, mode: TrackMatteMode, matte_layer_id: Option<impl Into<String>>) -> Self {
+        self.set_matte(mode, matte_layer_id);
+        self
     }
 
     /// Check if the layer is a solid color layer.
