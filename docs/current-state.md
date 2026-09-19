@@ -71,7 +71,30 @@
     - Work area looping and boundaries: `WorkArea` (`in_point`, `out_point`) with loop modes (`Loop` wrap-around, `Once` boundary stop, `PingPong` velocity bounce).
     - Drift-free delta time advancement: `tick(dt: std::time::Duration)` returning `ClockTickResult` (`timecode`, `frame`, `frame_changed`, `looped`, `reached_end`).
     - Navigation and stepping: single/multi-frame stepping (`step_next_frame`, `step_prev_frame`, `step_forward`, `step_backward`), jump to work area bounds (`jump_to_start`, `jump_to_end`), jump to composition bounds, and keyframe/marker jumping (`jump_to_next_keyframe_in_comp`, `jump_to_prev_keyframe_in_comp`, `jump_to_next_marker_in_comp`, `jump_to_prev_marker_in_comp`).
-- Full automated test suite passing with **92 tests** across the workspace (12 application tests + 49 project unit tests + 31 compositor unit tests).
+- Composition nesting and pre-comp evaluation pipeline implemented across `crates/project` and `crates/compositor`:
+  - `NestedCompositionEvaluation`: encapsulates evaluated inner stack, resolved local timeline timecode, composition canvas dimensions, and concatenated nesting world transform matrix.
+  - Time Remapping & Temporal Alignment:
+    - Base time offset calculation: $t_{\text{nested}} = t_{\text{parent}} - t_{\text{in\_point}} + t_{\text{start\_offset}}$.
+    - Time stretch / speed factor support: positive/negative speed multipliers (e.g. 50% slow-motion, 200% double speed, negative reverse).
+    - Optional animated time remapping property (`time_remapping: Option<Property<f64>>`) mapping parent timeline to inner composition seconds.
+    - Duration bounds clamping and loop modes: `LoopMode::Once` (boundary clamp), `LoopMode::Loop` (periodic wrap), and `LoopMode::PingPong` (oscillation bounce).
+    - Multi-rate synchronization: frame-exact calculations for matched frame rates and floating-point continuous second mapping for disparate frame rates.
+  - Spatial Concatenation & Nested Transformations:
+    - Hierarchical world transform cascading: $M_{\text{inner\_root}} = M_{\text{nesting\_world\_matrix}} \times M_{\text{inner\_world}}$.
+    - Bidirectional point transformations: `inner_to_root_point` and `root_to_inner_point`.
+    - Bounding box mapping: `inner_to_root_bbox`, `canvas_bounds_in_root`, and `inner_layer_root_bounds`.
+    - Transform helper `transform_bbox` on `AffineTransform2D`.
+  - Recursive Frame Representation & Compositing:
+    - `EvaluatedLayer` embeds `nested_composition: Option<Box<NestedCompositionEvaluation>>` with query methods `is_nested_composition()` and `nested_evaluation()`.
+    - `FlattenedRenderLayer`: represents atomic render elements with fully resolved root world matrices, cumulative opacities, layer paths, and nesting depths.
+    - `EvaluatedStack`: provides `flattened_render_list()` expanding nested compositions in painter's composite order, `collect_render_passes()` for offscreen render targets in dependency order, `has_nested_compositions()`, and `get_layer_deep()`.
+  - Recursion Limits & Cycle Protection:
+    - `LayerStackEvaluator`: configurable `max_nesting_depth` (default 32) guarding against unbounded recursion with `SceneGraphError::MaxNestingDepthExceeded`.
+    - Active cycle detection detecting circular nested composition references with `SceneGraphError::CircularNestedComposition`.
+    - Graceful missing composition error handling with `SceneGraphError::CompositionNotFound`.
+  - Layer Model Integration in `crates/project`:
+    - Extended `Layer` with `start_offset`, `time_stretch`, `time_remapping`, and `loop_mode` with full backward compatibility and JSON serialization roundtripping.
+- Full automated test suite passing with **103 tests** across the workspace (12 application tests + 50 project unit tests + 41 compositor unit tests).
 - Workspace compiles, builds, and passes all checks cleanly with 0 errors and 0 warnings (`cargo check --workspace`, `cargo build --workspace`, `cargo test --workspace`, and `cargo clippy --workspace --all-targets -- -D warnings`).
 
 ## What Is Currently Being Developed
@@ -82,10 +105,10 @@
 
 ## Next Single Task
 
-### Task 1.6: Implement composition nesting and pre-comp evaluation
+### Task 1.7: Create headless composition evaluation tests
 
-- Design nested composition evaluation pipeline in `crates/compositor`.
-- Implement pre-comp time-remapping, frame offset, and duration clipping relative to parent composition timelines.
-- Connect nested composition scene nodes to upstream evaluated stacks without circular graph recursion.
-- Add automated unit tests covering multi-level nested compositions, transform propagation across nesting boundaries, and timing offsets.
+- Create integration test suite in `crates/compositor/tests/` (or dedicated test crate/module) exercising complex, multi-layered composition scenarios completely headless (without GPU/window dependencies).
+- Validate end-to-end evaluation: combinations of nested pre-comps, keyframe Bezier ease-in-out animations, track mattes, parenting hierarchies, time stretch, reverse playback, and composite painter's ordering.
+- Benchmark and profile evaluation throughput for complex multi-layer compositions across thousands of evaluated frames.
+
 

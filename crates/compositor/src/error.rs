@@ -20,6 +20,14 @@ pub enum SceneGraphError {
         height: u32,
     },
     InvalidFrameRate(f64),
+    CircularNestedComposition {
+        composition_id: String,
+        cycle: Vec<String>,
+    },
+    MaxNestingDepthExceeded {
+        depth: usize,
+        max_depth: usize,
+    },
 }
 
 impl fmt::Display for SceneGraphError {
@@ -46,8 +54,22 @@ impl fmt::Display for SceneGraphError {
                 write!(f, "invalid composition dimensions: {width}x{height}")
             }
             Self::InvalidFrameRate(fps) => write!(f, "invalid composition frame rate: {fps}"),
+            Self::CircularNestedComposition { composition_id, cycle } => {
+                write!(
+                    f,
+                    "circular nested composition detected for '{composition_id}': {}",
+                    cycle.join(" -> ")
+                )
+            }
+            Self::MaxNestingDepthExceeded { depth, max_depth } => {
+                write!(
+                    f,
+                    "maximum nested composition depth exceeded: {depth} > {max_depth}"
+                )
+            }
         }
     }
 }
+
 
 impl std::error::Error for SceneGraphError {}

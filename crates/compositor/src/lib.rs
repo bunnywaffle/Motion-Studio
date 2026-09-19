@@ -5,7 +5,10 @@ pub mod node;
 pub mod transform;
 
 pub use error::SceneGraphError;
-pub use evaluation::{EvaluatedLayer, EvaluatedStack, LayerStackEvaluator};
+pub use evaluation::{
+    resolve_nested_time, EvaluatedLayer, EvaluatedStack, FlattenedRenderLayer, LayerStackEvaluator,
+    NestedCompositionEvaluation, RenderPassDescriptor,
+};
 pub use graph::SceneGraph;
 pub use node::SceneNode;
 pub use transform::{AffineTransform2D, BoundingBox2D, EvaluatedTransform, TransformResolver};
@@ -13,7 +16,7 @@ pub use transform::{AffineTransform2D, BoundingBox2D, EvaluatedTransform, Transf
 #[cfg(test)]
 mod tests {
     use super::*;
-    use project::{Color, Composition, Layer, Project, TimeCode};
+    use project::{Color, Composition, Layer, Project, TimeCode, Vec2};
     use std::collections::HashMap;
 
     #[test]
@@ -1396,5 +1399,773 @@ mod tests {
         let l_child_59 = stack_59.get_layer("child_node").unwrap();
         assert!(l_child_59.is_active);
     }
+
+    #[test]
+    fn test_basic_nested_composition_evaluation() {
+        let mut project = Project::with_defaults("Basic Nesting Project");
+        let tc0 = TimeCode::from_frames(0, 30.0);
+        let tc150 = TimeCode::from_frames(150, 30.0);
+
+        // Child Comp B: 800x600, duration 150 frames (5.0s)
+        let mut comp_b = Composition::new("comp_b", "Child Comp B", 800, 600, 30.0, tc150);
+        let b_bg = Layer::solid("b_bg", "B Background", Color::RED, 800, 600, tc0, tc150);
+        let b_text = Layer::text(
+            "b_text",
+            "B Title",
+            "Nested Title",
+            "Inter",
+            32.0,
+            Color::WHITE,
+            tc0,
+            tc150,
+        );
+        comp_b.add_layer(b_bg).unwrap();
+        comp_b.add_layer(b_text).unwrap();
+
+        // Parent Comp A: 1920x1080, duration 150 frames (5.0s)
+        let mut comp_a = Composition::hd_1080p_30fps("comp_a", "Parent Comp A", 5.0);
+        let nested_layer = Layer::nested_composition("nested_b", "Precomp B", "comp_b", tc0, tc150);
+        comp_a.add_layer(nested_layer).unwrap();
+
+        project.add_composition(comp_a).unwrap();
+        project.add_composition(comp_b).unwrap();
+
+        let evaluator = LayerStackEvaluator::new();
+        let stack_a = evaluator
+            .evaluate_composition(&project, "comp_a", &tc0)
+            .expect("Evaluate comp_a");
+
+        assert_eq!(stack_a.composition_id, "comp_a");
+        assert_eq!(stack_a.evaluated_layers.len(), 1);
+        assert!(stack_a.has_nested_compositions());
+
+        let l_nested = stack_a.get_layer("nested_b").unwrap();
+        assert!(l_nested.is_nested_composition());
+        assert!(l_nested.is_active);
+        assert!(l_nested.is_visible);
+
+        let nested_eval = l_nested.nested_evaluation().expect("Has nested evaluation");
+        assert_eq!(nested_eval.composition_id, "comp_b");
+        assert_eq!(nested_eval.width, 800);
+        assert_eq!(nested_eval.height, 600);
+        assert_eq!(nested_eval.resolved_time.frames(), 0);
+
+        let inner_stack = &nested_eval.inner_stack;
+        assert_eq!(inner_stack.composition_id, "comp_b");
+        assert_eq!(inner_stack.evaluated_layers.len(), 2);
+        assert!(inner_stack.get_layer("b_bg").unwrap().is_active);
+        assert!(inner_stack.get_layer("b_text").unwrap().is_active);
+
+        // Test canvas bounds in root
+        let bounds_root = nested_eval.canvas_bounds_in_root();
+        assert_eq!(bounds_root.min, Vec2::ZERO);
+        assert_eq!(bounds_root.max, Vec2::new(800.0, 600.0));
+    }
+
+    #[test]
+    fn test_time_offset_alignment_in_nested_composition() {
+        let mut project = Project::with_defaults("Timing Alignment Project");
+        let fps = 30.0;
+        let tc0 = TimeCode::from_frames(0, fps);
+        let tc60 = TimeCode::from_frames(60, fps);
+        let tc120 = TimeCode::from_frames(120, fps);
+
+        // Child Comp B: duration 120 frames (4.0s)
+        // Layer 1: active on [0, 60)
+        // Layer 2: active on [60, 120)
+        let mut comp_b = Composition::new("comp_b", "Child B", 1920, 1080, fps, tc120);
+        let l1 = Layer::solid("b_l1", "First Half", Color::RED, 100, 100, tc0, tc60);
+        let l2 = Layer::solid("b_l2", "Second Half", Color::BLUE, 100, 100, tc60, tc120);
+        comp_b.add_layer(l1).unwrap();
+        comp_b.add_layer(l2).unwrap();
+
+        // Parent Comp A:
+        // Nesting layer starts at frame 30 with in_point=30, out_point=150, start_offset = 10 frames
+        // Expected formula: t_nested = t_parent - t_in + t_offset
+        let mut comp_a = Composition::hd_1080p_30fps("comp_a", "Parent A", 10.0);
+        let nested_layer = Layer::nested_composition(
+            "nested_b",
+            "Precomp B",
+            "comp_b",
+            TimeCode::from_frames(30, fps),
+            TimeCode::from_frames(150, fps),
+        )
+        .with_start_offset(TimeCode::from_frames(10, fps));
+
+        comp_a.add_layer(nested_layer).unwrap();
+        project.add_composition(comp_a).unwrap();
+        project.add_composition(comp_b).unwrap();
+
+        let evaluator = LayerStackEvaluator::new();
+
+        // 1. Parent Frame 29 (before in_point 30): nesting layer is inactive
+        let stack_29 = evaluator
+            .evaluate_composition(&project, "comp_a", &TimeCode::from_frames(29, fps))
+            .unwrap();
+        let layer_29 = stack_29.get_layer("nested_b").unwrap();
+        assert!(!layer_29.is_active);
+        assert!(layer_29.nested_composition.is_none());
+
+        // 2. Parent Frame 30 (at in_point 30):
+        // t_nested = 30 - 30 + 10 = 10 frames
+        let stack_30 = evaluator
+            .evaluate_composition(&project, "comp_a", &TimeCode::from_frames(30, fps))
+            .unwrap();
+        let nested_eval_30 = stack_30
+            .get_layer("nested_b")
+            .unwrap()
+            .nested_evaluation()
+            .unwrap();
+        assert_eq!(nested_eval_30.resolved_time.frames(), 10);
+        // At frame 10: b_l1 is active [0, 60), b_l2 is inactive [60, 120)
+        assert!(nested_eval_30.inner_stack.get_layer("b_l1").unwrap().is_active);
+        assert!(!nested_eval_30.inner_stack.get_layer("b_l2").unwrap().is_active);
+
+        // 3. Parent Frame 90:
+        // t_nested = 90 - 30 + 10 = 70 frames
+        let stack_90 = evaluator
+            .evaluate_composition(&project, "comp_a", &TimeCode::from_frames(90, fps))
+            .unwrap();
+        let nested_eval_90 = stack_90
+            .get_layer("nested_b")
+            .unwrap()
+            .nested_evaluation()
+            .unwrap();
+        assert_eq!(nested_eval_90.resolved_time.frames(), 70);
+        // At frame 70: b_l1 is inactive, b_l2 is active [60, 120)
+        assert!(!nested_eval_90.inner_stack.get_layer("b_l1").unwrap().is_active);
+        assert!(nested_eval_90.inner_stack.get_layer("b_l2").unwrap().is_active);
+    }
+
+    #[test]
+    fn test_time_stretch_and_speed_factor_evaluation() {
+        let mut project = Project::with_defaults("Time Stretch Project");
+        let fps = 30.0;
+        let tc0 = TimeCode::from_frames(0, fps);
+        let tc300 = TimeCode::from_frames(300, fps);
+
+        let mut comp_child = Composition::new("comp_child", "Child", 1920, 1080, fps, tc300);
+
+        comp_child
+            .add_layer(Layer::solid("c_solid", "Solid", Color::WHITE, 100, 100, tc0, tc300))
+            .unwrap();
+
+        // 1. Slow-motion: 50% speed (time_stretch = 0.5)
+        let mut comp_slow = Composition::hd_1080p_30fps("comp_slow", "Slow-Mo", 10.0);
+        let slow_layer =
+            Layer::nested_composition("slow_layer", "Slow Precomp", "comp_child", tc0, tc300)
+                .with_time_stretch(0.5);
+        comp_slow.add_layer(slow_layer).unwrap();
+
+        // 2. Fast-forward: 200% double speed (time_stretch = 2.0)
+        let mut comp_fast = Composition::hd_1080p_30fps("comp_fast", "Fast-Forward", 10.0);
+        let fast_layer =
+            Layer::nested_composition("fast_layer", "Fast Precomp", "comp_child", tc0, tc300)
+                .with_time_stretch(2.0);
+        comp_fast.add_layer(fast_layer).unwrap();
+
+        // 3. Reverse playback: time_stretch = -1.0 with start_offset = 120 frames
+        let mut comp_rev = Composition::hd_1080p_30fps("comp_rev", "Reverse", 10.0);
+        let rev_layer =
+            Layer::nested_composition("rev_layer", "Reverse Precomp", "comp_child", tc0, tc300)
+                .with_time_stretch(-1.0)
+                .with_start_offset(TimeCode::from_frames(120, fps));
+        comp_rev.add_layer(rev_layer).unwrap();
+
+        project.add_composition(comp_child).unwrap();
+        project.add_composition(comp_slow).unwrap();
+        project.add_composition(comp_fast).unwrap();
+        project.add_composition(comp_rev).unwrap();
+
+        let evaluator = LayerStackEvaluator::new();
+
+        // Test Slow-motion (50%):
+        // Parent at frame 40 -> child at 20 frames
+        let stack_slow_40 = evaluator
+            .evaluate_composition(&project, "comp_slow", &TimeCode::from_frames(40, fps))
+            .unwrap();
+        let eval_slow_40 = stack_slow_40
+            .get_layer("slow_layer")
+            .unwrap()
+            .nested_evaluation()
+            .unwrap();
+        assert_eq!(eval_slow_40.resolved_time.frames(), 20);
+
+        // Parent at frame 100 -> child at 50 frames
+        let stack_slow_100 = evaluator
+            .evaluate_composition(&project, "comp_slow", &TimeCode::from_frames(100, fps))
+            .unwrap();
+        let eval_slow_100 = stack_slow_100
+            .get_layer("slow_layer")
+            .unwrap()
+            .nested_evaluation()
+            .unwrap();
+        assert_eq!(eval_slow_100.resolved_time.frames(), 50);
+
+        // Test Double speed (200%):
+        // Parent at frame 20 -> child at 40 frames
+        let stack_fast_20 = evaluator
+            .evaluate_composition(&project, "comp_fast", &TimeCode::from_frames(20, fps))
+            .unwrap();
+        let eval_fast_20 = stack_fast_20
+            .get_layer("fast_layer")
+            .unwrap()
+            .nested_evaluation()
+            .unwrap();
+        assert_eq!(eval_fast_20.resolved_time.frames(), 40);
+
+        // Parent at frame 50 -> child at 100 frames
+        let stack_fast_50 = evaluator
+            .evaluate_composition(&project, "comp_fast", &TimeCode::from_frames(50, fps))
+            .unwrap();
+        let eval_fast_50 = stack_fast_50
+            .get_layer("fast_layer")
+            .unwrap()
+            .nested_evaluation()
+            .unwrap();
+        assert_eq!(eval_fast_50.resolved_time.frames(), 100);
+
+        // Test Reverse playback (-100%):
+        // Parent at frame 0 -> child at 120 frames
+        let stack_rev_0 = evaluator
+            .evaluate_composition(&project, "comp_rev", &TimeCode::from_frames(0, fps))
+            .unwrap();
+        let eval_rev_0 = stack_rev_0
+            .get_layer("rev_layer")
+            .unwrap()
+            .nested_evaluation()
+            .unwrap();
+        assert_eq!(eval_rev_0.resolved_time.frames(), 120);
+
+        // Parent at frame 30 -> child at 90 frames (120 - 30)
+        let stack_rev_30 = evaluator
+            .evaluate_composition(&project, "comp_rev", &TimeCode::from_frames(30, fps))
+            .unwrap();
+        let eval_rev_30 = stack_rev_30
+            .get_layer("rev_layer")
+            .unwrap()
+            .nested_evaluation()
+            .unwrap();
+        assert_eq!(eval_rev_30.resolved_time.frames(), 90);
+
+        // Parent at frame 100 -> child at 20 frames (120 - 100)
+        let stack_rev_100 = evaluator
+            .evaluate_composition(&project, "comp_rev", &TimeCode::from_frames(100, fps))
+            .unwrap();
+        let eval_rev_100 = stack_rev_100
+            .get_layer("rev_layer")
+            .unwrap()
+            .nested_evaluation()
+            .unwrap();
+        assert_eq!(eval_rev_100.resolved_time.frames(), 20);
+    }
+
+    #[test]
+    fn test_spatial_transform_cascading_across_nesting_boundaries() {
+        use project::Vec2;
+
+        let mut project = Project::with_defaults("Spatial Cascading Project");
+        let tc0 = TimeCode::from_frames(0, 30.0);
+        let tc150 = TimeCode::from_frames(150, 30.0);
+
+        // Child Comp B: 400x300
+        // Contains an inner solid (100x100) positioned at (50, 50)
+        let mut comp_b = Composition::new("comp_b", "Child Comp B", 400, 300, 30.0, tc150);
+        let mut inner_layer =
+            Layer::solid("inner_rect", "Inner Rect", Color::RED, 100, 100, tc0, tc150);
+        inner_layer.transform.anchor_point.set_value(Vec2::ZERO);
+        inner_layer.transform.position.set_value(Vec2::new(50.0, 50.0));
+        comp_b.add_layer(inner_layer).unwrap();
+
+        // Parent Comp A: 1920x1080
+        // Nesting layer has:
+        // Position: (500, 400)
+        // Rotation: 90 degrees clockwise
+        // Scale: 200% (2.0x)
+        // Anchor point: (0, 0)
+        let mut comp_a = Composition::hd_1080p_30fps("comp_a", "Parent Comp A", 5.0);
+        let mut nesting_layer =
+            Layer::nested_composition("nesting_b", "Precomp B", "comp_b", tc0, tc150);
+        nesting_layer.transform.anchor_point.set_value(Vec2::ZERO);
+        nesting_layer.transform.position.set_value(Vec2::new(500.0, 400.0));
+        nesting_layer.transform.rotation.set_value(90.0);
+        nesting_layer.transform.scale.set_value(Vec2::new(200.0, 200.0));
+        comp_a.add_layer(nesting_layer).unwrap();
+
+        project.add_composition(comp_a).unwrap();
+        project.add_composition(comp_b).unwrap();
+
+        let evaluator = LayerStackEvaluator::new();
+        let stack_a = evaluator
+            .evaluate_composition(&project, "comp_a", &tc0)
+            .expect("Evaluate");
+
+        let l_nested = stack_a.get_layer("nesting_b").unwrap();
+        let nested_eval = l_nested.nested_evaluation().unwrap();
+
+        // 1. Mapping a point from Comp B (50, 50) to Comp A:
+        // In Comp A, nesting layer scales by 2 -> (100, 100)
+        // Rotated 90 deg clockwise around (0,0):
+        // x' = -100, y' = 100
+        // Translated by (500, 400):
+        // (500 - 100, 400 + 100) = (400, 500)
+        let pt_in_b = Vec2::new(50.0, 50.0);
+        let pt_in_a = nested_eval.inner_to_root_point(pt_in_b);
+        assert!((pt_in_a.x - 400.0).abs() < 1e-4);
+        assert!((pt_in_a.y - 500.0).abs() < 1e-4);
+
+        // 2. Inverting point from Comp A back to Comp B:
+        let pt_recovered = nested_eval.root_to_inner_point(pt_in_a).unwrap();
+        assert!((pt_recovered.x - pt_in_b.x).abs() < 1e-4);
+        assert!((pt_recovered.y - pt_in_b.y).abs() < 1e-4);
+
+        // 3. Concatenated matrix check for inner_layer:
+        let concatenated_matrix = nested_eval
+            .inner_layer_world_matrix("inner_rect")
+            .expect("inner_layer matrix");
+        let inner_origin_root = concatenated_matrix.transform_point(Vec2::ZERO);
+        assert!((inner_origin_root.x - 400.0).abs() < 1e-4);
+        assert!((inner_origin_root.y - 500.0).abs() < 1e-4);
+
+        // 4. Inner layer root bounds check:
+        // Inner layer is 100x100 at (50, 50).
+        // Corners in Comp B: (50, 50), (150, 50), (150, 150), (50, 150)
+        // In Comp A:
+        // (50, 50) -> (400, 500)
+        // (150, 50) -> scale 2: (300, 100) -> rot 90: (-100, 300) -> trans: (400, 700)
+        // (150, 150) -> scale 2: (300, 300) -> rot 90: (-300, 300) -> trans: (200, 700)
+        // (50, 150) -> scale 2: (100, 300) -> rot 90: (-300, 100) -> trans: (200, 500)
+        // AABB in Comp A: min (200, 500), max (400, 700)
+        let inner_root_bounds = nested_eval
+            .inner_layer_root_bounds("inner_rect", 100.0, 100.0)
+            .unwrap();
+        assert!((inner_root_bounds.min.x - 200.0).abs() < 1e-4);
+        assert!((inner_root_bounds.min.y - 500.0).abs() < 1e-4);
+        assert!((inner_root_bounds.max.x - 400.0).abs() < 1e-4);
+        assert!((inner_root_bounds.max.y - 700.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_multi_level_deep_nesting() {
+        let mut project = Project::with_defaults("Deep Nesting Project");
+        let tc0 = TimeCode::from_frames(0, 30.0);
+        let tc150 = TimeCode::from_frames(150, 30.0);
+
+        // Comp C (innermost): has leaf solid at (10, 20)
+        let mut comp_c = Composition::new("comp_c", "Comp C", 500, 500, 30.0, tc150);
+        let mut leaf = Layer::solid("leaf_solid", "Leaf Solid", Color::GREEN, 50, 50, tc0, tc150);
+        leaf.transform.anchor_point.set_value(Vec2::ZERO);
+        leaf.transform.position.set_value(Vec2::new(10.0, 20.0));
+        comp_c.add_layer(leaf).unwrap();
+
+        // Comp B: nests Comp C at (50, 60)
+        let mut comp_b = Composition::new("comp_b", "Comp B", 800, 800, 30.0, tc150);
+
+        let mut layer_c = Layer::nested_composition("nest_c", "Nested C", "comp_c", tc0, tc150);
+        layer_c.transform.anchor_point.set_value(Vec2::ZERO);
+        layer_c.transform.position.set_value(Vec2::new(50.0, 60.0));
+        comp_b.add_layer(layer_c).unwrap();
+
+        // Comp A: nests Comp B at (100, 200)
+        let mut comp_a = Composition::hd_1080p_30fps("comp_a", "Comp A", 5.0);
+        let mut layer_b = Layer::nested_composition("nest_b", "Nested B", "comp_b", tc0, tc150);
+        layer_b.transform.anchor_point.set_value(Vec2::ZERO);
+        layer_b.transform.position.set_value(Vec2::new(100.0, 200.0));
+        comp_a.add_layer(layer_b).unwrap();
+
+        project.add_composition(comp_a).unwrap();
+        project.add_composition(comp_b).unwrap();
+        project.add_composition(comp_c).unwrap();
+
+        let evaluator = LayerStackEvaluator::new();
+        let stack_a = evaluator
+            .evaluate_composition(&project, "comp_a", &tc0)
+            .expect("Evaluate deep nesting");
+
+        // Test hierarchical deep query:
+        let deep_layer = stack_a
+            .get_layer_deep(&["nest_b", "nest_c", "leaf_solid"])
+            .expect("Find deep leaf solid");
+        assert_eq!(deep_layer.name, "Leaf Solid");
+
+        // Test flattened render list:
+        let flattened = stack_a.flattened_render_list();
+        assert_eq!(flattened.len(), 1);
+
+        let item = &flattened[0];
+        assert_eq!(item.layer_id, "leaf_solid");
+        assert_eq!(item.layer_path, vec!["nest_b", "nest_c", "leaf_solid"]);
+        assert_eq!(item.nesting_depth, 2);
+
+        // Accumulated position in Comp A:
+        // Leaf (10, 20) + Comp C in B (50, 60) + Comp B in A (100, 200) = (160, 280)
+        let root_pos = item.local_to_root_point(Vec2::ZERO);
+        assert_eq!(root_pos, Vec2::new(160.0, 280.0));
+    }
+
+    #[test]
+    fn test_circular_nesting_and_missing_composition_error_handling() {
+        let mut project = Project::with_defaults("Error Handling Project");
+        let tc0 = TimeCode::from_frames(0, 30.0);
+        let tc150 = TimeCode::from_frames(150, 30.0);
+
+        // 1. Missing composition reference:
+        let mut comp_missing = Composition::hd_1080p_30fps("comp_miss", "Missing Comp Test", 5.0);
+        comp_missing
+            .add_layer(Layer::nested_composition(
+                "nest_bad",
+                "Non Existent",
+                "non_existent_comp_id",
+                tc0,
+                tc150,
+            ))
+            .unwrap();
+        project.add_composition(comp_missing).unwrap();
+
+        let evaluator = LayerStackEvaluator::new();
+        let err_missing = evaluator
+            .evaluate_composition(&project, "comp_miss", &tc0)
+            .unwrap_err();
+        assert!(matches!(
+            err_missing,
+            SceneGraphError::CompositionNotFound(ref id) if id == "non_existent_comp_id"
+        ));
+
+        // 2. Circular nesting: Comp A -> Comp B -> Comp A
+        let mut comp_cycle_a = Composition::hd_1080p_30fps("cycle_a", "Cycle A", 5.0);
+        let mut comp_cycle_b = Composition::hd_1080p_30fps("cycle_b", "Cycle B", 5.0);
+
+        comp_cycle_a
+            .add_layer(Layer::nested_composition(
+                "nest_b", "Nests B", "cycle_b", tc0, tc150,
+            ))
+            .unwrap();
+        comp_cycle_b
+            .add_layer(Layer::nested_composition(
+                "nest_a", "Nests A", "cycle_a", tc0, tc150,
+            ))
+            .unwrap();
+
+        let mut cycle_proj = Project::with_defaults("Cycle Proj");
+        cycle_proj.add_composition(comp_cycle_a).unwrap();
+        cycle_proj.add_composition(comp_cycle_b).unwrap();
+
+        let err_cycle = evaluator
+            .evaluate_composition(&cycle_proj, "cycle_a", &tc0)
+            .unwrap_err();
+        assert!(matches!(
+            err_cycle,
+            SceneGraphError::CircularNestedComposition {
+                ref composition_id,
+                ..
+            } if composition_id == "cycle_a"
+        ));
+
+        // 3. Max nesting depth exceeded:
+        // Set max_nesting_depth = 2 on a 4-level deep chain (c1 -> c2 -> c3 -> c4)
+        let strict_evaluator = LayerStackEvaluator::new().with_max_nesting_depth(2);
+
+        let mut c4 = Composition::hd_1080p_30fps("c4", "C4", 5.0);
+        c4.add_layer(Layer::solid("s", "S", Color::RED, 10, 10, tc0, tc150))
+            .unwrap();
+
+        let mut c3 = Composition::hd_1080p_30fps("c3", "C3", 5.0);
+        c3.add_layer(Layer::nested_composition("n4", "N4", "c4", tc0, tc150))
+            .unwrap();
+
+        let mut c2 = Composition::hd_1080p_30fps("c2", "C2", 5.0);
+        c2.add_layer(Layer::nested_composition("n3", "N3", "c3", tc0, tc150))
+            .unwrap();
+
+        let mut c1 = Composition::hd_1080p_30fps("c1", "C1", 5.0);
+        c1.add_layer(Layer::nested_composition("n2", "N2", "c2", tc0, tc150))
+            .unwrap();
+
+        let mut depth_proj = Project::with_defaults("Depth Proj");
+        depth_proj.add_composition(c1).unwrap();
+        depth_proj.add_composition(c2).unwrap();
+        depth_proj.add_composition(c3).unwrap();
+        depth_proj.add_composition(c4).unwrap();
+
+        let err_depth = strict_evaluator
+            .evaluate_composition(&depth_proj, "c1", &tc0)
+            .unwrap_err();
+        assert!(matches!(
+            err_depth,
+            SceneGraphError::MaxNestingDepthExceeded {
+                depth: 3,
+                max_depth: 2
+            }
+        ));
+    }
+
+    #[test]
+    fn test_flattened_composite_render_order_generation() {
+        let mut project = Project::with_defaults("Composite Order Project");
+        let tc0 = TimeCode::from_frames(0, 30.0);
+        let tc150 = TimeCode::from_frames(150, 30.0);
+
+        // Comp B:
+        // Stack index 0: B Top (upper layer)
+        // Stack index 1: B Bottom (lower layer)
+        // Composite render order in B: B Bottom -> B Top
+        let mut comp_b = Composition::new("comp_b", "Child B", 800, 600, 30.0, tc150);
+        let b_top = Layer::solid("b_top", "B Top", Color::WHITE, 100, 100, tc0, tc150);
+        let b_bot = Layer::solid("b_bot", "B Bottom", Color::BLACK, 100, 100, tc0, tc150);
+        comp_b.add_layer(b_top).unwrap();
+        comp_b.add_layer(b_bot).unwrap();
+
+        // Comp A:
+        // Stack index 0: A Top (foreground)
+        // Stack index 1: Precomp B (nested middle)
+        // Stack index 2: A Bottom (background)
+        // Composite render order in A: A Bottom -> Precomp B -> A Top
+        // With Precomp B expanded: A Bottom -> B Bottom -> B Top -> A Top
+        let mut comp_a = Composition::hd_1080p_30fps("comp_a", "Parent A", 5.0);
+        let a_top = Layer::solid("a_top", "A Top", Color::RED, 1920, 1080, tc0, tc150);
+        let a_mid = Layer::nested_composition("a_mid", "Precomp B", "comp_b", tc0, tc150);
+        let a_bot = Layer::solid("a_bot", "A Bottom", Color::BLUE, 1920, 1080, tc0, tc150);
+
+        comp_a.add_layer(a_top).unwrap();
+        comp_a.add_layer(a_mid).unwrap();
+        comp_a.add_layer(a_bot).unwrap();
+
+        project.add_composition(comp_a).unwrap();
+        project.add_composition(comp_b).unwrap();
+
+        let evaluator = LayerStackEvaluator::new();
+        let stack_a = evaluator
+            .evaluate_composition(&project, "comp_a", &tc0)
+            .unwrap();
+
+        // Check local render list for Comp A: bottom to top
+        assert_eq!(stack_a.render_list, vec!["a_bot", "a_mid", "a_top"]);
+
+        // Check flattened render list:
+        let flattened = stack_a.flattened_render_list();
+        let flattened_ids: Vec<&str> = flattened.iter().map(|l| l.layer_id.as_str()).collect();
+        assert_eq!(flattened_ids, vec!["a_bot", "b_bot", "b_top", "a_top"]);
+
+        // Check render pass descriptors:
+        let passes = stack_a.collect_render_passes();
+        assert_eq!(passes.len(), 2);
+        // Leaf pass first (Comp B)
+        assert_eq!(passes[0].composition_id, "comp_b");
+        assert_eq!(passes[0].layer_ids, vec!["b_bot", "b_top"]);
+        // Root pass second (Comp A)
+        assert_eq!(passes[1].composition_id, "comp_a");
+        assert_eq!(passes[1].layer_ids, vec!["a_bot", "a_mid", "a_top"]);
+    }
+
+    #[test]
+    fn test_animated_time_remapping_on_nested_composition() {
+        use project::Keyframe;
+
+        let mut project = Project::with_defaults("Time Remap Project");
+        let fps = 30.0;
+        let tc0 = TimeCode::from_frames(0, fps);
+        let tc30 = TimeCode::from_frames(30, fps);
+        let tc60 = TimeCode::from_frames(60, fps);
+        let tc90 = TimeCode::from_frames(90, fps);
+        let tc300 = TimeCode::from_frames(300, fps);
+
+        let mut comp_child = Composition::new("comp_child", "Child", 1920, 1080, fps, tc300);
+        comp_child
+            .add_layer(Layer::solid("c_solid", "Solid", Color::RED, 100, 100, tc0, tc90))
+            .unwrap();
+
+        // Parent Comp:
+        // Nested comp layer has animated time remapping:
+        // Frame 0 -> 0.0s (frame 0)
+        // Frame 30 -> 3.0s (frame 90 in child, fast forward)
+        // Frame 60 -> 1.0s (frame 30 in child, rewound)
+        let mut comp_parent = Composition::hd_1080p_30fps("comp_parent", "Parent", 5.0);
+        let mut remapping = project::Property::new("Time Remap", 0.0);
+        remapping.add_keyframe(Keyframe::linear(tc0, 0.0));
+        remapping.add_keyframe(Keyframe::linear(tc30, 3.0));
+        remapping.add_keyframe(Keyframe::linear(tc60, 1.0));
+
+        let nested_layer =
+            Layer::nested_composition("nest_remap", "Precomp", "comp_child", tc0, tc90)
+                .with_time_remapping(remapping);
+        comp_parent.add_layer(nested_layer).unwrap();
+
+        project.add_composition(comp_child).unwrap();
+        project.add_composition(comp_parent).unwrap();
+
+        let evaluator = LayerStackEvaluator::new();
+
+        // 1. Frame 0 -> 0.0s = 0 frames
+        let s0 = evaluator
+            .evaluate_composition(&project, "comp_parent", &tc0)
+            .unwrap();
+        let eval0 = s0
+            .get_layer("nest_remap")
+            .unwrap()
+            .nested_evaluation()
+            .unwrap();
+        assert_eq!(eval0.resolved_time.frames(), 0);
+
+        // 2. Frame 15 (halfway between 0.0s and 3.0s) -> 1.5s = 45 frames
+        let s15 = evaluator
+            .evaluate_composition(&project, "comp_parent", &TimeCode::from_frames(15, fps))
+            .unwrap();
+        let eval15 = s15
+            .get_layer("nest_remap")
+            .unwrap()
+            .nested_evaluation()
+            .unwrap();
+        assert_eq!(eval15.resolved_time.frames(), 45);
+
+        // 3. Frame 30 -> 3.0s = 90 frames
+        let s30 = evaluator
+            .evaluate_composition(&project, "comp_parent", &tc30)
+            .unwrap();
+        let eval30 = s30
+            .get_layer("nest_remap")
+            .unwrap()
+            .nested_evaluation()
+            .unwrap();
+        assert_eq!(eval30.resolved_time.frames(), 90);
+
+        // 4. Frame 45 (halfway between 3.0s and 1.0s) -> 2.0s = 60 frames
+        let s45 = evaluator
+            .evaluate_composition(&project, "comp_parent", &TimeCode::from_frames(45, fps))
+            .unwrap();
+        let eval45 = s45
+            .get_layer("nest_remap")
+            .unwrap()
+            .nested_evaluation()
+            .unwrap();
+        assert_eq!(eval45.resolved_time.frames(), 60);
+
+        // 5. Frame 60 -> 1.0s = 30 frames
+        let s60 = evaluator
+            .evaluate_composition(&project, "comp_parent", &tc60)
+            .unwrap();
+        let eval60 = s60
+            .get_layer("nest_remap")
+            .unwrap()
+            .nested_evaluation()
+            .unwrap();
+        assert_eq!(eval60.resolved_time.frames(), 30);
+    }
+
+    #[test]
+    fn test_nested_composition_loop_modes_and_bounds_clamping() {
+        use project::LoopMode;
+
+        let mut project = Project::with_defaults("Loop Modes Project");
+        let fps = 30.0;
+        let tc0 = TimeCode::from_frames(0, fps);
+        let tc60 = TimeCode::from_frames(60, fps);
+        let tc300 = TimeCode::from_frames(300, fps);
+
+        // Child comp has duration of 60 frames (2.0s)
+        let mut comp_child = Composition::new("comp_child", "Child", 1920, 1080, fps, tc60);
+        comp_child
+            .add_layer(Layer::solid("c_solid", "Solid", Color::RED, 100, 100, tc0, tc60))
+            .unwrap();
+
+        // 1. LoopMode::Once (clamping to duration 60)
+        let mut comp_once = Composition::hd_1080p_30fps("comp_once", "Once", 10.0);
+        let layer_once =
+            Layer::nested_composition("nest_once", "Once", "comp_child", tc0, tc300)
+                .with_loop_mode(LoopMode::Once);
+        comp_once.add_layer(layer_once).unwrap();
+
+        // 2. LoopMode::Loop (wraps around modulo 60)
+        let mut comp_loop = Composition::hd_1080p_30fps("comp_loop", "Loop", 10.0);
+        let layer_loop =
+            Layer::nested_composition("nest_loop", "Loop", "comp_child", tc0, tc300)
+                .with_loop_mode(LoopMode::Loop);
+        comp_loop.add_layer(layer_loop).unwrap();
+
+        // 3. LoopMode::PingPong (bounces between 0 and 60 with period 120)
+        let mut comp_ping = Composition::hd_1080p_30fps("comp_ping", "PingPong", 10.0);
+        let layer_ping =
+            Layer::nested_composition("nest_ping", "PingPong", "comp_child", tc0, tc300)
+                .with_loop_mode(LoopMode::PingPong);
+        comp_ping.add_layer(layer_ping).unwrap();
+
+        project.add_composition(comp_child).unwrap();
+        project.add_composition(comp_once).unwrap();
+        project.add_composition(comp_loop).unwrap();
+        project.add_composition(comp_ping).unwrap();
+
+        let evaluator = LayerStackEvaluator::new();
+
+        // At parent frame 75 (past child duration of 60 frames):
+        // 1. LoopMode::Once -> clamps to duration 60
+        let s_once = evaluator
+            .evaluate_composition(&project, "comp_once", &TimeCode::from_frames(75, fps))
+            .unwrap();
+        let eval_once = s_once
+            .get_layer("nest_once")
+            .unwrap()
+            .nested_evaluation()
+            .unwrap();
+        assert_eq!(eval_once.resolved_time.frames(), 60);
+
+        // 2. LoopMode::Loop -> wraps: 75 % 60 = 15
+        let s_loop = evaluator
+            .evaluate_composition(&project, "comp_loop", &TimeCode::from_frames(75, fps))
+            .unwrap();
+        let eval_loop = s_loop
+            .get_layer("nest_loop")
+            .unwrap()
+            .nested_evaluation()
+            .unwrap();
+        assert_eq!(eval_loop.resolved_time.frames(), 15);
+
+        // 3. LoopMode::PingPong -> period 120: 75 > 60 -> 120 - 75 = 45
+        let s_ping = evaluator
+            .evaluate_composition(&project, "comp_ping", &TimeCode::from_frames(75, fps))
+            .unwrap();
+        let eval_ping = s_ping
+            .get_layer("nest_ping")
+            .unwrap()
+            .nested_evaluation()
+            .unwrap();
+        assert_eq!(eval_ping.resolved_time.frames(), 45);
+    }
+
+    #[test]
+    fn test_nested_composition_opacity_cascading() {
+        let mut project = Project::with_defaults("Opacity Cascade Project");
+        let tc0 = TimeCode::from_frames(0, 30.0);
+        let tc150 = TimeCode::from_frames(150, 30.0);
+
+        // Child comp has a solid with 80% opacity
+        let mut comp_b = Composition::new("comp_b", "Child B", 800, 600, 30.0, tc150);
+
+        let mut inner_solid =
+            Layer::solid("b_solid", "B Solid", Color::WHITE, 800, 600, tc0, tc150);
+        inner_solid.opacity.set_value(80.0);
+        comp_b.add_layer(inner_solid).unwrap();
+
+        // Parent comp nesting layer has 50% opacity
+        let mut comp_a = Composition::hd_1080p_30fps("comp_a", "Parent A", 5.0);
+        let mut nesting_layer =
+            Layer::nested_composition("nest_b", "Precomp B", "comp_b", tc0, tc150);
+        nesting_layer.opacity.set_value(50.0);
+        comp_a.add_layer(nesting_layer).unwrap();
+
+        project.add_composition(comp_a).unwrap();
+        project.add_composition(comp_b).unwrap();
+
+        let evaluator = LayerStackEvaluator::new();
+        let stack_a = evaluator
+            .evaluate_composition(&project, "comp_a", &tc0)
+            .unwrap();
+
+        let flattened = stack_a.flattened_render_list();
+        assert_eq!(flattened.len(), 1);
+
+        // 0.5 * 0.8 = 0.4 (40%)
+        let combined_opacity = flattened[0].combined_opacity;
+        assert!((combined_opacity - 0.4).abs() < 1e-5);
+    }
 }
+
 

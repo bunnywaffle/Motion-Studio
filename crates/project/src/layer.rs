@@ -1,4 +1,5 @@
 use crate::blend_mode::BlendMode;
+use crate::clock::LoopMode;
 use crate::color::Color;
 use crate::error::ValidationError;
 use crate::marker::Marker;
@@ -10,6 +11,10 @@ use serde::{Deserialize, Serialize};
 
 const fn default_true() -> bool {
     true
+}
+
+const fn default_speed_one() -> f64 {
+    1.0
 }
 
 /// Geometric shape types supported by vector shape layers.
@@ -103,6 +108,14 @@ pub struct Layer {
     pub parent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub markers: Vec<Marker>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_offset: Option<TimeCode>,
+    #[serde(default = "default_speed_one")]
+    pub time_stretch: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_remapping: Option<Property<f64>>,
+    #[serde(default)]
+    pub loop_mode: LoopMode,
 }
 
 impl Layer {
@@ -130,6 +143,10 @@ impl Layer {
             out_point,
             parent_id: None,
             markers: Vec::new(),
+            start_offset: None,
+            time_stretch: 1.0,
+            time_remapping: None,
+            loop_mode: LoopMode::default(),
         }
     }
 
@@ -371,6 +388,50 @@ impl Layer {
     /// Builder to set track matte mode and optional matte layer ID.
     pub fn with_matte(mut self, mode: TrackMatteMode, matte_layer_id: Option<impl Into<String>>) -> Self {
         self.set_matte(mode, matte_layer_id);
+        self
+    }
+
+    /// Set the start offset timecode.
+    pub fn set_start_offset(&mut self, offset: Option<TimeCode>) {
+        self.start_offset = offset;
+    }
+
+    /// Builder to set start offset timecode.
+    pub fn with_start_offset(mut self, offset: TimeCode) -> Self {
+        self.start_offset = Some(offset);
+        self
+    }
+
+    /// Set the time stretch / speed multiplier.
+    pub fn set_time_stretch(&mut self, time_stretch: f64) {
+        self.time_stretch = time_stretch;
+    }
+
+    /// Builder to set time stretch / speed multiplier.
+    pub fn with_time_stretch(mut self, time_stretch: f64) -> Self {
+        self.time_stretch = time_stretch;
+        self
+    }
+
+    /// Set the animated time remapping property.
+    pub fn set_time_remapping(&mut self, time_remapping: Option<Property<f64>>) {
+        self.time_remapping = time_remapping;
+    }
+
+    /// Builder to set animated time remapping property.
+    pub fn with_time_remapping(mut self, time_remapping: Property<f64>) -> Self {
+        self.time_remapping = Some(time_remapping);
+        self
+    }
+
+    /// Set the loop mode.
+    pub fn set_loop_mode(&mut self, loop_mode: LoopMode) {
+        self.loop_mode = loop_mode;
+    }
+
+    /// Builder to set loop mode.
+    pub fn with_loop_mode(mut self, loop_mode: LoopMode) -> Self {
+        self.loop_mode = loop_mode;
         self
     }
 

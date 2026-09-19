@@ -207,6 +207,45 @@
     - `test_exhaustive_smpte_drop_frame_bijective_roundtrip`: exhaustive 10-minute cycle validation across all 17,982 frames (29.97 DF) and 35,964 frames (59.94 DF).
     - `test_playback_clock_ping_pong_extreme_dt`: stress testing PingPong with 2-frame work area and 1000s delta time verifying instant O(1) reflection.
   - All **92 tests** passing across the workspace with 0 errors and 0 warnings.
-- [ ] **Task 1.6: Implement composition nesting and pre-comp evaluation**
+- [x] **Task 1.6: Implement composition nesting and pre-comp evaluation**
+  - Implemented `NestedCompositionEvaluation` in `crates/compositor/src/evaluation.rs`:
+    - Stores `inner_stack: EvaluatedStack`, `resolved_time: TimeCode`, nested canvas dimensions (`width`, `height`), and concatenated `nesting_world_matrix`.
+    - Bidirectional coordinate transformation: `inner_to_root_point`, `root_to_inner_point` (with non-invertibility check).
+    - Bounding box mapping: `inner_to_root_bbox`, `canvas_bounds_in_root`, and `inner_layer_root_bounds`.
+  - Implemented temporal alignment & remapping in `resolve_nested_time`:
+    - Base time offset: $t_{\text{nested}} = t_{\text{parent}} - t_{\text{in\_point}} + t_{\text{start\_offset}}$.
+    - Time stretch / speed factor support: positive/negative speed multipliers (50% slow-motion, 200% double speed, negative reverse).
+    - Optional animated time remapping (`time_remapping: Option<Property<f64>>`) evaluating continuous timecode curves.
+    - Clamping and loop modes: `LoopMode::Once` (boundary clamp), `LoopMode::Loop` (periodic modulo wrap), and `LoopMode::PingPong` (oscillation reflection).
+    - Exact frame alignment when frame rates match and rational second conversion for cross-rate nesting.
+  - Implemented spatial matrix cascading:
+    - Cascades affine transformation matrices across nesting levels: $M_{\text{inner\_root}} = M_{\text{nesting\_world}} \times M_{\text{inner\_world}}$.
+    - Added `transform_bbox` helper method to `AffineTransform2D` in `crates/compositor/src/transform.rs`.
+  - Implemented recursive evaluated frame representation & flattened compositing:
+    - Embedded `nested_composition: Option<Box<NestedCompositionEvaluation>>` into `EvaluatedLayer`.
+    - Implemented `FlattenedRenderLayer`: resolves atomic render layers with full root world transforms, multiplied cumulative opacities, hierarchical layer paths, and nesting depths.
+    - Implemented `EvaluatedStack::flattened_render_list`: expands nested compositions in painter's bottom-to-top composite order.
+    - Implemented `EvaluatedStack::collect_render_passes`: generates offscreen render passes in dependency order (leaf nested comps first).
+    - Implemented `EvaluatedStack::get_layer_deep`: retrieves deep nested layers via path slices.
+  - Implemented cycle detection & recursion limits:
+    - Guarded against circular nested composition graphs returning `SceneGraphError::CircularNestedComposition`.
+    - Enforced configurable `max_nesting_depth` (default 32) returning `SceneGraphError::MaxNestingDepthExceeded`.
+    - Graceful missing composition handling with `SceneGraphError::CompositionNotFound`.
+  - Extended project data model in `crates/project/src/layer.rs`:
+    - Added `start_offset`, `time_stretch`, `time_remapping`, and `loop_mode` to `Layer` with builder and setter methods.
+    - Synchronized fields to `SceneNode` in `crates/compositor/src/node.rs`.
+  - Added 11 automated unit tests (1 in `project`, 10 in `compositor`):
+    - `test_basic_nested_composition_evaluation`: child comp evaluation, canvas bounds.
+    - `test_time_offset_alignment_in_nested_composition`: in-point and start-offset alignment.
+    - `test_time_stretch_and_speed_factor_evaluation`: 50% slow-mo, 200% double speed, reverse playback.
+    - `test_spatial_transform_cascading_across_nesting_boundaries`: anchor point, rotation, scaling, inverse point mapping, inner layer root bounds.
+    - `test_multi_level_deep_nesting`: depth 3 nesting, deep path query, concatenated root coordinates.
+    - `test_circular_nesting_and_missing_composition_error_handling`: cycles, missing comp IDs, max nesting depth error.
+    - `test_flattened_composite_render_order_generation`: painter's render order expansion, render pass descriptors.
+    - `test_animated_time_remapping_on_nested_composition`: keyframed remapping curves.
+    - `test_nested_composition_loop_modes_and_bounds_clamping`: Once, Loop, and PingPong modes.
+    - `test_nested_composition_opacity_cascading`: cumulative opacity multiplication across nesting boundaries.
+    - `test_nested_composition_temporal_properties_serialization_roundtrip`: JSON serialization and deserialization in `project`.
+  - All **103 tests** passing cleanly across the workspace with 0 errors and 0 warnings.
 - [ ] **Task 1.7: Create headless composition evaluation tests**
 

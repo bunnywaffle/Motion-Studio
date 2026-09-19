@@ -1117,6 +1117,49 @@ mod tests {
     }
 
     #[test]
+    fn test_nested_composition_temporal_properties_serialization_roundtrip() {
+        let mut project = Project::new("proj_temporal_test", "Temporal Props Test");
+        let mut comp = Composition::hd_1080p_30fps("comp_main", "Main Comp", 5.0);
+        let tc0 = TimeCode::zero(30.0);
+        let tc150 = TimeCode::from_frames(150, 30.0);
+        let offset = TimeCode::from_frames(15, 30.0);
+
+        let mut remapping = Property::new("Time Remap", 0.0);
+        remapping.add_keyframe(Keyframe::linear(tc0, 0.0));
+        remapping.add_keyframe(Keyframe::linear(tc150, 5.0));
+
+        let layer = Layer::nested_composition("nest_1", "Nested Layer", "comp_child", tc0, tc150)
+            .with_start_offset(offset)
+            .with_time_stretch(0.5)
+            .with_time_remapping(remapping)
+            .with_loop_mode(LoopMode::PingPong);
+
+        comp.add_layer(layer).unwrap();
+        project.add_composition(comp).unwrap();
+
+        // Roundtrip to JSON
+        let json = project.to_json_pretty().expect("Serialize");
+        let restored = Project::from_json(&json).expect("Deserialize");
+        assert_eq!(project, restored);
+
+        let restored_comp = restored.get_composition("comp_main").unwrap();
+        let restored_layer = &restored_comp.layers[0];
+        assert_eq!(restored_layer.start_offset, Some(offset));
+        assert_eq!(restored_layer.time_stretch, 0.5);
+        assert_eq!(restored_layer.loop_mode, LoopMode::PingPong);
+        assert!(restored_layer.time_remapping.is_some());
+        assert_eq!(
+            restored_layer
+                .time_remapping
+                .as_ref()
+                .unwrap()
+                .keyframes
+                .len(),
+            2
+        );
+    }
+
+    #[test]
     fn test_keyframe_hold_and_linear_interpolation() {
         let fps = 30.0;
         let t0 = TimeCode::from_frames(0, fps);

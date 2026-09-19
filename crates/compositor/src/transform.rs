@@ -191,6 +191,11 @@ impl AffineTransform2D {
         )
     }
 
+    /// Transform an axis-aligned bounding box by this transform, returning the enclosing AABB.
+    pub fn transform_bbox(&self, bbox: &BoundingBox2D) -> BoundingBox2D {
+        bbox.transform(self)
+    }
+
     /// Convert to a 3x3 matrix in row-major order: `[[m00, m01, m02], [m10, m11, m12], [m20, m21, m22]]`.
     pub fn to_matrix_3x3(&self) -> [[f32; 3]; 3] {
         [

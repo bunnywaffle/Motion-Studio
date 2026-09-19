@@ -1,4 +1,6 @@
-use project::{BlendMode, Layer, LayerSource, Property, TimeCode, TrackMatteMode, Transform};
+use project::{
+    BlendMode, Layer, LayerSource, LoopMode, Property, TimeCode, TrackMatteMode, Transform,
+};
 
 /// A node in the compositor scene graph, representing a layer with its transform, visual properties,
 /// and hierarchical parenting connections.
@@ -20,6 +22,10 @@ pub struct SceneNode {
     pub out_point: TimeCode,
     pub parent_id: Option<String>,
     pub children_ids: Vec<String>,
+    pub start_offset: Option<TimeCode>,
+    pub time_stretch: f64,
+    pub time_remapping: Option<Property<f64>>,
+    pub loop_mode: LoopMode,
 }
 
 impl SceneNode {
@@ -42,6 +48,10 @@ impl SceneNode {
             out_point: layer.out_point,
             parent_id: layer.parent_id.clone(),
             children_ids: Vec::new(),
+            start_offset: layer.start_offset,
+            time_stretch: layer.time_stretch,
+            time_remapping: layer.time_remapping.clone(),
+            loop_mode: layer.loop_mode,
         }
     }
 
