@@ -200,8 +200,8 @@ impl LayerStackEvaluator {
             }
         }
 
-        // 4. Resolve hierarchical transforms using topological evaluation order
-        let transforms = TransformResolver::resolve_scene_graph(graph).unwrap_or_default();
+        // 4. Resolve hierarchical transforms using topological evaluation order at target timecode
+        let transforms = TransformResolver::resolve_scene_graph_at(graph, time).unwrap_or_default();
 
         let mut evaluated_layers = Vec::with_capacity(stack_nodes.len());
 
@@ -218,7 +218,7 @@ impl LayerStackEvaluator {
 
             let is_visible = is_active && node.visible && solo_eligible;
 
-            let local_opacity = (*node.opacity.value()).clamp(0.0, 100.0);
+            let local_opacity = node.opacity.evaluate_at(time).clamp(0.0, 100.0);
             let effective_opacity = if is_visible {
                 local_opacity / 100.0
             } else {
@@ -234,7 +234,7 @@ impl LayerStackEvaluator {
             let transform = transforms
                 .get(&node.id)
                 .copied()
-                .unwrap_or_else(|| EvaluatedTransform::from_node_transform(&node.transform));
+                .unwrap_or_else(|| EvaluatedTransform::from_node_transform_at(&node.transform, time));
 
             evaluated_layers.push(EvaluatedLayer {
                 id: node.id.clone(),

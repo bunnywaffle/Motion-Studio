@@ -48,9 +48,20 @@
   - `EvaluatedStack` & `EvaluatedLayer`: Comprehensive frame evaluation context with timing offsets, layer states, and filter queries.
   - `AffineTransform2D`: Full 2D affine transformation matrix math supporting translations, non-uniform scaling, clockwise rotations (degrees and radians), anchor point offset, matrix multiplication, inversion, and $3\times3$ conversions.
   - `BoundingBox2D`: 2D axis-aligned bounding box primitive with affine transform projection, union, intersection, point containment, and corner evaluation.
-  - `TransformResolver`: Evaluates layer world transforms via hierarchical matrix concatenation ($M_{\text{world}} = M_{\text{parent}} \times M_{\text{local}}$) in topological evaluation order.
-  - `EvaluatedTransform`: Evaluated local and world matrices with bidirectional point and bounding box mapping (`local_to_world_point`, `world_to_local_point`, `local_to_world_bbox`, `world_to_local_bbox`, and `world_bounds`).
-- Full automated test suite passing with **69 tests** across the workspace (12 application tests + 29 project unit tests + 28 compositor unit tests).
+  - `TransformResolver`: Evaluates layer world transforms via hierarchical matrix concatenation ($M_{\text{world}} = M_{\text{parent}} \times M_{\text{local}}$) in topological evaluation order at arbitrary timeline positions (`resolve_scene_graph_at`).
+  - `EvaluatedTransform`: Evaluated local and world matrices with bidirectional point and bounding box mapping (`local_to_world_point`, `world_to_local_point`, `local_to_world_bbox`, `world_to_local_bbox`, and `world_bounds`), with time-based construction (`from_node_transform_at`).
+- Complete animatable property system and interpolation engine implemented across `crates/project` and `crates/compositor`:
+  - `Interpolate`: Pure Rust interpolation trait supporting linear interpolation (`lerp`) and step/hold interpolation (`step`) across scalar floats (`f32`, `f64`), 2D vectors (`Vec2`), colors (`Color`), booleans, and strings.
+  - `Keyframe<T>`: Rich keyframe container holding `time: TimeCode`, `subframe: f32`, `value: T`, `interpolation: KeyframeInterpolation`, and optional `in_tangent` / `out_tangent` handles (`KeyframeTangent`).
+  - `KeyframeInterpolation`: `Hold` (step), `Linear`, and `Bezier` easing modes.
+  - `KeyframeTangent`: 2D normalized control handle $(x, y)$ with industry presets (`linear_out`, `linear_in`, `ease_in`, `ease_out`, `ease_in_out`).
+  - `Extrapolation`: Pre- and post-boundary extrapolation modes (`Hold`, `Linear` tangent slope projection, `Cycle` periodic loop, `PingPong` reflection).
+  - Cubic Bezier Solver: Analytical Newton-Raphson inversion of $x(\theta) = t$ with robust bisection fallback and $y(\theta)$ evaluation.
+  - Keyframe Track Evaluator: Binary search lookup across sorted keyframe tracks with exact point matching, interval interpolation, and sub-frame floating-point evaluation.
+  - `Property<T>`: Extended with `keyframes: Vec<Keyframe<T>>`, sorted insertion (`add_keyframe`), timestamp replacement, removal, and continuous evaluation (`evaluate_at`, `evaluate_at_seconds`, `evaluate_with_extrapolation`).
+  - Full backward compatibility: `keyframes` serialized with `#[serde(default, skip_serializing_if = "Vec::is_empty")]`.
+  - Compositor integration: `LayerStackEvaluator` evaluates animated layer opacity and animated hierarchical transforms dynamically at the target `TimeCode`.
+- Full automated test suite passing with **78 tests** across the workspace (12 application tests + 35 project unit tests + 31 compositor unit tests).
 - Workspace compiles, builds, and passes all checks cleanly with 0 errors and 0 warnings (`cargo check --workspace`, `cargo build --workspace`, `cargo test --workspace`, and `cargo clippy --workspace --all-targets -- -D warnings`).
 
 ## What Is Currently Being Developed
@@ -61,10 +72,10 @@
 
 ## Next Single Task
 
-### Task 1.4: Implement the animatable property system and interpolation
+### Task 1.5: Implement timeline time-to-frame conversion and playback clock
 
-- Implement keyframe data structures (time, value, easing / interpolation types: Linear, Hold, Bezier with in/out control handles).
-- Implement keyframe interpolation algorithms evaluating property values at any arbitrary floating-point time.
-- Integrate animatable property evaluation into transform and layer property resolution in `crates/compositor`.
-- Add automated unit tests covering step/hold interpolation, linear interpolation, Bezier curve evaluation, and boundary extrapolation.
+- Implement high-precision playback clock and frame timing structures (current time, play/pause state, playback speed/direction, looping work area).
+- Implement robust time-to-frame and frame-to-time conversions handling standard frame rates (24, 25, 29.97 drop-frame, 30, 50, 59.94 drop-frame, 60, custom).
+- Support work area in/out points and frame clamping/wrapping for real-time playback loops.
+- Add automated unit tests covering frame-exact conversions, drop-frame timing edge cases, clock drift prevention, and transport playback state transitions.
 

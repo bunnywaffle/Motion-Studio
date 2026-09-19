@@ -1,6 +1,6 @@
 use crate::error::SceneGraphError;
 use crate::graph::SceneGraph;
-use project::{Transform, Vec2};
+use project::{TimeCode, Transform, Vec2};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ops::{Mul, MulAssign};
@@ -510,7 +510,13 @@ impl EvaluatedTransform {
         }
     }
 
-    /// Construct an evaluated transform from a standalone layer `project::Transform` with no parent.
+    /// Construct an evaluated transform from a standalone layer `project::Transform` with no parent at a specific timecode.
+    pub fn from_node_transform_at(transform: &Transform, time: &TimeCode) -> Self {
+        let (anchor, pos, scale, rot) = transform.evaluate_at(time);
+        Self::from_components(pos, scale, rot, anchor, None)
+    }
+
+    /// Construct an evaluated transform from a standalone layer `project::Transform` with no parent using its current static values.
     pub fn from_node_transform(transform: &Transform) -> Self {
         let anchor = *transform.anchor_point.value();
         let pos = *transform.position.value();
@@ -567,19 +573,17 @@ impl Default for EvaluatedTransform {
 pub struct TransformResolver;
 
 impl TransformResolver {
-    /// Resolve all layer transforms for a scene graph in topological evaluation order.
-    pub fn resolve_scene_graph(
+    /// Resolve all layer transforms for a scene graph in topological evaluation order at a specific timecode.
+    pub fn resolve_scene_graph_at(
         graph: &SceneGraph,
+        time: &TimeCode,
     ) -> Result<HashMap<String, EvaluatedTransform>, SceneGraphError> {
         let eval_order = graph.evaluation_order()?;
         let mut resolved: HashMap<String, EvaluatedTransform> =
             HashMap::with_capacity(eval_order.len());
 
         for node in eval_order {
-            let anchor = *node.transform.anchor_point.value();
-            let position = *node.transform.position.value();
-            let scale = *node.transform.scale.value();
-            let rotation = *node.transform.rotation.value();
+            let (anchor, position, scale, rotation) = node.transform.evaluate_at(time);
 
             let local_matrix =
                 AffineTransform2D::from_transform_components(position, scale, rotation, anchor);
@@ -610,5 +614,12 @@ impl TransformResolver {
         }
 
         Ok(resolved)
+    }
+
+    /// Resolve all layer transforms for a scene graph in topological evaluation order at zero timecode.
+    pub fn resolve_scene_graph(
+        graph: &SceneGraph,
+    ) -> Result<HashMap<String, EvaluatedTransform>, SceneGraphError> {
+        Self::resolve_scene_graph_at(graph, &TimeCode::zero(graph.frame_rate))
     }
 }

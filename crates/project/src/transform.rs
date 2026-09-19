@@ -1,4 +1,5 @@
 use crate::property::Property;
+use crate::timecode::TimeCode;
 use crate::vec2::Vec2;
 use serde::{Deserialize, Serialize};
 
@@ -46,6 +47,36 @@ impl Transform {
             && self.position.is_default()
             && self.scale.is_default()
             && self.rotation.is_default()
+    }
+
+    /// Check whether any of the transform properties are currently animated.
+    pub fn is_animated(&self) -> bool {
+        self.anchor_point.is_animated()
+            || self.position.is_animated()
+            || self.scale.is_animated()
+            || self.rotation.is_animated()
+    }
+
+    /// Evaluate all transform components at a given TimeCode.
+    /// Returns `(anchor_point, position, scale, rotation)`.
+    pub fn evaluate_at(&self, time: &TimeCode) -> (Vec2, Vec2, Vec2, f32) {
+        (
+            self.anchor_point.evaluate_at(time),
+            self.position.evaluate_at(time),
+            self.scale.evaluate_at(time),
+            self.rotation.evaluate_at(time),
+        )
+    }
+
+    /// Evaluate all transform components at arbitrary floating-point seconds.
+    /// Returns `(anchor_point, position, scale, rotation)`.
+    pub fn evaluate_at_seconds(&self, seconds: f64) -> (Vec2, Vec2, Vec2, f32) {
+        (
+            self.anchor_point.evaluate_at_seconds(seconds),
+            self.position.evaluate_at_seconds(seconds),
+            self.scale.evaluate_at_seconds(seconds),
+            self.rotation.evaluate_at_seconds(seconds),
+        )
     }
 }
 

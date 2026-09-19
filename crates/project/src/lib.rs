@@ -3,6 +3,7 @@ pub mod blend_mode;
 pub mod color;
 pub mod composition;
 pub mod error;
+pub mod keyframe;
 pub mod layer;
 pub mod marker;
 pub mod matte;
@@ -18,6 +19,10 @@ pub use blend_mode::BlendMode;
 pub use color::Color;
 pub use composition::Composition;
 pub use error::{ColorError, ProjectError, TimeCodeError, ValidationError};
+pub use keyframe::{
+    evaluate_cubic_bezier, evaluate_keyframe_track, interpolate_keyframes, Extrapolation,
+    Interpolate, Keyframe, KeyframeInterpolation, KeyframeTangent,
+};
 pub use layer::{Layer, LayerSource, ShapeType};
 pub use marker::Marker;
 pub use matte::TrackMatteMode;
@@ -1103,5 +1108,244 @@ mod tests {
         assert_eq!(r_comp.layers[1].matte_mode, TrackMatteMode::AlphaInverted);
         assert_eq!(r_comp.layers[1].matte_layer_id.as_deref(), Some("l_src"));
         assert!(r_comp.layers[1].has_matte());
+    }
+
+    #[test]
+    fn test_keyframe_hold_and_linear_interpolation() {
+        let fps = 30.0;
+        let t0 = TimeCode::from_frames(0, fps);
+        let t30 = TimeCode::from_frames(30, fps); // 1.0s
+        let t60 = TimeCode::from_frames(60, fps); // 2.0s
+
+        // Hold keyframes: [0s: 10.0, Hold] -> [1s: 20.0, Hold] -> [2s: 30.0]
+        let k0 = Keyframe::hold(t0, 10.0f32);
+        let k1 = Keyframe::hold(t30, 20.0f32);
+        let k2 = Keyframe::linear(t60, 30.0f32);
+
+        let kfs = vec![k0, k1, k2];
+
+        // Before 1.0s, value must hold at 10.0
+        assert_eq!(evaluate_keyframe_track(&kfs, 0.0, &0.0, Extrapolation::Hold, Extrapolation::Hold), 10.0);
+        assert_eq!(evaluate_keyframe_track(&kfs, 0.5, &0.0, Extrapolation::Hold, Extrapolation::Hold), 10.0);
+        assert_eq!(evaluate_keyframe_track(&kfs, 0.999, &0.0, Extrapolation::Hold, Extrapolation::Hold), 10.0);
+
+        // Exactly at 1.0s, value steps to 20.0
+        assert_eq!(evaluate_keyframe_track(&kfs, 1.0, &0.0, Extrapolation::Hold, Extrapolation::Hold), 20.0);
+        assert_eq!(evaluate_keyframe_track(&kfs, 1.5, &0.0, Extrapolation::Hold, Extrapolation::Hold), 20.0);
+
+        // Exactly at 2.0s, value steps to 30.0
+        assert_eq!(evaluate_keyframe_track(&kfs, 2.0, &0.0, Extrapolation::Hold, Extrapolation::Hold), 30.0);
+
+        // Linear keyframes: [0s: 0.0] -> [1s: 100.0]
+        let lin0 = Keyframe::linear(t0, 0.0f32);
+        let lin1 = Keyframe::linear(t30, 100.0f32);
+        let lin_kfs = vec![lin0, lin1];
+
+        // Exact intermediate points and arbitrary floating-point times
+        let v_mid = evaluate_keyframe_track(&lin_kfs, 0.5, &0.0, Extrapolation::Hold, Extrapolation::Hold);
+        assert!((v_mid - 50.0).abs() < 1e-5);
+
+        let v_quarter = evaluate_keyframe_track(&lin_kfs, 0.25, &0.0, Extrapolation::Hold, Extrapolation::Hold);
+        assert!((v_quarter - 25.0).abs() < 1e-5);
+
+        let v_arb = evaluate_keyframe_track(&lin_kfs, 0.732, &0.0, Extrapolation::Hold, Extrapolation::Hold);
+        assert!((v_arb - 73.2).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_cubic_bezier_curve_evaluation() {
+        // 1. Diagonal linear control points (1/3, 1/3) and (2/3, 2/3) must yield pure linear result
+        let p_lin_out = KeyframeTangent::linear_out();
+        let p_lin_in = KeyframeTangent::linear_in();
+        for step in 0..=10 {
+            let t = step as f32 / 10.0;
+            let s = evaluate_cubic_bezier(t, p_lin_out, p_lin_in);
+            assert!((s - t).abs() < 1e-4, "Failed for t = {t}, got {s}");
+        }
+
+        // 2. Ease In Out curve (0.42, 0.0) and (0.58, 1.0)
+        let ease_out = KeyframeTangent::ease_in_out_out();
+        let ease_in = KeyframeTangent::ease_in_out_in();
+
+        // Boundaries
+        assert_eq!(evaluate_cubic_bezier(0.0, ease_out, ease_in), 0.0);
+        assert_eq!(evaluate_cubic_bezier(1.0, ease_out, ease_in), 1.0);
+
+        // Symmetry around midpoint: at t = 0.5, ease_in_out should be 0.5
+        let mid = evaluate_cubic_bezier(0.5, ease_out, ease_in);
+        assert!((mid - 0.5).abs() < 1e-3, "Ease in out mid was {mid}");
+
+        // Slow start (t = 0.2 must be significantly less than 0.2)
+        let slow_start = evaluate_cubic_bezier(0.2, ease_out, ease_in);
+        assert!(slow_start < 0.15, "Expected slow start, got {slow_start}");
+
+        // Slow finish (t = 0.8 must be significantly greater than 0.8)
+        let slow_finish = evaluate_cubic_bezier(0.8, ease_out, ease_in);
+        assert!(slow_finish > 0.85, "Expected slow finish, got {slow_finish}");
+
+        // Interpolate keyframes with Bezier
+        let fps = 30.0;
+        let k0 = Keyframe::bezier(
+            TimeCode::from_frames(0, fps),
+            0.0f32,
+            None,
+            Some(KeyframeTangent::ease_in_out_out()),
+        );
+        let k1 = Keyframe::bezier(
+            TimeCode::from_frames(30, fps),
+            100.0f32,
+            Some(KeyframeTangent::ease_in_out_in()),
+            None,
+        );
+
+        let v_eased_mid = interpolate_keyframes(&k0, &k1, 0.5);
+        assert!((v_eased_mid - 50.0).abs() < 0.1);
+
+        let v_eased_early = interpolate_keyframes(&k0, &k1, 0.2);
+        assert!(v_eased_early < 15.0);
+    }
+
+    #[test]
+    fn test_keyframe_boundary_extrapolation() {
+        let fps = 30.0;
+        // Two keyframes: [1.0s: 100.0] -> [3.0s: 300.0] (duration = 2.0s, slope = 100.0 units/sec)
+        let k0 = Keyframe::linear(TimeCode::from_seconds(1.0, fps), 100.0f32);
+        let k1 = Keyframe::linear(TimeCode::from_seconds(3.0, fps), 300.0f32);
+        let kfs = vec![k0, k1];
+
+        // 1. Hold Extrapolation
+        let pre_hold = evaluate_keyframe_track(&kfs, 0.0, &0.0, Extrapolation::Hold, Extrapolation::Hold);
+        assert_eq!(pre_hold, 100.0);
+        let post_hold = evaluate_keyframe_track(&kfs, 5.0, &0.0, Extrapolation::Hold, Extrapolation::Hold);
+        assert_eq!(post_hold, 300.0);
+
+        // 2. Linear Extrapolation
+        // At t = 0.0s (1.0s before k0), value should project to 100 - (1.0 * 100) = 0.0
+        let pre_lin = evaluate_keyframe_track(&kfs, 0.0, &0.0, Extrapolation::Linear, Extrapolation::Linear);
+        assert!((pre_lin - 0.0).abs() < 1e-4);
+
+        // At t = 4.0s (1.0s after k1), value should project to 300 + (1.0 * 100) = 400.0
+        let post_lin = evaluate_keyframe_track(&kfs, 4.0, &0.0, Extrapolation::Linear, Extrapolation::Linear);
+        assert!((post_lin - 400.0).abs() < 1e-4);
+
+        // 3. Cycle Extrapolation (Duration 2.0s, span [1.0, 3.0])
+        // t = 3.5s -> wraps to 1.5s -> value 150.0
+        let cycle_val = evaluate_keyframe_track(&kfs, 3.5, &0.0, Extrapolation::Cycle, Extrapolation::Cycle);
+        assert!((cycle_val - 150.0).abs() < 1e-3);
+
+        // 4. PingPong Extrapolation
+        // t = 4.0s -> 1.0s past end in first reflection -> moves from 300 back towards 100 -> value 200.0
+        let pingpong_val = evaluate_keyframe_track(&kfs, 4.0, &0.0, Extrapolation::PingPong, Extrapolation::PingPong);
+        assert!((pingpong_val - 200.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_multi_dimensional_property_interpolation() {
+        let fps = 30.0;
+        let t0 = TimeCode::from_frames(0, fps);
+        let t30 = TimeCode::from_frames(30, fps);
+
+        // Vec2 Position Interpolation
+        let mut pos_prop = Property::new("Position", Vec2::new(100.0, 200.0));
+        pos_prop.add_keyframe(Keyframe::linear(t0, Vec2::new(100.0, 200.0)));
+        pos_prop.add_keyframe(Keyframe::linear(t30, Vec2::new(900.0, 600.0)));
+
+        assert!(pos_prop.is_animated());
+        assert_eq!(pos_prop.keyframe_count(), 2);
+
+        let pos_mid = pos_prop.evaluate_at_seconds(0.5);
+        assert_eq!(pos_mid, Vec2::new(500.0, 400.0));
+
+        let pos_q = pos_prop.evaluate_at(&TimeCode::from_frames(15, fps));
+        assert_eq!(pos_q, Vec2::new(500.0, 400.0));
+
+        // Color RGBA Interpolation
+        let mut color_prop = Property::new("Color", Color::RED);
+        color_prop.add_keyframe(Keyframe::linear(t0, Color::rgba(1.0, 0.0, 0.0, 1.0)));
+        color_prop.add_keyframe(Keyframe::linear(t30, Color::rgba(0.0, 0.0, 1.0, 0.5)));
+
+        let col_mid = color_prop.evaluate_at_seconds(0.5);
+        assert!((col_mid.r - 0.5).abs() < 1e-5);
+        assert_eq!(col_mid.g, 0.0);
+        assert!((col_mid.b - 0.5).abs() < 1e-5);
+        assert!((col_mid.a - 0.75).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_property_keyframe_management_and_evaluation() {
+        let fps = 30.0;
+        let mut prop = Property::new("Opacity", 100.0f32);
+        assert!(!prop.is_animated());
+        assert!(!prop.has_keyframes());
+
+        // Add keyframes in arbitrary/out-of-order temporal order
+        prop.add_keyframe(Keyframe::linear(TimeCode::from_frames(60, fps), 100.0));
+        prop.add_keyframe(Keyframe::linear(TimeCode::from_frames(0, fps), 0.0));
+        prop.add_keyframe(Keyframe::linear(TimeCode::from_frames(30, fps), 50.0));
+
+        // Verify sorted order: frames 0, 30, 60
+        assert_eq!(prop.keyframe_count(), 3);
+        assert_eq!(prop.keyframes()[0].time.frames(), 0);
+        assert_eq!(prop.keyframes()[1].time.frames(), 30);
+        assert_eq!(prop.keyframes()[2].time.frames(), 60);
+
+        // Update keyframe at identical timestamp replaces rather than duplicates
+        prop.add_keyframe(Keyframe::linear(TimeCode::from_frames(30, fps), 75.0));
+        assert_eq!(prop.keyframe_count(), 3);
+        assert_eq!(prop.keyframes()[1].value, 75.0);
+
+        // Find keyframe
+        let found = prop.keyframe_at(&TimeCode::from_frames(30, fps));
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().value, 75.0);
+
+        // Remove keyframe
+        let removed = prop.remove_keyframe_at(&TimeCode::from_frames(30, fps));
+        assert!(removed.is_some());
+        assert_eq!(prop.keyframe_count(), 2);
+
+        // Clear keyframes
+        prop.clear_keyframes();
+        assert!(!prop.is_animated());
+        assert_eq!(prop.keyframe_count(), 0);
+        assert_eq!(prop.evaluate_at_seconds(1.5), 100.0); // falls back to static value
+    }
+
+    #[test]
+    fn test_keyframe_serialization_roundtrip_and_backward_compatibility() {
+        let fps = 30.0;
+        let mut prop = Property::new("Rotation", 0.0f32);
+        prop.add_keyframe(Keyframe::bezier(
+            TimeCode::from_frames(0, fps),
+            0.0,
+            None,
+            Some(KeyframeTangent::new(0.3, 0.1)),
+        ));
+        prop.add_keyframe(Keyframe::hold(TimeCode::from_frames(30, fps), 90.0));
+        prop.add_keyframe(Keyframe::linear(TimeCode::from_frames(60, fps), 180.0));
+
+        // Serialize
+        let json = serde_json::to_string_pretty(&prop).expect("Serialize property with keyframes");
+
+        // Deserialize
+        let restored: Property<f32> = serde_json::from_str(&json).expect("Deserialize property");
+        assert_eq!(prop, restored);
+        assert_eq!(restored.keyframe_count(), 3);
+        assert_eq!(restored.keyframes()[0].interpolation, KeyframeInterpolation::Bezier);
+        assert_eq!(restored.keyframes()[1].interpolation, KeyframeInterpolation::Hold);
+        assert_eq!(restored.keyframes()[2].interpolation, KeyframeInterpolation::Linear);
+
+        // Backward compatibility: JSON with NO keyframes field deserializes into empty keyframes
+        let legacy_json = r#"{
+            "name": "Legacy Scale",
+            "value": 100.0,
+            "default_value": 100.0,
+            "animated": false
+        }"#;
+        let legacy_prop: Property<f32> = serde_json::from_str(legacy_json).expect("Deserialize legacy property");
+        assert_eq!(legacy_prop.name(), "Legacy Scale");
+        assert_eq!(*legacy_prop, 100.0);
+        assert!(legacy_prop.keyframes.is_empty());
+        assert!(!legacy_prop.is_animated());
     }
 }

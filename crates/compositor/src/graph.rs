@@ -310,13 +310,35 @@ impl SceneGraph {
             .collect()
     }
 
+    /// Evaluate the spatial transforms for all nodes in the scene graph at the specified timecode
+    /// using topological evaluation order.
+    pub fn evaluate_transforms_at(
+        &self,
+        time: &TimeCode,
+    ) -> Result<HashMap<String, EvaluatedTransform>, SceneGraphError> {
+        TransformResolver::resolve_scene_graph_at(self, time)
+    }
+
+    /// Retrieve the evaluated spatial transform for a specific node in the scene graph at the specified timecode.
+    pub fn get_evaluated_transform_at(
+        &self,
+        id: &str,
+        time: &TimeCode,
+    ) -> Result<EvaluatedTransform, SceneGraphError> {
+        let transforms = self.evaluate_transforms_at(time)?;
+        transforms
+            .get(id)
+            .copied()
+            .ok_or_else(|| SceneGraphError::NodeNotFound(id.to_string()))
+    }
+
     /// Evaluate the spatial transforms for all nodes in the scene graph using
-    /// topological evaluation order.
+    /// topological evaluation order at zero timecode.
     pub fn evaluate_transforms(&self) -> Result<HashMap<String, EvaluatedTransform>, SceneGraphError> {
         TransformResolver::resolve_scene_graph(self)
     }
 
-    /// Retrieve the evaluated spatial transform for a specific node in the scene graph.
+    /// Retrieve the evaluated spatial transform for a specific node in the scene graph at zero timecode.
     pub fn get_evaluated_transform(&self, id: &str) -> Result<EvaluatedTransform, SceneGraphError> {
         let transforms = self.evaluate_transforms()?;
         transforms

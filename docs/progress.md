@@ -142,7 +142,39 @@
     - BoundingBox2D area, emptiness, and geometric intersection tests (overlapping, disjoint, and touching).
     - Flat 9-element array, 6-element column-major array, GPU column-major conversions, and non-finite / singular matrix handling.
   - All **69 tests** passing across the workspace with 0 errors and 0 warnings.
-- [ ] **Task 1.4: Implement the animatable property system and interpolation**
+- [x] **Task 1.4: Implement the animatable property system and interpolation**
+  - Implemented `Interpolate` trait in `crates/project/src/keyframe.rs` supporting linear interpolation (`lerp`) and step/hold interpolation (`step`) across scalar floats (`f32`, `f64`), vectors (`Vec2`), colors (`Color`), booleans, and strings.
+  - Added `lerp` method directly to `Vec2` in `crates/project/src/vec2.rs`.
+  - Implemented `KeyframeInterpolation` enum (`Hold`, `Linear`, `Bezier`).
+  - Implemented `KeyframeTangent` 2D control handle with industry standard easing presets (`linear_out`, `linear_in`, `ease_in`, `ease_out`, `ease_in_out`).
+  - Implemented `Extrapolation` enum (`Hold`, `Linear`, `Cycle`, `PingPong`).
+  - Implemented `Keyframe<T>` struct (`time: TimeCode`, `subframe: f32`, `value: T`, `interpolation`, `in_tangent`, `out_tangent`) with floating-point second evaluation (`time_seconds`).
+  - Implemented cubic Bezier solver (`evaluate_cubic_bezier`) using analytical Newton-Raphson inversion of $x(\theta) = t$ with robust bisection fallback.
+  - Implemented keyframe track evaluator (`evaluate_keyframe_track`) with binary search interval matching, extrapolation handling, and sub-frame floating-point evaluation.
+  - Extended `Property<T>` in `crates/project/src/property.rs`:
+    - Added `keyframes: Vec<Keyframe<T>>` with `#[serde(default, skip_serializing_if = "Vec::is_empty")]` for 100% backward compatibility.
+    - Added keyframe management methods: `add_keyframe`, `remove_keyframe_at`, `keyframe_at`, `clear_keyframes`, `has_keyframes`, `keyframe_count`.
+    - Added time-based evaluation API: `evaluate_at(&TimeCode)`, `evaluate_at_seconds(f64)`, `evaluate_with_extrapolation`.
+  - Extended `Transform` in `crates/project/src/transform.rs`:
+    - Added `evaluate_at(&TimeCode) -> (Vec2, Vec2, Vec2, f32)` and `evaluate_at_seconds(f64)`.
+    - Added `is_animated() -> bool`.
+  - Integrated into composition evaluation pipeline in `crates/compositor`:
+    - Extended `EvaluatedTransform` with `from_node_transform_at(transform, time)`.
+    - Extended `TransformResolver` with `resolve_scene_graph_at(graph, time)`.
+    - Extended `SceneGraph` with `evaluate_transforms_at(&self, time)` and `get_evaluated_transform_at`.
+    - Updated `LayerStackEvaluator::evaluate(graph, time)` to evaluate dynamic layer opacity and hierarchical transforms at the target `TimeCode`.
+  - Added 6 unit tests in `crates/project`:
+    - Hold/step and linear interpolation across exact and sub-frame times.
+    - Cubic Bezier curve evaluation (linear diagonal, ease-in-out S-curve, Newton convergence).
+    - Boundary extrapolation (`Hold`, `Linear` tangent slopes, `Cycle` loops, `PingPong` reflection).
+    - Multi-dimensional property interpolation (`Vec2` position, `Color` RGBA).
+    - Property keyframe track management (automatic sorting, replacement at identical timestamp, deletion, clear).
+    - JSON serialization roundtrip with keyframes and legacy backward compatibility with keyframeless properties.
+  - Added 3 unit tests in `crates/compositor`:
+    - Evaluated layer opacity fade over time (active rendering participation at > 0.0).
+    - Animated layer transform with Bezier ease-in-out translation, linear rotation, and scaling.
+    - Hierarchical transform evaluation with moving parent and rotating child.
+  - All **78 tests** passing across the workspace with 0 errors and 0 warnings.
 - [ ] **Task 1.5: Implement timeline time-to-frame conversion and playback clock**
 - [ ] **Task 1.6: Implement composition nesting and pre-comp evaluation**
 - [ ] **Task 1.7: Create headless composition evaluation tests**

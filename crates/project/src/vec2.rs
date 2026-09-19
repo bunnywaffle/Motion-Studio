@@ -57,6 +57,11 @@ impl Vec2 {
             Self::ZERO
         }
     }
+
+    /// Linearly interpolate between this vector and another.
+    pub fn lerp(self, other: Self, t: f32) -> Self {
+        self + (other - self) * t
+    }
 }
 
 impl Default for Vec2 {

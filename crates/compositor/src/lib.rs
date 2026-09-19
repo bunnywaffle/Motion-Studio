@@ -1208,5 +1208,193 @@ mod tests {
         assert!(!inf_matrix.is_invertible());
         assert!(inf_matrix.inverse().is_none());
     }
+
+    #[test]
+    fn test_animated_layer_opacity_evaluation() {
+        use project::Keyframe;
+
+        let fps = 30.0;
+        let mut comp = Composition::hd_1080p_30fps("comp_anim_op", "Opacity Animation", 5.0);
+        let tc0 = TimeCode::from_frames(0, fps);
+        let tc60 = TimeCode::from_frames(60, fps);
+
+        let mut layer = Layer::solid("fade_layer", "Fader", Color::WHITE, 1920, 1080, tc0, tc60);
+        // Keyframe opacity: 0% at frame 0 -> 100% at frame 30 (1 second fade-in)
+        layer.opacity.add_keyframe(Keyframe::linear(tc0, 0.0f32));
+        layer.opacity.add_keyframe(Keyframe::linear(TimeCode::from_frames(30, fps), 100.0f32));
+
+        comp.add_layer(layer).unwrap();
+
+        let graph = SceneGraph::from_composition(&comp).unwrap();
+        let evaluator = LayerStackEvaluator::new();
+
+        // Frame 0: Opacity 0%
+        let stack_0 = evaluator.evaluate(&graph, &tc0);
+        let l_0 = stack_0.get_layer("fade_layer").unwrap();
+        assert_eq!(l_0.local_opacity, 0.0);
+        assert_eq!(l_0.effective_opacity, 0.0);
+        assert!(!l_0.is_rendered()); // effective opacity 0.0 is not rendered
+        assert_eq!(stack_0.render_list, vec!["fade_layer"]);
+
+        // Frame 15: Opacity 50%
+        let stack_15 = evaluator.evaluate(&graph, &TimeCode::from_frames(15, fps));
+        let l_15 = stack_15.get_layer("fade_layer").unwrap();
+        assert!((l_15.local_opacity - 50.0).abs() < 1e-4);
+        assert!((l_15.effective_opacity - 0.5).abs() < 1e-4);
+        assert!(l_15.is_rendered());
+        assert_eq!(stack_15.render_list, vec!["fade_layer"]);
+
+        // Frame 30: Opacity 100%
+        let stack_30 = evaluator.evaluate(&graph, &TimeCode::from_frames(30, fps));
+        let l_30 = stack_30.get_layer("fade_layer").unwrap();
+        assert_eq!(l_30.local_opacity, 100.0);
+        assert_eq!(l_30.effective_opacity, 1.0);
+        assert!(l_30.is_rendered());
+
+        // Frame 45: Opacity holds at 100% (post-keyframe hold)
+        let stack_45 = evaluator.evaluate(&graph, &TimeCode::from_frames(45, fps));
+        let l_45 = stack_45.get_layer("fade_layer").unwrap();
+        assert_eq!(l_45.local_opacity, 100.0);
+        assert_eq!(l_45.effective_opacity, 1.0);
+    }
+
+    #[test]
+    fn test_animated_layer_transform_with_bezier_easing() {
+        use project::{Keyframe, KeyframeTangent, Vec2};
+
+        let fps = 30.0;
+        let mut comp = Composition::hd_1080p_30fps("comp_anim_trans", "Transform Animation", 5.0);
+        let tc0 = TimeCode::from_frames(0, fps);
+        let tc30 = TimeCode::from_frames(30, fps);
+        let tc60 = TimeCode::from_frames(60, fps);
+
+        let mut layer = Layer::solid("box", "Moving Box", Color::RED, 100, 100, tc0, tc60);
+        layer.transform.anchor_point.set_value(Vec2::ZERO);
+
+        // Position: moves from (100, 100) at frame 0 to (500, 500) at frame 30 with ease-in-out
+        layer.transform.position.add_keyframe(Keyframe::bezier(
+            tc0,
+            Vec2::new(100.0, 100.0),
+            None,
+            Some(KeyframeTangent::ease_in_out_out()),
+        ));
+        layer.transform.position.add_keyframe(Keyframe::bezier(
+            tc30,
+            Vec2::new(500.0, 500.0),
+            Some(KeyframeTangent::ease_in_out_in()),
+            None,
+        ));
+
+        // Rotation: rotates from 0 to 90 degrees linearly over frames 0..30
+        layer.transform.rotation.add_keyframe(Keyframe::linear(tc0, 0.0));
+        layer.transform.rotation.add_keyframe(Keyframe::linear(tc30, 90.0));
+
+        // Scale: scales from 100% to 200% over frames 0..30
+        layer.transform.scale.add_keyframe(Keyframe::linear(tc0, Vec2::SCALE_100));
+        layer.transform.scale.add_keyframe(Keyframe::linear(tc30, Vec2::new(200.0, 200.0)));
+
+        comp.add_layer(layer).unwrap();
+
+        let graph = SceneGraph::from_composition(&comp).unwrap();
+        let evaluator = LayerStackEvaluator::new();
+
+        // 1. Frame 0: Pos (100, 100), Rot 0, Scale 100%
+        let stack_0 = evaluator.evaluate(&graph, &tc0);
+        let t_0 = stack_0.get_transform("box").unwrap();
+        assert_eq!(t_0.position, Vec2::new(100.0, 100.0));
+        assert_eq!(t_0.rotation, 0.0);
+        assert_eq!(t_0.scale, Vec2::SCALE_100);
+        assert_eq!(t_0.local_to_world_point(Vec2::ZERO), Vec2::new(100.0, 100.0));
+        let bounds_0 = t_0.world_bounds(100.0, 100.0);
+        assert_eq!(bounds_0.min, Vec2::new(100.0, 100.0));
+        assert_eq!(bounds_0.max, Vec2::new(200.0, 200.0));
+
+        // 2. Frame 15 (Midpoint): Pos should be halfway (300, 300) due to symmetric ease-in-out
+        let stack_15 = evaluator.evaluate(&graph, &TimeCode::from_frames(15, fps));
+        let t_15 = stack_15.get_transform("box").unwrap();
+        assert!((t_15.position.x - 300.0).abs() < 1.0);
+        assert!((t_15.position.y - 300.0).abs() < 1.0);
+        assert!((t_15.rotation - 45.0).abs() < 1e-4);
+        assert!((t_15.scale.x - 150.0).abs() < 1e-4);
+
+        // 3. Frame 30: Pos (500, 500), Rot 90, Scale 200%
+        let stack_30 = evaluator.evaluate(&graph, &tc30);
+        let t_30 = stack_30.get_transform("box").unwrap();
+        assert_eq!(t_30.position, Vec2::new(500.0, 500.0));
+        assert_eq!(t_30.rotation, 90.0);
+        assert_eq!(t_30.scale, Vec2::new(200.0, 200.0));
+
+        // Local origin (0, 0) maps to (500, 500)
+        assert_eq!(t_30.local_to_world_point(Vec2::ZERO), Vec2::new(500.0, 500.0));
+
+        // Point (100, 0) in local space: scaled to (200, 0), rotated 90 deg clockwise -> (0, 200), translated by (500, 500) -> (500, 700)
+        let p_transformed = t_30.local_to_world_point(Vec2::new(100.0, 0.0));
+        assert!((p_transformed.x - 500.0).abs() < 1e-4);
+        assert!((p_transformed.y - 700.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_hierarchical_transform_evaluation_with_animated_parent_and_child() {
+        use project::{Keyframe, Vec2};
+
+        let fps = 30.0;
+        let mut comp = Composition::hd_1080p_30fps("comp_anim_hier", "Hierarchy Animation", 5.0);
+        let tc0 = TimeCode::from_frames(0, fps);
+        let tc60 = TimeCode::from_frames(60, fps);
+
+        // Parent Layer: moves horizontally from (0, 100) to (600, 100) over 60 frames (2.0s)
+        let mut parent = Layer::solid("parent_node", "Parent", Color::RED, 200, 200, tc0, tc60);
+        parent.transform.anchor_point.set_value(Vec2::ZERO);
+        parent.transform.position.add_keyframe(Keyframe::linear(tc0, Vec2::new(0.0, 100.0)));
+        parent.transform.position.add_keyframe(Keyframe::linear(tc60, Vec2::new(600.0, 100.0)));
+
+        // Child Layer: parented to parent, positioned locally at (50, 0), rotates 0 -> 360 deg over 60 frames
+        let mut child = Layer::solid("child_node", "Child", Color::BLUE, 50, 50, tc0, tc60);
+        child.set_parent(Some("parent_node"));
+        child.transform.anchor_point.set_value(Vec2::ZERO);
+        child.transform.position.set_value(Vec2::new(50.0, 0.0));
+        child.transform.rotation.add_keyframe(Keyframe::linear(tc0, 0.0));
+        child.transform.rotation.add_keyframe(Keyframe::linear(tc60, 360.0));
+
+        comp.add_layer(parent).unwrap();
+        comp.add_layer(child).unwrap();
+
+        let graph = SceneGraph::from_composition(&comp).unwrap();
+        let evaluator = LayerStackEvaluator::new();
+
+        // 1. Frame 0: Parent at (0, 100), Child local (50, 0) -> Child world (50, 100)
+        let stack_0 = evaluator.evaluate(&graph, &tc0);
+        let child_t0 = stack_0.get_transform("child_node").unwrap();
+        assert_eq!(child_t0.local_to_world_point(Vec2::ZERO), Vec2::new(50.0, 100.0));
+
+        // 2. Frame 30 (Midpoint, 1.0s):
+        // Parent has moved to (300, 100)
+        // Child rotation is 180 degrees
+        // Child local (0, 0): offset (50, 0) from parent. In parent space: (50, 0).
+        // Parent rotation is 0, so parent world origin + (50, 0) = (350, 100)
+        let stack_30 = evaluator.evaluate(&graph, &TimeCode::from_frames(30, fps));
+        let parent_t30 = stack_30.get_transform("parent_node").unwrap();
+        let child_t30 = stack_30.get_transform("child_node").unwrap();
+        assert_eq!(parent_t30.position, Vec2::new(300.0, 100.0));
+        assert!((child_t30.rotation - 180.0).abs() < 1e-4);
+        assert_eq!(child_t30.local_to_world_point(Vec2::ZERO), Vec2::new(350.0, 100.0));
+
+        // Point (10, 0) in child space: rotated 180 deg in child -> (-10, 0) relative to child pos (50, 0) -> (40, 0) in parent space
+        // Translated by parent pos (300, 100) -> (340, 100)
+        let child_pt_world = child_t30.local_to_world_point(Vec2::new(10.0, 0.0));
+        assert!((child_pt_world.x - 340.0).abs() < 1e-4);
+        assert!((child_pt_world.y - 100.0).abs() < 1e-4);
+
+        // 3. Frame 60: Parent has reached (600, 100), Child rotation completed 360 deg
+        let stack_60 = evaluator.evaluate(&graph, &tc60);
+        // At exact out_point 60, layers are inactive
+        let l_parent = stack_60.get_layer("parent_node").unwrap();
+        assert!(!l_parent.is_active);
+
+        // Frame 59 (active):
+        let stack_59 = evaluator.evaluate(&graph, &TimeCode::from_frames(59, fps));
+        let l_child_59 = stack_59.get_layer("child_node").unwrap();
+        assert!(l_child_59.is_active);
+    }
 }
 
