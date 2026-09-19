@@ -78,23 +78,23 @@
     - Time stretch / speed factor support: positive/negative speed multipliers (e.g. 50% slow-motion, 200% double speed, negative reverse).
     - Optional animated time remapping property (`time_remapping: Option<Property<f64>>`) mapping parent timeline to inner composition seconds.
     - Duration bounds clamping and loop modes: `LoopMode::Once` (boundary clamp), `LoopMode::Loop` (periodic wrap), and `LoopMode::PingPong` (oscillation bounce).
-    - Multi-rate synchronization: frame-exact calculations for matched frame rates and floating-point continuous second mapping for disparate frame rates.
+    - Multi-rate synchronization: frame-exact calculations for matched frame rates and floating-point continuous second mapping for disparate frame rates, with non-finite float guards.
   - Spatial Concatenation & Nested Transformations:
     - Hierarchical world transform cascading: $M_{\text{inner\_root}} = M_{\text{nesting\_world\_matrix}} \times M_{\text{inner\_world}}$.
     - Bidirectional point transformations: `inner_to_root_point` and `root_to_inner_point`.
-    - Bounding box mapping: `inner_to_root_bbox`, `canvas_bounds_in_root`, and `inner_layer_root_bounds`.
+    - Bounding box mapping: `inner_to_root_bbox`, `canvas_bounds_in_root`, and exact `inner_layer_root_bounds` (direct root transformation eliminating intermediate AABB rotation bloat).
     - Transform helper `transform_bbox` on `AffineTransform2D`.
   - Recursive Frame Representation & Compositing:
     - `EvaluatedLayer` embeds `nested_composition: Option<Box<NestedCompositionEvaluation>>` with query methods `is_nested_composition()` and `nested_evaluation()`.
-    - `FlattenedRenderLayer`: represents atomic render elements with fully resolved root world matrices, cumulative opacities, layer paths, and nesting depths.
-    - `EvaluatedStack`: provides `flattened_render_list()` expanding nested compositions in painter's composite order, `collect_render_passes()` for offscreen render targets in dependency order, `has_nested_compositions()`, and `get_layer_deep()`.
+    - `FlattenedRenderLayer`: represents atomic render elements with fully resolved root world transforms, cumulative opacities, hierarchical layer paths, `matte_source_path`, `is_matte_source`, and nesting depths.
+    - `EvaluatedStack`: provides `flattened_render_list()` expanding nested compositions in painter's composite order, `collect_render_passes()` for offscreen render targets in dependency order (including track matte pre-comps with `nesting_layer_id`), `has_nested_compositions()`, `get_layer_deep()`, `get_flattened_layer()`, and `deep_layer_root_matrix()`.
   - Recursion Limits & Cycle Protection:
     - `LayerStackEvaluator`: configurable `max_nesting_depth` (default 32) guarding against unbounded recursion with `SceneGraphError::MaxNestingDepthExceeded`.
     - Active cycle detection detecting circular nested composition references with `SceneGraphError::CircularNestedComposition`.
     - Graceful missing composition error handling with `SceneGraphError::CompositionNotFound`.
   - Layer Model Integration in `crates/project`:
     - Extended `Layer` with `start_offset`, `time_stretch`, `time_remapping`, and `loop_mode` with full backward compatibility and JSON serialization roundtripping.
-- Full automated test suite passing with **103 tests** across the workspace (12 application tests + 50 project unit tests + 41 compositor unit tests).
+- Full automated test suite passing with **108 tests** across the workspace (12 application tests + 50 project unit tests + 46 compositor unit tests).
 - Workspace compiles, builds, and passes all checks cleanly with 0 errors and 0 warnings (`cargo check --workspace`, `cargo build --workspace`, `cargo test --workspace`, and `cargo clippy --workspace --all-targets -- -D warnings`).
 
 ## What Is Currently Being Developed

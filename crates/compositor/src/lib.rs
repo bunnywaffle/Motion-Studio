@@ -2166,6 +2166,258 @@ mod tests {
         let combined_opacity = flattened[0].combined_opacity;
         assert!((combined_opacity - 0.4).abs() < 1e-5);
     }
+
+    #[test]
+    fn test_inner_layer_root_bounds_exactness_under_opposing_rotations() {
+        let mut project = Project::with_defaults("Rotation Exactness Project");
+        let tc0 = TimeCode::from_frames(0, 30.0);
+        let tc150 = TimeCode::from_frames(150, 30.0);
+
+        // Child Comp B (400x400):
+        // Inner layer is a 100x100 solid positioned at (150, 150) rotated 45 degrees.
+        let mut comp_b = Composition::new("comp_b", "Comp B", 400, 400, 30.0, tc150);
+        let mut inner_layer =
+            Layer::solid("inner_rect", "Rotated Inner", Color::RED, 100, 100, tc0, tc150);
+        inner_layer.transform.anchor_point.set_value(Vec2::ZERO);
+        inner_layer.transform.position.set_value(Vec2::new(150.0, 150.0));
+        inner_layer.transform.rotation.set_value(45.0);
+        comp_b.add_layer(inner_layer).unwrap();
+
+        // Parent Comp A:
+        // Nesting layer is positioned at (200, 200) and rotated -45 degrees.
+        // Net rotation in Comp A viewport = 45 deg + (-45 deg) = 0 deg!
+        let mut comp_a = Composition::hd_1080p_30fps("comp_a", "Comp A", 5.0);
+        let mut nesting_layer =
+            Layer::nested_composition("nest_b", "Precomp B", "comp_b", tc0, tc150);
+        nesting_layer.transform.anchor_point.set_value(Vec2::ZERO);
+        nesting_layer.transform.position.set_value(Vec2::new(200.0, 200.0));
+        nesting_layer.transform.rotation.set_value(-45.0);
+        comp_a.add_layer(nesting_layer).unwrap();
+
+        project.add_composition(comp_a).unwrap();
+        project.add_composition(comp_b).unwrap();
+
+        let evaluator = LayerStackEvaluator::new();
+        let stack_a = evaluator
+            .evaluate_composition(&project, "comp_a", &tc0)
+            .expect("Evaluate");
+
+        let l_nested = stack_a.get_layer("nest_b").unwrap();
+        let nested_eval = l_nested.nested_evaluation().unwrap();
+
+        // Under net rotation 0, the root AABB width and height must be exactly 100.0 (zero AABB bloat)
+        let exact_bounds = nested_eval
+            .inner_layer_root_bounds("inner_rect", 100.0, 100.0)
+            .expect("Root bounds");
+        assert!((exact_bounds.width() - 100.0).abs() < 1e-3);
+        assert!((exact_bounds.height() - 100.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_nested_composition_as_track_matte_render_passes() {
+        use project::TrackMatteMode;
+
+        let mut project = Project::with_defaults("Matte Precomp Project");
+        let tc0 = TimeCode::from_frames(0, 30.0);
+        let tc150 = TimeCode::from_frames(150, 30.0);
+
+        // Child Comp B (matte source shape)
+        let mut comp_b = Composition::new("comp_b", "Matte Comp", 400, 400, 30.0, tc150);
+        comp_b
+            .add_layer(Layer::solid(
+                "matte_shape",
+                "Circle",
+                Color::WHITE,
+                400,
+                400,
+                tc0,
+                tc150,
+            ))
+            .unwrap();
+
+        // Parent Comp A:
+        // Layer 0: "b_matte" (pre-comp of comp_b)
+        // Layer 1: "video_clip" (uses "b_matte" as alpha track matte)
+        let mut comp_a = Composition::hd_1080p_30fps("comp_a", "Parent Comp", 5.0);
+        let matte_layer = Layer::nested_composition("b_matte", "Matte Precomp", "comp_b", tc0, tc150);
+        let mut video_layer =
+            Layer::solid("video_clip", "Video Clip", Color::RED, 1920, 1080, tc0, tc150);
+        video_layer.set_matte(TrackMatteMode::Alpha, Some("b_matte"));
+
+        comp_a.add_layer(matte_layer).unwrap();
+        comp_a.add_layer(video_layer).unwrap();
+
+        project.add_composition(comp_a).unwrap();
+        project.add_composition(comp_b).unwrap();
+
+        // 1. Default evaluator (consume_matte_sources = true):
+        let evaluator = LayerStackEvaluator::new();
+        let stack_a = evaluator
+            .evaluate_composition(&project, "comp_a", &tc0)
+            .unwrap();
+
+        // Main render list only has video_clip (matte was consumed)
+        assert_eq!(stack_a.render_list, vec!["video_clip"]);
+
+        // BUT collect_render_passes MUST still collect the offscreen pass for comp_b!
+        let passes = stack_a.collect_render_passes();
+        assert_eq!(passes.len(), 2);
+        // Leaf pass first: comp_b
+        assert_eq!(passes[0].composition_id, "comp_b");
+        assert_eq!(passes[0].nesting_layer_id.as_deref(), Some("b_matte"));
+        assert_eq!(passes[0].layer_ids, vec!["matte_shape"]);
+        // Root pass second: comp_a
+        assert_eq!(passes[1].composition_id, "comp_a");
+        assert_eq!(passes[1].nesting_layer_id, None);
+        assert_eq!(passes[1].layer_ids, vec!["video_clip"]);
+
+        // 2. Non-consuming evaluator:
+        let non_consuming = LayerStackEvaluator::new().with_consume_matte_sources(false);
+        let stack_nc = non_consuming
+            .evaluate_composition(&project, "comp_a", &tc0)
+            .unwrap();
+        let flattened = stack_nc.flattened_render_list();
+        assert_eq!(flattened.len(), 2);
+        // Inner layer of b_matte inherits is_matte_source = true
+        let flat_matte = flattened
+            .iter()
+            .find(|l| l.layer_id == "matte_shape")
+            .unwrap();
+        assert!(flat_matte.is_matte_source);
+    }
+
+    #[test]
+    fn test_nested_composition_parented_in_parent_and_child() {
+        let mut project = Project::with_defaults("Cross Boundary Parenting Project");
+        let tc0 = TimeCode::from_frames(0, 30.0);
+        let tc150 = TimeCode::from_frames(150, 30.0);
+
+        // Comp B:
+        // Layer "b_parent" positioned at (30, 40)
+        // Layer "b_leaf" parented to "b_parent" positioned locally at (5, 5)
+        let mut comp_b = Composition::new("comp_b", "Comp B", 600, 600, 30.0, tc150);
+        let mut b_parent = Layer::solid("b_parent", "B Parent", Color::BLUE, 50, 50, tc0, tc150);
+        b_parent.transform.anchor_point.set_value(Vec2::ZERO);
+        b_parent.transform.position.set_value(Vec2::new(30.0, 40.0));
+
+        let mut b_leaf = Layer::solid("b_leaf", "B Leaf", Color::GREEN, 20, 20, tc0, tc150);
+        b_leaf.transform.anchor_point.set_value(Vec2::ZERO);
+        b_leaf.transform.position.set_value(Vec2::new(5.0, 5.0));
+        b_leaf.set_parent(Some("b_parent"));
+
+        comp_b.add_layer(b_parent).unwrap();
+        comp_b.add_layer(b_leaf).unwrap();
+
+        // Comp A:
+        // Layer "a_null" positioned at (100, 200)
+        // Layer "a_nest" nests Comp B, positioned at (10, 20), parented to "a_null"
+        let mut comp_a = Composition::hd_1080p_30fps("comp_a", "Comp A", 5.0);
+        let mut a_null = Layer::solid("a_null", "A Null", Color::BLACK, 10, 10, tc0, tc150);
+        a_null.transform.anchor_point.set_value(Vec2::ZERO);
+        a_null.transform.position.set_value(Vec2::new(100.0, 200.0));
+
+        let mut a_nest = Layer::nested_composition("a_nest", "Nested B", "comp_b", tc0, tc150);
+        a_nest.transform.anchor_point.set_value(Vec2::ZERO);
+        a_nest.transform.position.set_value(Vec2::new(10.0, 20.0));
+        a_nest.set_parent(Some("a_null"));
+
+        comp_a.add_layer(a_null).unwrap();
+        comp_a.add_layer(a_nest).unwrap();
+
+        project.add_composition(comp_a).unwrap();
+        project.add_composition(comp_b).unwrap();
+
+        let evaluator = LayerStackEvaluator::new();
+        let stack_a = evaluator
+            .evaluate_composition(&project, "comp_a", &tc0)
+            .unwrap();
+
+        // Accumulated position for b_leaf:
+        // (100 + 10) + (30 + 5) = 145
+        // (200 + 20) + (40 + 5) = 265
+        let root_matrix = stack_a
+            .deep_layer_root_matrix(&["a_nest", "b_leaf"])
+            .expect("Leaf root matrix");
+        let origin = root_matrix.transform_point(Vec2::ZERO);
+        assert!((origin.x - 145.0).abs() < 1e-4);
+        assert!((origin.y - 265.0).abs() < 1e-4);
+
+        let flat_leaf = stack_a.get_flattened_layer("b_leaf").unwrap();
+        assert_eq!(flat_leaf.local_to_root_point(Vec2::ZERO), Vec2::new(145.0, 265.0));
+    }
+
+    #[test]
+    fn test_flattened_render_layer_matte_inheritance_and_path() {
+        use project::TrackMatteMode;
+
+        let mut project = Project::with_defaults("Matte Path Project");
+        let tc0 = TimeCode::from_frames(0, 30.0);
+        let tc150 = TimeCode::from_frames(150, 30.0);
+
+        // Comp B has internal track matte pairing
+        let mut comp_b = Composition::new("comp_b", "Comp B", 500, 500, 30.0, tc150);
+        let inner_matte = Layer::solid("m_src", "Matte Src", Color::WHITE, 50, 50, tc0, tc150);
+        let mut inner_target = Layer::solid("m_tgt", "Matte Target", Color::RED, 50, 50, tc0, tc150);
+        inner_target.set_matte(TrackMatteMode::Alpha, Some("m_src"));
+
+        comp_b.add_layer(inner_matte).unwrap();
+        comp_b.add_layer(inner_target).unwrap();
+
+        // Comp A nests Comp B
+        let mut comp_a = Composition::hd_1080p_30fps("comp_a", "Comp A", 5.0);
+        let nest = Layer::nested_composition("nest_b", "Nest B", "comp_b", tc0, tc150);
+        comp_a.add_layer(nest).unwrap();
+
+        project.add_composition(comp_a).unwrap();
+        project.add_composition(comp_b).unwrap();
+
+        let evaluator = LayerStackEvaluator::new().with_consume_matte_sources(false);
+        let stack_a = evaluator
+            .evaluate_composition(&project, "comp_a", &tc0)
+            .unwrap();
+
+        let flat_target = stack_a.get_flattened_layer("m_tgt").unwrap();
+        assert_eq!(flat_target.matte_mode, TrackMatteMode::Alpha);
+        assert_eq!(flat_target.matte_source_id.as_deref(), Some("m_src"));
+        assert_eq!(
+            flat_target.matte_source_path,
+            Some(vec!["nest_b".to_string(), "m_src".to_string()])
+        );
+
+        let flat_matte = stack_a.get_flattened_layer("m_src").unwrap();
+        assert!(flat_matte.is_matte_source);
+    }
+
+    #[test]
+    fn test_resolve_nested_time_nan_and_infinite_stretch_robustness() {
+        use project::LoopMode;
+
+        let tc0 = TimeCode::from_frames(0, 30.0);
+        let tc150 = TimeCode::from_frames(150, 30.0);
+        let comp = Composition::hd_1080p_30fps("comp", "Comp", 5.0);
+
+        // NaN time stretch
+        let mut layer_nan = Layer::nested_composition("nan_layer", "NaN", "comp", tc0, tc150);
+        layer_nan.time_stretch = f64::NAN;
+        let node_nan = SceneNode::from_layer(&layer_nan, 0);
+        let t_nan = resolve_nested_time(&node_nan, &tc0, &comp);
+        assert_eq!(t_nan.frames(), 0);
+
+        // Infinite time stretch
+        let mut layer_inf = Layer::nested_composition("inf_layer", "Inf", "comp", tc0, tc150);
+        layer_inf.time_stretch = f64::INFINITY;
+        let node_inf = SceneNode::from_layer(&layer_inf, 0);
+        let t_inf = resolve_nested_time(&node_inf, &tc0, &comp);
+        assert_eq!(t_inf.frames(), 0);
+
+        // Animated time remap returning non-finite value
+        let mut layer_remap = Layer::nested_composition("remap_nan", "Remap", "comp", tc0, tc150);
+        layer_remap.time_remapping = Some(project::Property::new("Remap", f64::NAN));
+        layer_remap.loop_mode = LoopMode::Loop;
+        let node_remap = SceneNode::from_layer(&layer_remap, 0);
+        let t_remap = resolve_nested_time(&node_remap, &tc0, &comp);
+        assert_eq!(t_remap.frames(), 0);
+    }
 }
 
 

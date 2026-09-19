@@ -234,7 +234,7 @@
   - Extended project data model in `crates/project/src/layer.rs`:
     - Added `start_offset`, `time_stretch`, `time_remapping`, and `loop_mode` to `Layer` with builder and setter methods.
     - Synchronized fields to `SceneNode` in `crates/compositor/src/node.rs`.
-  - Added 11 automated unit tests (1 in `project`, 10 in `compositor`):
+  - Added 16 automated unit tests (1 in `project`, 15 in `compositor`):
     - `test_basic_nested_composition_evaluation`: child comp evaluation, canvas bounds.
     - `test_time_offset_alignment_in_nested_composition`: in-point and start-offset alignment.
     - `test_time_stretch_and_speed_factor_evaluation`: 50% slow-mo, 200% double speed, reverse playback.
@@ -246,6 +246,11 @@
     - `test_nested_composition_loop_modes_and_bounds_clamping`: Once, Loop, and PingPong modes.
     - `test_nested_composition_opacity_cascading`: cumulative opacity multiplication across nesting boundaries.
     - `test_nested_composition_temporal_properties_serialization_roundtrip`: JSON serialization and deserialization in `project`.
-  - All **103 tests** passing cleanly across the workspace with 0 errors and 0 warnings.
+    - `test_inner_layer_root_bounds_exactness_under_opposing_rotations`: direct root bounds transformation without intermediate AABB bloat.
+    - `test_nested_composition_as_track_matte_render_passes`: offscreen render pass collection and nesting layer ID tracking for track matte pre-comps.
+    - `test_nested_composition_parented_in_parent_and_child`: 4-level cross-boundary hierarchy concatenation.
+    - `test_flattened_render_layer_matte_inheritance_and_path`: track matte source flag inheritance and exact hierarchical matte source path resolution.
+    - `test_resolve_nested_time_nan_and_infinite_stretch_robustness`: defensive floating-point safety against NaN and infinite speeds.
+  - All **108 tests** passing cleanly across the workspace with 0 errors and 0 warnings.
 - [ ] **Task 1.7: Create headless composition evaluation tests**
 

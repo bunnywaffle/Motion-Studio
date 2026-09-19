@@ -66,9 +66,9 @@ impl NestedCompositionEvaluation {
         width: f32,
         height: f32,
     ) -> Option<BoundingBox2D> {
-        let inner_layer = self.inner_stack.get_layer(inner_layer_id)?;
-        let inner_world_bbox = inner_layer.world_bounds(width, height);
-        Some(self.inner_to_root_bbox(&inner_world_bbox))
+        let root_matrix = self.inner_layer_world_matrix(inner_layer_id)?;
+        let local_bbox = BoundingBox2D::from_origin_size(Vec2::ZERO, Vec2::new(width, height));
+        Some(root_matrix.transform_bbox(&local_bbox))
     }
 }
 
@@ -99,6 +99,10 @@ pub struct FlattenedRenderLayer {
     pub matte_mode: TrackMatteMode,
     /// Track matte source layer ID.
     pub matte_source_id: Option<String>,
+    /// Track matte source layer full hierarchical path, if applicable.
+    pub matte_source_path: Option<Vec<String>>,
+    /// True if this layer (or its ancestor nesting composition) is consumed as a track matte.
+    pub is_matte_source: bool,
     /// Relative time offset in frames from layer in-point.
     pub time_offset_frames: i64,
     /// Relative time offset in seconds from layer in-point.
@@ -127,6 +131,8 @@ impl FlattenedRenderLayer {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderPassDescriptor {
     pub composition_id: String,
+    /// ID of the layer nesting this composition (None for the root composition pass).
+    pub nesting_layer_id: Option<String>,
     pub width: u32,
     pub height: u32,
     pub time: TimeCode,
@@ -315,7 +321,7 @@ impl EvaluatedStack {
     /// with world transforms concatenated ($M_{\text{root}} = M_{\text{nesting}} \times M_{\text{inner}}$)
     /// and effective opacities multiplied.
     pub fn flattened_render_list(&self) -> Vec<FlattenedRenderLayer> {
-        self.flattened_render_list_internal(AffineTransform2D::IDENTITY, 1.0, 0, &[])
+        self.flattened_render_list_internal(AffineTransform2D::IDENTITY, 1.0, 0, &[], false)
     }
 
     pub(crate) fn flattened_render_list_internal(
@@ -324,6 +330,7 @@ impl EvaluatedStack {
         parent_opacity: f32,
         depth: usize,
         path_prefix: &[String],
+        parent_is_matte_source: bool,
     ) -> Vec<FlattenedRenderLayer> {
         let mut result = Vec::new();
 
@@ -335,6 +342,7 @@ impl EvaluatedStack {
 
                 let current_world_matrix = parent_matrix * layer.world_matrix();
                 let current_opacity = parent_opacity * layer.effective_opacity;
+                let current_is_matte = parent_is_matte_source || layer.is_matte_source;
 
                 if let Some(ref nested) = layer.nested_composition {
                     let inner_layers = nested.inner_stack.flattened_render_list_internal(
@@ -342,9 +350,16 @@ impl EvaluatedStack {
                         current_opacity,
                         depth + 1,
                         &current_path,
+                        current_is_matte,
                     );
                     result.extend(inner_layers);
                 } else {
+                    let matte_source_path = layer.matte_source_id.as_ref().map(|src_id| {
+                        let mut p = path_prefix.to_vec();
+                        p.push(src_id.clone());
+                        p
+                    });
+
                     result.push(FlattenedRenderLayer {
                         composition_id: self.composition_id.clone(),
                         layer_path: current_path,
@@ -357,6 +372,8 @@ impl EvaluatedStack {
                         nesting_depth: depth,
                         matte_mode: layer.matte_mode,
                         matte_source_id: layer.matte_source_id.clone(),
+                        matte_source_path,
+                        is_matte_source: current_is_matte,
                         time_offset_frames: layer.time_offset_frames,
                         time_offset_seconds: layer.time_offset_seconds,
                     });
@@ -367,10 +384,25 @@ impl EvaluatedStack {
         result
     }
 
+    /// Retrieve a flattened render layer by its unique layer ID from the composite list.
+    pub fn get_flattened_layer(&self, id: &str) -> Option<FlattenedRenderLayer> {
+        self.flattened_render_list().into_iter().find(|l| l.layer_id == id)
+    }
+
+    /// Retrieve the concatenated root world transform matrix for a deeply nested layer path.
+    pub fn deep_layer_root_matrix(&self, layer_path: &[&str]) -> Option<AffineTransform2D> {
+        let flattened = self.flattened_render_list();
+        flattened
+            .iter()
+            .find(|l| l.layer_path.as_slice() == layer_path)
+            .map(|l| l.root_world_matrix)
+    }
+
     /// Collect all composition render passes in bottom-up dependency order.
     pub fn collect_render_passes(&self) -> Vec<RenderPassDescriptor> {
         let mut passes = Vec::new();
         self.collect_render_passes_internal(
+            None,
             AffineTransform2D::IDENTITY,
             1.0,
             BlendMode::Normal,
@@ -382,19 +414,24 @@ impl EvaluatedStack {
 
     fn collect_render_passes_internal(
         &self,
+        nesting_layer_id: Option<String>,
         world_matrix: AffineTransform2D,
         opacity: f32,
         blend_mode: BlendMode,
         depth: usize,
         passes: &mut Vec<RenderPassDescriptor>,
     ) {
-        // Collect nested children passes first (leaf-first dependency order)
-        for layer_id in &self.render_list {
-            if let Some(layer) = self.get_layer(layer_id) {
+        // Collect nested children passes first (leaf-first dependency order).
+        // Include any nested comp that is in self.render_list OR is an active, visible matte source
+        for layer in &self.evaluated_layers {
+            let is_needed = self.render_list.contains(&layer.id)
+                || (layer.is_visible && layer.is_active && layer.is_matte_source);
+            if is_needed {
                 if let Some(ref nested) = layer.nested_composition {
                     let child_world = world_matrix * layer.world_matrix();
                     let child_opacity = opacity * layer.effective_opacity;
                     nested.inner_stack.collect_render_passes_internal(
+                        Some(layer.id.clone()),
                         child_world,
                         child_opacity,
                         layer.blend_mode,
@@ -408,6 +445,7 @@ impl EvaluatedStack {
         // Add this composition pass
         passes.push(RenderPassDescriptor {
             composition_id: self.composition_id.clone(),
+            nesting_layer_id,
             width: self.width,
             height: self.height,
             time: self.time,
@@ -436,13 +474,34 @@ pub fn resolve_nested_time(
             nested_comp.frame_rate,
         )
     } else {
+        let time_stretch = if node.time_stretch.is_finite() {
+            node.time_stretch
+        } else {
+            1.0
+        };
+
         // Frame rate alignment
         let same_rate = (parent_time.frame_rate() - nested_comp.frame_rate).abs() < 1e-6;
         if same_rate {
-            let elapsed_frames = parent_time.frames() - node.in_point.frames();
-            let offset_frames = node.start_offset.map(|tc| tc.frames()).unwrap_or(0);
-            let raw_frames = (elapsed_frames as f64) * node.time_stretch + (offset_frames as f64);
-            let target_frames = raw_frames.round() as i64;
+            let in_point_frames = if (node.in_point.frame_rate() - parent_time.frame_rate()).abs() < 1e-6 {
+                node.in_point.frames()
+            } else {
+                TimeCode::from_seconds(node.in_point.seconds(), parent_time.frame_rate()).frames()
+            };
+            let elapsed_frames = parent_time.frames() - in_point_frames;
+            let offset_frames = node.start_offset.map(|tc| {
+                if (tc.frame_rate() - nested_comp.frame_rate).abs() < 1e-6 {
+                    tc.frames()
+                } else {
+                    TimeCode::from_seconds(tc.seconds(), nested_comp.frame_rate).frames()
+                }
+            }).unwrap_or(0);
+            let raw_frames = (elapsed_frames as f64) * time_stretch + (offset_frames as f64);
+            let target_frames = if raw_frames.is_finite() {
+                raw_frames.round() as i64
+            } else {
+                0
+            };
             let duration_frames = nested_comp.duration.frames();
 
             let final_frames = if duration_frames <= 0 {
@@ -466,7 +525,7 @@ pub fn resolve_nested_time(
         } else {
             let elapsed_seconds = parent_time.seconds() - node.in_point.seconds();
             let offset_seconds = node.start_offset.map(|tc| tc.seconds()).unwrap_or(0.0);
-            let target_seconds = elapsed_seconds * node.time_stretch + offset_seconds;
+            let target_seconds = elapsed_seconds * time_stretch + offset_seconds;
             clamp_or_loop_seconds(
                 target_seconds,
                 nested_comp.duration.seconds(),
@@ -483,7 +542,7 @@ fn clamp_or_loop_seconds(
     loop_mode: LoopMode,
     frame_rate: f64,
 ) -> TimeCode {
-    if duration_seconds <= 0.0 {
+    if !target_seconds.is_finite() || duration_seconds <= 0.0 {
         return TimeCode::zero(frame_rate);
     }
     let resolved_sec = match loop_mode {
