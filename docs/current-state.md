@@ -46,7 +46,11 @@
   - `TrackMatteMode`: Full track matte modeling (`None`, `Alpha`, `AlphaInverted`, `Luma`, `LumaInverted`) with serialization and predicate helpers.
   - `LayerStackEvaluator`: Evaluates composition layers at any timeline `TimeCode`, enforcing exact `[in_point, out_point)` boundary intervals, solo suppression/preservation, track matte pairing (explicit and adjacent), opacity clamping/normalization, and painter's composite render list generation.
   - `EvaluatedStack` & `EvaluatedLayer`: Comprehensive frame evaluation context with timing offsets, layer states, and filter queries.
-- Full automated test suite passing with **55 tests** across the workspace (12 application tests + 29 project unit tests + 14 compositor unit tests).
+  - `AffineTransform2D`: Full 2D affine transformation matrix math supporting translations, non-uniform scaling, clockwise rotations (degrees and radians), anchor point offset, matrix multiplication, inversion, and $3\times3$ conversions.
+  - `BoundingBox2D`: 2D axis-aligned bounding box primitive with affine transform projection, union, intersection, point containment, and corner evaluation.
+  - `TransformResolver`: Evaluates layer world transforms via hierarchical matrix concatenation ($M_{\text{world}} = M_{\text{parent}} \times M_{\text{local}}$) in topological evaluation order.
+  - `EvaluatedTransform`: Evaluated local and world matrices with bidirectional point and bounding box mapping (`local_to_world_point`, `world_to_local_point`, `local_to_world_bbox`, `world_to_local_bbox`, and `world_bounds`).
+- Full automated test suite passing with **69 tests** across the workspace (12 application tests + 29 project unit tests + 28 compositor unit tests).
 - Workspace compiles, builds, and passes all checks cleanly with 0 errors and 0 warnings (`cargo check --workspace`, `cargo build --workspace`, `cargo test --workspace`, and `cargo clippy --workspace --all-targets -- -D warnings`).
 
 ## What Is Currently Being Developed
@@ -57,9 +61,10 @@
 
 ## Next Single Task
 
-### Task 1.3: Implement the transform hierarchy and matrix concatenation
+### Task 1.4: Implement the animatable property system and interpolation
 
-- Implement 2D affine transform matrix math (`glam::Affine2` or internal $3\times3$ transform matrices).
-- Evaluate world transform matrices by concatenating parent-child transform chains in topological evaluation order.
-- Add anchor point offsetting, position translation, scale, and rotation composition.
-- Add unit tests verifying transform concatenation, local-to-world point mapping, and deep hierarchy transformations.
+- Implement keyframe data structures (time, value, easing / interpolation types: Linear, Hold, Bezier with in/out control handles).
+- Implement keyframe interpolation algorithms evaluating property values at any arbitrary floating-point time.
+- Integrate animatable property evaluation into transform and layer property resolution in `crates/compositor`.
+- Add automated unit tests covering step/hold interpolation, linear interpolation, Bezier curve evaluation, and boundary extrapolation.
+

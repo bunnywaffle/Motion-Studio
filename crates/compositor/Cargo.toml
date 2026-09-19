@@ -6,3 +6,5 @@ license.workspace = true
 
 [dependencies]
 project = { workspace = true }
+serde = { workspace = true }
+

@@ -1,5 +1,6 @@
 use crate::graph::SceneGraph;
-use project::{BlendMode, LayerSource, TimeCode, TrackMatteMode};
+use crate::transform::{AffineTransform2D, BoundingBox2D, EvaluatedTransform, TransformResolver};
+use project::{BlendMode, LayerSource, TimeCode, TrackMatteMode, Vec2};
 use std::collections::HashSet;
 
 /// The evaluated state of a single layer at a specific timeline position.
@@ -21,12 +22,48 @@ pub struct EvaluatedLayer {
     pub time_offset_frames: i64,
     pub time_offset_seconds: f64,
     pub parent_id: Option<String>,
+    pub transform: EvaluatedTransform,
 }
 
 impl EvaluatedLayer {
     /// Return true if this layer participates in active rendering.
     pub fn is_rendered(&self) -> bool {
         self.is_visible && self.is_active && !self.is_matte_source && self.effective_opacity > 0.0
+    }
+
+    /// Return the evaluated local affine transform matrix for this layer.
+    pub fn local_matrix(&self) -> AffineTransform2D {
+        self.transform.local_matrix
+    }
+
+    /// Return the evaluated world affine transform matrix for this layer.
+    pub fn world_matrix(&self) -> AffineTransform2D {
+        self.transform.world_matrix
+    }
+
+    /// Map a local 2D point on this layer to world composition coordinates.
+    pub fn local_to_world_point(&self, point: Vec2) -> Vec2 {
+        self.transform.local_to_world_point(point)
+    }
+
+    /// Map a world 2D point to local coordinates for this layer. Returns `None` if non-invertible.
+    pub fn world_to_local_point(&self, point: Vec2) -> Option<Vec2> {
+        self.transform.world_to_local_point(point)
+    }
+
+    /// Map an axis-aligned bounding box from layer local coordinates to world coordinates.
+    pub fn local_to_world_bbox(&self, bbox: &BoundingBox2D) -> BoundingBox2D {
+        self.transform.local_to_world_bbox(bbox)
+    }
+
+    /// Map an axis-aligned bounding box from world coordinates to layer local coordinates.
+    pub fn world_to_local_bbox(&self, bbox: &BoundingBox2D) -> Option<BoundingBox2D> {
+        self.transform.world_to_local_bbox(bbox)
+    }
+
+    /// Calculate the world-space bounding box for this layer given its untransformed dimensions.
+    pub fn world_bounds(&self, width: f32, height: f32) -> BoundingBox2D {
+        self.transform.world_bounds(width, height)
     }
 }
 
@@ -83,6 +120,11 @@ impl EvaluatedStack {
     /// Return true if any layer in the stack is currently soloed.
     pub fn has_solo(&self) -> bool {
         self.has_solo
+    }
+
+    /// Retrieve the evaluated transform of a layer by ID, if present.
+    pub fn get_transform(&self, id: &str) -> Option<&EvaluatedTransform> {
+        self.get_layer(id).map(|l| &l.transform)
     }
 }
 
@@ -158,7 +200,9 @@ impl LayerStackEvaluator {
             }
         }
 
-        // 4. Evaluate each layer's state
+        // 4. Resolve hierarchical transforms using topological evaluation order
+        let transforms = TransformResolver::resolve_scene_graph(graph).unwrap_or_default();
+
         let mut evaluated_layers = Vec::with_capacity(stack_nodes.len());
 
         for (idx, node) in stack_nodes.iter().enumerate() {
@@ -187,6 +231,11 @@ impl LayerStackEvaluator {
             let time_offset_frames = time.frames() - node.in_point.frames();
             let time_offset_seconds = time.seconds() - node.in_point.seconds();
 
+            let transform = transforms
+                .get(&node.id)
+                .copied()
+                .unwrap_or_else(|| EvaluatedTransform::from_node_transform(&node.transform));
+
             evaluated_layers.push(EvaluatedLayer {
                 id: node.id.clone(),
                 name: node.name.clone(),
@@ -204,6 +253,7 @@ impl LayerStackEvaluator {
                 time_offset_frames,
                 time_offset_seconds,
                 parent_id: node.parent_id.clone(),
+                transform,
             });
         }
 

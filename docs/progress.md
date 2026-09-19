@@ -104,7 +104,44 @@
   - Added 5 unit tests in `crates/compositor` covering exact boundary conditions, opacity clamping, solo modes, adjacent track matte pairing, explicit matte targeting, and matte consumption.
   - Added unit test in `crates/project` verifying serialization roundtrip of solo and track matte configurations.
   - Workspace compiles cleanly with **55 total tests passing** (12 in `application`, 29 in `project`, 14 in `compositor`) and 0 clippy warnings.
-- [ ] **Task 1.3: Implement the transform hierarchy and matrix concatenation**
+- [x] **Task 1.3: Implement the transform hierarchy and matrix concatenation**
+  - Implemented `AffineTransform2D` in `crates/compositor/src/transform.rs`:
+    - Full 2D affine transformation matrix math using 3x3 homogeneous representation (`a, b, c, d, tx, ty`).
+    - Matrix multiplication (`Mul`, `MulAssign`) conforming to column-vector conventions: `(M1 * M2) * P == M1 * (M2 * P)`.
+    - Local transform synthesis following motion graphics evaluation order:
+      $M_{\text{local}} = T(\text{position}) \times R(\text{rotation}) \times S(\text{scale} / 100.0) \times T(-\text{anchor\_point})$.
+    - Clockwise rotation matrices in screen coordinates for both radians and degrees (`from_rotation_degrees`, `from_rotation_radians`).
+    - Determinant calculation, invertibility testing (`is_invertible`), and closed-form analytical inverse calculation (`inverse`).
+    - Point and vector transformations (`transform_point`, `transform_point_inverse`, `transform_vector`).
+    - Conversions to and from 3x3 matrices (`to_matrix_3x3`, `to_matrix_3x3_flat`, `from_matrix_3x3`).
+  - Implemented `BoundingBox2D` in `crates/compositor/src/transform.rs`:
+    - 2D axis-aligned bounding box primitive with min/max, size, center, and corner vertices.
+    - Transform projection (`transform`, `transform_inverse`) computing world AABBs from 4 transformed corners.
+    - Point containment (`contains_point`), intersection (`intersects`), and bounding box union (`union`).
+  - Implemented `TransformResolver` in `crates/compositor/src/transform.rs`:
+    - Traverses the scene graph in topological evaluation order (`evaluation_order()`), guaranteeing that each parent's world matrix is evaluated prior to its children.
+    - Hierarchical matrix concatenation: root layers assign $M_{\text{world}} = M_{\text{local}}$, while child layers concatenate $M_{\text{world}} = M_{\text{parent\_world}} \times M_{\text{local}}$.
+  - Implemented `EvaluatedTransform` and integrated into the composition evaluation pipeline:
+    - Added `transform: EvaluatedTransform` to `EvaluatedLayer` in `crates/compositor/src/evaluation.rs`.
+    - Added layer-level bidirectional mapping methods: `local_to_world_point`, `world_to_local_point`, `local_to_world_bbox`, `world_to_local_bbox`, and `world_bounds(w, h)`.
+    - Added `get_transform(id)` query to `EvaluatedStack`.
+    - Added `evaluate_transforms()` and `get_evaluated_transform(id)` to `SceneGraph`.
+  - Added 14 unit tests in `crates/compositor`:
+    - Identity transform invariants, default properties, and vector invariance.
+    - Individual transform components (translation, non-uniform scaling, clockwise rotations, anchor point offsets).
+    - Combined local transform order ($T \times R \times S \times T_{\text{-anchor}}$) verifying anchor point placement at position.
+    - Matrix algebra associativity, determinant values, and 3x3 matrix conversion roundtrips.
+    - Bounding box mapping, 90-degree rotated dimensions, corner projections, and inverse roundtrips.
+    - Parent-child matrix concatenation (parent rotated 90 degrees with offset child, verifying rotated child axes).
+    - Deep parenting chains (20-layer translation chain and 4-layer 360-degree rotation accumulation).
+    - Numerical invertibility and world-to-local roundtrip point recovery across arbitrary coordinates.
+    - Layer stack pipeline integration, world bounds calculation, and `EvaluatedStack` queries.
+    - Negative scaling / mirroring with rotation, anchor point offset, and invertible point/bbox mapping.
+    - Simultaneous parent and child complex transforms verifying exact mathematical composition equivalence.
+    - Deep 100-level parenting chain verifying topological sort and numerical stability without drift.
+    - BoundingBox2D area, emptiness, and geometric intersection tests (overlapping, disjoint, and touching).
+    - Flat 9-element array, 6-element column-major array, GPU column-major conversions, and non-finite / singular matrix handling.
+  - All **69 tests** passing across the workspace with 0 errors and 0 warnings.
 - [ ] **Task 1.4: Implement the animatable property system and interpolation**
 - [ ] **Task 1.5: Implement timeline time-to-frame conversion and playback clock**
 - [ ] **Task 1.6: Implement composition nesting and pre-comp evaluation**

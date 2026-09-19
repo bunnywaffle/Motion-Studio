@@ -2,11 +2,13 @@ pub mod error;
 pub mod evaluation;
 pub mod graph;
 pub mod node;
+pub mod transform;
 
 pub use error::SceneGraphError;
 pub use evaluation::{EvaluatedLayer, EvaluatedStack, LayerStackEvaluator};
 pub use graph::SceneGraph;
 pub use node::SceneNode;
+pub use transform::{AffineTransform2D, BoundingBox2D, EvaluatedTransform, TransformResolver};
 
 #[cfg(test)]
 mod tests {
@@ -565,4 +567,646 @@ mod tests {
         let eval_l1 = stack.get_layer("l1").unwrap();
         assert!(eval_l1.is_matte_source);
     }
+
+    #[test]
+    fn test_identity_transform_and_defaults() {
+        use project::Vec2;
+
+        let id = AffineTransform2D::IDENTITY;
+        assert_eq!(id.a, 1.0);
+        assert_eq!(id.b, 0.0);
+        assert_eq!(id.c, 0.0);
+        assert_eq!(id.d, 1.0);
+        assert_eq!(id.tx, 0.0);
+        assert_eq!(id.ty, 0.0);
+        assert_eq!(id.determinant(), 1.0);
+        assert!(id.is_invertible());
+
+        let p = Vec2::new(142.5, -87.25);
+        assert_eq!(id.transform_point(p), p);
+        assert_eq!(id * p, p);
+        assert_eq!(id.transform_vector(p), p);
+
+        let inv = id.inverse().expect("Identity is invertible");
+        assert_eq!(inv, id);
+
+        let eval_def = EvaluatedTransform::default();
+        assert_eq!(eval_def.local_matrix, AffineTransform2D::IDENTITY);
+        assert_eq!(eval_def.world_matrix, AffineTransform2D::IDENTITY);
+        assert_eq!(eval_def.anchor_point, Vec2::ZERO);
+        assert_eq!(eval_def.position, Vec2::ZERO);
+        assert_eq!(eval_def.scale, Vec2::SCALE_100);
+        assert_eq!(eval_def.rotation, 0.0);
+        assert!(eval_def.is_invertible());
+    }
+
+    #[test]
+    fn test_individual_transform_components() {
+        use project::Vec2;
+
+        // 1. Translation
+        let t = AffineTransform2D::from_translation(Vec2::new(250.0, -150.0));
+        assert_eq!(t.transform_point(Vec2::ZERO), Vec2::new(250.0, -150.0));
+        assert_eq!(t.transform_point(Vec2::new(10.0, 20.0)), Vec2::new(260.0, -130.0));
+        // Vector transformation ignores translation
+        assert_eq!(t.transform_vector(Vec2::new(10.0, 20.0)), Vec2::new(10.0, 20.0));
+
+        // 2. Scale
+        let s = AffineTransform2D::from_scale(Vec2::new(2.5, 0.5));
+        assert_eq!(s.transform_point(Vec2::new(100.0, 100.0)), Vec2::new(250.0, 50.0));
+        assert_eq!(s.determinant(), 1.25);
+
+        // 3. Rotation (90, 180, 270, 360 degrees)
+        let r90 = AffineTransform2D::from_rotation_degrees(90.0);
+        let p_unit_x = Vec2::new(1.0, 0.0);
+        let p_rot90 = r90.transform_point(p_unit_x);
+        assert!((p_rot90.x - 0.0).abs() < 1e-5);
+        assert!((p_rot90.y - 1.0).abs() < 1e-5); // Clockwise in screen coordinates maps (1,0) -> (0,1)
+
+        let r180 = AffineTransform2D::from_rotation_degrees(180.0);
+        let p_rot180 = r180.transform_point(p_unit_x);
+        assert!((p_rot180.x - (-1.0)).abs() < 1e-5);
+        assert!((p_rot180.y - 0.0).abs() < 1e-5);
+
+        let r360 = AffineTransform2D::from_rotation_degrees(360.0);
+        assert!(r360.approx_eq(&AffineTransform2D::IDENTITY, 1e-5));
+
+        // 4. Anchor Point offsetting:
+        // When layer is at position (300, 200) with anchor point (50, 50),
+        // local anchor point (50, 50) MUST map to world position (300, 200).
+        let comp_trans = AffineTransform2D::from_transform_components(
+            Vec2::new(300.0, 200.0),
+            Vec2::SCALE_100,
+            0.0,
+            Vec2::new(50.0, 50.0),
+        );
+        assert_eq!(comp_trans.transform_point(Vec2::new(50.0, 50.0)), Vec2::new(300.0, 200.0));
+        // Local top-left (0, 0) should be at (300 - 50, 200 - 50) = (250, 150)
+        assert_eq!(comp_trans.transform_point(Vec2::ZERO), Vec2::new(250.0, 150.0));
+    }
+
+    #[test]
+    fn test_combined_local_transform_order() {
+        use project::Vec2;
+
+        // Verify order: T(pos) * R(rot) * S(scale) * T(-anchor)
+        let pos = Vec2::new(500.0, 500.0);
+        let anchor = Vec2::new(100.0, 100.0);
+        let scale = Vec2::new(200.0, 200.0); // 2x scale
+        let rot = 90.0; // 90 deg clockwise
+
+        let m_local = AffineTransform2D::from_transform_components(pos, scale, rot, anchor);
+
+        // 1. Anchor point MUST map exactly to Position
+        let p_anchor_world = m_local.transform_point(anchor);
+        assert!((p_anchor_world.x - pos.x).abs() < 1e-4);
+        assert!((p_anchor_world.y - pos.y).abs() < 1e-4);
+
+        // 2. Point 50 units to the right of anchor in local space: (150, 100)
+        // Offset from anchor = (50, 0)
+        // Scaled by 2x = (100, 0)
+        // Rotated 90 deg clockwise in screen space = (0, 100)
+        // Translated to pos (500, 500) = (500, 600)
+        let p_right = Vec2::new(150.0, 100.0);
+        let p_right_world = m_local.transform_point(p_right);
+        assert!((p_right_world.x - 500.0).abs() < 1e-4);
+        assert!((p_right_world.y - 600.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_matrix_algebra_and_3x3_conversions() {
+        use project::Vec2;
+
+        let m1 = AffineTransform2D::from_translation(Vec2::new(10.0, 20.0));
+        let m2 = AffineTransform2D::from_scale(Vec2::new(2.0, 3.0));
+        let m3 = AffineTransform2D::from_rotation_degrees(45.0);
+
+        // Associativity: (m1 * m2) * m3 == m1 * (m2 * m3)
+        let a = (m1 * m2) * m3;
+        let b = m1 * (m2 * m3);
+        assert!(a.approx_eq(&b, 1e-5));
+
+        // 3x3 matrix conversion roundtrip
+        let mat_array = a.to_matrix_3x3();
+        let from_mat = AffineTransform2D::from_matrix_3x3(mat_array);
+        assert!(a.approx_eq(&from_mat, 1e-5));
+
+        let flat = a.to_matrix_3x3_flat();
+        assert_eq!(flat.len(), 9);
+        assert_eq!(flat[8], 1.0);
+        assert_eq!(flat[7], 0.0);
+        assert_eq!(flat[6], 0.0);
+
+        // Determinant of scale and rotation
+        let rot_only = AffineTransform2D::from_rotation_degrees(33.0);
+        assert!((rot_only.determinant() - 1.0).abs() < 1e-5);
+
+        let scale_only = AffineTransform2D::from_scale(Vec2::new(3.0, 4.0));
+        assert!((scale_only.determinant() - 12.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_bounding_box_mapping_and_operations() {
+        use project::Vec2;
+
+        let bbox = BoundingBox2D::from_origin_size(Vec2::new(10.0, 20.0), Vec2::new(100.0, 50.0));
+        assert_eq!(bbox.min, Vec2::new(10.0, 20.0));
+        assert_eq!(bbox.max, Vec2::new(110.0, 70.0));
+        assert_eq!(bbox.width(), 100.0);
+        assert_eq!(bbox.height(), 50.0);
+        assert_eq!(bbox.center(), Vec2::new(60.0, 45.0));
+        assert!(bbox.contains_point(Vec2::new(50.0, 50.0)));
+        assert!(!bbox.contains_point(Vec2::new(5.0, 50.0)));
+
+        // Transform bbox by 90 degree rotation around origin and translation (200, 200)
+        let transform = AffineTransform2D::from_translation(Vec2::new(200.0, 200.0))
+            * AffineTransform2D::from_rotation_degrees(90.0);
+
+        let transformed_bbox = bbox.transform(&transform);
+        // Original corners: (10, 20), (110, 20), (110, 70), (10, 70)
+        // Rotated 90 deg clockwise (x, y) -> (-y, x):
+        // (-20, 10), (-20, 110), (-70, 110), (-70, 10)
+        // Translated by (200, 200):
+        // (180, 210), (180, 310), (130, 310), (130, 210)
+        // Resulting AABB: min = (130, 210), max = (180, 310)
+        assert!((transformed_bbox.min.x - 130.0).abs() < 1e-4);
+        assert!((transformed_bbox.min.y - 210.0).abs() < 1e-4);
+        assert!((transformed_bbox.max.x - 180.0).abs() < 1e-4);
+        assert!((transformed_bbox.max.y - 310.0).abs() < 1e-4);
+        assert!((transformed_bbox.width() - 50.0).abs() < 1e-4);
+        assert!((transformed_bbox.height() - 100.0).abs() < 1e-4);
+
+        // Inverse transform roundtrip
+        let recovered_bbox = transformed_bbox.transform_inverse(&transform).unwrap();
+        assert!((recovered_bbox.min.x - bbox.min.x).abs() < 1e-4);
+        assert!((recovered_bbox.min.y - bbox.min.y).abs() < 1e-4);
+        assert!((recovered_bbox.max.x - bbox.max.x).abs() < 1e-4);
+        assert!((recovered_bbox.max.y - bbox.max.y).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_parent_child_matrix_concatenation() {
+        use project::Vec2;
+
+        let mut comp = Composition::hd_1080p_30fps("comp_parenting", "Parenting Test", 5.0);
+        let tc0 = TimeCode::zero(30.0);
+        let tc150 = TimeCode::from_frames(150, 30.0);
+
+        // Parent Layer: placed at (1000, 500), rotated 90 degrees clockwise, anchor (0, 0)
+        let mut parent = Layer::solid("parent", "Parent Layer", Color::RED, 200, 200, tc0, tc150);
+        parent.transform.position.set_value(Vec2::new(1000.0, 500.0));
+        parent.transform.rotation.set_value(90.0);
+        parent.transform.anchor_point.set_value(Vec2::ZERO);
+
+        // Child Layer: parented to "parent", local position (200, 0), rotation 0, anchor (0, 0)
+        let mut child = Layer::solid("child", "Child Layer", Color::BLUE, 100, 100, tc0, tc150);
+        child.set_parent(Some("parent"));
+        child.transform.position.set_value(Vec2::new(200.0, 0.0));
+        child.transform.rotation.set_value(0.0);
+        child.transform.anchor_point.set_value(Vec2::ZERO);
+
+        comp.add_layer(parent).unwrap();
+        comp.add_layer(child).unwrap();
+
+        let graph = SceneGraph::from_composition(&comp).unwrap();
+        let transforms = graph.evaluate_transforms().expect("Transforms resolve");
+
+        let parent_t = transforms.get("parent").unwrap();
+        let child_t = transforms.get("child").unwrap();
+
+        // Parent local origin (0, 0) maps to (1000, 500)
+        let p_world = parent_t.local_to_world_point(Vec2::ZERO);
+        assert_eq!(p_world, Vec2::new(1000.0, 500.0));
+
+        // Child local origin (0, 0):
+        // In child local space: (0, 0)
+        // Position in parent space: (200, 0)
+        // In parent space, rotated 90 deg clockwise: (200, 0) -> (0, 200)
+        // Translated by parent position (1000, 500): -> (1000, 700)
+        let child_origin_world = child_t.local_to_world_point(Vec2::ZERO);
+        assert!((child_origin_world.x - 1000.0).abs() < 1e-4);
+        assert!((child_origin_world.y - 700.0).abs() < 1e-4);
+
+        // Child point (0, 50) [50 units down in child space]:
+        // In parent space, rotated 90 deg clockwise: (0, 50) -> (-50, 0)
+        // Relative to child pos (200, 0): (200, 50) rotated -> (-50, 200)
+        // Translated by parent pos (1000, 500): -> (950, 700)
+        let child_down_world = child_t.local_to_world_point(Vec2::new(0.0, 50.0));
+        assert!((child_down_world.x - 950.0).abs() < 1e-4);
+        assert!((child_down_world.y - 700.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_deep_parenting_chains_transform_evaluation() {
+        use project::Vec2;
+
+        let mut comp = Composition::hd_1080p_30fps("comp_chain", "Deep Chain Transforms", 5.0);
+        let tc0 = TimeCode::zero(30.0);
+        let tc150 = TimeCode::from_frames(150, 30.0);
+        const CHAIN_LENGTH: usize = 20;
+
+        // Create a 20-layer chain where each child is offset by (10.0, 5.0) relative to its parent
+        for i in 0..CHAIN_LENGTH {
+            let mut layer = Layer::solid(
+                format!("layer_{i}"),
+                format!("Layer {i}"),
+                Color::WHITE,
+                50,
+                50,
+                tc0,
+                tc150,
+            );
+            layer.transform.position.set_value(Vec2::new(10.0, 5.0));
+            layer.transform.anchor_point.set_value(Vec2::ZERO);
+
+            if i > 0 {
+                layer.set_parent(Some(format!("layer_{}", i - 1)));
+            }
+            comp.add_layer(layer).unwrap();
+        }
+
+        let graph = SceneGraph::from_composition(&comp).unwrap();
+        let transforms = graph.evaluate_transforms().unwrap();
+
+        // Node 0 world origin: (10.0, 5.0)
+        let t0 = transforms.get("layer_0").unwrap();
+        assert_eq!(t0.local_to_world_point(Vec2::ZERO), Vec2::new(10.0, 5.0));
+
+        // Node 19 world origin: 20 * (10.0, 5.0) = (200.0, 100.0)
+        let t19 = transforms.get("layer_19").unwrap();
+        let origin_19 = t19.local_to_world_point(Vec2::ZERO);
+        assert!((origin_19.x - 200.0).abs() < 1e-3);
+        assert!((origin_19.y - 100.0).abs() < 1e-3);
+
+        // Also test a 4-level chain with 90 degree rotations accumulating to 360 degrees
+        let mut rot_comp = Composition::hd_1080p_30fps("comp_rot_chain", "Rot Chain", 5.0);
+        for i in 0..4 {
+            let mut layer = Layer::solid(
+                format!("rot_{i}"),
+                format!("Rot {i}"),
+                Color::WHITE,
+                50,
+                50,
+                tc0,
+                tc150,
+            );
+            layer.transform.rotation.set_value(90.0);
+            layer.transform.position.set_value(Vec2::ZERO);
+            layer.transform.anchor_point.set_value(Vec2::ZERO);
+            if i > 0 {
+                layer.set_parent(Some(format!("rot_{}", i - 1)));
+            }
+            rot_comp.add_layer(layer).unwrap();
+        }
+
+        let rot_graph = SceneGraph::from_composition(&rot_comp).unwrap();
+        let rot_transforms = rot_graph.evaluate_transforms().unwrap();
+
+        let t3 = rot_transforms.get("rot_3").unwrap();
+        // 4 * 90 = 360 degrees accumulated rotation = Identity!
+        assert!(t3.world_matrix.approx_eq(&AffineTransform2D::IDENTITY, 1e-4));
+    }
+
+    #[test]
+    fn test_invertibility_and_world_to_local_roundtrip() {
+        use project::Vec2;
+
+        let mut comp = Composition::hd_1080p_30fps("comp_invert", "Invertibility", 5.0);
+        let tc0 = TimeCode::zero(30.0);
+        let tc150 = TimeCode::from_frames(150, 30.0);
+
+        // Layer with non-trivial values
+        let mut layer = Layer::solid("l_complex", "Complex", Color::GREEN, 200, 200, tc0, tc150);
+        layer.transform.position.set_value(Vec2::new(743.2, 381.9));
+        layer.transform.anchor_point.set_value(Vec2::new(45.0, 92.5));
+        layer.transform.scale.set_value(Vec2::new(140.0, 75.0));
+        layer.transform.rotation.set_value(37.5);
+        comp.add_layer(layer).unwrap();
+
+        let graph = SceneGraph::from_composition(&comp).unwrap();
+        let eval_transform = graph.get_evaluated_transform("l_complex").unwrap();
+        assert!(eval_transform.is_invertible());
+
+        // Test multiple arbitrary points for exact roundtrip mapping
+        let test_points = [
+            Vec2::ZERO,
+            Vec2::new(100.0, 100.0),
+            Vec2::new(-45.0, -92.5),
+            Vec2::new(1920.0, 1080.0),
+            Vec2::new(-350.25, 874.125),
+        ];
+
+        for local_pt in test_points {
+            let world_pt = eval_transform.local_to_world_point(local_pt);
+            let recovered_local = eval_transform
+                .world_to_local_point(world_pt)
+                .expect("World to local point succeeds");
+
+            assert!(
+                local_pt.distance_to(recovered_local) < 1e-3,
+                "Failed roundtrip for point {:?}: got {:?}",
+                local_pt,
+                recovered_local
+            );
+        }
+
+        // Test non-invertible transform (scale x is 0)
+        let non_invertible = AffineTransform2D::from_transform_components(
+            Vec2::new(100.0, 100.0),
+            Vec2::new(0.0, 100.0), // 0% scale along x
+            0.0,
+            Vec2::ZERO,
+        );
+        assert!(!non_invertible.is_invertible());
+        assert_eq!(non_invertible.determinant(), 0.0);
+        assert!(non_invertible.inverse().is_none());
+        assert!(non_invertible.transform_point_inverse(Vec2::new(50.0, 50.0)).is_none());
+    }
+
+    #[test]
+    fn test_pipeline_integration_evaluated_layer_transforms() {
+        use project::Vec2;
+
+        let mut comp = Composition::hd_1080p_30fps("comp_pipeline", "Pipeline Transforms", 5.0);
+        let tc0 = TimeCode::zero(30.0);
+        let tc150 = TimeCode::from_frames(150, 30.0);
+
+        let mut parent = Layer::solid("p_layer", "Parent Layer", Color::RED, 400, 300, tc0, tc150);
+        parent.transform.position.set_value(Vec2::new(500.0, 400.0));
+
+        let mut child = Layer::solid("c_layer", "Child Layer", Color::BLUE, 100, 100, tc0, tc150);
+        child.set_parent(Some("p_layer"));
+        child.transform.position.set_value(Vec2::new(50.0, 50.0));
+
+        comp.add_layer(parent).unwrap();
+        comp.add_layer(child).unwrap();
+
+        let graph = SceneGraph::from_composition(&comp).unwrap();
+        let evaluator = LayerStackEvaluator::new();
+        let stack = evaluator.evaluate(&graph, &TimeCode::from_frames(10, 30.0));
+
+        let parent_eval = stack.get_layer("p_layer").unwrap();
+        let child_eval = stack.get_layer("c_layer").unwrap();
+
+        // Local matrices
+        assert_eq!(parent_eval.local_matrix().tx, 500.0);
+        assert_eq!(parent_eval.local_matrix().ty, 400.0);
+
+        // World matrices
+        assert_eq!(child_eval.world_matrix().tx, 550.0);
+        assert_eq!(child_eval.world_matrix().ty, 450.0);
+
+        // Layer convenience point mapping
+        let world_pt = child_eval.local_to_world_point(Vec2::new(10.0, 10.0));
+        assert_eq!(world_pt, Vec2::new(560.0, 460.0));
+
+        let local_recovered = child_eval.world_to_local_point(world_pt).unwrap();
+        assert_eq!(local_recovered, Vec2::new(10.0, 10.0));
+
+        // World bounds calculation for 100x100 child layer
+        let bounds = child_eval.world_bounds(100.0, 100.0);
+        assert_eq!(bounds.min, Vec2::new(550.0, 450.0));
+        assert_eq!(bounds.max, Vec2::new(650.0, 550.0));
+        assert_eq!(bounds.width(), 100.0);
+        assert_eq!(bounds.height(), 100.0);
+
+        // EvaluatedStack transform query
+        let t_query = stack.get_transform("c_layer").unwrap();
+        assert_eq!(t_query.world_matrix, child_eval.world_matrix());
+    }
+
+    #[test]
+    fn test_negative_scaling_and_mirroring() {
+        use project::Vec2;
+
+        // Negative horizontal scale (mirror along X): scale = (-100%, 100%)
+        let m_mirror = AffineTransform2D::from_transform_components(
+            Vec2::new(200.0, 100.0),
+            Vec2::new(-100.0, 100.0),
+            0.0,
+            Vec2::ZERO,
+        );
+
+        assert_eq!(m_mirror.determinant(), -1.0);
+        assert!(m_mirror.is_invertible());
+
+        // Point (50, 20) in mirrored layer:
+        // x: 200 - 50 = 150
+        // y: 100 + 20 = 120
+        let p = m_mirror.transform_point(Vec2::new(50.0, 20.0));
+        assert_eq!(p, Vec2::new(150.0, 120.0));
+
+        // Inverse roundtrip
+        let p_rec = m_mirror.transform_point_inverse(p).unwrap();
+        assert!((p_rec.x - 50.0).abs() < 1e-5);
+        assert!((p_rec.y - 20.0).abs() < 1e-5);
+
+        // Bounding box under mirror
+        let bbox = BoundingBox2D::from_origin_size(Vec2::ZERO, Vec2::new(100.0, 50.0));
+        let transformed_bbox = bbox.transform(&m_mirror);
+        // Corners: (0,0)->(200,100), (100,0)->(100,100), (100,50)->(100,150), (0,50)->(200,150)
+        // Extrema: min = (100, 100), max = (200, 150)
+        assert_eq!(transformed_bbox.min, Vec2::new(100.0, 100.0));
+        assert_eq!(transformed_bbox.max, Vec2::new(200.0, 150.0));
+        assert_eq!(transformed_bbox.width(), 100.0);
+        assert_eq!(transformed_bbox.height(), 50.0);
+
+        // Mirror + rotation + anchor point
+        let m_complex_mirror = AffineTransform2D::from_transform_components(
+            Vec2::new(400.0, 300.0),
+            Vec2::new(-200.0, 150.0),
+            45.0,
+            Vec2::new(50.0, 25.0),
+        );
+        assert!(m_complex_mirror.is_invertible());
+        let test_pt = Vec2::new(123.4, 56.7);
+        let world = m_complex_mirror.transform_point(test_pt);
+        let recovered = m_complex_mirror.transform_point_inverse(world).unwrap();
+        assert!((recovered.x - test_pt.x).abs() < 1e-3);
+        assert!((recovered.y - test_pt.y).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_simultaneous_parent_child_full_transforms() {
+        use project::Vec2;
+
+        let mut comp = Composition::hd_1080p_30fps("comp_simul", "Simultaneous Transforms", 5.0);
+        let tc0 = TimeCode::zero(30.0);
+        let tc150 = TimeCode::from_frames(150, 30.0);
+
+        // Parent with all 4 components non-trivial:
+        let mut parent = Layer::solid("p", "Parent", Color::RED, 300, 200, tc0, tc150);
+        parent.transform.position.set_value(Vec2::new(400.0, 300.0));
+        parent.transform.anchor_point.set_value(Vec2::new(50.0, 40.0));
+        parent.transform.scale.set_value(Vec2::new(150.0, 80.0));
+        parent.transform.rotation.set_value(35.0);
+
+        // Child with all 4 components non-trivial and parented to "p":
+        let mut child = Layer::solid("c", "Child", Color::BLUE, 100, 80, tc0, tc150);
+        child.set_parent(Some("p"));
+        child.transform.position.set_value(Vec2::new(120.0, -45.0));
+        child.transform.anchor_point.set_value(Vec2::new(25.0, 20.0));
+        child.transform.scale.set_value(Vec2::new(80.0, 120.0));
+        child.transform.rotation.set_value(-20.0);
+
+        comp.add_layer(parent).unwrap();
+        comp.add_layer(child).unwrap();
+
+        let graph = SceneGraph::from_composition(&comp).unwrap();
+        let transforms = graph.evaluate_transforms().unwrap();
+
+        let parent_eval = transforms.get("p").unwrap();
+        let child_eval = transforms.get("c").unwrap();
+
+        // Mathematical invariant: for ANY local point P in child,
+        // child_eval.world_matrix * P == parent_eval.world_matrix * (child_eval.local_matrix * P)
+        let pts = [
+            Vec2::ZERO,
+            Vec2::new(25.0, 20.0), // child anchor point
+            Vec2::new(100.0, 80.0),
+            Vec2::new(-30.0, 70.0),
+        ];
+
+        for pt in pts {
+            let direct_world = child_eval.local_to_world_point(pt);
+            let child_in_parent = child_eval.local_matrix.transform_point(pt);
+            let step_by_step_world = parent_eval.local_to_world_point(child_in_parent);
+
+            assert!(
+                (direct_world.x - step_by_step_world.x).abs() < 1e-4,
+                "X mismatch for point {:?}: direct={}, step={}",
+                pt, direct_world.x, step_by_step_world.x
+            );
+            assert!(
+                (direct_world.y - step_by_step_world.y).abs() < 1e-4,
+                "Y mismatch for point {:?}: direct={}, step={}",
+                pt, direct_world.y, step_by_step_world.y
+            );
+
+            // Invertibility roundtrip
+            let recovered = child_eval.world_to_local_point(direct_world).unwrap();
+            assert!((recovered.x - pt.x).abs() < 1e-3);
+            assert!((recovered.y - pt.y).abs() < 1e-3);
+        }
+    }
+
+    #[test]
+    fn test_deep_100_level_parenting_chain() {
+        use project::Vec2;
+
+        let mut comp = Composition::hd_1080p_30fps("comp_deep100", "Deep 100 Chain", 5.0);
+        let tc0 = TimeCode::zero(30.0);
+        let tc150 = TimeCode::from_frames(150, 30.0);
+        const CHAIN_LENGTH: usize = 100;
+
+        for i in 0..CHAIN_LENGTH {
+            let mut layer = Layer::solid(
+                format!("l_{i}"),
+                format!("Layer {i}"),
+                Color::WHITE,
+                50,
+                50,
+                tc0,
+                tc150,
+            );
+            layer.transform.position.set_value(Vec2::new(2.5, 1.5));
+            layer.transform.anchor_point.set_value(Vec2::ZERO);
+
+            if i > 0 {
+                layer.set_parent(Some(format!("l_{}", i - 1)));
+            }
+            comp.add_layer(layer).unwrap();
+        }
+
+        let graph = SceneGraph::from_composition(&comp).unwrap();
+        let transforms = graph.evaluate_transforms().unwrap();
+        assert_eq!(transforms.len(), CHAIN_LENGTH);
+
+        // Node 99 world origin should be 100 * (2.5, 1.5) = (250.0, 150.0)
+        let t99 = transforms.get("l_99").unwrap();
+        let pt99 = t99.local_to_world_point(Vec2::ZERO);
+        assert!((pt99.x - 250.0).abs() < 1e-2);
+        assert!((pt99.y - 150.0).abs() < 1e-2);
+
+        // Invertibility roundtrip through 100 concatenated matrices
+        let recovered = t99.world_to_local_point(pt99).unwrap();
+        assert!(recovered.distance_to(Vec2::ZERO) < 1e-2);
+    }
+
+    #[test]
+    fn test_bounding_box_extended_operations() {
+        use project::Vec2;
+
+        let b1 = BoundingBox2D::new(Vec2::new(0.0, 0.0), Vec2::new(100.0, 100.0));
+        let b2 = BoundingBox2D::new(Vec2::new(50.0, 50.0), Vec2::new(150.0, 150.0));
+        let b3 = BoundingBox2D::new(Vec2::new(200.0, 200.0), Vec2::new(300.0, 300.0));
+
+        assert_eq!(b1.area(), 10000.0);
+        assert!(!b1.is_empty());
+
+        let empty = BoundingBox2D::ZERO;
+        assert!(empty.is_empty());
+        assert_eq!(empty.area(), 0.0);
+
+        // Intersection between b1 and b2
+        let inter12 = b1.intersection(&b2).unwrap();
+        assert_eq!(inter12.min, Vec2::new(50.0, 50.0));
+        assert_eq!(inter12.max, Vec2::new(100.0, 100.0));
+        assert_eq!(inter12.width(), 50.0);
+        assert_eq!(inter12.height(), 50.0);
+
+        // Disjoint boxes b1 and b3
+        assert!(!b1.intersects(&b3));
+        assert!(b1.intersection(&b3).is_none());
+
+        // Union
+        let union12 = b1.union(&b2);
+        assert_eq!(union12.min, Vec2::new(0.0, 0.0));
+        assert_eq!(union12.max, Vec2::new(150.0, 150.0));
+    }
+
+    #[test]
+    fn test_matrix_array_conversions_and_singular_handling() {
+        use project::Vec2;
+
+        // 1. Column-major 6-float array roundtrip
+        let t = AffineTransform2D::from_transform_components(
+            Vec2::new(10.0, 20.0),
+            Vec2::new(50.0, 150.0),
+            45.0,
+            Vec2::new(5.0, 5.0),
+        );
+        let cols = t.to_cols_array();
+        let from_cols = AffineTransform2D::from_cols_array(cols);
+        assert_eq!(t, from_cols);
+
+        // 2. Flat 9-float array roundtrip
+        let flat = t.to_matrix_3x3_flat();
+        let from_flat = AffineTransform2D::from_matrix_3x3_flat(flat);
+        assert!(t.approx_eq(&from_flat, 1e-5));
+
+        // 3. Column-major 3x3 array check
+        let cols_3x3 = t.to_matrix_3x3_cols();
+        assert_eq!(cols_3x3[0][0], t.a);
+        assert_eq!(cols_3x3[0][1], t.b);
+        assert_eq!(cols_3x3[0][2], 0.0);
+        assert_eq!(cols_3x3[1][0], t.c);
+        assert_eq!(cols_3x3[1][1], t.d);
+        assert_eq!(cols_3x3[1][2], 0.0);
+        assert_eq!(cols_3x3[2][0], t.tx);
+        assert_eq!(cols_3x3[2][1], t.ty);
+        assert_eq!(cols_3x3[2][2], 1.0);
+
+        // 4. Non-finite values handling (NaN / Inf)
+        let nan_matrix = AffineTransform2D::new(f32::NAN, 0.0, 0.0, 1.0, 0.0, 0.0);
+        assert!(!nan_matrix.is_finite());
+        assert!(!nan_matrix.is_invertible());
+        assert!(nan_matrix.inverse().is_none());
+
+        let inf_matrix = AffineTransform2D::new(1.0, 0.0, 0.0, f32::INFINITY, 0.0, 0.0);
+        assert!(!inf_matrix.is_finite());
+        assert!(!inf_matrix.is_invertible());
+        assert!(inf_matrix.inverse().is_none());
+    }
 }
+

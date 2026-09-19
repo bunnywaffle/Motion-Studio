@@ -1,5 +1,6 @@
 use crate::error::SceneGraphError;
 use crate::node::SceneNode;
+use crate::transform::{EvaluatedTransform, TransformResolver};
 use project::{Composition, Project, TimeCode};
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -307,5 +308,20 @@ impl SceneGraph {
             .into_iter()
             .filter(|n| n.is_visible_at(time))
             .collect()
+    }
+
+    /// Evaluate the spatial transforms for all nodes in the scene graph using
+    /// topological evaluation order.
+    pub fn evaluate_transforms(&self) -> Result<HashMap<String, EvaluatedTransform>, SceneGraphError> {
+        TransformResolver::resolve_scene_graph(self)
+    }
+
+    /// Retrieve the evaluated spatial transform for a specific node in the scene graph.
+    pub fn get_evaluated_transform(&self, id: &str) -> Result<EvaluatedTransform, SceneGraphError> {
+        let transforms = self.evaluate_transforms()?;
+        transforms
+            .get(id)
+            .copied()
+            .ok_or_else(|| SceneGraphError::NodeNotFound(id.to_string()))
     }
 }
