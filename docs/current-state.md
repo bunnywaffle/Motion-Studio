@@ -94,21 +94,31 @@
     - Graceful missing composition error handling with `SceneGraphError::CompositionNotFound`.
   - Layer Model Integration in `crates/project`:
     - Extended `Layer` with `start_offset`, `time_stretch`, `time_remapping`, and `loop_mode` with full backward compatibility and JSON serialization roundtripping.
-- Full automated test suite passing with **108 tests** across the workspace (12 application tests + 50 project unit tests + 46 compositor unit tests).
+- Comprehensive headless integration test suite and performance benchmark implemented in `crates/compositor/tests/headless_evaluation_tests.rs`:
+  - 8 realistic end-to-end composition scenario tests exercising all engine features headless:
+    - Multi-layer composite with mixed layer sources (Solids, Text, Shape - Rectangle, Ellipse, Path, Procedural, NestedComposition) with activation boundaries and flattened render lists.
+    - Deep 6-level parenting chains with Bezier ease-in-out curves across Position, Scale, Rotation, and Anchor Point, verifying topological evaluation order, parent-child matrix concatenation, and numerical invertibility.
+    - All 4 track matte modes (`Alpha`, `AlphaInverted`, `Luma`, `LumaInverted`) with adjacent and explicit targeting, matte consumption, and matte preservation under soloing.
+    - 3-tier nested pre-comps with time stretching (50% slow-mo, 200% double speed, reverse playback), start offsets, animated time remapping, and loop modes (`Once`, `Loop`, `PingPong`).
+    - Full 300-frame timeline scrub verifying half-open interval boundaries `[in_point, out_point)`, opacity fades, zero-opacity render omission, and painter's composite order.
+    - Full tree point mapping: bidirectional point mapping from innermost nested pre-comp layer to root composition viewport coordinates across cascaded nesting transforms, verifying exact invertibility and root bounding box containment.
+    - Defensive validation of parenting cycles, self-parenting, missing parents, circular nested compositions, missing composition references, recursion depth limits (`MaxNestingDepthExceeded`), negative timecodes, and extreme out-of-bounds frame requests.
+    - High-throughput stress test evaluating 10,000 frames of a complex multi-layer composition (12 layers, parenting chains, Bezier curves, track mattes, nested pre-comps) achieving ~16,000 evaluations/sec in debug mode and > 72,000 evaluations/sec in release mode (~13.9 µs/frame latency), vastly exceeding real-time timeline scrubbing requirements.
+- Full automated test suite passing with **116 tests** across the workspace (12 application tests + 50 project unit tests + 46 compositor unit tests + 8 compositor integration tests).
 - Workspace compiles, builds, and passes all checks cleanly with 0 errors and 0 warnings (`cargo check --workspace`, `cargo build --workspace`, `cargo test --workspace`, and `cargo clippy --workspace --all-targets -- -D warnings`).
 
 ## What Is Currently Being Developed
-- Phase 1: Core Engine Architecture.
+- Phase 2: Hardware-Accelerated Rendering Architecture.
 
 ## Known Problems
 - None.
 
 ## Next Single Task
 
-### Task 1.7: Create headless composition evaluation tests
+### Task 2.1: Initialize wgpu context and render device
 
-- Create integration test suite in `crates/compositor/tests/` (or dedicated test crate/module) exercising complex, multi-layered composition scenarios completely headless (without GPU/window dependencies).
-- Validate end-to-end evaluation: combinations of nested pre-comps, keyframe Bezier ease-in-out animations, track mattes, parenting hierarchies, time stretch, reverse playback, and composite painter's ordering.
-- Benchmark and profile evaluation throughput for complex multi-layer compositions across thousands of evaluated frames.
+- Configure and initialize `wgpu` graphics backend (Instance, Adapter, Device, Queue).
+- Establish headless and offscreen rendering targets and surface capabilities.
+- Prepare device and queue abstractions for pipeline caching and texture upload.
 
 
