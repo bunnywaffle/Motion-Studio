@@ -24,14 +24,16 @@ pub enum TimeCodeError {
     InvalidFormat(String),
     InvalidComponent(String),
     InvalidFrameRate(String),
+    DroppedFrame(String),
 }
 
 impl fmt::Display for TimeCodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidFormat(s) => write!(f, "invalid timecode format: '{s}' (expected HH:MM:SS:FF)"),
+            Self::InvalidFormat(s) => write!(f, "invalid timecode format: '{s}' (expected HH:MM:SS:FF or HH:MM:SS;FF)"),
             Self::InvalidComponent(s) => write!(f, "invalid timecode component: '{s}'"),
             Self::InvalidFrameRate(s) => write!(f, "invalid frame rate: '{s}' (must be > 0.0)"),
+            Self::DroppedFrame(s) => write!(f, "dropped frame in timecode: '{s}'"),
         }
     }
 }
@@ -76,6 +78,10 @@ pub enum ValidationError {
         index: usize,
         len: usize,
     },
+    InvalidWorkArea {
+        in_point_frames: i64,
+        out_point_frames: i64,
+    },
 }
 
 impl fmt::Display for ValidationError {
@@ -98,6 +104,15 @@ impl fmt::Display for ValidationError {
                 write!(
                     f,
                     "invalid timing for layer '{layer_id}': in_point ({in_point_frames}) must be <= out_point ({out_point_frames})"
+                )
+            }
+            Self::InvalidWorkArea {
+                in_point_frames,
+                out_point_frames,
+            } => {
+                write!(
+                    f,
+                    "invalid work area bounds: in_point ({in_point_frames}) must be <= out_point ({out_point_frames})"
                 )
             }
             Self::LayerNotFound(id) => write!(f, "layer not found: '{id}'"),

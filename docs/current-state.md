@@ -61,7 +61,17 @@
   - `Property<T>`: Extended with `keyframes: Vec<Keyframe<T>>`, sorted insertion (`add_keyframe`), timestamp replacement, removal, and continuous evaluation (`evaluate_at`, `evaluate_at_seconds`, `evaluate_with_extrapolation`).
   - Full backward compatibility: `keyframes` serialized with `#[serde(default, skip_serializing_if = "Vec::is_empty")]`.
   - Compositor integration: `LayerStackEvaluator` evaluates animated layer opacity and animated hierarchical transforms dynamically at the target `TimeCode`.
-- Full automated test suite passing with **78 tests** across the workspace (12 application tests + 35 project unit tests + 31 compositor unit tests).
+- High-precision playback clock and timeline transport architecture implemented in `crates/project`:
+  - `FrameRate`: Precise rational frame rate representation (`numerator`, `denominator`, `drop_frame`) preventing accumulated floating-point inaccuracies, with presets for all industry standards (23.976, 24, 25 PAL, 29.97 NDF, 29.97 DF, 30, 50, 59.94 NDF, 59.94 DF, 60, and arbitrary rational custom rates).
+  - SMPTE 12M drop-frame standard calculation: exact frame-to-timecode and timecode-to-frame algorithms dropping frames 0 and 1 at each minute except every 10th minute for 29.97 DF (and frames 0, 1, 2, 3 for 59.94 DF), with `;` separator support and dropped frame detection (`TimeCodeError::DroppedFrame`).
+  - `PlaybackClock` / `Transport`:
+    - Drift-free integer nanosecond continuous position tracking (`position_nanos`, `position_seconds`) and discrete frame quantization (`current_frame`, `subframe` in `[0.0, 1.0)`).
+    - Transport states: `Playing`, `Paused`, `Scrubbing` with full transition methods (`play`, `pause`, `toggle_playback`, `play_reverse`, `start_scrubbing`, `stop_scrubbing`, `scrub_to`, `seek`).
+    - Speed multiplier and reverse playback support (positive/negative speeds, `set_speed`, `reverse`).
+    - Work area looping and boundaries: `WorkArea` (`in_point`, `out_point`) with loop modes (`Loop` wrap-around, `Once` boundary stop, `PingPong` velocity bounce).
+    - Drift-free delta time advancement: `tick(dt: std::time::Duration)` returning `ClockTickResult` (`timecode`, `frame`, `frame_changed`, `looped`, `reached_end`).
+    - Navigation and stepping: single/multi-frame stepping (`step_next_frame`, `step_prev_frame`, `step_forward`, `step_backward`), jump to work area bounds (`jump_to_start`, `jump_to_end`), jump to composition bounds, and keyframe/marker jumping (`jump_to_next_keyframe_in_comp`, `jump_to_prev_keyframe_in_comp`, `jump_to_next_marker_in_comp`, `jump_to_prev_marker_in_comp`).
+- Full automated test suite passing with **92 tests** across the workspace (12 application tests + 49 project unit tests + 31 compositor unit tests).
 - Workspace compiles, builds, and passes all checks cleanly with 0 errors and 0 warnings (`cargo check --workspace`, `cargo build --workspace`, `cargo test --workspace`, and `cargo clippy --workspace --all-targets -- -D warnings`).
 
 ## What Is Currently Being Developed
@@ -72,10 +82,10 @@
 
 ## Next Single Task
 
-### Task 1.5: Implement timeline time-to-frame conversion and playback clock
+### Task 1.6: Implement composition nesting and pre-comp evaluation
 
-- Implement high-precision playback clock and frame timing structures (current time, play/pause state, playback speed/direction, looping work area).
-- Implement robust time-to-frame and frame-to-time conversions handling standard frame rates (24, 25, 29.97 drop-frame, 30, 50, 59.94 drop-frame, 60, custom).
-- Support work area in/out points and frame clamping/wrapping for real-time playback loops.
-- Add automated unit tests covering frame-exact conversions, drop-frame timing edge cases, clock drift prevention, and transport playback state transitions.
+- Design nested composition evaluation pipeline in `crates/compositor`.
+- Implement pre-comp time-remapping, frame offset, and duration clipping relative to parent composition timelines.
+- Connect nested composition scene nodes to upstream evaluated stacks without circular graph recursion.
+- Add automated unit tests covering multi-level nested compositions, transform propagation across nesting boundaries, and timing offsets.
 

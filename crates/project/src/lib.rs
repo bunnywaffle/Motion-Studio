@@ -1,8 +1,10 @@
 pub mod asset;
 pub mod blend_mode;
+pub mod clock;
 pub mod color;
 pub mod composition;
 pub mod error;
+pub mod frame_rate;
 pub mod keyframe;
 pub mod layer;
 pub mod marker;
@@ -16,9 +18,13 @@ pub mod vec2;
 // Re-export primary types at crate root for ergonomic use
 pub use asset::{Asset, AssetType};
 pub use blend_mode::BlendMode;
+pub use clock::{
+    ClockTickResult, LoopMode, PlaybackClock, PlaybackDirection, PlaybackState, Transport, WorkArea,
+};
 pub use color::Color;
 pub use composition::Composition;
 pub use error::{ColorError, ProjectError, TimeCodeError, ValidationError};
+pub use frame_rate::FrameRate;
 pub use keyframe::{
     evaluate_cubic_bezier, evaluate_keyframe_track, interpolate_keyframes, Extrapolation,
     Interpolate, Keyframe, KeyframeInterpolation, KeyframeTangent,
@@ -28,7 +34,7 @@ pub use marker::Marker;
 pub use matte::TrackMatteMode;
 pub use project::{Project, ProjectSettings, CURRENT_FORMAT_VERSION};
 pub use property::Property;
-pub use timecode::TimeCode;
+pub use timecode::{drop_frame_smpte_to_frame, frame_to_drop_frame_smpte, TimeCode};
 pub use transform::Transform;
 pub use vec2::Vec2;
 
@@ -1348,4 +1354,691 @@ mod tests {
         assert!(legacy_prop.keyframes.is_empty());
         assert!(!legacy_prop.is_animated());
     }
+
+    #[test]
+    fn test_frame_rate_presets_and_rational_math() {
+        // Presets
+        assert_eq!(FrameRate::FPS_24.numerator(), 24);
+        assert_eq!(FrameRate::FPS_24.denominator(), 1);
+        assert!(!FrameRate::FPS_24.is_drop_frame());
+        assert_eq!(FrameRate::FPS_24.nominal_fps(), 24);
+        assert_eq!(FrameRate::FPS_24.drop_frame_count(), 0);
+
+        assert_eq!(FrameRate::FPS_25.numerator(), 25);
+        assert_eq!(FrameRate::FPS_25.denominator(), 1);
+        assert_eq!(FrameRate::FPS_25.nominal_fps(), 25);
+
+        assert_eq!(FrameRate::FPS_30.numerator(), 30);
+        assert_eq!(FrameRate::FPS_30.denominator(), 1);
+
+        assert_eq!(FrameRate::FPS_50.numerator(), 50);
+        assert_eq!(FrameRate::FPS_60.numerator(), 60);
+
+        // NTSC Fractional Rates
+        assert_eq!(FrameRate::FPS_23_976.numerator(), 24000);
+        assert_eq!(FrameRate::FPS_23_976.denominator(), 1001);
+        assert_eq!(FrameRate::FPS_23_976.nominal_fps(), 24);
+        assert!((FrameRate::FPS_23_976.as_f64() - 23.976023976).abs() < 1e-6);
+
+        assert_eq!(FrameRate::FPS_29_97_NDF.numerator(), 30000);
+        assert_eq!(FrameRate::FPS_29_97_NDF.denominator(), 1001);
+        assert_eq!(FrameRate::FPS_29_97_NDF.nominal_fps(), 30);
+        assert!(!FrameRate::FPS_29_97_NDF.is_drop_frame());
+        assert_eq!(FrameRate::FPS_29_97_NDF.drop_frame_count(), 0);
+
+        assert_eq!(FrameRate::FPS_29_97_DF.numerator(), 30000);
+        assert_eq!(FrameRate::FPS_29_97_DF.denominator(), 1001);
+        assert_eq!(FrameRate::FPS_29_97_DF.nominal_fps(), 30);
+        assert!(FrameRate::FPS_29_97_DF.is_drop_frame());
+        assert_eq!(FrameRate::FPS_29_97_DF.drop_frame_count(), 2);
+
+        assert_eq!(FrameRate::FPS_59_94_DF.numerator(), 60000);
+        assert_eq!(FrameRate::FPS_59_94_DF.denominator(), 1001);
+        assert_eq!(FrameRate::FPS_59_94_DF.nominal_fps(), 60);
+        assert!(FrameRate::FPS_59_94_DF.is_drop_frame());
+        assert_eq!(FrameRate::FPS_59_94_DF.drop_frame_count(), 4);
+
+        // from_fps inference
+        assert_eq!(FrameRate::from_fps(23.976), FrameRate::FPS_23_976);
+        assert_eq!(FrameRate::from_fps(24.0), FrameRate::FPS_24);
+        assert_eq!(FrameRate::from_fps(25.0), FrameRate::FPS_25);
+        assert_eq!(FrameRate::from_fps(29.97), FrameRate::FPS_29_97_NDF);
+        assert_eq!(FrameRate::from_fps(30.0), FrameRate::FPS_30);
+        assert_eq!(FrameRate::from_fps(50.0), FrameRate::FPS_50);
+        assert_eq!(FrameRate::from_fps(59.94), FrameRate::FPS_59_94_NDF);
+        assert_eq!(FrameRate::from_fps(60.0), FrameRate::FPS_60);
+
+        // Custom rational frame rate
+        let custom = FrameRate::new(120, 1);
+        assert_eq!(custom.as_f64(), 120.0);
+        assert_eq!(custom.nominal_fps(), 120);
+
+        // Frame duration
+        let dur_25 = FrameRate::FPS_25.frame_duration();
+        assert_eq!(dur_25, std::time::Duration::from_millis(40));
+
+        let dur_50 = FrameRate::FPS_50.frame_duration();
+        assert_eq!(dur_50, std::time::Duration::from_millis(20));
+    }
+
+    #[test]
+    fn test_frame_exact_conversions_all_industry_frame_rates() {
+        let test_rates = [
+            (FrameRate::FPS_23_976, false, 24),
+            (FrameRate::FPS_24, false, 24),
+            (FrameRate::FPS_25, false, 25),
+            (FrameRate::FPS_29_97_NDF, false, 30),
+            (FrameRate::FPS_30, false, 30),
+            (FrameRate::FPS_50, false, 50),
+            (FrameRate::FPS_59_94_NDF, false, 60),
+            (FrameRate::FPS_60, false, 60),
+            (FrameRate::new(120, 1), false, 120),
+        ];
+
+        for (rate, is_drop, fps_nominal) in test_rates {
+            let fps = rate.as_f64();
+
+            // Zero frames
+            let tc_zero = TimeCode::from_frames(0, fps).with_drop_frame(is_drop);
+            assert_eq!(tc_zero.to_timecode_str(), "00:00:00:00");
+            assert_eq!(
+                TimeCode::from_timecode_str("00:00:00:00", fps).unwrap().frames(),
+                0
+            );
+
+            // 1 second mark
+            let frames_1s = fps_nominal as i64;
+            let tc_1s = TimeCode::from_frames(frames_1s, fps).with_drop_frame(is_drop);
+            assert_eq!(tc_1s.to_timecode_str(), "00:00:01:00");
+            assert_eq!(
+                TimeCode::from_timecode_str("00:00:01:00", fps).unwrap().frames(),
+                frames_1s
+            );
+
+            // Arbitrary frame: 1 minute, 23 seconds, 7 frames
+            let frames_arb = ((60 + 23) * fps_nominal as i64) + 7;
+            let tc_arb = TimeCode::from_frames(frames_arb, fps).with_drop_frame(is_drop);
+            let s_arb = tc_arb.to_timecode_str();
+            assert_eq!(s_arb, format!("00:01:23:{:02}", 7));
+            assert_eq!(
+                TimeCode::from_timecode_str(&s_arb, fps).unwrap().frames(),
+                frames_arb
+            );
+
+            // Resample check
+            let resampled = tc_arb.resample(60.0);
+            assert_eq!(resampled.frame_rate(), 60.0);
+            assert!((resampled.seconds() - tc_arb.seconds()).abs() < 0.05);
+        }
+    }
+
+    #[test]
+    fn test_smpte_drop_frame_29_97_calculation_and_edge_cases() {
+        let fps = 29.97;
+
+        // Frame 0: 00;00;00;00
+        let tc0 = TimeCode::from_frames(0, fps).with_drop_frame(true);
+        assert_eq!(tc0.to_timecode_str(), "00:00:00;00");
+        assert_eq!(TimeCode::from_timecode_str("00:00:00;00", fps).unwrap().frames(), 0);
+
+        // Frame 1799 (59 seconds, frame 29)
+        let tc_1799 = TimeCode::from_frames(1799, fps).with_drop_frame(true);
+        assert_eq!(tc_1799.to_timecode_str(), "00:00:59;29");
+        assert_eq!(TimeCode::from_timecode_str("00:00:59;29", fps).unwrap().frames(), 1799);
+
+        // Frame 1800: minute 1 mark! Drops frames 0 and 1, jumps directly to 00;01;00;02
+        let tc_1800 = TimeCode::from_frames(1800, fps).with_drop_frame(true);
+        assert_eq!(tc_1800.to_timecode_str(), "00:01:00;02");
+        assert_eq!(TimeCode::from_timecode_str("00:01:00;02", fps).unwrap().frames(), 1800);
+
+        // Frame 1801: 00;01;00;03
+        let tc_1801 = TimeCode::from_frames(1801, fps).with_drop_frame(true);
+        assert_eq!(tc_1801.to_timecode_str(), "00:01:00;03");
+        assert_eq!(TimeCode::from_timecode_str("00:01:00;03", fps).unwrap().frames(), 1801);
+
+        // Frame 3597: minute 1, 59 seconds, frame 29
+        let tc_3597 = TimeCode::from_frames(3597, fps).with_drop_frame(true);
+        assert_eq!(tc_3597.to_timecode_str(), "00:01:59;29");
+        assert_eq!(TimeCode::from_timecode_str("00:01:59;29", fps).unwrap().frames(), 3597);
+
+        // Frame 3598: minute 2 mark! Drops frames 0 and 1, jumps to 00;02;00;02
+        let tc_3598 = TimeCode::from_frames(3598, fps).with_drop_frame(true);
+        assert_eq!(tc_3598.to_timecode_str(), "00:02:00;02");
+        assert_eq!(TimeCode::from_timecode_str("00:02:00;02", fps).unwrap().frames(), 3598);
+
+        // Frame 17981: minute 9, 59 seconds, frame 29
+        let tc_17981 = TimeCode::from_frames(17981, fps).with_drop_frame(true);
+        assert_eq!(tc_17981.to_timecode_str(), "00:09:59;29");
+        assert_eq!(TimeCode::from_timecode_str("00:09:59;29", fps).unwrap().frames(), 17981);
+
+        // Frame 17982: minute 10 mark! Every 10th minute frames are NOT dropped!
+        let tc_17982 = TimeCode::from_frames(17982, fps).with_drop_frame(true);
+        assert_eq!(tc_17982.to_timecode_str(), "00:10:00;00");
+        assert_eq!(TimeCode::from_timecode_str("00:10:00;00", fps).unwrap().frames(), 17982);
+
+        // Frame 17983: 00;10;00;01 (present at minute 10!)
+        let tc_17983 = TimeCode::from_frames(17983, fps).with_drop_frame(true);
+        assert_eq!(tc_17983.to_timecode_str(), "00:10:00;01");
+        assert_eq!(TimeCode::from_timecode_str("00:10:00;01", fps).unwrap().frames(), 17983);
+
+        // Frame 17984: 00;10;00;02
+        let tc_17984 = TimeCode::from_frames(17984, fps).with_drop_frame(true);
+        assert_eq!(tc_17984.to_timecode_str(), "00:10:00;02");
+        assert_eq!(TimeCode::from_timecode_str("00:10:00;02", fps).unwrap().frames(), 17984);
+
+        // 1-hour mark: 6 * 17982 = 107892 frames -> 01;00;00;00 (minute 60 is a multiple of 10)
+        let tc_1hour = TimeCode::from_frames(107892, fps).with_drop_frame(true);
+        assert_eq!(tc_1hour.to_timecode_str(), "01:00:00;00");
+        assert_eq!(TimeCode::from_timecode_str("01:00:00;00", fps).unwrap().frames(), 107892);
+    }
+
+    #[test]
+    fn test_smpte_drop_frame_59_94_calculation_and_edge_cases() {
+        let fps = 59.94;
+
+        // Frame 0: 00;00;00;00
+        let tc0 = TimeCode::from_frames(0, fps).with_drop_frame(true);
+        assert_eq!(tc0.to_timecode_str(), "00:00:00;00");
+        assert_eq!(TimeCode::from_timecode_str("00:00:00;00", fps).unwrap().frames(), 0);
+
+        // Frame 3599 (59 seconds, frame 59)
+        let tc_3599 = TimeCode::from_frames(3599, fps).with_drop_frame(true);
+        assert_eq!(tc_3599.to_timecode_str(), "00:00:59;59");
+        assert_eq!(TimeCode::from_timecode_str("00:00:59;59", fps).unwrap().frames(), 3599);
+
+        // Frame 3600: minute 1 mark! Drops frames 0, 1, 2, 3 -> jumps directly to 00;01;00;04
+        let tc_3600 = TimeCode::from_frames(3600, fps).with_drop_frame(true);
+        assert_eq!(tc_3600.to_timecode_str(), "00:01:00;04");
+        assert_eq!(TimeCode::from_timecode_str("00:01:00;04", fps).unwrap().frames(), 3600);
+
+        // Frame 3601: 00;01;00;05
+        let tc_3601 = TimeCode::from_frames(3601, fps).with_drop_frame(true);
+        assert_eq!(tc_3601.to_timecode_str(), "00:01:00;05");
+        assert_eq!(TimeCode::from_timecode_str("00:01:00;05", fps).unwrap().frames(), 3601);
+
+        // Frame 35964: minute 10 mark at 59.94 DF! Not dropped!
+        let tc_35964 = TimeCode::from_frames(35964, fps).with_drop_frame(true);
+        assert_eq!(tc_35964.to_timecode_str(), "00:10:00;00");
+        assert_eq!(TimeCode::from_timecode_str("00:10:00;00", fps).unwrap().frames(), 35964);
+
+        // Frame 35965: 00;10;00;01 (present at minute 10!)
+        let tc_35965 = TimeCode::from_frames(35965, fps).with_drop_frame(true);
+        assert_eq!(tc_35965.to_timecode_str(), "00:10:00;01");
+        assert_eq!(TimeCode::from_timecode_str("00:10:00;01", fps).unwrap().frames(), 35965);
+
+        // 1-hour mark: 6 * 35964 = 215784 frames
+        let tc_1hour = TimeCode::from_frames(215784, fps).with_drop_frame(true);
+        assert_eq!(tc_1hour.to_timecode_str(), "01:00:00;00");
+        assert_eq!(TimeCode::from_timecode_str("01:00:00;00", fps).unwrap().frames(), 215784);
+    }
+
+    #[test]
+    fn test_drop_frame_invalid_inputs_and_negative_timecode() {
+        // Attempting to parse dropped frame numbers in 29.97 drop frame
+        let err_0 = TimeCode::from_timecode_str("00:01:00;00", 29.97);
+        assert!(matches!(err_0, Err(TimeCodeError::DroppedFrame(_))));
+
+        let err_1 = TimeCode::from_timecode_str("00:01:00;01", 29.97);
+        assert!(matches!(err_1, Err(TimeCodeError::DroppedFrame(_))));
+
+        // Attempting to parse dropped frame numbers in 59.94 drop frame
+        let err_59_3 = TimeCode::from_timecode_str("00:01:00;03", 59.94);
+        assert!(matches!(err_59_3, Err(TimeCodeError::DroppedFrame(_))));
+
+        // Negative drop-frame timecode
+        let neg_df = TimeCode::from_frames(-1800, 29.97).with_drop_frame(true);
+        assert_eq!(neg_df.to_timecode_str(), "-00:01:00;02");
+
+        let parsed_neg = TimeCode::from_timecode_str("-00:01:00;02", 29.97).unwrap();
+        assert_eq!(parsed_neg.frames(), -1800);
+        assert!(parsed_neg.is_drop_frame());
+
+        // Negative 10-minute drop frame
+        let neg_df_10m = TimeCode::from_frames(-17982, 29.97).with_drop_frame(true);
+        assert_eq!(neg_df_10m.to_timecode_str(), "-00:10:00;00");
+        let parsed_10m = TimeCode::from_timecode_str("-00:10:00;00", 29.97).unwrap();
+        assert_eq!(parsed_10m.frames(), -17982);
+    }
+
+    #[test]
+    fn test_smpte_drop_frame_from_smpte_and_component_bounds() {
+        let df_rate = FrameRate::FPS_29_97_DF;
+
+        // from_smpte with colon syntax must respect FrameRate's drop-frame flag and reject dropped frame 0
+        let dropped_colon = TimeCode::from_smpte("00:01:00:00", df_rate);
+        assert!(matches!(dropped_colon, Err(TimeCodeError::DroppedFrame(_))));
+
+        let dropped_colon_1 = TimeCode::from_smpte("00:01:00:01", df_rate);
+        assert!(matches!(dropped_colon_1, Err(TimeCodeError::DroppedFrame(_))));
+
+        // Valid frame after drop parsed via colon syntax must produce frame 1800
+        let parsed_first_valid = TimeCode::from_smpte("00:01:00:02", df_rate).unwrap();
+        assert_eq!(parsed_first_valid.frames(), 1800);
+        assert!(parsed_first_valid.is_drop_frame());
+        assert_eq!(parsed_first_valid.to_timecode_str(), "00:01:00;02");
+
+        // Component bounds validation (minutes >= 60, seconds >= 60, frames >= nominal_fps)
+        assert!(matches!(
+            TimeCode::from_timecode_str("00:60:00:00", 30.0),
+            Err(TimeCodeError::InvalidComponent(_))
+        ));
+        assert!(matches!(
+            TimeCode::from_timecode_str("00:00:60:00", 30.0),
+            Err(TimeCodeError::InvalidComponent(_))
+        ));
+        assert!(matches!(
+            TimeCode::from_timecode_str("00:00:00:30", 30.0),
+            Err(TimeCodeError::InvalidComponent(_))
+        ));
+
+        // WorkArea::new and set_work_area typed ValidationError
+        let wa_err = WorkArea::new(TimeCode::from_frames(100, 30.0), TimeCode::from_frames(50, 30.0));
+        assert!(matches!(
+            wa_err,
+            Err(ValidationError::InvalidWorkArea {
+                in_point_frames: 100,
+                out_point_frames: 50,
+            })
+        ));
+
+        let mut clock = PlaybackClock::default();
+        let set_wa_err = clock.set_work_area(TimeCode::from_frames(100, 30.0), TimeCode::from_frames(50, 30.0));
+        assert!(matches!(
+            set_wa_err,
+            Err(ValidationError::InvalidWorkArea {
+                in_point_frames: 100,
+                out_point_frames: 50,
+            })
+        ));
+    }
+
+    #[test]
+    fn test_exhaustive_smpte_drop_frame_bijective_roundtrip() {
+        // Full 10-minute cycle for 29.97 DF: all 17,982 frames must be 100% bijective
+        for frame in 0..17982i64 {
+            let (hh, mm, ss, ff) = frame_to_drop_frame_smpte(frame, 30, 2);
+            let back = drop_frame_smpte_to_frame(hh as i64, mm as i64, ss as i64, ff as i64, 30, 2)
+                .unwrap_or_else(|e| panic!("frame {frame} failed reverse conversion: {e}"));
+            assert_eq!(back, frame, "Frame mismatch at frame {frame} -> ({hh}:{mm}:{ss};{ff})");
+        }
+
+        // Full 10-minute cycle for 59.94 DF: all 35,964 frames must be 100% bijective
+        for frame in 0..35964i64 {
+            let (hh, mm, ss, ff) = frame_to_drop_frame_smpte(frame, 60, 4);
+            let back = drop_frame_smpte_to_frame(hh as i64, mm as i64, ss as i64, ff as i64, 60, 4)
+                .unwrap_or_else(|e| panic!("frame {frame} (59.94) failed reverse conversion: {e}"));
+            assert_eq!(back, frame, "59.94 Frame mismatch at frame {frame} -> ({hh}:{mm}:{ss};{ff})");
+        }
+    }
+
+    #[test]
+    fn test_playback_clock_tick_progression_and_subframes() {
+        let mut clock = PlaybackClock::new(FrameRate::FPS_30, TimeCode::from_frames(300, 30.0));
+        assert!(clock.is_paused());
+        assert_eq!(clock.current_frame(), 0);
+        assert_eq!(clock.subframe(), 0.0);
+
+        // When paused, tick does not advance position
+        let res_paused = clock.tick(std::time::Duration::from_millis(100));
+        assert_eq!(res_paused.frame, 0);
+        assert!(!res_paused.frame_changed);
+        assert_eq!(clock.current_frame(), 0);
+
+        // Start playback
+        clock.play();
+        assert!(clock.is_playing());
+
+        // Advance by half a frame at 30fps (approx 16.666667 ms)
+        let dt_half = std::time::Duration::from_nanos(16_666_667);
+        let res1 = clock.tick(dt_half);
+        assert_eq!(res1.frame, 0);
+        assert!(!res1.frame_changed);
+        assert_eq!(clock.current_frame(), 0);
+        assert!((clock.subframe() - 0.5).abs() < 0.01);
+
+        // Advance by another half frame (total 1 full frame = 33.333334 ms)
+        let res2 = clock.tick(dt_half);
+        assert_eq!(res2.frame, 1);
+        assert!(res2.frame_changed);
+        assert_eq!(clock.current_frame(), 1);
+        assert!(clock.subframe() < 0.05);
+
+        // Continuous seconds tracking
+        assert!((clock.position_seconds() - (33_333_334.0 / 1e9)).abs() < 1e-6);
+        assert_eq!(clock.timecode().frames(), 1);
+    }
+
+    #[test]
+    fn test_playback_clock_drift_prevention_extended_playback() {
+        // Run 1 hour of simulated 29.97fps playback (3600 seconds)
+        // At 60 Hz display refresh rate, 1 tick = 1/60s = 16_666_666 nanoseconds
+        let mut clock = PlaybackClock::new(
+            FrameRate::FPS_29_97_DF,
+            TimeCode::from_frames(200_000, 29.97).with_drop_frame(true),
+        );
+        clock.play();
+
+        // 3600 seconds total in 1-second chunks (1,000,000,000 ns each)
+        let one_sec = std::time::Duration::from_secs(1);
+        for _ in 0..3600 {
+            clock.tick(one_sec);
+        }
+
+        // Exact elapsed nanoseconds: 3600 * 1,000,000,000 = 3,600,000,000,000
+        assert_eq!(clock.position_nanos(), 3_600_000_000_000i128);
+        assert_eq!(clock.position_seconds(), 3600.0);
+
+        // Exact frames calculation for 3600 seconds at 30000/1001 fps:
+        // (3600 * 30000) / 1001 = 108,000,000 / 1001 = 107,892.107892... -> frame 107,892
+        let expected_frame = (3600i128 * 30000) / 1001;
+        assert_eq!(clock.current_frame(), expected_frame as i64);
+        assert_eq!(clock.current_frame(), 107892);
+
+        // Drift check: 0 frame drift after 3600 seconds!
+        let (calc_frame, _) = FrameRate::FPS_29_97_DF.nanos_to_frames(3_600_000_000_000);
+        assert_eq!(clock.current_frame(), calc_frame);
+    }
+
+    #[test]
+    fn test_playback_clock_work_area_loop_modes() {
+        let fps = FrameRate::FPS_30;
+        let comp_dur = TimeCode::from_frames(300, 30.0); // 10s
+        let mut clock = PlaybackClock::new(fps, comp_dur);
+
+        // Set work area: frames 30 to 90 (1.0s to 3.0s, span = 60 frames = 2.0s)
+        let wa_in = TimeCode::from_frames(30, 30.0);
+        let wa_out = TimeCode::from_frames(90, 30.0);
+        clock.set_work_area(wa_in, wa_out).unwrap();
+        assert_eq!(clock.work_area_in().frames(), 30);
+        assert_eq!(clock.work_area_out().frames(), 90);
+
+        // --- 1. LoopMode::Loop ---
+        clock.set_loop_mode(LoopMode::Loop);
+        clock.seek_frame(85); // 5 frames before out
+        clock.play();
+
+        // Advance 10 frames (1/3 second = 333_333_333 ns)
+        // Position would be 85 + 10 = 95 >= 90 -> wraps around by 5 frames past in_point (30) -> frame 35
+        let dt_10_frames = std::time::Duration::from_nanos(10 * 33_333_333);
+        let res = clock.tick(dt_10_frames);
+        assert!(res.looped);
+        assert_eq!(clock.current_frame(), 35);
+
+        // Reverse looping
+        clock.set_speed(-1.0);
+        clock.seek_frame(32); // 2 frames past in_point
+        // Advance 5 frames in reverse -> passes in_point (30) by 3 frames -> wraps to out_point (90) - 3 = 87
+        let dt_5_frames = std::time::Duration::from_nanos(5 * 33_333_333);
+        let res_rev = clock.tick(dt_5_frames);
+        assert!(res_rev.looped);
+        assert_eq!(clock.current_frame(), 87);
+
+        // --- 2. LoopMode::Once ---
+        clock.set_loop_mode(LoopMode::Once);
+        clock.set_speed(1.0);
+        clock.seek_frame(85);
+        clock.play();
+
+        // Advance 10 frames -> reaches boundary 90 and pauses
+        let res_once = clock.tick(dt_10_frames);
+        assert!(res_once.reached_end);
+        assert!(clock.is_paused());
+        assert_eq!(clock.current_frame(), 90);
+
+        // --- 3. LoopMode::PingPong ---
+        clock.set_loop_mode(LoopMode::PingPong);
+        clock.set_speed(1.0);
+        clock.seek_frame(85);
+        clock.play();
+
+        // Advance 10 frames forward: reaches 90, bounces back by 5 frames to 85, reverses speed
+        let res_bounce1 = clock.tick(dt_10_frames);
+        assert!(res_bounce1.looped);
+        assert_eq!(clock.current_frame(), 85);
+        assert_eq!(clock.speed(), -1.0);
+        assert_eq!(clock.direction(), PlaybackDirection::Reverse);
+
+        // Next tick in reverse direction: moves from 85 backward
+        clock.tick(dt_5_frames);
+        assert_eq!(clock.current_frame(), 80);
+    }
+
+    #[test]
+    fn test_playback_clock_ping_pong_extreme_dt() {
+        // Stress test: narrow work area (frames 10 to 12, span = 2 frames = 66.666 ms at 30fps)
+        // Extreme dt: 1000 seconds (30,000 frames traversed across multiple bounce cycles)
+        // Must complete instantaneously in O(1) time without looping or freezing.
+        let mut clock = PlaybackClock::new(FrameRate::FPS_30, TimeCode::from_frames(300, 30.0));
+        clock
+            .set_work_area(TimeCode::from_frames(10, 30.0), TimeCode::from_frames(12, 30.0))
+            .unwrap();
+        clock.set_loop_mode(LoopMode::PingPong);
+        clock.seek_frame(10);
+        clock.play();
+
+        let dt_1000s = std::time::Duration::from_secs(1000);
+        let res = clock.tick(dt_1000s);
+        assert!(res.looped);
+        assert!(clock.current_frame() >= 10 && clock.current_frame() <= 12);
+
+        // Reverse direction extreme dt
+        clock.seek_frame(12);
+        clock.set_speed(-1.0);
+        let res_rev = clock.tick(dt_1000s);
+        assert!(res_rev.looped);
+        assert!(clock.current_frame() >= 10 && clock.current_frame() <= 12);
+    }
+
+    #[test]
+    fn test_playback_clock_transport_state_transitions_and_speed() {
+        let mut clock = PlaybackClock::default();
+        assert!(clock.is_paused());
+
+        // Play and Pause
+        clock.play();
+        assert!(clock.is_playing());
+        clock.pause();
+        assert!(clock.is_paused());
+
+        // Toggle
+        clock.toggle_playback();
+        assert!(clock.is_playing());
+        clock.toggle_playback();
+        assert!(clock.is_paused());
+
+        // Speed settings
+        clock.set_speed(2.0);
+        assert_eq!(clock.speed(), 2.0);
+        assert!(clock.direction().is_forward());
+
+        clock.set_speed(-0.5);
+        assert_eq!(clock.speed(), -0.5);
+        assert!(clock.direction().is_reverse());
+
+        clock.reverse();
+        assert_eq!(clock.speed(), 0.5);
+        assert!(clock.direction().is_forward());
+
+        clock.play_reverse();
+        assert!(clock.is_playing());
+        assert_eq!(clock.speed(), -0.5);
+        assert!(clock.direction().is_reverse());
+
+        // Scrubbing
+        clock.start_scrubbing();
+        assert!(clock.is_scrubbing());
+        clock.scrub_to_frame(42);
+        assert_eq!(clock.current_frame(), 42);
+        assert!(clock.is_scrubbing());
+        clock.stop_scrubbing();
+        assert!(clock.is_paused());
+        assert_eq!(clock.current_frame(), 42);
+    }
+
+    #[test]
+    fn test_playback_clock_frame_stepping_and_jumping() {
+        let fps = FrameRate::FPS_30;
+        let comp_dur = TimeCode::from_frames(300, 30.0);
+        let mut clock = PlaybackClock::new(fps, comp_dur);
+
+        // Work area 30..90
+        clock
+            .set_work_area(TimeCode::from_frames(30, 30.0), TimeCode::from_frames(90, 30.0))
+            .unwrap();
+
+        // Step next frame
+        clock.seek_frame(10);
+        clock.step_next_frame();
+        assert_eq!(clock.current_frame(), 11);
+        assert!(clock.is_paused());
+
+        // Step prev frame
+        clock.step_prev_frame();
+        assert_eq!(clock.current_frame(), 10);
+
+        // Step forward multiple
+        clock.step_forward(20);
+        assert_eq!(clock.current_frame(), 30);
+
+        // Step backward multiple
+        clock.step_backward(15);
+        assert_eq!(clock.current_frame(), 15);
+
+        // Clamping at composition bounds
+        clock.step_backward(50);
+        assert_eq!(clock.current_frame(), 0);
+
+        clock.step_forward(500);
+        assert_eq!(clock.current_frame(), 300);
+
+        // Jump to work area start / end
+        clock.jump_to_start();
+        assert_eq!(clock.current_frame(), 30);
+
+        clock.jump_to_end();
+        assert_eq!(clock.current_frame(), 90);
+
+        // Jump to comp start / end
+        clock.jump_to_comp_start();
+        assert_eq!(clock.current_frame(), 0);
+
+        clock.jump_to_comp_end();
+        assert_eq!(clock.current_frame(), 300);
+    }
+
+    #[test]
+    fn test_playback_clock_composition_integration_and_keyframe_markers() {
+        let mut comp = Composition::hd_1080p_30fps("comp_clock", "Clock Test Comp", 10.0);
+
+        // Add 2 composition markers
+        comp.add_marker(Marker::new("m1", TimeCode::from_frames(30, 30.0), "Marker 1"));
+        comp.add_marker(Marker::new("m2", TimeCode::from_frames(90, 30.0), "Marker 2"));
+
+        // Add Layer 1 with opacity keyframes
+        let mut layer1 = Layer::solid(
+            "layer1",
+            "Layer 1",
+            Color::RED,
+            1920,
+            1080,
+            TimeCode::from_frames(0, 30.0),
+            TimeCode::from_frames(300, 30.0),
+        );
+        layer1.opacity.add_keyframe(Keyframe::linear(TimeCode::from_frames(10, 30.0), 0.0));
+        layer1.opacity.add_keyframe(Keyframe::linear(TimeCode::from_frames(45, 30.0), 100.0));
+        layer1.opacity.add_keyframe(Keyframe::linear(TimeCode::from_frames(120, 30.0), 50.0));
+
+        // Add Layer 2 with position keyframes and a layer marker
+        let mut layer2 = Layer::solid(
+            "layer2",
+            "Layer 2",
+            Color::BLUE,
+            1920,
+            1080,
+            TimeCode::from_frames(0, 30.0),
+            TimeCode::from_frames(300, 30.0),
+        );
+        layer2.transform.position.add_keyframe(Keyframe::linear(
+            TimeCode::from_frames(20, 30.0),
+            Vec2::new(0.0, 0.0),
+        ));
+        layer2.transform.position.add_keyframe(Keyframe::linear(
+            TimeCode::from_frames(60, 30.0),
+            Vec2::new(100.0, 100.0),
+        ));
+        layer2.transform.position.add_keyframe(Keyframe::linear(
+            TimeCode::from_frames(100, 30.0),
+            Vec2::new(200.0, 200.0),
+        ));
+        layer2.add_marker(Marker::new("m_layer", TimeCode::from_frames(75, 30.0), "Layer Marker"));
+
+        comp.add_layer(layer1).unwrap();
+        comp.add_layer(layer2).unwrap();
+
+        // Check all_keyframe_times: [10, 20, 45, 60, 100, 120]
+        let kf_times = comp.all_keyframe_times();
+        assert_eq!(kf_times.len(), 6);
+        assert_eq!(
+            kf_times.iter().map(|t| t.frames()).collect::<Vec<_>>(),
+            vec![10, 20, 45, 60, 100, 120]
+        );
+
+        // Check all_marker_times: [30, 75, 90]
+        let marker_times = comp.all_marker_times();
+        assert_eq!(marker_times.len(), 3);
+        assert_eq!(
+            marker_times.iter().map(|t| t.frames()).collect::<Vec<_>>(),
+            vec![30, 75, 90]
+        );
+
+        // Clock keyframe navigation
+        let mut clock = comp.clock();
+        assert_eq!(clock.current_frame(), 0);
+
+        assert!(clock.jump_to_next_keyframe_in_comp(&comp));
+        assert_eq!(clock.current_frame(), 10);
+
+        assert!(clock.jump_to_next_keyframe_in_comp(&comp));
+        assert_eq!(clock.current_frame(), 20);
+
+        assert!(clock.jump_to_next_keyframe_in_comp(&comp));
+        assert_eq!(clock.current_frame(), 45);
+
+        assert!(clock.jump_to_next_keyframe_in_comp(&comp));
+        assert_eq!(clock.current_frame(), 60);
+
+        assert!(clock.jump_to_next_keyframe_in_comp(&comp));
+        assert_eq!(clock.current_frame(), 100);
+
+        assert!(clock.jump_to_next_keyframe_in_comp(&comp));
+        assert_eq!(clock.current_frame(), 120);
+
+        // No more keyframes after 120
+        assert!(!clock.jump_to_next_keyframe_in_comp(&comp));
+        assert_eq!(clock.current_frame(), 120);
+
+        // Jump previous keyframe
+        assert!(clock.jump_to_prev_keyframe_in_comp(&comp));
+        assert_eq!(clock.current_frame(), 100);
+
+        assert!(clock.jump_to_prev_keyframe_in_comp(&comp));
+        assert_eq!(clock.current_frame(), 60);
+
+        // Marker navigation
+        clock.seek_frame(0);
+        assert!(clock.jump_to_next_marker_in_comp(&comp));
+        assert_eq!(clock.current_frame(), 30);
+
+        assert!(clock.jump_to_next_marker_in_comp(&comp));
+        assert_eq!(clock.current_frame(), 75);
+
+        assert!(clock.jump_to_next_marker_in_comp(&comp));
+        assert_eq!(clock.current_frame(), 90);
+
+        assert!(!clock.jump_to_next_marker_in_comp(&comp));
+
+        assert!(clock.jump_to_prev_marker_in_comp(&comp));
+        assert_eq!(clock.current_frame(), 75);
+    }
 }
+

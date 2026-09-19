@@ -1,6 +1,8 @@
+use crate::clock::PlaybackClock;
 use crate::color::Color;
 use crate::error::ValidationError;
-use crate::layer::Layer;
+use crate::frame_rate::FrameRate;
+use crate::layer::{Layer, LayerSource, ShapeType};
 use crate::marker::Marker;
 use crate::timecode::TimeCode;
 use serde::{Deserialize, Serialize};
@@ -308,5 +310,84 @@ impl Composition {
         }
 
         Ok(())
+    }
+
+    /// Return the rational `FrameRate` representation of this composition's frame rate.
+    pub fn frame_rate_info(&self) -> FrameRate {
+        FrameRate::from_fps(self.frame_rate)
+    }
+
+    /// Create an initialized `PlaybackClock` / `Transport` for this composition.
+    pub fn clock(&self) -> PlaybackClock {
+        PlaybackClock::from_composition(self)
+    }
+
+    /// Collect all unique keyframe timestamps across all layers and properties.
+    pub fn all_keyframe_times(&self) -> Vec<TimeCode> {
+        let mut times = Vec::new();
+        for layer in &self.layers {
+            for kf in &layer.opacity.keyframes {
+                times.push(kf.time);
+            }
+            for kf in &layer.transform.anchor_point.keyframes {
+                times.push(kf.time);
+            }
+            for kf in &layer.transform.position.keyframes {
+                times.push(kf.time);
+            }
+            for kf in &layer.transform.scale.keyframes {
+                times.push(kf.time);
+            }
+            for kf in &layer.transform.rotation.keyframes {
+                times.push(kf.time);
+            }
+            if let LayerSource::Shape { shape_type } = &layer.source {
+                match shape_type {
+                    ShapeType::Rectangle {
+                        width,
+                        height,
+                        corner_radius,
+                    } => {
+                        for kf in &width.keyframes {
+                            times.push(kf.time);
+                        }
+                        for kf in &height.keyframes {
+                            times.push(kf.time);
+                        }
+                        for kf in &corner_radius.keyframes {
+                            times.push(kf.time);
+                        }
+                    }
+                    ShapeType::Ellipse { radius_x, radius_y } => {
+                        for kf in &radius_x.keyframes {
+                            times.push(kf.time);
+                        }
+                        for kf in &radius_y.keyframes {
+                            times.push(kf.time);
+                        }
+                    }
+                    ShapeType::Path { .. } => {}
+                }
+            }
+        }
+        times.sort_by_key(|a| a.frames());
+        times.dedup_by(|a, b| a.frames() == b.frames());
+        times
+    }
+
+    /// Collect all unique marker timestamps on the composition and all layers.
+    pub fn all_marker_times(&self) -> Vec<TimeCode> {
+        let mut times = Vec::new();
+        for m in &self.markers {
+            times.push(m.time);
+        }
+        for layer in &self.layers {
+            for m in &layer.markers {
+                times.push(m.time);
+            }
+        }
+        times.sort_by_key(|a| a.frames());
+        times.dedup_by(|a, b| a.frames() == b.frames());
+        times
     }
 }

@@ -175,6 +175,38 @@
     - Animated layer transform with Bezier ease-in-out translation, linear rotation, and scaling.
     - Hierarchical transform evaluation with moving parent and rotating child.
   - All **78 tests** passing across the workspace with 0 errors and 0 warnings.
-- [ ] **Task 1.5: Implement timeline time-to-frame conversion and playback clock**
+- [x] **Task 1.5: Implement timeline time-to-frame conversion and playback clock**
+  - Implemented `FrameRate` in `crates/project/src/frame_rate.rs`:
+    - Rational frame rate representation (`numerator`, `denominator`, `drop_frame`) to avoid floating-point accumulation drift.
+    - Industry standard presets: `FPS_23_976` (24000/1001), `FPS_24` (24/1), `FPS_25` (25/1), `FPS_29_97_NDF` (30000/1001), `FPS_29_97_DF` (30000/1001 with drop-frame), `FPS_30` (30/1), `FPS_50` (50/1), `FPS_59_94_NDF` (60000/1001), `FPS_59_94_DF` (60000/1001 with drop-frame), and `FPS_60` (60/1).
+    - Rational conversions: `frames_to_seconds`, `seconds_to_frames`, `frame_duration`, `frame_duration_nanos`, `nanos_to_frames` with threshold quantization, and automatic `from_fps` inference.
+  - Implemented SMPTE 12M drop-frame conversion in `crates/project/src/timecode.rs`:
+    - `frame_to_drop_frame_smpte`: frame index to `(HH, MM, SS, FF)` dropping frames 0 and 1 at each minute except every 10th minute for nominal 30fps / 29.97 DF (and frames 0, 1, 2, 3 for nominal 60fps / 59.94 DF).
+    - `drop_frame_smpte_to_frame`: bijective reverse conversion with detection and error reporting for dropped frame numbers via `TimeCodeError::DroppedFrame`.
+    - Integrated with `TimeCode::to_timecode_str` (with `;` drop-frame separator e.g. `00;01;00;02`) and `TimeCode::from_timecode_str`.
+  - Implemented `PlaybackClock` and `Transport` in `crates/project/src/clock.rs`:
+    - Drift-free integer nanosecond wall-clock position accumulation (`position_nanos`, `position_seconds`) and discrete frame quantization (`current_frame`, `subframe` in `[0.0, 1.0)`).
+    - Transport states: `PlaybackState::Paused`, `Playing`, `Scrubbing` with full state transition methods (`play`, `pause`, `toggle_playback`, `play_reverse`, `start_scrubbing`, `stop_scrubbing`, `scrub_to`, `seek`).
+    - Arbitrary playback speed and direction: positive/negative speed multipliers (`speed`, `set_speed`, `reverse`, `direction`).
+    - Work area boundaries: `WorkArea` (`in_point`, `out_point`) with loop modes (`LoopMode::Loop` wrap-around, `Once` boundary clamp & auto-pause, `PingPong` velocity reflection).
+    - Drift-free delta time advancement: `tick(dt: std::time::Duration)` returning `ClockTickResult` (`timecode`, `frame`, `frame_changed`, `looped`, `reached_end`).
+    - Stepping and jumping: single/multi-frame stepping (`step_next_frame`, `step_prev_frame`, `step_forward`, `step_backward`), jump to work area and composition bounds (`jump_to_start`, `jump_to_end`, `jump_to_comp_start`, `jump_to_comp_end`), and keyframe/marker jumping across compositions (`jump_to_next_keyframe_in_comp`, `jump_to_prev_keyframe_in_comp`, `jump_to_next_marker_in_comp`, `jump_to_prev_marker_in_comp`).
+  - Added 11 automated unit tests in `crates/project`:
+    - `test_frame_rate_presets_and_rational_math`: presets, rational numbers, nominal fps, drop count, durations.
+    - `test_frame_exact_conversions_all_industry_frame_rates`: exact string roundtrips across all 10 standard rates.
+    - `test_smpte_drop_frame_29_97_calculation_and_edge_cases`: 1-minute drop, 2-minute drop, 10-minute non-drop, 1-hour mark.
+    - `test_smpte_drop_frame_59_94_calculation_and_edge_cases`: 4-frame drop at minute boundaries, 10-minute non-drop, 1-hour mark.
+    - `test_drop_frame_invalid_inputs_and_negative_timecode`: rejection of dropped frame numbers and negative drop-frame formatting/parsing.
+    - `test_playback_clock_tick_progression_and_subframes`: paused invariance, tick advancement, fractional subframes.
+    - `test_playback_clock_drift_prevention_extended_playback`: 1 hour of simulated 29.97fps playback verifying 0 nanoseconds and 0 frames drift.
+    - `test_playback_clock_work_area_loop_modes`: wrap-around looping, Once auto-pause, PingPong bounce and speed reflection.
+    - `test_playback_clock_transport_state_transitions_and_speed`: play/pause/toggle, speed multipliers, reverse, scrubbing.
+    - `test_playback_clock_frame_stepping_and_jumping`: step next/prev, step forward/backward, composition clamping, jump start/end.
+    - `test_playback_clock_composition_integration_and_keyframe_markers`: composition marker and multi-layer keyframe jumping.
+    - `test_smpte_drop_frame_from_smpte_and_component_bounds`: colon syntax drop-frame detection, component boundary validation, and WorkArea ValidationError.
+    - `test_exhaustive_smpte_drop_frame_bijective_roundtrip`: exhaustive 10-minute cycle validation across all 17,982 frames (29.97 DF) and 35,964 frames (59.94 DF).
+    - `test_playback_clock_ping_pong_extreme_dt`: stress testing PingPong with 2-frame work area and 1000s delta time verifying instant O(1) reflection.
+  - All **92 tests** passing across the workspace with 0 errors and 0 warnings.
 - [ ] **Task 1.6: Implement composition nesting and pre-comp evaluation**
 - [ ] **Task 1.7: Create headless composition evaluation tests**
+
