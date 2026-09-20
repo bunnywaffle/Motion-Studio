@@ -401,5 +401,37 @@
     - Added `test_remove_layer_effect_directly`: tests targeted layer effect deletion and enabled state toggle.
   - All **143 workspace tests passing** (34 in application) with 0 errors and zero clippy warnings.
 
+---
+
+## Phase 2: Hardware-Accelerated Rendering Architecture
+
+- [x] **Task 2.1: GPU Context Initialization & Basic RenderTarget**
+  - Implemented `GpuContext` in `crates/renderer/src/device.rs` supporting headless discrete and software fallback adapters.
+  - Implemented `RenderTarget` with 256-byte aligned texture readback (`read_texture_to_cpu`).
+  - Implemented `CustomShaderPipeline` with custom WGSL compilation and uniform updates.
+  - Added unit tests for headless initialization, target dimension validation, and custom shader rendering.
+
+- [x] **Task 2.2: Offscreen Render Target, Pipelining, Blit Compositor & Texture Cache**
+  - **RenderTarget Enhancement**:
+    - Added `RenderTarget::with_format` supporting arbitrary texture formats (`Rgba8Unorm`, `Rgba8UnormSrgb`, `Rgba16Float`).
+    - Added `RenderTarget::clear(&gpu, color)` to clear render targets to arbitrary background colors in an isolated render pass.
+  - **DoubleBufferedTarget**:
+    - Ping-pong dual-buffer management (`read_target`, `write_target`, `swap()`, `read_active_to_cpu`) for multi-pass effect chains (e.g. 2-pass separable Gaussian blur).
+  - **BlitPipeline**:
+    - Hardware-accelerated textured quad rendering pipeline in `crates/renderer/src/blit.rs`.
+    - WGSL shader supporting affine 4x4 matrix transformation, opacity control, and premultiplied/unpremultiplied alpha blending.
+    - Procedural full-screen/quad geometry with bilinear texture filtering (`wgpu::Sampler`).
+    - Configurable load operation: blit with texture load (compositing) or clear (target reset).
+  - **TextureCache**:
+    - Centralized GPU texture cache in `crates/renderer/src/cache.rs` for uploaded media assets and rendered pre-comps.
+    - Direct RGBA image upload (`upload_rgba_image`) with validation, dimension tracking, and lifecycle management (`get`, `get_view`, `remove`, `clear`).
+  - **Automated Tests**:
+    - `test_render_target_formats_and_clearing`: Validated format selection and solid color clearing with CPU readback.
+    - `test_double_buffered_target_ping_pong`: Validated buffer swapping and pointer alternation.
+    - `test_texture_cache_upload_and_reuse`: Validated dynamic RGBA upload and dimension querying.
+    - `test_blit_pipeline_rendering_and_readback`: Validated hardware blit rendering, alpha blending, and pixel readback.
+  - All **147 workspace tests passing** across all crates (`cargo test --workspace`) with 0 errors and zero clippy warnings (`cargo clippy --workspace --all-targets -- -D warnings`).
+
+
 
 

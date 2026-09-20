@@ -105,8 +105,18 @@ pub struct RenderTarget {
 impl RenderTarget {
     pub const DEFAULT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
-    /// Allocate a new offscreen render target texture at the given width and height.
+    /// Allocate a new offscreen render target texture at the given width and height with default format.
     pub fn new(gpu: &GpuContext, width: u32, height: u32) -> Result<Self, GpuError> {
+        Self::with_format(gpu, width, height, Self::DEFAULT_FORMAT)
+    }
+
+    /// Allocate a new offscreen render target texture at the given width, height, and format.
+    pub fn with_format(
+        gpu: &GpuContext,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+    ) -> Result<Self, GpuError> {
         if width == 0 || height == 0 {
             return Err(GpuError::InvalidDimensions { width, height });
         }
@@ -116,8 +126,6 @@ impl RenderTarget {
             height,
             depth_or_array_layers: 1,
         };
-
-        let format = Self::DEFAULT_FORMAT;
 
         let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("RenderTarget Texture"),
@@ -236,5 +244,103 @@ impl RenderTarget {
         staging_buffer.unmap();
 
         Ok(tightly_packed)
+    }
+
+    /// Clear the render target with the specified color.
+    pub fn clear(&self, gpu: &GpuContext, color: wgpu::Color) {
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("RenderTarget Clear Encoder"),
+            });
+
+        {
+            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("RenderTarget Clear Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(color),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+        }
+
+        gpu.queue.submit(std::iter::once(encoder.finish()));
+    }
+}
+
+/// A double-buffered ping-pong render target for chained multi-pass compositing operations.
+pub struct DoubleBufferedTarget {
+    target_a: RenderTarget,
+    target_b: RenderTarget,
+    is_a_read: bool,
+}
+
+impl DoubleBufferedTarget {
+    /// Create a double-buffered target with default texture format.
+    pub fn new(gpu: &GpuContext, width: u32, height: u32) -> Result<Self, GpuError> {
+        Self::with_format(gpu, width, height, RenderTarget::DEFAULT_FORMAT)
+    }
+
+    /// Create a double-buffered target with specified texture format.
+    pub fn with_format(
+        gpu: &GpuContext,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+    ) -> Result<Self, GpuError> {
+        let target_a = RenderTarget::with_format(gpu, width, height, format)?;
+        let target_b = RenderTarget::with_format(gpu, width, height, format)?;
+        Ok(Self {
+            target_a,
+            target_b,
+            is_a_read: true,
+        })
+    }
+
+    /// Current read destination target (source for next pass).
+    pub fn read_target(&self) -> &RenderTarget {
+        if self.is_a_read {
+            &self.target_a
+        } else {
+            &self.target_b
+        }
+    }
+
+    /// Current write destination target (target for current pass).
+    pub fn write_target(&self) -> &RenderTarget {
+        if self.is_a_read {
+            &self.target_b
+        } else {
+            &self.target_a
+        }
+    }
+
+    /// Swap read and write targets after a pass finishes.
+    pub fn swap(&mut self) {
+        self.is_a_read = !self.is_a_read;
+    }
+
+    pub fn width(&self) -> u32 {
+        self.target_a.width()
+    }
+
+    pub fn height(&self) -> u32 {
+        self.target_a.height()
+    }
+
+    pub fn format(&self) -> wgpu::TextureFormat {
+        self.target_a.format()
+    }
+
+    /// Read the current active read buffer back to CPU memory.
+    pub fn read_active_to_cpu(&self, gpu: &GpuContext) -> Result<Vec<u8>, GpuError> {
+        self.read_target().read_texture_to_cpu(gpu)
     }
 }

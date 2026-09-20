@@ -149,24 +149,31 @@
     - Inline keyframe navigation controls `<` `◆` `>` to step between previous/next keyframes and add/remove keyframes at the playhead.
     - Timeline track lane renders diamond keyframe markers (`◆`) at exact relative positions along the timeline, highlighting gold at the playhead and cyan elsewhere. Clicking any keyframe seeks the playhead directly to that keyframe.
     - Real-time keyframe recording on value nudge/scrub when a property is animated.
+- Hardware-Accelerated Rendering Architecture in `crates/renderer` (Phase 2 Task 2.1 & Task 2.2):
+  - `GpuContext`: Headless wgpu 24 initialization with automatic hardware adapter selection, software adapter fallback, and downlevel limits support.
+  - `RenderTarget`: Flexible offscreen texture format support (`Rgba8UnormSrgb`, `Rgba8Unorm`, `Rgba16Float`), color clearing (`clear`), texture view generation, and 256-byte aligned CPU readback (`read_texture_to_cpu`).
+  - `DoubleBufferedTarget`: Ping-pong dual-buffer management (`read_target`, `write_target`, `swap()`) for sequential multi-pass compositing and effect chains.
+  - `BlitPipeline`: Hardware-accelerated textured quad rendering pipeline with WGSL shader (`vs_main`, `fs_main`), custom 4x4 matrix transformation, alpha blending, opacity control, and premultiplied/unpremultiplied alpha modes.
+  - `TextureCache`: Asset and composition texture cache with direct GPU texture uploads (`upload_rgba_image`), dimension tracking, view lookups, and cache lifecycle management.
 - Project Panel Asset Bin Overhaul:
   - Removed composition layers from Project panel to match After Effects architecture.
   - Project panel is strictly an Asset Bin displaying Compositions, Imported Media Assets, and Solids footage items.
-- Full automated test suite passing with **143 tests** across the workspace (34 application tests + 51 project unit tests + 47 compositor unit tests + 8 compositor integration tests + 3 renderer unit tests).
+- Full automated test suite passing with **147 tests** across the workspace (34 application tests + 51 project unit tests + 47 compositor unit tests + 8 compositor integration tests + 7 renderer unit tests).
 - Workspace compiles, builds, and passes all checks cleanly with 0 errors and 0 warnings (`cargo check --workspace`, `cargo build --workspace`, `cargo test --workspace`, and `cargo clippy --workspace --all-targets -- -D warnings`).
 
 ## What Is Currently Being Developed
-- Phase 2: Hardware-Accelerated Rendering Architecture (pipelines, shaders, layer blit).
+- Phase 2: Hardware-Accelerated Rendering Architecture (layer composite rendering pass and GPU effect integration).
 
 ## Known Problems
 - None.
 
 ## Next Single Task
 
-### Task 2.2: Create offscreen render target and readback
+### Task 2.3: Implement GPU composition renderer and layer composite pass
 
-- Expand render target abstraction with multi-buffer pipelining and color format conversions.
-- Create vertex/fragment shader pipelines for compositing layers onto render targets.
-- Implement texture cache for uploaded assets and cached pre-comps.
+- Wire `EvaluatedStack` and `FlattenedRenderLayer` from `crates/compositor` into a hardware rendering pass in `crates/renderer`.
+- Iterate over flattened render layers in painter's composite order and blit them onto the root offscreen render target using their world transformation matrices and cumulative opacities.
+- Support offscreen render passes for nested pre-compositions and track matte masks.
+
 
 
