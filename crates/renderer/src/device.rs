@@ -46,7 +46,7 @@ impl GpuContext {
             .ok_or(GpuError::NoAdapterFound)?,
         };
 
-        let (device, queue) = pollster::block_on(adapter.request_device(
+        let device_res = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("Motion Compositor Headless Device"),
                 required_features: wgpu::Features::empty(),
@@ -54,7 +54,20 @@ impl GpuContext {
                 memory_hints: wgpu::MemoryHints::default(),
             },
             None,
-        ))?;
+        ));
+
+        let (device, queue) = match device_res {
+            Ok(pair) => pair,
+            Err(_) => pollster::block_on(adapter.request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("Motion Compositor Headless Device Downlevel"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::downlevel_defaults(),
+                    memory_hints: wgpu::MemoryHints::default(),
+                },
+                None,
+            ))?,
+        };
 
         Ok(Self {
             instance,

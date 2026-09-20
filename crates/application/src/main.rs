@@ -198,7 +198,7 @@ mod tests {
     use gpui_kit::component::dock::{DockPlacement, PanelId};
     use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
     use gpui_kit::test::TestWindowExt;
-    use gpui_kit::{px, size, AppContext as _, Entity, TestAppContext};
+    use gpui_kit::{px, size, AppContext as _, Entity, SharedString, TestAppContext};
 
     fn setup_test_window(cx: &mut TestAppContext) -> (Entity<Root>, Entity<AppView>) {
         cx.update(gpui_kit::init);
@@ -1276,6 +1276,158 @@ mod tests {
         let layer = state.selected_layer().expect("layer selected");
         assert_eq!(layer.effects.len(), 1);
         assert_eq!(layer.effects[0].id, fx2_id);
+    }
+
+    #[gpui_kit::test]
+    fn test_ui_effects_panel_addition_and_properties_inspector_manipulation(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            Theme::change(ThemeMode::Dark, None, cx);
+        });
+
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
+            window.activate_window();
+            window.set_window_title("Motion Compositor");
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+
+        let app_view = app_view_entity.expect("AppView created");
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+
+            let dock_area = app_view.read(cx).dock_area().clone();
+            let panels = app_view.read(cx).panels().clone();
+            let properties_id = PanelId::from(panels.properties.entity_id());
+            let effects_id = PanelId::from(panels.effects.entity_id());
+
+            // 1. Switch dock to Effects tab
+            dock_area.update(cx, |dock, cx| {
+                dock.select_panel(effects_id, window, cx);
+            });
+            window.render_frame(cx);
+
+            // Verify effects items are visible in the DOM
+            assert!(window.find("effects_panel").visible());
+            assert!(window.find("effects_categories").visible());
+            assert!(window.find("effect_item_gaussian_blur").visible());
+            assert!(window.find("effect_item_brightness_contrast").visible());
+
+            // 2. Add effect to selected layer
+            let state_entity = app_view.read(cx).state().clone();
+            state_entity.update(cx, |s, cx| {
+                let _ = s.add_effect_to_selected_layer(project::EffectType::gaussian_blur(10.0));
+                cx.notify();
+            });
+
+            // 3. Switch back to Properties tab
+            dock_area.update(cx, |dock, cx| {
+                dock.select_panel(properties_id, window, cx);
+            });
+            window.render_frame(cx);
+
+            // Verify Properties tab has the applied effect
+            let layer = state_entity.read(cx).selected_layer().unwrap().clone();
+            assert_eq!(layer.effects.len(), 1);
+            let eff_id = layer.effects[0].id.clone();
+
+            assert!(window.find(SharedString::from(format!("effect_toggle_{eff_id}"))).visible());
+            assert!(window.find(SharedString::from(format!("effect_delete_{eff_id}"))).visible());
+            assert!(window.find(SharedString::from(format!("param_radius_{eff_id}"))).visible());
+            assert!(window.find(SharedString::from(format!("param_radius_plus_{eff_id}"))).visible());
+            assert!(window.find(SharedString::from(format!("param_radius_minus_{eff_id}"))).visible());
+
+            // 4. Test live parameter nudging
+            state_entity.update(cx, |s, cx| {
+                let _ = s.nudge_effect_param(&eff_id, "radius", 5.0);
+                cx.notify();
+            });
+            window.render_frame(cx);
+            let layer_after_nudge = state_entity.read(cx).selected_layer().unwrap().clone();
+            if let project::EffectType::GaussianBlur { radius } = &layer_after_nudge.effects[0].effect_type {
+                assert_eq!(radius.value, 15.0);
+            } else {
+                panic!("Expected GaussianBlur");
+            }
+
+            // 5. Test toggle enabled
+            state_entity.update(cx, |s, cx| {
+                let _ = s.toggle_effect_enabled(&eff_id);
+                cx.notify();
+            });
+            window.render_frame(cx);
+            let layer_after_toggle = state_entity.read(cx).selected_layer().unwrap().clone();
+            assert!(!layer_after_toggle.effects[0].enabled);
+
+            // 6. Test delete effect
+            state_entity.update(cx, |s, cx| {
+                let _ = s.remove_effect_from_selected_layer(&eff_id);
+                cx.notify();
+            });
+            window.render_frame(cx);
+            let layer_after_delete = state_entity.read(cx).selected_layer().unwrap().clone();
+            assert_eq!(layer_after_delete.effects.len(), 0);
+        })
+        .expect("update_window failed");
+    }
+
+    #[gpui_kit::test]
+    fn test_ui_project_panel_media_import_and_assets_listing(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            Theme::change(ThemeMode::Dark, None, cx);
+        });
+
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
+            window.activate_window();
+            window.set_window_title("Motion Compositor");
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+
+        let app_view = app_view_entity.expect("AppView created");
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+
+            // Verify project panel and import button
+            assert!(window.find("project_panel").visible());
+            assert!(window.find("project_assets").visible());
+            assert!(window.find("import_media_button").visible());
+            assert!(window.find("add_solid_button").visible());
+
+            let state_entity = app_view.read(cx).state().clone();
+
+            // Import an image
+            let temp_dir = std::env::temp_dir();
+            let test_img_path = temp_dir.join("motion_studio_ui_import_test.png");
+            let img = image::RgbaImage::new(400, 300);
+            img.save(&test_img_path).expect("failed to create test image");
+
+            let layer_id = state_entity.update(cx, |s, cx| {
+                let lid = s.import_media_file(test_img_path.clone()).expect("import succeeded");
+                cx.notify();
+                lid
+            });
+
+            window.render_frame(cx);
+
+            // Verify layer selected and registered
+            let state = state_entity.read(cx);
+            assert_eq!(state.selected_layer_id.as_deref(), Some(layer_id.as_str()));
+            assert!(state.project.assets.iter().any(|a| a.path == test_img_path));
+
+            // Verify canvas rendered new layer
+            assert!(window.find(SharedString::from(format!("canvas_layer_{layer_id}"))).visible());
+
+            let _ = std::fs::remove_file(test_img_path);
+        })
+        .expect("update_window failed");
     }
 }
 

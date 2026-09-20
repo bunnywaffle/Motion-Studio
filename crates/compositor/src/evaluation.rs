@@ -109,6 +109,8 @@ pub struct FlattenedRenderLayer {
     pub time_offset_frames: i64,
     /// Relative time offset in seconds from layer in-point.
     pub time_offset_seconds: f64,
+    /// Evaluated post-processing effects applied to this layer.
+    pub effects: Vec<EvaluatedEffect>,
 }
 
 impl FlattenedRenderLayer {
@@ -428,6 +430,7 @@ impl EvaluatedStack {
                         is_matte_source: current_is_matte,
                         time_offset_frames: layer.time_offset_frames,
                         time_offset_seconds: layer.time_offset_seconds,
+                        effects: layer.effects.clone(),
                     });
                 }
             }

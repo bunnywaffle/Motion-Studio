@@ -30,6 +30,32 @@ where
         .child(label)
 }
 
+fn step_button_with_id<F>(
+    id: impl Into<ElementId>,
+    label: &'static str,
+    cx: &App,
+    on_click: F,
+) -> impl IntoElement
+where
+    F: Fn(&mut App) + 'static,
+{
+    div()
+        .id(id)
+        .test_support()
+        .px_1p5()
+        .py_0p5()
+        .rounded_sm()
+        .bg(cx.theme().muted)
+        .hover(|s| s.bg(cx.theme().accent))
+        .text_color(cx.theme().foreground)
+        .text_xs()
+        .cursor_pointer()
+        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+            on_click(cx);
+        })
+        .child(label)
+}
+
 // --- 1. Project Panel ---
 
 pub struct ProjectPanel {
@@ -105,7 +131,49 @@ impl Render for ProjectPanel {
                         .child(div().flex_1().child(format!("{}", comp.duration))),
                 );
 
-                // 2. Layers within active composition
+                // 2. Imported project assets (Image, Video, Audio, etc.)
+                for asset in &state.project.assets {
+                    let (type_str, icon) = match &asset.asset_type {
+                        project::AssetType::Image => ("Image", IconName::Image),
+                        project::AssetType::Video => ("Video", IconName::Film),
+                        project::AssetType::Audio => ("Audio", IconName::Music),
+                        project::AssetType::Vector => ("Vector", IconName::Folder),
+                        project::AssetType::Font => ("Font", IconName::Type),
+                        project::AssetType::Other(_) => ("Media", IconName::Layers),
+                    };
+
+                    let path_str = asset.path.to_string_lossy().to_string();
+                    let display_name = asset
+                        .path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(&asset.name)
+                        .to_string();
+
+                    items.push(
+                        h_flex()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .items_center()
+                            .text_color(cx.theme().foreground)
+                            .hover(|s| s.bg(cx.theme().muted))
+                            .child(
+                                h_flex()
+                                    .w(px(110.))
+                                    .gap_1()
+                                    .items_center()
+                                    .child(icon_box(icon))
+                                    .child(display_name),
+                            )
+                            .child(div().w(px(70.)).child(type_str))
+                            .child(div().w(px(70.)).child("-"))
+                            .child(div().flex_1().child(path_str)),
+                    );
+                }
+
+                // 3. Layers within active composition
                 for layer in &comp.layers {
                     let is_selected = state.selected_layer_id.as_deref() == Some(&layer.id);
                     let type_str = match &layer.source {
@@ -264,7 +332,7 @@ impl Render for ProjectPanel {
                                         }
                                     })
                                     .child(icon_box(IconName::FolderOpen))
-                                    .child("Import"),
+                                    .child("Import Media..."),
                             )
                             .child(
                                 div()
@@ -853,9 +921,19 @@ impl Render for PropertiesPanel {
                                                     h_flex()
                                                         .gap_1()
                                                         .items_center()
-                                                        .child(step_button("-", cx, move |cx| s_m.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_m, "radius", -5.0); cx.notify(); })))
+                                                        .child(step_button_with_id(
+                                                            SharedString::from(format!("param_radius_minus_{}", eff_id)),
+                                                            "-",
+                                                            cx,
+                                                            move |cx| s_m.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_m, "radius", -5.0); cx.notify(); }),
+                                                        ))
                                                         .child(div().id(SharedString::from(format!("param_radius_{}", eff_id))).test_support().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("{:.1} px", r)))
-                                                        .child(step_button("+", cx, move |cx| s_p.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p, "radius", 5.0); cx.notify(); }))),
+                                                        .child(step_button_with_id(
+                                                            SharedString::from(format!("param_radius_plus_{}", eff_id)),
+                                                            "+",
+                                                            cx,
+                                                            move |cx| s_p.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p, "radius", 5.0); cx.notify(); }),
+                                                        )),
                                                 ),
                                         );
                                     }
@@ -1444,7 +1522,7 @@ impl Render for EffectsPanel {
                     .child(effect_item_row("directional_blur", "Directional Blur", EffectType::gaussian_blur(15.0), &self.state, cx))
                     .child(effect_item_row("sharpen", "Sharpen", EffectType::brightness_contrast(0.0, 25.0), &self.state, cx))
                     // Category 2: Color Correction
-                    .child(category_header("▼ Color Correction", IconName::Sun, cx))
+                    .child(category_header("▼ Color Correction", IconName::Palette, cx))
                     .child(effect_item_row("brightness_contrast", "Brightness & Contrast", EffectType::brightness_contrast(15.0, 10.0), &self.state, cx))
                     .child(effect_item_row("tint", "Tint", EffectType::tint(Color::BLACK, Color::WHITE, 100.0), &self.state, cx))
                     .child(effect_item_row("invert", "Invert", EffectType::invert(100.0), &self.state, cx))
@@ -1455,7 +1533,7 @@ impl Render for EffectsPanel {
                     .child(effect_item_row("drop_shadow", "Drop Shadow", EffectType::drop_shadow(8.0, 45.0, 10.0, 75.0, Color::BLACK), &self.state, cx))
                     .child(effect_item_row("transform", "Transform", EffectType::drop_shadow(0.0, 0.0, 0.0, 100.0, Color::BLACK), &self.state, cx))
                     // Category 4: Generate & Stylize
-                    .child(category_header("▼ Generate & Stylize", IconName::Layers, cx))
+                    .child(category_header("▼ Generate & Stylize", IconName::Sparkles, cx))
                     .child(effect_item_row("fill", "Fill", EffectType::tint(Color::rgb(0.2, 0.4, 0.8), Color::rgb(0.2, 0.4, 0.8), 100.0), &self.state, cx))
                     .child(effect_item_row("gradient_ramp", "Gradient Ramp", EffectType::tint(Color::BLACK, Color::rgb(0.9, 0.3, 0.1), 75.0), &self.state, cx))
                     // Category 5: Transition

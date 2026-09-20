@@ -302,9 +302,9 @@
   - Integrated `gpui_kit::assets::IconName` across all application panels, replacing raw Unicode text glyphs:
     - `TimelinePanel`: Transport controls use `IconName::SkipBack`, `IconName::StepBack`, `IconName::Play` / `IconName::Pause`, `IconName::StepForward`, `IconName::SkipForward`, and `IconName::Repeat`.
     - Layer Switches: `IconName::Eye` / `IconName::EyeOff` for visibility toggle, `IconName::Sparkles` for solo toggle.
-    - `ProjectPanel`: Asset classification icons (`IconName::Folder` for compositions, `IconName::Layers` for solids, `IconName::Image` for images, `IconName::Film` for videos, `IconName::Type` for text, `IconName::Sparkles` for shapes). Toolbar uses `IconName::FolderOpen` ("Import") and `IconName::Plus` ("Solid").
-    - `PropertiesPanel`: Section headers and transform row icons (`IconName::Layers`, `IconName::Move`, `IconName::Maximize2`, `IconName::RotateCw`, `IconName::Sun`, `IconName::SlidersHorizontal`).
-    - `EffectsPanel`: Category and action icons (`IconName::SlidersHorizontal`, `IconName::Sun`, `IconName::WandSparkles`, `IconName::Layers`, `IconName::RotateCw`, `IconName::Plus`, `IconName::Sparkles`).
+    - `ProjectPanel`: Asset classification icons (`IconName::Folder` for compositions, `IconName::Layers` for solids, `IconName::Image` for images, `IconName::Film` for videos, `IconName::Music` for audio files, `IconName::Type` for text, `IconName::Sparkles` for shapes). Toolbar uses `IconName::FolderOpen` ("Import Media...") and `IconName::Plus` ("Solid").
+    - `PropertiesPanel`: Section headers and transform row icons (`IconName::Layers`, `IconName::Move`, `IconName::Maximize2`, `IconName::RotateCw`, `IconName::Sun`, `IconName::SlidersHorizontal`, `IconName::Trash`).
+    - `EffectsPanel`: Category and action icons (`IconName::SlidersHorizontal`, `IconName::Palette`, `IconName::WandSparkles`, `IconName::Sparkles`, `IconName::RotateCw`, `IconName::Plus`).
 
 - [x] **Enhancement: Media Import Pipeline**
   - Integrated `rfd = "0.15"` for native cross-platform file dialogs and `image = "0.25"` for media metadata decoding.
@@ -313,8 +313,9 @@
     - Registers new `Asset` in `project.assets`.
     - Instantiates a new centered `Layer` in active composition with anchor point centered at `(width/2, height/2)`.
     - Automatically selects the newly imported layer in canvas and timeline.
-  - Added "Import" button to `ProjectPanel` toolbar with file picker filter for images and videos (`png`, `jpg`, `jpeg`, `mp4`, `mov`, `webm`).
-  - Added unit test `test_media_import_and_layer_creation` in `crates/application`.
+  - Added "Import Media..." button to `ProjectPanel` toolbar with file picker filter for images and videos (`png`, `jpg`, `jpeg`, `mp4`, `mov`, `webm`).
+  - Added project assets display in `ProjectPanel` rendering imported audio/image/video files with dedicated type icons.
+  - Added unit test `test_media_import_and_layer_creation` and full GPUI test `test_ui_project_panel_media_import_and_assets_listing` in `crates/application`.
 
 - [x] **Enhancement: Real Layer Effects Architecture**
   - Data model in `crates/project/src/effect.rs`:
@@ -326,13 +327,14 @@
   - Compositor evaluation in `crates/compositor/src/evaluation.rs`:
     - `EvaluatedEffect` and `EvaluatedEffectType`.
     - Attached to `EvaluatedLayer`: `effects: Vec<EvaluatedEffect>`.
+    - Attached to `FlattenedRenderLayer`: `effects: Vec<EvaluatedEffect>` to preserve effect stack for downstream rendering.
     - Dynamic keyframe/property evaluation over time in `LayerStackEvaluator`.
   - Editor state mutation in `crates/application/src/state.rs`:
     - `add_effect_to_selected_layer`, `remove_effect_from_selected_layer`, `toggle_effect_enabled`, `nudge_effect_param`.
   - UI panels in `crates/application/src/panels.rs`:
     - `EffectsPanel`: 13 real built-in clickable effects that add real effect instances to the selected layer.
     - `PropertiesPanel`: Working **"▼ Effects"** inspector section rendering applied effects with eye visibility toggle, trash delete button, and live `-`/`+` numeric parameter nudging.
-  - Added unit and UI tests: `test_layer_effects_crud_and_serialization`, `test_layer_effects_evaluation_over_time`, `test_effects_crud_and_parameter_nudging`.
-  - All **132 workspace tests passing** with 0 errors and zero clippy warnings.
+  - Added unit and UI tests: `test_layer_effects_crud_and_serialization`, `test_layer_effects_evaluation_over_time`, `test_effects_crud_and_parameter_nudging`, `test_ui_effects_panel_addition_and_properties_inspector_manipulation`.
+  - All **135 workspace tests passing** with 0 errors and zero clippy warnings.
 
 

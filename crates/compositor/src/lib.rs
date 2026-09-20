@@ -2493,6 +2493,16 @@ mod tests {
             }
             _ => panic!("Expected Invert"),
         }
+
+        // 5. Verify FlattenedRenderLayer preserves evaluated effects
+        let flat_list = eval_enabled.flattened_render_list();
+        let flat_fx_layer = flat_list
+            .iter()
+            .find(|l| l.layer_id == "layer_fx")
+            .expect("layer_fx in flattened list");
+        assert_eq!(flat_fx_layer.effects.len(), 2);
+        assert_eq!(flat_fx_layer.effects[0].id, "fx_blur_anim");
+        assert_eq!(flat_fx_layer.effects[1].id, "fx_inv");
     }
 }
 
