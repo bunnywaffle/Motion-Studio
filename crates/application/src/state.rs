@@ -344,6 +344,140 @@ impl EditorState {
         Ok(layer_id)
     }
 
+    /// Delete the currently selected layer from the active composition.
+    pub fn delete_selected_layer(&mut self) -> Result<String, String> {
+        let sel_id = self
+            .selected_layer_id
+            .take()
+            .ok_or_else(|| "No layer selected to delete".to_string())?;
+
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+
+        comp.remove_layer(&sel_id)
+            .ok_or_else(|| format!("Layer {sel_id} not found in composition"))?;
+
+        // Automatically select the nearest remaining layer if any
+        self.selected_layer_id = comp.layers.last().map(|l| l.id.clone());
+        Ok(sel_id)
+    }
+
+    /// Remove a layer by its ID.
+    pub fn remove_layer_by_id(&mut self, layer_id: &str) -> Result<(), String> {
+        let is_selected = self.selected_layer_id.as_deref() == Some(layer_id);
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+
+        comp.remove_layer(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found in composition"))?;
+
+        if is_selected {
+            self.selected_layer_id = comp.layers.last().map(|l| l.id.clone());
+        }
+        Ok(())
+    }
+
+    /// Move the currently selected layer up in the stack (toward index 0, on top visually).
+    pub fn move_selected_layer_up(&mut self) -> Result<(), String> {
+        let sel_id = self
+            .selected_layer_id
+            .clone()
+            .ok_or_else(|| "No layer selected".to_string())?;
+        self.move_layer_up(&sel_id)
+    }
+
+    /// Move the currently selected layer down in the stack (away from index 0, lower visually).
+    pub fn move_selected_layer_down(&mut self) -> Result<(), String> {
+        let sel_id = self
+            .selected_layer_id
+            .clone()
+            .ok_or_else(|| "No layer selected".to_string())?;
+        self.move_layer_down(&sel_id)
+    }
+
+    /// Move a layer identified by ID up in the visual stack.
+    pub fn move_layer_up(&mut self, layer_id: &str) -> Result<(), String> {
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+
+        let current_idx = comp
+            .layer_index(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+
+        if current_idx > 0 {
+            comp.move_layer(current_idx, current_idx - 1)
+                .map_err(|e| format!("{e:?}"))?;
+        }
+        Ok(())
+    }
+
+    /// Move a layer identified by ID down in the visual stack.
+    pub fn move_layer_down(&mut self, layer_id: &str) -> Result<(), String> {
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+
+        let current_idx = comp
+            .layer_index(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+
+        if current_idx + 1 < comp.layers.len() {
+            comp.move_layer(current_idx, current_idx + 1)
+                .map_err(|e| format!("{e:?}"))?;
+        }
+        Ok(())
+    }
+
+    /// Reorder a layer directly to a specific target index.
+    pub fn reorder_layer(&mut self, layer_id: &str, new_index: usize) -> Result<(), String> {
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+
+        comp.reorder_layer(layer_id, new_index)
+            .map_err(|e| format!("{e:?}"))
+    }
+
+    /// Delete an asset from project by its asset ID.
+    pub fn delete_asset(&mut self, asset_id: &str) -> Result<(), String> {
+        let idx = self
+            .project
+            .assets
+            .iter()
+            .position(|a| a.id == asset_id)
+            .ok_or_else(|| format!("Asset {asset_id} not found"))?;
+        self.project.assets.remove(idx);
+        Ok(())
+    }
+
+    /// Update custom GLSL / WGSL shader code on an effect.
+    pub fn update_glsl_code(&mut self, effect_id: &str, code: &str) -> Result<(), String> {
+        let selected_id = self
+            .selected_layer_id
+            .clone()
+            .ok_or_else(|| "No layer selected".to_string())?;
+
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(&selected_id)
+            .ok_or_else(|| format!("Layer {selected_id} not found"))?;
+
+        let effect = layer
+            .get_effect_mut(effect_id)
+            .ok_or_else(|| format!("Effect {effect_id} not found"))?;
+
+        if effect.set_glsl_code(code) {
+            Ok(())
+        } else {
+            Err(format!("Effect {effect_id} is not a GLSL shader effect"))
+        }
+    }
+
     /// Add an effect of `effect_type` to the currently selected layer.
     pub fn add_effect_to_selected_layer(
         &mut self,

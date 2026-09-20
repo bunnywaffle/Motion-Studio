@@ -1430,4 +1430,3 @@ mod tests {
         .expect("update_window failed");
     }
 }
-

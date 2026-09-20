@@ -1,10 +1,31 @@
 pub mod device;
+pub mod shader;
 
 pub use device::{GpuContext, GpuError, RenderTarget};
+pub use shader::{CustomShaderPipeline, CustomShaderUniforms};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_custom_shader_pipeline() {
+        if let Ok(gpu) = GpuContext::new_headless() {
+            let target = RenderTarget::new(&gpu, 64, 64).expect("create target");
+            let pipeline = CustomShaderPipeline::new(
+                &gpu,
+                CustomShaderPipeline::DEFAULT_WGSL,
+                target.format(),
+            )
+            .expect("compile shader pipeline");
+
+            let uniforms = CustomShaderUniforms::default();
+            pipeline.render(&gpu, &target, uniforms);
+
+            let pixels = target.read_texture_to_cpu(&gpu).expect("read pixels");
+            assert_eq!(pixels.len(), 64 * 64 * 4);
+        }
+    }
 
     #[test]
     fn test_gpu_context_headless_initialization() {

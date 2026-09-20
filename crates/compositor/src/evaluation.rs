@@ -173,6 +173,13 @@ pub enum EvaluatedEffectType {
         opacity: f32,
         color: Color,
     },
+    GlslShader {
+        code: String,
+        param1: f32,
+        param2: f32,
+        param3: f32,
+        param4: f32,
+    },
 }
 
 impl EvaluatedEffectType {
@@ -183,6 +190,69 @@ impl EvaluatedEffectType {
             Self::Tint { .. } => "Tint",
             Self::Invert { .. } => "Invert",
             Self::DropShadow { .. } => "Drop Shadow",
+            Self::GlslShader { .. } => "Custom GLSL Shader",
+        }
+    }
+
+    /// Visually process an input Color through this evaluated effect algorithm.
+    pub fn process_color(&self, c: Color) -> Color {
+        match self {
+            Self::GaussianBlur { radius } => {
+                let softness = (*radius / 100.0).clamp(0.0, 0.4);
+                Color::rgba(
+                    c.r * (1.0 - softness) + 0.5 * softness,
+                    c.g * (1.0 - softness) + 0.5 * softness,
+                    c.b * (1.0 - softness) + 0.5 * softness,
+                    c.a,
+                )
+            }
+            Self::BrightnessContrast { brightness, contrast } => {
+                let b = *brightness / 100.0;
+                let k = (1.0 + *contrast / 100.0).max(0.0);
+                Color::rgba(
+                    ((c.r - 0.5) * k + 0.5 + b).clamp(0.0, 1.0),
+                    ((c.g - 0.5) * k + 0.5 + b).clamp(0.0, 1.0),
+                    ((c.b - 0.5) * k + 0.5 + b).clamp(0.0, 1.0),
+                    c.a,
+                )
+            }
+            Self::Tint { map_black, map_white, amount } => {
+                let t = (*amount / 100.0).clamp(0.0, 1.0);
+                let lum = 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
+                let tr = map_black.r * (1.0 - lum) + map_white.r * lum;
+                let tg = map_black.g * (1.0 - lum) + map_white.g * lum;
+                let tb = map_black.b * (1.0 - lum) + map_white.b * lum;
+                Color::rgba(
+                    c.r * (1.0 - t) + tr * t,
+                    c.g * (1.0 - t) + tg * t,
+                    c.b * (1.0 - t) + tb * t,
+                    c.a,
+                )
+            }
+            Self::Invert { amount } => {
+                let t = (*amount / 100.0).clamp(0.0, 1.0);
+                Color::rgba(
+                    c.r * (1.0 - t) + (1.0 - c.r) * t,
+                    c.g * (1.0 - t) + (1.0 - c.g) * t,
+                    c.b * (1.0 - t) + (1.0 - c.b) * t,
+                    c.a,
+                )
+            }
+            Self::DropShadow { color: _, opacity, .. } => {
+                let op = (*opacity / 100.0).clamp(0.0, 1.0);
+                Color::rgba(c.r, c.g, c.b, (c.a * (1.0 + 0.15 * op)).clamp(0.0, 1.0))
+            }
+            Self::GlslShader { param1: _, param2, param3, param4, .. } => {
+                let gain = 1.0 + (*param2 / 100.0);
+                let shift = *param3 / 100.0;
+                let mod_alpha = if *param4 != 0.0 { (*param4 / 100.0).clamp(0.0, 1.0) } else { 1.0 };
+                Color::rgba(
+                    (c.r * gain + shift).clamp(0.0, 1.0),
+                    (c.g * gain).clamp(0.0, 1.0),
+                    (c.b * gain - shift * 0.5).clamp(0.0, 1.0),
+                    (c.a * mod_alpha).clamp(0.0, 1.0),
+                )
+            }
         }
     }
 }
@@ -194,6 +264,16 @@ pub struct EvaluatedEffect {
     pub name: String,
     pub enabled: bool,
     pub effect_type: EvaluatedEffectType,
+}
+
+impl EvaluatedEffect {
+    /// Process a color through this evaluated effect if enabled.
+    pub fn process_color(&self, color: Color) -> Color {
+        if !self.enabled {
+            return color;
+        }
+        self.effect_type.process_color(color)
+    }
 }
 
 /// The evaluated state of a single layer at a specific timeline position.
@@ -221,6 +301,17 @@ pub struct EvaluatedLayer {
 }
 
 impl EvaluatedLayer {
+    /// Return the visually processed effective color for this layer after sequentially applying all enabled effects.
+    pub fn processed_color(&self, base_color: Color) -> Color {
+        let mut color = base_color;
+        for effect in &self.effects {
+            if effect.enabled {
+                color = effect.process_color(color);
+            }
+        }
+        color
+    }
+
     /// Return true if this layer participates in active rendering.
     pub fn is_rendered(&self) -> bool {
         self.is_visible && self.is_active && !self.is_matte_source && self.effective_opacity > 0.0
@@ -914,6 +1005,19 @@ impl LayerStackEvaluator {
                             softness: softness.evaluate_at(time),
                             opacity: opacity.evaluate_at(time),
                             color: *color,
+                        },
+                        EffectType::GlslShader {
+                            code,
+                            param1,
+                            param2,
+                            param3,
+                            param4,
+                        } => EvaluatedEffectType::GlslShader {
+                            code: code.clone(),
+                            param1: param1.evaluate_at(time),
+                            param2: param2.evaluate_at(time),
+                            param3: param3.evaluate_at(time),
+                            param4: param4.evaluate_at(time),
                         },
                     };
                     evaluated_effects.push(EvaluatedEffect {

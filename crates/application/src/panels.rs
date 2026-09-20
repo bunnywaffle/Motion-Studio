@@ -103,46 +103,120 @@ impl Render for ProjectPanel {
         let state = self.state.read(cx);
         let comp_opt = state.active_composition();
         let add_state = self.state.clone();
+        let del_state = self.state.clone();
+        let import_state = self.state.clone();
 
-        let asset_items: Vec<Div> = match comp_opt {
-            Some(comp) => {
-                let mut items = Vec::new();
+        let mut bin_items: Vec<Div> = Vec::new();
 
-                // 1. Active Composition item
-                items.push(
-                    h_flex()
+        if let Some(comp) = comp_opt {
+            // --- Section 1: Compositions ---
+            bin_items.push(
+                h_flex()
+                    .px_2()
+                    .py_1()
+                    .mt_1()
+                    .bg(cx.theme().secondary)
+                    .rounded_sm()
+                    .items_center()
+                    .justify_between()
+                    .text_xs()
+                    .font_semibold()
+                    .text_color(cx.theme().foreground)
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .items_center()
+                            .child(icon_box(IconName::Folder))
+                            .child("COMPOSITIONS"),
+                    )
+                    .child(
+                        div()
+                            .px_1p5()
+                            .rounded_sm()
+                            .bg(cx.theme().muted)
+                            .text_color(cx.theme().muted_foreground)
+                            .child("1"),
+                    ),
+            );
+
+            // Active comp row
+            bin_items.push(
+                h_flex()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .bg(cx.theme().muted)
+                    .text_xs()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .items_center()
+                            .font_semibold()
+                            .child(icon_box(IconName::Film))
+                            .child(comp.name.clone()),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!("{}x{}", comp.width, comp.height))
+                            .child(format!("{:.0}fps", comp.frame_rate))
+                            .child(format!("{}", comp.duration)),
+                    ),
+            );
+
+            // --- Section 2: Project Media & Bins ---
+            bin_items.push(
+                h_flex()
+                    .px_2()
+                    .py_1()
+                    .mt_2()
+                    .bg(cx.theme().secondary)
+                    .rounded_sm()
+                    .items_center()
+                    .justify_between()
+                    .text_xs()
+                    .font_semibold()
+                    .text_color(cx.theme().foreground)
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .items_center()
+                            .child(icon_box(IconName::FolderOpen))
+                            .child("PROJECT MEDIA"),
+                    )
+                    .child(
+                        div()
+                            .px_1p5()
+                            .rounded_sm()
+                            .bg(cx.theme().muted)
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!("{}", state.project.assets.len())),
+                    ),
+            );
+
+            if state.project.assets.is_empty() {
+                bin_items.push(
+                    div()
                         .px_2()
-                        .py_1()
-                        .rounded_sm()
-                        .bg(cx.theme().muted)
+                        .py_2()
                         .text_xs()
-                        .items_center()
-                        .child(
-                            h_flex()
-                                .w(px(110.))
-                                .gap_1()
-                                .items_center()
-                                .font_semibold()
-                                .child(icon_box(IconName::Folder))
-                                .child(comp.name.clone()),
-                        )
-                        .child(div().w(px(70.)).child("Composition"))
-                        .child(div().w(px(70.)).child(format!("{}x{}", comp.width, comp.height)))
-                        .child(div().flex_1().child(format!("{}", comp.duration))),
+                        .text_color(cx.theme().muted_foreground)
+                        .child("No external media. Click 'Import Media' to add PNG/JPG or video."),
                 );
-
-                // 2. Imported project assets (Image, Video, Audio, etc.)
+            } else {
                 for asset in &state.project.assets {
                     let (type_str, icon) = match &asset.asset_type {
-                        project::AssetType::Image => ("Image", IconName::Image),
-                        project::AssetType::Video => ("Video", IconName::Film),
-                        project::AssetType::Audio => ("Audio", IconName::Music),
-                        project::AssetType::Vector => ("Vector", IconName::Folder),
-                        project::AssetType::Font => ("Font", IconName::Type),
-                        project::AssetType::Other(_) => ("Media", IconName::Layers),
+                        project::AssetType::Image => ("PNG/JPG", IconName::Image),
+                        project::AssetType::Video => ("VIDEO", IconName::Film),
+                        project::AssetType::Audio => ("AUDIO", IconName::Music),
+                        project::AssetType::Vector => ("SVG", IconName::Folder),
+                        project::AssetType::Font => ("FONT", IconName::Type),
+                        project::AssetType::Other(_) => ("MEDIA", IconName::Layers),
                     };
 
-                    let path_str = asset.path.to_string_lossy().to_string();
                     let display_name = asset
                         .path
                         .file_name()
@@ -150,101 +224,206 @@ impl Render for ProjectPanel {
                         .unwrap_or(&asset.name)
                         .to_string();
 
-                    items.push(
+                    let asset_id_del = asset.id.clone();
+                    let s_del = self.state.clone();
+
+                    bin_items.push(
                         h_flex()
                             .px_2()
                             .py_1()
                             .rounded_sm()
                             .text_xs()
                             .items_center()
+                            .justify_between()
                             .text_color(cx.theme().foreground)
                             .hover(|s| s.bg(cx.theme().muted))
                             .child(
                                 h_flex()
-                                    .w(px(110.))
-                                    .gap_1()
+                                    .gap_1p5()
                                     .items_center()
                                     .child(icon_box(icon))
-                                    .child(display_name),
+                                    .child(div().font_medium().child(display_name)),
                             )
-                            .child(div().w(px(70.)).child(type_str))
-                            .child(div().w(px(70.)).child("-"))
-                            .child(div().flex_1().child(path_str)),
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .px_1p5()
+                                            .py_0p5()
+                                            .rounded_sm()
+                                            .bg(cx.theme().secondary)
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(type_str),
+                                    )
+                                    .child(
+                                        div()
+                                            .cursor_pointer()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .hover(|s| s.text_color(rgb(0xef4444)))
+                                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                s_del.update(cx, |s, cx| {
+                                                    let _ = s.delete_asset(&asset_id_del);
+                                                    cx.notify();
+                                                });
+                                            })
+                                            .child(icon_box(IconName::Trash)),
+                                    ),
+                            ),
                     );
                 }
-
-                // 3. Layers within active composition
-                for layer in &comp.layers {
-                    let is_selected = state.selected_layer_id.as_deref() == Some(&layer.id);
-                    let type_str = match &layer.source {
-                        LayerSource::Solid { .. } => "Solid",
-                        LayerSource::Image { .. } => "Image",
-                        LayerSource::Video { .. } => "Video",
-                        LayerSource::Text { .. } => "Text",
-                        LayerSource::Shape { .. } => "Shape",
-                        LayerSource::NestedComposition { .. } => "Pre-comp",
-                        _ => "Procedural",
-                    };
-                    let res_str = match &layer.source {
-                        LayerSource::Solid { width, height, .. } => format!("{width}x{height}"),
-                        _ => "-".to_string(),
-                    };
-
-                    let sel_state = self.state.clone();
-                    let lid = layer.id.clone();
-                    let icon_elem = match &layer.source {
-                        LayerSource::Solid { .. } => icon_box(IconName::Layers),
-                        LayerSource::Image { .. } => icon_box(IconName::Image),
-                        LayerSource::Video { .. } => icon_box(IconName::Film),
-                        LayerSource::Text { .. } => icon_box(IconName::Type),
-                        LayerSource::Shape { .. } => icon_box(IconName::Sparkles),
-                        LayerSource::NestedComposition { .. } => icon_box(IconName::Folder),
-                        _ => icon_box(IconName::Layers),
-                    };
-
-                    let mut row = h_flex()
-                        .px_2()
-                        .py_1()
-                        .rounded_sm()
-                        .text_xs()
-                        .items_center()
-                        .cursor_pointer()
-                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                            sel_state.update(cx, |s, cx| {
-                                s.select_layer(Some(lid.clone()));
-                                cx.notify();
-                            });
-                        })
-                        .child(
-                            h_flex()
-                                .w(px(110.))
-                                .gap_1()
-                                .items_center()
-                                .child(icon_elem)
-                                .child(layer.name.clone()),
-                        )
-                        .child(div().w(px(70.)).child(type_str))
-                        .child(div().w(px(70.)).child(res_str))
-                        .child(div().flex_1().child(format!("{} - {}", layer.in_point, layer.out_point)));
-
-                    if is_selected {
-                        row = row
-                            .bg(cx.theme().accent)
-                            .text_color(cx.theme().accent_foreground);
-                    } else {
-                        row = row
-                            .text_color(cx.theme().foreground)
-                            .hover(|s| s.bg(cx.theme().muted));
-                    }
-                    items.push(row);
-                }
-
-                items
             }
-            None => Vec::new(),
-        };
 
-        let import_state = self.state.clone();
+            // --- Section 3: Active Composition Layers ---
+            bin_items.push(
+                h_flex()
+                    .px_2()
+                    .py_1()
+                    .mt_2()
+                    .bg(cx.theme().secondary)
+                    .rounded_sm()
+                    .items_center()
+                    .justify_between()
+                    .text_xs()
+                    .font_semibold()
+                    .text_color(cx.theme().foreground)
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .items_center()
+                            .child(icon_box(IconName::Layers))
+                            .child("COMPOSITION LAYERS"),
+                    )
+                    .child(
+                        div()
+                            .px_1p5()
+                            .rounded_sm()
+                            .bg(cx.theme().muted)
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!("{}", comp.layers.len())),
+                    ),
+            );
+
+            for (idx, layer) in comp.layers.iter().enumerate() {
+                let is_selected = state.selected_layer_id.as_deref() == Some(&layer.id);
+                let type_str = match &layer.source {
+                    LayerSource::Solid { .. } => "Solid",
+                    LayerSource::Image { .. } => "Image",
+                    LayerSource::Video { .. } => "Video",
+                    LayerSource::Text { .. } => "Text",
+                    LayerSource::Shape { .. } => "Shape",
+                    LayerSource::NestedComposition { .. } => "Pre-comp",
+                    _ => "2D",
+                };
+
+                let sel_state = self.state.clone();
+                let lid = layer.id.clone();
+                let lid_up = layer.id.clone();
+                let lid_down = layer.id.clone();
+                let lid_del = layer.id.clone();
+                let s_up = self.state.clone();
+                let s_down = self.state.clone();
+                let s_layer_del = self.state.clone();
+
+                let icon_elem = match &layer.source {
+                    LayerSource::Solid { .. } => icon_box(IconName::Layers),
+                    LayerSource::Image { .. } => icon_box(IconName::Image),
+                    LayerSource::Video { .. } => icon_box(IconName::Film),
+                    LayerSource::Text { .. } => icon_box(IconName::Type),
+                    LayerSource::Shape { .. } => icon_box(IconName::Sparkles),
+                    LayerSource::NestedComposition { .. } => icon_box(IconName::Folder),
+                    _ => icon_box(IconName::Layers),
+                };
+
+                let mut row = h_flex()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .text_xs()
+                    .items_center()
+                    .justify_between()
+                    .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        sel_state.update(cx, |s, cx| {
+                            s.select_layer(Some(lid.clone()));
+                            cx.notify();
+                        });
+                    })
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .items_center()
+                            .child(div().w(px(16.)).text_color(cx.theme().muted_foreground).child(format!("{}", idx + 1)))
+                            .child(icon_elem)
+                            .child(div().font_medium().child(layer.name.clone())),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .items_center()
+                            .child(
+                                div()
+                                    .px_1p5()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .bg(cx.theme().secondary)
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(type_str),
+                            )
+                            .child(
+                                div()
+                                    .cursor_pointer()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .hover(|s| s.text_color(cx.theme().foreground))
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        s_up.update(cx, |s, cx| {
+                                            let _ = s.move_layer_up(&lid_up);
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child(icon_box(IconName::ChevronUp)),
+                            )
+                            .child(
+                                div()
+                                    .cursor_pointer()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .hover(|s| s.text_color(cx.theme().foreground))
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        s_down.update(cx, |s, cx| {
+                                            let _ = s.move_layer_down(&lid_down);
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child(icon_box(IconName::ChevronDown)),
+                            )
+                            .child(
+                                div()
+                                    .cursor_pointer()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .hover(|s| s.text_color(rgb(0xef4444)))
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        s_layer_del.update(cx, |s, cx| {
+                                            let _ = s.remove_layer_by_id(&lid_del);
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child(icon_box(IconName::Trash)),
+                            ),
+                    );
+
+                if is_selected {
+                    row = row
+                        .bg(cx.theme().accent)
+                        .text_color(cx.theme().accent_foreground);
+                } else {
+                    row = row
+                        .text_color(cx.theme().foreground)
+                        .hover(|s| s.bg(cx.theme().muted));
+                }
+                bin_items.push(row);
+            }
+        }
 
         div()
             .id("project_panel")
@@ -255,56 +434,20 @@ impl Render for ProjectPanel {
             .flex_col()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            // Header / search bar & actions
+            // Header / Actions toolbar
             .child(
                 h_flex()
                     .px_3()
                     .py_2()
-                    .gap_2()
+                    .gap_1p5()
                     .border_b_1()
                     .border_color(cx.theme().border)
                     .bg(cx.theme().secondary)
-                    .child(
-                        h_flex()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .overflow_hidden()
-                            .px_2()
-                            .py_1()
-                            .rounded_sm()
-                            .bg(cx.theme().muted)
-                            .text_color(cx.theme().muted_foreground)
-                            .text_xs()
-                            .child("Search..."),
-                    )
+                    .items_center()
+                    .justify_between()
                     .child(
                         h_flex()
                             .gap_1()
-                            .child(
-                                div()
-                                    .id("add_solid_button")
-                                    .test_support()
-                                    .px_2()
-                                    .py_1()
-                                    .rounded_sm()
-                                    .bg(cx.theme().muted)
-                                    .hover(|s| s.bg(cx.theme().accent))
-                                    .text_color(cx.theme().foreground)
-                                    .text_xs()
-                                    .cursor_pointer()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                        add_state.update(cx, |s, cx| {
-                                            let color = Color::from_rgba_u8(245, 158, 11, 255);
-                                            let _ = s.add_solid_layer("New Solid", color, 400, 400);
-                                            cx.notify();
-                                        });
-                                    })
-                                    .child(icon_box(IconName::Plus))
-                                    .child("Solid"),
-                            )
                             .child(
                                 div()
                                     .id("import_media_button")
@@ -336,46 +479,68 @@ impl Render for ProjectPanel {
                             )
                             .child(
                                 div()
+                                    .id("add_solid_button")
+                                    .test_support()
                                     .px_2()
                                     .py_1()
                                     .rounded_sm()
                                     .bg(cx.theme().muted)
+                                    .hover(|s| s.bg(cx.theme().accent))
                                     .text_color(cx.theme().foreground)
                                     .text_xs()
+                                    .cursor_pointer()
                                     .flex()
                                     .items_center()
                                     .gap_1()
-                                    .child(icon_box(IconName::Folder))
-                                    .child("Comp"),
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        add_state.update(cx, |s, cx| {
+                                            let color = Color::from_rgba_u8(245, 158, 11, 255);
+                                            let _ = s.add_solid_layer("New Solid", color, 400, 400);
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child(icon_box(IconName::Plus))
+                                    .child("Solid"),
+                            )
+                            .child(
+                                div()
+                                    .id("delete_asset_button")
+                                    .test_support()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .bg(cx.theme().muted)
+                                    .hover(|s| s.bg(rgb(0xef4444)).text_color(rgb(0xffffff)))
+                                    .text_color(cx.theme().foreground)
+                                    .text_xs()
+                                    .cursor_pointer()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        del_state.update(cx, |s, cx| {
+                                            let _ = s.delete_selected_layer();
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child(icon_box(IconName::Trash))
+                                    .child("Delete"),
                             ),
                     ),
             )
-            // Column headers
-            .child(
-                h_flex()
-                    .px_3()
-                    .py_1()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(div().w(px(110.)).child("Name"))
-                    .child(div().w(px(70.)).child("Type"))
-                    .child(div().w(px(70.)).child("Resolution"))
-                    .child(div().flex_1().child("Duration")),
-            )
-            // Asset media list
+            // Organized Bins and Assets List
             .child(
                 v_flex()
                     .id("project_assets")
                     .test_support()
                     .flex_1()
                     .overflow_hidden()
-                    .px_1()
+                    .px_2()
                     .py_1()
-                    .children(asset_items),
+                    .gap_1()
+                    .children(bin_items),
             )
-            // Footer
+            // Footer summary
             .child(
                 h_flex()
                     .px_3()
@@ -386,9 +551,9 @@ impl Render for ProjectPanel {
                     .text_color(cx.theme().muted_foreground)
                     .child(match comp_opt {
                         Some(comp) => format!(
-                            "{} items • {} selected • {:.2} fps",
-                            comp.layers.len() + 1,
-                            if state.selected_layer_id.is_some() { 1 } else { 0 },
+                            "1 Comp • {} Assets • {} Layers • {:.2} fps",
+                            state.project.assets.len(),
+                            comp.layers.len(),
                             comp.frame_rate
                         ),
                         None => "0 items".to_string(),
@@ -483,18 +648,34 @@ impl Render for CompositionViewerPanel {
 
         // Render evaluated layers in painter's composite order
         let rendered_layers: Vec<AnyElement> = match eval_stack.as_ref() {
-            Some(stack) => stack
-                .render_layers()
-                .into_iter()
-                .map(|layer| {
-                    let (base_w, base_h, col) = match &layer.source {
+            Some(stack) => {
+                let mut elements = Vec::new();
+                for layer in stack.render_layers() {
+                    let (base_w, base_h, col, image_path) = match &layer.source {
                         LayerSource::Solid {
                             width,
                             height,
                             color,
-                        } => (*width as f32, *height as f32, *color),
-                        _ => (400.0, 300.0, Color::WHITE),
+                        } => (*width as f32, *height as f32, *color, None),
+                        LayerSource::Image { asset_id } => {
+                            let (w, h, p) = if let Some(asset) = state.project.get_asset(asset_id) {
+                                let (dim_w, dim_h) = image::image_dimensions(&asset.path)
+                                    .unwrap_or((1920, 1080));
+                                (dim_w as f32, dim_h as f32, Some(asset.path.clone()))
+                            } else {
+                                (400.0, 300.0, None)
+                            };
+                            (w, h, Color::WHITE, p)
+                        }
+                        LayerSource::Video { asset_id, .. } => {
+                            let p = state.project.get_asset(asset_id).map(|a| a.path.clone());
+                            (1920.0, 1080.0, Color::WHITE, p)
+                        }
+                        _ => (400.0, 300.0, Color::WHITE, None),
                     };
+
+                    // Process visual effects (Invert, Tint, Brightness/Contrast, GlslShader)
+                    let processed_col = layer.processed_color(col);
 
                     let bbox = layer.world_bounds(base_w, base_h);
                     let l_x = bbox.min.x * scale_x;
@@ -502,6 +683,35 @@ impl Render for CompositionViewerPanel {
                     let l_w = ((bbox.max.x - bbox.min.x) * scale_x).max(2.0);
                     let l_h = ((bbox.max.y - bbox.min.y) * scale_y).max(2.0);
                     let is_selected = state.selected_layer_id.as_deref() == Some(&layer.id);
+
+                    // Render Drop Shadow if present
+                    for eff in &layer.effects {
+                        if eff.enabled {
+                            if let compositor::EvaluatedEffectType::DropShadow { distance, angle, opacity, color, .. } = &eff.effect_type {
+                                let rad = angle.to_radians();
+                                let sx = l_x + distance * rad.cos() * scale_x;
+                                let sy = l_y + distance * rad.sin() * scale_y;
+                                let op = (opacity / 100.0).clamp(0.0, 1.0) * layer.effective_opacity.clamp(0.0, 1.0);
+                                elements.push(
+                                    div()
+                                        .absolute()
+                                        .left(px(sx))
+                                        .top(px(sy))
+                                        .w(px(l_w))
+                                        .h(px(l_h))
+                                        .bg(Rgba {
+                                            r: color.r,
+                                            g: color.g,
+                                            b: color.b,
+                                            a: color.a * op * 0.75,
+                                        })
+                                        .rounded_sm()
+                                        .into_any_element(),
+                                );
+                                break;
+                            }
+                        }
+                    }
 
                     let sel_state = self.state.clone();
                     let lid = layer.id.clone();
@@ -515,11 +725,12 @@ impl Render for CompositionViewerPanel {
                         .w(px(l_w))
                         .h(px(l_h))
                         .bg(Rgba {
-                            r: col.r,
-                            g: col.g,
-                            b: col.b,
-                            a: col.a * layer.effective_opacity.clamp(0.0, 1.0),
+                            r: processed_col.r,
+                            g: processed_col.g,
+                            b: processed_col.b,
+                            a: processed_col.a * layer.effective_opacity.clamp(0.0, 1.0),
                         })
+                        .overflow_hidden()
                         .cursor_pointer()
                         .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                             sel_state.update(cx, |s, cx| {
@@ -528,15 +739,24 @@ impl Render for CompositionViewerPanel {
                             });
                         });
 
+                    if let Some(ref img_path) = image_path {
+                        layer_el = layer_el.child(
+                            gpui::img(img_path.clone())
+                                .size_full()
+                                .opacity(layer.effective_opacity.clamp(0.0, 1.0)),
+                        );
+                    }
+
                     if is_selected {
                         layer_el = layer_el
                             .border_2()
                             .border_color(rgb(0x3b82f6)); // accent selection border
                     }
 
-                    layer_el.into_any_element()
-                })
-                .collect(),
+                    elements.push(layer_el.into_any_element());
+                }
+                elements
+            }
             None => Vec::new(),
         };
 
@@ -1087,6 +1307,105 @@ impl Render for PropertiesPanel {
                                                     ),
                                             );
                                     }
+                                    EffectType::GlslShader { param1, param2, param3, param4, code } => {
+                                        let p1 = param1.value;
+                                        let p2 = param2.value;
+                                        let p3 = param3.value;
+                                        let p4 = param4.value;
+                                        let s_p1m = self.state.clone();
+                                        let s_p1p = self.state.clone();
+                                        let s_p2m = self.state.clone();
+                                        let s_p2p = self.state.clone();
+                                        let s_p3m = self.state.clone();
+                                        let s_p3p = self.state.clone();
+                                        let s_p4m = self.state.clone();
+                                        let s_p4p = self.state.clone();
+                                        let id_p1m = eff_id.clone();
+                                        let id_p1p = eff_id.clone();
+                                        let id_p2m = eff_id.clone();
+                                        let id_p2p = eff_id.clone();
+                                        let id_p3m = eff_id.clone();
+                                        let id_p3p = eff_id.clone();
+                                        let id_p4m = eff_id.clone();
+                                        let id_p4p = eff_id.clone();
+                                        let code_preview = if code.len() > 60 {
+                                            format!("{}...", &code[..60])
+                                        } else {
+                                            code.clone()
+                                        };
+                                        effect_box = effect_box
+                                            .child(
+                                                h_flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .text_xs()
+                                                    .child(div().text_color(cx.theme().muted_foreground).child("P1 (Speed)"))
+                                                    .child(
+                                                        h_flex()
+                                                            .gap_1()
+                                                            .items_center()
+                                                            .child(step_button("-", cx, move |cx| s_p1m.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p1m, "param1", -0.5); cx.notify(); })))
+                                                            .child(div().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("{:.2}", p1)))
+                                                            .child(step_button("+", cx, move |cx| s_p1p.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p1p, "param1", 0.5); cx.notify(); }))),
+                                                    ),
+                                            )
+                                            .child(
+                                                h_flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .text_xs()
+                                                    .child(div().text_color(cx.theme().muted_foreground).child("P2 (Intensity)"))
+                                                    .child(
+                                                        h_flex()
+                                                            .gap_1()
+                                                            .items_center()
+                                                            .child(step_button("-", cx, move |cx| s_p2m.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p2m, "param2", -5.0); cx.notify(); })))
+                                                            .child(div().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("{:.1}", p2)))
+                                                            .child(step_button("+", cx, move |cx| s_p2p.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p2p, "param2", 5.0); cx.notify(); }))),
+                                                    ),
+                                            )
+                                            .child(
+                                                h_flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .text_xs()
+                                                    .child(div().text_color(cx.theme().muted_foreground).child("P3 (Scale)"))
+                                                    .child(
+                                                        h_flex()
+                                                            .gap_1()
+                                                            .items_center()
+                                                            .child(step_button("-", cx, move |cx| s_p3m.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p3m, "param3", -0.5); cx.notify(); })))
+                                                            .child(div().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("{:.2}", p3)))
+                                                            .child(step_button("+", cx, move |cx| s_p3p.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p3p, "param3", 0.5); cx.notify(); }))),
+                                                    ),
+                                            )
+                                            .child(
+                                                h_flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .text_xs()
+                                                    .child(div().text_color(cx.theme().muted_foreground).child("P4 (Opacity)"))
+                                                    .child(
+                                                        h_flex()
+                                                            .gap_1()
+                                                            .items_center()
+                                                            .child(step_button("-", cx, move |cx| s_p4m.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p4m, "param4", -5.0); cx.notify(); })))
+                                                            .child(div().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("{:.1}", p4)))
+                                                            .child(step_button("+", cx, move |cx| s_p4p.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p4p, "param4", 5.0); cx.notify(); }))),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .mt_1()
+                                                    .p_1p5()
+                                                    .rounded_sm()
+                                                    .bg(cx.theme().muted)
+                                                    .text_xs()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .overflow_hidden()
+                                                    .child(code_preview),
+                                            );
+                                    }
                                 }
 
                                 fx_col = fx_col.child(effect_box);
@@ -1538,7 +1857,10 @@ impl Render for EffectsPanel {
                     .child(effect_item_row("gradient_ramp", "Gradient Ramp", EffectType::tint(Color::BLACK, Color::rgb(0.9, 0.3, 0.1), 75.0), &self.state, cx))
                     // Category 5: Transition
                     .child(category_header("▼ Transition", IconName::RotateCw, cx))
-                    .child(effect_item_row("linear_wipe", "Linear Wipe", EffectType::invert(50.0), &self.state, cx)),
+                    .child(effect_item_row("linear_wipe", "Linear Wipe", EffectType::invert(50.0), &self.state, cx))
+                    // Category 6: Custom Shaders
+                    .child(category_header("▼ Custom Shaders (GLSL/WGSL)", IconName::Code, cx))
+                    .child(effect_item_row("custom_glsl", "Custom GLSL Shader", EffectType::glsl_shader(project::Effect::default_glsl_code(), 1.0, 50.0, 1.0, 100.0), &self.state, cx)),
             )
             // Footer
             .child(

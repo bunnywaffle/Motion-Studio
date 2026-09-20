@@ -32,6 +32,13 @@ pub enum EffectType {
         opacity: Property<f32>,
         color: Color,
     },
+    GlslShader {
+        code: String,
+        param1: Property<f32>,
+        param2: Property<f32>,
+        param3: Property<f32>,
+        param4: Property<f32>,
+    },
 }
 
 impl EffectType {
@@ -43,6 +50,7 @@ impl EffectType {
             Self::Tint { .. } => "Tint",
             Self::Invert { .. } => "Invert",
             Self::DropShadow { .. } => "Drop Shadow",
+            Self::GlslShader { .. } => "Custom GLSL Shader",
         }
     }
 
@@ -91,6 +99,17 @@ impl EffectType {
             softness: Property::new("Softness", softness.max(0.0)),
             opacity: Property::new("Opacity", opacity.clamp(0.0, 100.0)),
             color,
+        }
+    }
+
+    /// Construct a custom GLSL / WGSL shader effect type.
+    pub fn glsl_shader(code: impl Into<String>, p1: f32, p2: f32, p3: f32, p4: f32) -> Self {
+        Self::GlslShader {
+            code: code.into(),
+            param1: Property::new("Param 1 (Speed/Time)", p1),
+            param2: Property::new("Param 2 (Intensity)", p2),
+            param3: Property::new("Param 3 (Scale/Freq)", p3),
+            param4: Property::new("Param 4 (Tint/Phase)", p4),
         }
     }
 }
@@ -154,6 +173,49 @@ impl Effect {
             "Drop Shadow",
             EffectType::drop_shadow(distance, angle, softness, opacity, color),
         )
+    }
+
+    /// Factory for creating a custom GLSL / WGSL shader effect with default template.
+    pub fn glsl_shader(id: impl Into<String>, code: impl Into<String>) -> Self {
+        Self::new(
+            id,
+            "Custom GLSL Shader",
+            EffectType::glsl_shader(code, 1.0, 50.0, 1.0, 100.0),
+        )
+    }
+
+    /// Return the standard default GLSL fragment shader code template.
+    pub const fn default_glsl_code() -> &'static str {
+        r#"// Custom GLSL Fragment Shader
+// Uniforms:
+//   uniform float param1; // Speed / Time
+//   uniform float param2; // Intensity / Color Boost (0-100)
+//   uniform float param3; // Scale / Frequency
+//   uniform float param4; // Opacity / Blend (0-100)
+void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
+    float intensity = param2 / 100.0;
+    vec3 col = inColor.rgb * (1.0 + intensity * 0.5);
+    fragColor = vec4(clamp(col, 0.0, 1.0), inColor.a * (param4 / 100.0));
+}"#
+    }
+
+    /// Update the custom shader code string.
+    pub fn set_glsl_code(&mut self, new_code: impl Into<String>) -> bool {
+        if let EffectType::GlslShader { code, .. } = &mut self.effect_type {
+            *code = new_code.into();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Return the custom shader code string if this is a GlslShader effect.
+    pub fn glsl_code(&self) -> Option<&str> {
+        if let EffectType::GlslShader { code, .. } = &self.effect_type {
+            Some(code.as_str())
+        } else {
+            None
+        }
     }
 
     /// Return the canonical type name of this effect.
@@ -221,6 +283,27 @@ impl Effect {
                     return true;
                 } else if param_name.eq_ignore_ascii_case("opacity") {
                     opacity.set_value((opacity.value + delta).clamp(0.0, 100.0));
+                    return true;
+                }
+            }
+            EffectType::GlslShader {
+                param1,
+                param2,
+                param3,
+                param4,
+                ..
+            } => {
+                if param_name.eq_ignore_ascii_case("param1") || param_name.eq_ignore_ascii_case("p1") {
+                    param1.set_value(param1.value + delta);
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("param2") || param_name.eq_ignore_ascii_case("p2") {
+                    param2.set_value(param2.value + delta);
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("param3") || param_name.eq_ignore_ascii_case("p3") {
+                    param3.set_value(param3.value + delta);
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("param4") || param_name.eq_ignore_ascii_case("p4") {
+                    param4.set_value(param4.value + delta);
                     return true;
                 }
             }
