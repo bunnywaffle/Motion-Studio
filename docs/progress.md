@@ -264,6 +264,23 @@
   - Phase 1: Core Engine Architecture is now **100% COMPLETE**.
   - All **116 tests** passing cleanly across the workspace with 0 errors and 0 warnings (12 in `application`, 50 in `project`, 46 unit tests in `compositor`, and 8 integration tests in `compositor`).
 
+- [x] **Task 1.8: Connect pure Rust engine into native GPUI application UI**
+  - Designed and implemented `EditorState` in `crates/application/src/state.rs`:
+    - Wraps `Project`, `PlaybackClock`, active composition pointer, layer selection tracking, and real-time frame evaluation via `LayerStackEvaluator` (`evaluate_current_frame()`).
+    - Seeded realistic demo composition: 1920x1080 @ 30fps with background dark slate solid layer, animated rotating cyan accent box, and fading title badge with keyframed opacity.
+    - Added layer mutation helpers: `nudge_position`, `nudge_anchor`, `nudge_scale`, `nudge_rotation`, `nudge_opacity`, `toggle_layer_visibility`, `toggle_layer_solo`, `toggle_selected_layer_visibility`, `toggle_selected_layer_solo`, `add_solid_layer`, and work area navigation (`jump_to_start`, `jump_to_end`).
+  - Rewrote GPUI UI panels in `crates/application/src/panels.rs` with reactive `EditorState` observation:
+    - `ProjectPanel`: Observes `EditorState`, lists composition and media assets, renders clickable layer rows with active selection, and provides a working `+ Solid` button adding newly created solid layers immediately to canvas and timeline.
+    - `CompositionViewerPanel`: Observes `EditorState`, calls `evaluate_current_frame()`, maps world bounding boxes to canvas dimensions (512x288 16:9 frame), renders visible layers in painter's composite order with effective opacities, supports interactive click-to-select, and highlights the selected layer with an accent border.
+    - `PropertiesPanel`: Real-time inspector for the selected layer displaying Anchor, Position, Scale, Rotation, and Opacity with clickable `-`/`+` nudge step buttons, and toggleable `[✓] Visible` and `[✓] Solo` switches (empty state when no layer is selected).
+    - `TimelinePanel`: Live SMPTE timecode and frame counter, interactive transport buttons (`|<`, `<`, `▶ Play`/`⏸ Pause`, `>`, `>|`), time ruler with dynamic playhead marker, and layer track lanes with index, `[V]` eye toggle, `[S]` solo toggle, track span bars, selection state, and track playhead line.
+  - Implemented application playback and hotkeys in `crates/application/src/main.rs`:
+    - Spacebar key binding and `TogglePlayback` action for play/pause control.
+    - 60Hz asynchronous background playback loop advancing `PlaybackClock` with delta time and notifying GPUI observers.
+    - Added 7 comprehensive GPUI unit and integration tests: `test_editor_state_initialization`, `test_playback_transport_and_clock_stepping`, `test_layer_selection_and_inspector_sync`, `test_transform_mutation_and_evaluated_frame_update`, `test_visibility_and_solo_toggles`, `test_adding_new_solid_layer`, `test_spacebar_action_playback_toggle`.
+  - Full workspace test suite now passing with **123 tests** (19 in `application`, 50 in `project`, 46 unit tests in `compositor`, and 8 integration tests in `compositor`).
+  - Clean compilation, zero warnings on `cargo clippy --workspace --all-targets -- -D warnings`.
+
 ---
 
 ## Phase 2: Hardware-Accelerated Rendering Architecture

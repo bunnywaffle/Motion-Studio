@@ -1,4 +1,6 @@
 mod panels;
+pub mod state;
+use state::EditorState;
 
 use std::rc::Rc;
 
@@ -14,17 +16,57 @@ pub use panels::{
     PropertiesPanel, TimelinePanel,
 };
 
+actions!(workspace, [TogglePlayback]);
+
 pub struct AppView {
+    state: Entity<EditorState>,
     dock_area: Entity<DockArea>,
     dock_skin: Rc<DockSkin>,
     panels: AppPanels,
+    focus_handle: FocusHandle,
+    _subscriptions: Vec<Subscription>,
+    _playback_task: Option<Task<()>>,
 }
 
 impl AppView {
     pub fn new(window: &mut Window, cx: &mut App) -> Self {
+        let state = cx.new(|_| EditorState::new());
+        Self::new_with_state(state, window, cx)
+    }
+
+    pub fn new_with_state(state: Entity<EditorState>, window: &mut Window, cx: &mut App) -> Self {
         let (dock_area, dock_skin) = DockSkin::dock_area("workspace_dock", None, window, cx);
         dock_skin.set_panel_style(PanelStyle::TabBar, cx);
-        let panels = AppPanels::new(cx);
+        let panels = AppPanels::new(state.clone(), cx);
+
+        // Bind spacebar key to TogglePlayback
+        cx.bind_keys([KeyBinding::new("space", TogglePlayback, None)]);
+
+        // Setup background 60Hz playback loop
+        let loop_state = state.clone();
+        let playback_task = cx.spawn(|cx: &mut AsyncApp| {
+            let cx = cx.clone();
+            let state = loop_state;
+            async move {
+                let mut last_instant = std::time::Instant::now();
+                loop {
+                    cx.background_executor().timer(std::time::Duration::from_millis(16)).await;
+                    let now = std::time::Instant::now();
+                    let dt = now - last_instant;
+                    last_instant = now;
+                    cx.update(|cx| {
+                        state.update(cx, |editor, cx| {
+                            if editor.is_playing {
+                                let changed = editor.tick(dt);
+                                if changed {
+                                    cx.notify();
+                                }
+                            }
+                        });
+                    });
+                }
+            }
+        });
 
         // Left dock: Project / Assets
         let left_layout =
@@ -56,11 +98,23 @@ impl AppView {
             dock.set_dock_size(DockPlacement::Bottom, px(260.), window, cx);
         });
 
+        let focus_handle = cx.focus_handle();
+
+        // cx.on_action(|this, _: &TogglePlayback, cx| {});
+
         Self {
+            state,
             dock_area,
             dock_skin,
             panels,
+            focus_handle,
+            _subscriptions: Vec::new(),
+            _playback_task: Some(playback_task),
         }
+    }
+
+    pub fn state(&self) -> &Entity<EditorState> {
+        &self.state
     }
 
     pub fn dock_area(&self) -> &Entity<DockArea> {
@@ -74,18 +128,41 @@ impl AppView {
     pub fn panels(&self) -> &AppPanels {
         &self.panels
     }
+
+    pub fn focus_handle(&self) -> &FocusHandle {
+        &self.focus_handle
+    }
 }
 
 impl Render for AppView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let state_key = self.state.clone();
         div()
             .id("app_view")
+            .track_focus(&self.focus_handle)
             .test_support()
             .size_full()
             .flex()
             .flex_col()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
+            .on_action({
+                let state = self.state.clone();
+                move |_: &TogglePlayback, _window, cx| {
+                    state.update(cx, |s, cx| {
+                        s.toggle_playback();
+                        cx.notify();
+                    });
+                }
+            })
+            .on_key_down(move |event, _window, cx| {
+                if event.keystroke.key == "space" || event.keystroke.key == " " {
+                    state_key.update(cx, |s, cx| {
+                        s.toggle_playback();
+                        cx.notify();
+                    });
+                }
+            })
             .child(self.dock_area.clone())
     }
 }
@@ -548,7 +625,7 @@ mod tests {
 
         // 1. ProjectPanel standalone
         let h_proj = cx.open_window(size(px(400.), px(400.)), |window, cx| {
-            let p = cx.new(ProjectPanel::new);
+            let p = cx.new(ProjectPanel::standalone);
             Root::new(p, window, cx)
         });
         cx.update_window(h_proj.into(), |_, window, cx| {
@@ -560,7 +637,7 @@ mod tests {
 
         // 2. CompositionViewerPanel standalone
         let h_comp = cx.open_window(size(px(600.), px(400.)), |window, cx| {
-            let p = cx.new(CompositionViewerPanel::new);
+            let p = cx.new(CompositionViewerPanel::standalone);
             Root::new(p, window, cx)
         });
         cx.update_window(h_comp.into(), |_, window, cx| {
@@ -572,7 +649,7 @@ mod tests {
 
         // 3. PropertiesPanel standalone
         let h_prop = cx.open_window(size(px(400.), px(400.)), |window, cx| {
-            let p = cx.new(PropertiesPanel::new);
+            let p = cx.new(PropertiesPanel::standalone);
             Root::new(p, window, cx)
         });
         cx.update_window(h_prop.into(), |_, window, cx| {
@@ -596,7 +673,7 @@ mod tests {
 
         // 5. TimelinePanel standalone
         let h_time = cx.open_window(size(px(800.), px(300.)), |window, cx| {
-            let p = cx.new(TimelinePanel::new);
+            let p = cx.new(TimelinePanel::standalone);
             Root::new(p, window, cx)
         });
         cx.update_window(h_time.into(), |_, window, cx| {
@@ -664,6 +741,300 @@ mod tests {
             assert!(window.try_find("effects_categories").is_none());
         })
         .expect("update_window failed");
+    }
+
+    #[gpui_kit::test]
+    fn test_editor_state_initialization(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (_root, app_view) = setup_test_window(cx);
+        cx.run_until_parked();
+
+        app_view.read_with(cx, |view, cx| {
+            let state = view.state().read(cx);
+            assert_eq!(state.active_comp_id, "comp_main");
+            let comp = state.active_composition().expect("active comp present");
+            assert_eq!(comp.name, "Main Composition");
+            assert_eq!(comp.width, 1920);
+            assert_eq!(comp.height, 1080);
+            assert_eq!(comp.layers.len(), 3);
+            assert_eq!(state.selected_layer_id, Some("layer_accent".to_string()));
+            assert_eq!(state.clock.current_frame(), 0);
+            assert!(!state.is_playing);
+
+            let eval_stack = state.evaluate_current_frame().expect("evaluate succeeded");
+            assert_eq!(eval_stack.composition_id, "comp_main");
+            assert!(eval_stack.render_count() >= 2);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn test_playback_transport_and_clock_stepping(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (_root, app_view) = setup_test_window(cx);
+        cx.run_until_parked();
+
+        // 1. Step forward and backward
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                assert_eq!(s.clock.current_frame(), 0);
+                s.step_forward();
+                assert_eq!(s.clock.current_frame(), 1);
+                s.step_forward();
+                assert_eq!(s.clock.current_frame(), 2);
+                s.step_backward();
+                assert_eq!(s.clock.current_frame(), 1);
+                s.jump_to_end();
+                assert_eq!(s.clock.current_frame(), 150);
+                s.jump_to_start();
+                assert_eq!(s.clock.current_frame(), 0);
+                s.seek_frame(45);
+                assert_eq!(s.clock.current_frame(), 45);
+                cx.notify();
+            });
+        });
+
+        // 2. Play / Pause state toggle
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                assert!(!s.is_playing);
+                s.play();
+                assert!(s.is_playing);
+                s.pause();
+                assert!(!s.is_playing);
+                s.toggle_playback();
+                assert!(s.is_playing);
+                s.toggle_playback();
+                assert!(!s.is_playing);
+                cx.notify();
+            });
+        });
+    }
+
+    #[gpui_kit::test]
+    fn test_layer_selection_and_inspector_sync(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (_root, app_view) = setup_test_window(cx);
+        cx.run_until_parked();
+
+        // Initially accent layer selected
+        app_view.read_with(cx, |view, cx| {
+            let state = view.state().read(cx);
+            assert_eq!(state.selected_layer_id, Some("layer_accent".to_string()));
+            let layer = state.selected_layer().unwrap();
+            assert_eq!(layer.name, "Animated Box");
+        });
+
+        // Switch selection to badge layer
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.select_layer(Some("layer_badge".to_string()));
+                cx.notify();
+            });
+        });
+
+        app_view.read_with(cx, |view, cx| {
+            let state = view.state().read(cx);
+            assert_eq!(state.selected_layer_id, Some("layer_badge".to_string()));
+            let layer = state.selected_layer().unwrap();
+            assert_eq!(layer.name, "Accent Badge");
+        });
+
+        // Clear selection
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.select_layer(None);
+                cx.notify();
+            });
+        });
+
+        app_view.read_with(cx, |view, cx| {
+            let state = view.state().read(cx);
+            assert_eq!(state.selected_layer_id, None);
+            assert!(state.selected_layer().is_none());
+        });
+    }
+
+    #[gpui_kit::test]
+    fn test_transform_mutation_and_evaluated_frame_update(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (_root, app_view) = setup_test_window(cx);
+        cx.run_until_parked();
+
+        // Check initial evaluated position
+        let initial_pos = app_view.read_with(cx, |view, cx| {
+            let state = view.state().read(cx);
+            let eval = state.evaluate_current_frame().unwrap();
+            let l = eval.get_layer("layer_accent").unwrap();
+            l.transform.position
+        });
+
+        // Nudge position
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.select_layer(Some("layer_accent".to_string()));
+                s.nudge_position(50.0, -30.0);
+                cx.notify();
+            });
+        });
+
+        // Verify evaluated position reflects nudge
+        app_view.read_with(cx, |view, cx| {
+            let state = view.state().read(cx);
+            let eval = state.evaluate_current_frame().unwrap();
+            let l = eval.get_layer("layer_accent").unwrap();
+            assert_eq!(l.transform.position.x, initial_pos.x + 50.0);
+            assert_eq!(l.transform.position.y, initial_pos.y - 30.0);
+        });
+
+        // Nudge scale, rotation, opacity
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.nudge_scale(20.0, 20.0);
+                s.nudge_rotation(45.0);
+                s.nudge_opacity(-25.0);
+                cx.notify();
+            });
+        });
+
+        app_view.read_with(cx, |view, cx| {
+            let state = view.state().read(cx);
+            let comp = state.active_composition().unwrap();
+            let layer = comp.get_layer("layer_accent").unwrap();
+            assert_eq!(layer.opacity.value, 75.0);
+
+            let eval = state.evaluate_current_frame().unwrap();
+            let l = eval.get_layer("layer_accent").unwrap();
+            assert_eq!(l.transform.rotation, 45.0);
+            assert!((l.effective_opacity - 0.75).abs() < 1e-4);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn test_visibility_and_solo_toggles(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (_root, app_view) = setup_test_window(cx);
+        cx.run_until_parked();
+
+        // 1. Visibility toggle
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.toggle_layer_visibility("layer_accent");
+                cx.notify();
+            });
+        });
+
+        app_view.read_with(cx, |view, cx| {
+            let state = view.state().read(cx);
+            let comp = state.active_composition().unwrap();
+            let layer = comp.get_layer("layer_accent").unwrap();
+            assert!(!layer.visible);
+
+            let eval = state.evaluate_current_frame().unwrap();
+            assert!(!eval.render_layers().iter().any(|l| l.id == "layer_accent"));
+        });
+
+        // Restore visibility
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.toggle_layer_visibility("layer_accent");
+                cx.notify();
+            });
+        });
+
+        app_view.read_with(cx, |view, cx| {
+            let state = view.state().read(cx);
+            let eval = state.evaluate_current_frame().unwrap();
+            assert!(eval.render_layers().iter().any(|l| l.id == "layer_accent"));
+        });
+
+        // 2. Solo toggle
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.toggle_layer_solo("layer_accent");
+                cx.notify();
+            });
+        });
+
+        app_view.read_with(cx, |view, cx| {
+            let state = view.state().read(cx);
+            let eval = state.evaluate_current_frame().unwrap();
+            assert!(eval.has_solo);
+            // Only soloed layers are rendered
+            for layer in eval.render_layers() {
+                assert_eq!(layer.id, "layer_accent");
+            }
+        });
+    }
+
+    #[gpui_kit::test]
+    fn test_adding_new_solid_layer(cx: &mut TestAppContext) {
+        use project::Color;
+
+        cx.update(gpui_kit::init);
+        let (_root, app_view) = setup_test_window(cx);
+        cx.run_until_parked();
+
+        let new_layer_id = app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                let id = s
+                    .add_solid_layer("Golden Solid", Color::from_rgba_u8(245, 158, 11, 255), 500, 300)
+                    .expect("added solid");
+                cx.notify();
+                id
+            })
+        });
+
+        app_view.read_with(cx, |view, cx| {
+            let state = view.state().read(cx);
+            let comp = state.active_composition().unwrap();
+            assert_eq!(comp.layers.len(), 4);
+            assert_eq!(state.selected_layer_id, Some(new_layer_id.clone()));
+
+            let eval = state.evaluate_current_frame().unwrap();
+            assert!(eval.get_layer(&new_layer_id).is_some());
+            assert!(eval.render_layers().iter().any(|l| l.id == new_layer_id));
+        });
+    }
+
+    #[gpui_kit::test]
+    fn test_spacebar_action_playback_toggle(cx: &mut TestAppContext) {
+        use super::TogglePlayback;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+
+        let app_view = app_view_entity.expect("AppView created");
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            let focus_handle = app_view.read(cx).focus_handle().clone();
+            window.focus(&focus_handle, cx);
+            window.render_frame(cx);
+
+            // Initially paused
+            assert!(!app_view.read(cx).state().read(cx).is_playing);
+
+            // Dispatch TogglePlayback action (deferred by GPUI)
+            window.dispatch_action(Box::new(TogglePlayback), cx);
+        })
+        .expect("update_window failed");
+
+        cx.run_until_parked();
+        assert!(app_view.read_with(cx, |view, cx| view.state().read(cx).is_playing));
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            // Dispatch TogglePlayback again (deferred by GPUI)
+            window.dispatch_action(Box::new(TogglePlayback), cx);
+        })
+        .expect("update_window failed");
+
+        cx.run_until_parked();
+        assert!(!app_view.read_with(cx, |view, cx| view.state().read(cx).is_playing));
     }
 }
 

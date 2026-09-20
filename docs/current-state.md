@@ -104,11 +104,21 @@
     - Full tree point mapping: bidirectional point mapping from innermost nested pre-comp layer to root composition viewport coordinates across cascaded nesting transforms, verifying exact invertibility and root bounding box containment.
     - Defensive validation of parenting cycles, self-parenting, missing parents, circular nested compositions, missing composition references, recursion depth limits (`MaxNestingDepthExceeded`), negative timecodes, and extreme out-of-bounds frame requests.
     - High-throughput stress test evaluating 10,000 frames of a complex multi-layer composition (12 layers, parenting chains, Bezier curves, track mattes, nested pre-comps) achieving ~16,000 evaluations/sec in debug mode and > 72,000 evaluations/sec in release mode (~13.9 µs/frame latency), vastly exceeding real-time timeline scrubbing requirements.
-- Full automated test suite passing with **116 tests** across the workspace (12 application tests + 50 project unit tests + 46 compositor unit tests + 8 compositor integration tests).
+- Full engine-to-UI integration completed in `crates/application`:
+  - `EditorState` in `crates/application/src/state.rs`: Manages active `Project`, `PlaybackClock`, active composition selection, layer selection, demo seed composition, layer mutations (transform nudges, visibility, solo, layer creation), and real-time frame evaluation via `evaluate_current_frame()`.
+  - Reactive GPUI panels in `crates/application/src/panels.rs`:
+    - `ProjectPanel`: Displays live project composition and layer assets, interactive row selection, and working `+ Solid` button adding new solid layers dynamically to the composition.
+    - `CompositionViewerPanel`: Observes `EditorState`, evaluates frames at current playback timecode, maps world bounding boxes to canvas dimensions (512x288 16:9 frame), renders visible layers in painter's composite order with effective opacities, supports click selection, and highlights selected layer with an accent border.
+    - `PropertiesPanel`: Real-time inspector for the selected layer displaying Anchor, Position, Scale, Rotation, and Opacity with clickable `-`/`+` nudge step buttons, and toggleable `[✓] Visible` and `[✓] Solo` switches (empty state when no layer is selected).
+    - `TimelinePanel`: Live SMPTE timecode and frame counter, transport buttons (`|<`, `<`, `▶ Play`/`⏸ Pause`, `>`, `>|`), time ruler with dynamic playhead marker, and layer track lanes with index, `[V]` eye toggle, `[S]` solo toggle, track span bars, selection state, and track playhead line.
+  - Application shell & input in `crates/application/src/main.rs`:
+    - Spacebar keybinding and `TogglePlayback` action for play/pause control.
+    - 60Hz asynchronous background playback loop advancing `PlaybackClock` with delta time and notifying GPUI observers.
+- Full automated test suite passing with **123 tests** across the workspace (19 application tests + 50 project unit tests + 46 compositor unit tests + 8 compositor integration tests).
 - Workspace compiles, builds, and passes all checks cleanly with 0 errors and 0 warnings (`cargo check --workspace`, `cargo build --workspace`, `cargo test --workspace`, and `cargo clippy --workspace --all-targets -- -D warnings`).
 
 ## What Is Currently Being Developed
-- Phase 2: Hardware-Accelerated Rendering Architecture.
+- Phase 2: Hardware-Accelerated Rendering Architecture (wgpu GPU context, render pipelines, shaders).
 
 ## Known Problems
 - None.

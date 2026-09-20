@@ -3,21 +3,59 @@ use gpui_kit::component::dock::{BasePanel, Panel, PanelEvent};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::*;
 
+use crate::state::EditorState;
+use project::{Color, LayerSource};
+
+fn step_button<F>(label: &'static str, cx: &App, on_click: F) -> impl IntoElement
+where
+    F: Fn(&mut App) + 'static,
+{
+    div()
+        .px_1p5()
+        .py_0p5()
+        .rounded_sm()
+        .bg(cx.theme().muted)
+        .hover(|s| s.bg(cx.theme().accent))
+        .text_color(cx.theme().foreground)
+        .text_xs()
+        .cursor_pointer()
+        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+            on_click(cx);
+        })
+        .child(label)
+}
+
 // --- 1. Project Panel ---
 
 pub struct ProjectPanel {
     focus_handle: FocusHandle,
+    state: Entity<EditorState>,
+    _subscription: Subscription,
 }
 
 impl ProjectPanel {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(state: Entity<EditorState>, cx: &mut Context<Self>) -> Self {
+        let _subscription = cx.observe(&state, |_this, _state, cx| {
+            cx.notify();
+        });
         Self {
             focus_handle: cx.focus_handle(),
+            state,
+            _subscription,
         }
+    }
+
+    pub fn standalone(cx: &mut Context<Self>) -> Self {
+        let state = cx.new(|_| EditorState::new());
+        Self::new(state, cx)
     }
 
     pub fn focus_handle(&self) -> &FocusHandle {
         &self.focus_handle
+    }
+
+    pub fn state(&self) -> &Entity<EditorState> {
+        &self.state
     }
 }
 
@@ -31,6 +69,93 @@ impl Focusable for ProjectPanel {
 
 impl Render for ProjectPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let state = self.state.read(cx);
+        let comp_opt = state.active_composition();
+        let add_state = self.state.clone();
+
+        let asset_items: Vec<Div> = match comp_opt {
+            Some(comp) => {
+                let mut items = Vec::new();
+
+                // 1. Active Composition item
+                items.push(
+                    h_flex()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .bg(cx.theme().muted)
+                        .text_xs()
+                        .items_center()
+                        .child(div().w(px(110.)).font_semibold().child(format!("📁 {}", comp.name)))
+                        .child(div().w(px(70.)).child("Composition"))
+                        .child(div().w(px(70.)).child(format!("{}x{}", comp.width, comp.height)))
+                        .child(div().flex_1().child(format!("{}", comp.duration))),
+                );
+
+                // 2. Layers within active composition
+                for layer in &comp.layers {
+                    let is_selected = state.selected_layer_id.as_deref() == Some(&layer.id);
+                    let type_str = match &layer.source {
+                        LayerSource::Solid { .. } => "Solid",
+                        LayerSource::Image { .. } => "Image",
+                        LayerSource::Video { .. } => "Video",
+                        LayerSource::Text { .. } => "Text",
+                        LayerSource::Shape { .. } => "Shape",
+                        LayerSource::NestedComposition { .. } => "Pre-comp",
+                        _ => "Procedural",
+                    };
+                    let res_str = match &layer.source {
+                        LayerSource::Solid { width, height, .. } => format!("{width}x{height}"),
+                        _ => "-".to_string(),
+                    };
+
+                    let sel_state = self.state.clone();
+                    let lid = layer.id.clone();
+                    let icon = match &layer.source {
+                        LayerSource::Solid { .. } => "⏹",
+                        LayerSource::Image { .. } => "🖼",
+                        LayerSource::Video { .. } => "🎬",
+                        LayerSource::Text { .. } => "🔤",
+                        LayerSource::Shape { .. } => "⬡",
+                        LayerSource::NestedComposition { .. } => "🎞",
+                        _ => "⚙",
+                    };
+
+                    let mut row = h_flex()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .text_xs()
+                        .items_center()
+                        .cursor_pointer()
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            sel_state.update(cx, |s, cx| {
+                                s.select_layer(Some(lid.clone()));
+                                cx.notify();
+                            });
+                        })
+                        .child(div().w(px(110.)).child(format!("{icon} {}", layer.name)))
+                        .child(div().w(px(70.)).child(type_str))
+                        .child(div().w(px(70.)).child(res_str))
+                        .child(div().flex_1().child(format!("{} - {}", layer.in_point, layer.out_point)));
+
+                    if is_selected {
+                        row = row
+                            .bg(cx.theme().accent)
+                            .text_color(cx.theme().accent_foreground);
+                    } else {
+                        row = row
+                            .text_color(cx.theme().foreground)
+                            .hover(|s| s.bg(cx.theme().muted));
+                    }
+                    items.push(row);
+                }
+
+                items
+            }
+            None => Vec::new(),
+        };
+
         div()
             .id("project_panel")
             .test_support()
@@ -65,13 +190,24 @@ impl Render for ProjectPanel {
                             .gap_1()
                             .child(
                                 div()
+                                    .id("add_solid_button")
+                                    .test_support()
                                     .px_2()
                                     .py_1()
                                     .rounded_sm()
                                     .bg(cx.theme().muted)
+                                    .hover(|s| s.bg(cx.theme().accent))
                                     .text_color(cx.theme().foreground)
                                     .text_xs()
-                                    .child("+ Bin"),
+                                    .cursor_pointer()
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        add_state.update(cx, |s, cx| {
+                                            let color = Color::from_rgba_u8(245, 158, 11, 255);
+                                            let _ = s.add_solid_layer("New Solid", color, 400, 400);
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child("+ Solid"),
                             )
                             .child(
                                 div()
@@ -99,7 +235,7 @@ impl Render for ProjectPanel {
                     .child(div().w(px(70.)).child("Resolution"))
                     .child(div().flex_1().child("Duration")),
             )
-            // Asset media list placeholder
+            // Asset media list
             .child(
                 v_flex()
                     .id("project_assets")
@@ -108,60 +244,7 @@ impl Render for ProjectPanel {
                     .overflow_hidden()
                     .px_1()
                     .py_1()
-                    // Selected Item: Comp 1
-                    .child(
-                        h_flex()
-                            .px_2()
-                            .py_1()
-                            .rounded_sm()
-                            .bg(cx.theme().accent)
-                            .text_color(cx.theme().accent_foreground)
-                            .text_xs()
-                            .items_center()
-                            .child(div().w(px(110.)).font_semibold().child("📁 Comp 1"))
-                            .child(div().w(px(70.)).child("Composition"))
-                            .child(div().w(px(70.)).child("1920x1080"))
-                            .child(div().flex_1().child("00:10:00")),
-                    )
-                    // Item 2: Video
-                    .child(
-                        h_flex()
-                            .px_2()
-                            .py_1()
-                            .rounded_sm()
-                            .text_xs()
-                            .items_center()
-                            .child(div().w(px(110.)).child("🎬 Footage_01.mp4"))
-                            .child(div().w(px(70.)).child("H.264 Video"))
-                            .child(div().w(px(70.)).child("1920x1080"))
-                            .child(div().flex_1().child("00:30:00")),
-                    )
-                    // Item 3: Image
-                    .child(
-                        h_flex()
-                            .px_2()
-                            .py_1()
-                            .rounded_sm()
-                            .text_xs()
-                            .items_center()
-                            .child(div().w(px(110.)).child("🖼 Background.png"))
-                            .child(div().w(px(70.)).child("PNG Image"))
-                            .child(div().w(px(70.)).child("3840x2160"))
-                            .child(div().flex_1().child("Still")),
-                    )
-                    // Item 4: Audio
-                    .child(
-                        h_flex()
-                            .px_2()
-                            .py_1()
-                            .rounded_sm()
-                            .text_xs()
-                            .items_center()
-                            .child(div().w(px(110.)).child("🔊 Audio_Track.wav"))
-                            .child(div().w(px(70.)).child("WAV Audio"))
-                            .child(div().w(px(70.)).child("44.1 kHz"))
-                            .child(div().flex_1().child("01:15:00")),
-                    ),
+                    .children(asset_items),
             )
             // Footer
             .child(
@@ -172,7 +255,15 @@ impl Render for ProjectPanel {
                     .border_color(cx.theme().border)
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child("4 items • 1 selected • 30.00 fps"),
+                    .child(match comp_opt {
+                        Some(comp) => format!(
+                            "{} items • {} selected • {:.2} fps",
+                            comp.layers.len() + 1,
+                            if state.selected_layer_id.is_some() { 1 } else { 0 },
+                            comp.frame_rate
+                        ),
+                        None => "0 items".to_string(),
+                    }),
             )
     }
 }
@@ -199,17 +290,33 @@ pub type CompositionPanel = CompositionViewerPanel;
 
 pub struct CompositionViewerPanel {
     focus_handle: FocusHandle,
+    state: Entity<EditorState>,
+    _subscription: Subscription,
 }
 
 impl CompositionViewerPanel {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(state: Entity<EditorState>, cx: &mut Context<Self>) -> Self {
+        let _subscription = cx.observe(&state, |_this, _state, cx| {
+            cx.notify();
+        });
         Self {
             focus_handle: cx.focus_handle(),
+            state,
+            _subscription,
         }
+    }
+
+    pub fn standalone(cx: &mut Context<Self>) -> Self {
+        let state = cx.new(|_| EditorState::new());
+        Self::new(state, cx)
     }
 
     pub fn focus_handle(&self) -> &FocusHandle {
         &self.focus_handle
+    }
+
+    pub fn state(&self) -> &Entity<EditorState> {
+        &self.state
     }
 }
 
@@ -223,6 +330,87 @@ impl Focusable for CompositionViewerPanel {
 
 impl Render for CompositionViewerPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let state = self.state.read(cx);
+        let comp_opt = state.active_composition();
+        let eval_stack = state.evaluate_current_frame().ok();
+
+        let comp_name = comp_opt.map(|c| c.name.clone()).unwrap_or_else(|| "No Comp".to_string());
+        let comp_res = comp_opt.map(|c| format!("{} x {} (1.00)", c.width, c.height)).unwrap_or_default();
+        let comp_fps = comp_opt.map(|c| format!("{:.2} fps", c.frame_rate)).unwrap_or_default();
+        let current_tc = format!("{}", state.clock.timecode());
+        let current_frame = state.clock.current_frame();
+
+        let bg_color = comp_opt
+            .map(|c| Rgba { r: c.background_color.r, g: c.background_color.g, b: c.background_color.b, a: c.background_color.a })
+            .unwrap_or(Rgba { r: 0.07, g: 0.07, b: 0.08, a: 1.0 });
+
+        // Canvas viewport dimensions
+        let canvas_w = 512.0f32;
+        let canvas_h = 288.0f32;
+        let comp_w = comp_opt.map(|c| c.width as f32).unwrap_or(1920.0);
+        let comp_h = comp_opt.map(|c| c.height as f32).unwrap_or(1080.0);
+        let scale_x = canvas_w / comp_w;
+        let scale_y = canvas_h / comp_h;
+
+        // Render evaluated layers in painter's composite order
+        let rendered_layers: Vec<AnyElement> = match eval_stack.as_ref() {
+            Some(stack) => stack
+                .render_layers()
+                .into_iter()
+                .map(|layer| {
+                    let (base_w, base_h, col) = match &layer.source {
+                        LayerSource::Solid {
+                            width,
+                            height,
+                            color,
+                        } => (*width as f32, *height as f32, *color),
+                        _ => (400.0, 300.0, Color::WHITE),
+                    };
+
+                    let bbox = layer.world_bounds(base_w, base_h);
+                    let l_x = bbox.min.x * scale_x;
+                    let l_y = bbox.min.y * scale_y;
+                    let l_w = ((bbox.max.x - bbox.min.x) * scale_x).max(2.0);
+                    let l_h = ((bbox.max.y - bbox.min.y) * scale_y).max(2.0);
+                    let is_selected = state.selected_layer_id.as_deref() == Some(&layer.id);
+
+                    let sel_state = self.state.clone();
+                    let lid = layer.id.clone();
+
+                    let mut layer_el = div()
+                        .id(ElementId::Name(format!("canvas_layer_{}", layer.id).into()))
+                        .test_support()
+                        .absolute()
+                        .left(px(l_x))
+                        .top(px(l_y))
+                        .w(px(l_w))
+                        .h(px(l_h))
+                        .bg(Rgba {
+                            r: col.r,
+                            g: col.g,
+                            b: col.b,
+                            a: col.a * (layer.effective_opacity / 100.0).clamp(0.0, 1.0),
+                        })
+                        .cursor_pointer()
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            sel_state.update(cx, |s, cx| {
+                                s.select_layer(Some(lid.clone()));
+                                cx.notify();
+                            });
+                        });
+
+                    if is_selected {
+                        layer_el = layer_el
+                            .border_2()
+                            .border_color(rgb(0x3b82f6)); // accent selection border
+                    }
+
+                    layer_el.into_any_element()
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+
         div()
             .id("composition_panel")
             .test_support()
@@ -247,16 +435,16 @@ impl Render for CompositionViewerPanel {
                         h_flex()
                             .gap_3()
                             .items_center()
-                            .child(div().font_bold().child("Comp 1"))
+                            .child(div().font_bold().child(comp_name))
                             .child(
                                 div()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("1920 x 1080 (1.00)"),
+                                    .child(comp_res),
                             )
                             .child(
                                 div()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("30.00 fps"),
+                                    .child(comp_fps),
                             ),
                     )
                     .child(
@@ -308,34 +496,17 @@ impl Render for CompositionViewerPanel {
                     .p_4()
                     .overflow_hidden()
                     .child(
-                        // 16:9 canvas frame placeholder
-                        v_flex()
-                            .w(px(512.))
-                            .h(px(288.))
+                        // 16:9 canvas frame
+                        div()
+                            .w(px(canvas_w))
+                            .h(px(canvas_h))
                             .border_2()
                             .border_color(cx.theme().border)
-                            .bg(cx.theme().muted)
+                            .bg(bg_color)
                             .rounded_sm()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                v_flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .child(div().font_semibold().text_sm().child("Comp 1"))
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child("1920 x 1080 • 16:9"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child("00:00:00:00 / 00:00:10:00"),
-                                    ),
-                            ),
+                            .relative()
+                            .overflow_hidden()
+                            .children(rendered_layers),
                     ),
             )
             // Status bar
@@ -348,8 +519,8 @@ impl Render for CompositionViewerPanel {
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .justify_between()
-                    .child(div().child("Time: 00:00:00:00 (Frame 0)"))
-                    .child(div().child("Scroll to Zoom • Space+Drag to Pan")),
+                    .child(div().child(format!("Time: {} (Frame {})", current_tc, current_frame)))
+                    .child(div().child("Scroll to Zoom • Space to Play/Pause")),
             )
     }
 }
@@ -366,7 +537,7 @@ impl Panel for CompositionViewerPanel {
     }
 
     fn title(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        "Composition: Comp 1"
+        "Composition"
     }
 }
 
@@ -374,17 +545,33 @@ impl Panel for CompositionViewerPanel {
 
 pub struct PropertiesPanel {
     focus_handle: FocusHandle,
+    state: Entity<EditorState>,
+    _subscription: Subscription,
 }
 
 impl PropertiesPanel {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(state: Entity<EditorState>, cx: &mut Context<Self>) -> Self {
+        let _subscription = cx.observe(&state, |_this, _state, cx| {
+            cx.notify();
+        });
         Self {
             focus_handle: cx.focus_handle(),
+            state,
+            _subscription,
         }
+    }
+
+    pub fn standalone(cx: &mut Context<Self>) -> Self {
+        let state = cx.new(|_| EditorState::new());
+        Self::new(state, cx)
     }
 
     pub fn focus_handle(&self) -> &FocusHandle {
         &self.focus_handle
+    }
+
+    pub fn state(&self) -> &Entity<EditorState> {
+        &self.state
     }
 }
 
@@ -398,6 +585,15 @@ impl Focusable for PropertiesPanel {
 
 impl Render for PropertiesPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let state = self.state.read(cx);
+        let selected_layer = state.selected_layer();
+        let eval_stack = state.evaluate_current_frame().ok();
+
+        let header_title = match selected_layer {
+            Some(l) => format!("Selected: {}", l.name),
+            None => "No Layer Selected".to_string(),
+        };
+
         div()
             .id("properties_panel")
             .test_support()
@@ -417,7 +613,7 @@ impl Render for PropertiesPanel {
                     .bg(cx.theme().secondary)
                     .items_center()
                     .justify_between()
-                    .child(div().font_semibold().text_xs().child("Selected: Layer 1 (Text)"))
+                    .child(div().font_semibold().text_xs().child(header_title))
                     .child(
                         div()
                             .px_1p5()
@@ -437,209 +633,253 @@ impl Render for PropertiesPanel {
                     .overflow_hidden()
                     .p_3()
                     .gap_3()
-                    // Transform Section Header
-                    .child(
-                        div()
-                            .font_semibold()
-                            .text_xs()
-                            .text_color(cx.theme().foreground)
-                            .child("▼ Transform"),
-                    )
-                    // Anchor Point
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .justify_between()
-                            .text_xs()
-                            .child(
-                                div()
-                                    .w(px(70.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Anchor Pt"),
-                            )
-                            .child(
-                                h_flex()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .px_2()
-                                            .py_0p5()
-                                            .bg(cx.theme().muted)
-                                            .rounded_sm()
-                                            .child("X: 960.0"),
-                                    )
-                                    .child(
-                                        div()
-                                            .px_2()
-                                            .py_0p5()
-                                            .bg(cx.theme().muted)
-                                            .rounded_sm()
-                                            .child("Y: 540.0"),
-                                    ),
-                            ),
-                    )
-                    // Position (X, Y)
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .justify_between()
-                            .text_xs()
-                            .child(
-                                div()
-                                    .w(px(70.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Position"),
-                            )
-                            .child(
-                                h_flex()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .px_2()
-                                            .py_0p5()
-                                            .bg(cx.theme().muted)
-                                            .rounded_sm()
-                                            .child("X: 960.0"),
-                                    )
-                                    .child(
-                                        div()
-                                            .px_2()
-                                            .py_0p5()
-                                            .bg(cx.theme().muted)
-                                            .rounded_sm()
-                                            .child("Y: 540.0"),
-                                    ),
-                            ),
-                    )
-                    // Scale (X, Y)
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .justify_between()
-                            .text_xs()
-                            .child(
-                                div()
-                                    .w(px(70.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Scale"),
-                            )
-                            .child(
-                                h_flex()
-                                    .gap_1()
-                                    .items_center()
-                                    .child(
-                                        div()
-                                            .px_2()
-                                            .py_0p5()
-                                            .bg(cx.theme().muted)
-                                            .rounded_sm()
-                                            .child("100.0 %"),
-                                    )
-                                    .child(
-                                        div()
-                                            .px_2()
-                                            .py_0p5()
-                                            .bg(cx.theme().muted)
-                                            .rounded_sm()
-                                            .child("100.0 %"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child("🔗"),
-                                    ),
-                            ),
-                    )
-                    // Rotation
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .justify_between()
-                            .text_xs()
-                            .child(
-                                div()
-                                    .w(px(70.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Rotation"),
-                            )
-                            .child(
-                                div()
-                                    .px_2()
-                                    .py_0p5()
-                                    .bg(cx.theme().muted)
-                                    .rounded_sm()
-                                    .child("0x +0.0°"),
-                            ),
-                    )
-                    // Opacity
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .justify_between()
-                            .text_xs()
-                            .child(
-                                div()
-                                    .w(px(70.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Opacity"),
-                            )
-                            .child(
-                                div()
-                                    .px_2()
-                                    .py_0p5()
-                                    .bg(cx.theme().muted)
-                                    .rounded_sm()
-                                    .child("100.0 %"),
-                            ),
-                    )
-                    // Section 2: Switches & Modes
-                    .child(
-                        div()
-                            .font_semibold()
-                            .text_xs()
-                            .text_color(cx.theme().foreground)
-                            .child("▼ Switches & Modes"),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .text_xs()
-                            .child(
-                                div()
-                                    .px_2()
-                                    .py_0p5()
-                                    .bg(cx.theme().secondary)
-                                    .text_color(cx.theme().foreground)
-                                    .rounded_sm()
-                                    .child("[✓] Visible"),
-                            )
-                            .child(
-                                div()
-                                    .px_2()
-                                    .py_0p5()
-                                    .bg(cx.theme().secondary)
-                                    .text_color(cx.theme().foreground)
-                                    .rounded_sm()
-                                    .child("[✓] Audio"),
-                            )
-                            .child(
-                                div()
-                                    .px_2()
-                                    .py_0p5()
-                                    .bg(cx.theme().muted)
-                                    .rounded_sm()
-                                    .child("[ ] Solo"),
-                            )
-                            .child(
-                                div()
-                                    .px_2()
-                                    .py_0p5()
-                                    .bg(cx.theme().muted)
-                                    .rounded_sm()
-                                    .child("[ ] Lock"),
-                            ),
-                    ),
+                    .children(if let Some(layer) = selected_layer {
+                        let eval_layer = eval_stack.as_ref().and_then(|s| s.get_layer(&layer.id));
+                        let anchor = eval_layer.map(|l| l.transform.anchor_point).unwrap_or(layer.transform.anchor_point.value);
+                        let pos = eval_layer.map(|l| l.transform.position).unwrap_or(layer.transform.position.value);
+                        let sc = eval_layer.map(|l| l.transform.scale).unwrap_or(layer.transform.scale.value);
+                        let rot = eval_layer.map(|l| l.transform.rotation).unwrap_or(layer.transform.rotation.value);
+                        let op = eval_layer.map(|l| l.effective_opacity).unwrap_or(layer.opacity.value);
+
+                        let s_anchor_mx = self.state.clone();
+                        let s_anchor_px = self.state.clone();
+                        let s_anchor_my = self.state.clone();
+                        let s_anchor_py = self.state.clone();
+
+                        let s_pos_mx = self.state.clone();
+                        let s_pos_px = self.state.clone();
+                        let s_pos_my = self.state.clone();
+                        let s_pos_py = self.state.clone();
+
+                        let s_scale_mx = self.state.clone();
+                        let s_scale_px = self.state.clone();
+                        let s_scale_my = self.state.clone();
+                        let s_scale_py = self.state.clone();
+
+                        let s_rot_m = self.state.clone();
+                        let s_rot_p = self.state.clone();
+
+                        let s_op_m = self.state.clone();
+                        let s_op_p = self.state.clone();
+
+                        let s_vis = self.state.clone();
+                        let s_solo = self.state.clone();
+
+                        vec![
+                            // Transform Section Header
+                            div()
+                                .font_semibold()
+                                .text_xs()
+                                .text_color(cx.theme().foreground)
+                                .child("▼ Transform"),
+
+                            // Anchor Point (X, Y)
+                            h_flex()
+                                .items_center()
+                                .justify_between()
+                                .text_xs()
+                                .child(
+                                    div()
+                                        .w(px(70.))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child("Anchor Pt"),
+                                )
+                                .child(
+                                    h_flex()
+                                        .gap_1()
+                                        .items_center()
+                                        .child(
+                                            h_flex()
+                                                .gap_1()
+                                                .items_center()
+                                                .child(step_button("-", cx, move |cx| s_anchor_mx.update(cx, |s, cx| { s.nudge_anchor(-10.0, 0.0); cx.notify(); })))
+                                                .child(div().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("X: {:.1}", anchor.x)))
+                                                .child(step_button("+", cx, move |cx| s_anchor_px.update(cx, |s, cx| { s.nudge_anchor(10.0, 0.0); cx.notify(); }))),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .gap_1()
+                                                .items_center()
+                                                .child(step_button("-", cx, move |cx| s_anchor_my.update(cx, |s, cx| { s.nudge_anchor(0.0, -10.0); cx.notify(); })))
+                                                .child(div().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("Y: {:.1}", anchor.y)))
+                                                .child(step_button("+", cx, move |cx| s_anchor_py.update(cx, |s, cx| { s.nudge_anchor(0.0, 10.0); cx.notify(); }))),
+                                        ),
+                                ),
+
+                            // Position (X, Y)
+                            h_flex()
+                                .items_center()
+                                .justify_between()
+                                .text_xs()
+                                .child(
+                                    div()
+                                        .w(px(70.))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child("Position"),
+                                )
+                                .child(
+                                    h_flex()
+                                        .gap_1()
+                                        .items_center()
+                                        .child(
+                                            h_flex()
+                                                .gap_1()
+                                                .items_center()
+                                                .child(step_button("-", cx, move |cx| s_pos_mx.update(cx, |s, cx| { s.nudge_position(-10.0, 0.0); cx.notify(); })))
+                                                .child(div().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("X: {:.1}", pos.x)))
+                                                .child(step_button("+", cx, move |cx| s_pos_px.update(cx, |s, cx| { s.nudge_position(10.0, 0.0); cx.notify(); }))),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .gap_1()
+                                                .items_center()
+                                                .child(step_button("-", cx, move |cx| s_pos_my.update(cx, |s, cx| { s.nudge_position(0.0, -10.0); cx.notify(); })))
+                                                .child(div().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("Y: {:.1}", pos.y)))
+                                                .child(step_button("+", cx, move |cx| s_pos_py.update(cx, |s, cx| { s.nudge_position(0.0, 10.0); cx.notify(); }))),
+                                        ),
+                                ),
+
+                            // Scale (X, Y)
+                            h_flex()
+                                .items_center()
+                                .justify_between()
+                                .text_xs()
+                                .child(
+                                    div()
+                                        .w(px(70.))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child("Scale"),
+                                )
+                                .child(
+                                    h_flex()
+                                        .gap_1()
+                                        .items_center()
+                                        .child(
+                                            h_flex()
+                                                .gap_1()
+                                                .items_center()
+                                                .child(step_button("-", cx, move |cx| s_scale_mx.update(cx, |s, cx| { s.nudge_scale(-10.0, 0.0); cx.notify(); })))
+                                                .child(div().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("{:.1} %", sc.x)))
+                                                .child(step_button("+", cx, move |cx| s_scale_px.update(cx, |s, cx| { s.nudge_scale(10.0, 0.0); cx.notify(); }))),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .gap_1()
+                                                .items_center()
+                                                .child(step_button("-", cx, move |cx| s_scale_my.update(cx, |s, cx| { s.nudge_scale(0.0, -10.0); cx.notify(); })))
+                                                .child(div().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("{:.1} %", sc.y)))
+                                                .child(step_button("+", cx, move |cx| s_scale_py.update(cx, |s, cx| { s.nudge_scale(0.0, 10.0); cx.notify(); }))),
+                                        ),
+                                ),
+
+                            // Rotation
+                            h_flex()
+                                .items_center()
+                                .justify_between()
+                                .text_xs()
+                                .child(
+                                    div()
+                                        .w(px(70.))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child("Rotation"),
+                                )
+                                .child(
+                                    h_flex()
+                                        .gap_1()
+                                        .items_center()
+                                        .child(step_button("-", cx, move |cx| s_rot_m.update(cx, |s, cx| { s.nudge_rotation(-15.0); cx.notify(); })))
+                                        .child(
+                                            div()
+                                                .px_2()
+                                                .py_0p5()
+                                                .bg(cx.theme().muted)
+                                                .rounded_sm()
+                                                .child(format!("{:.1}°", rot)),
+                                        )
+                                        .child(step_button("+", cx, move |cx| s_rot_p.update(cx, |s, cx| { s.nudge_rotation(15.0); cx.notify(); }))),
+                                ),
+
+                            // Opacity
+                            h_flex()
+                                .items_center()
+                                .justify_between()
+                                .text_xs()
+                                .child(
+                                    div()
+                                        .w(px(70.))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child("Opacity"),
+                                )
+                                .child(
+                                    h_flex()
+                                        .gap_1()
+                                        .items_center()
+                                        .child(step_button("-", cx, move |cx| s_op_m.update(cx, |s, cx| { s.nudge_opacity(-10.0); cx.notify(); })))
+                                        .child(
+                                            div()
+                                                .px_2()
+                                                .py_0p5()
+                                                .bg(cx.theme().muted)
+                                                .rounded_sm()
+                                                .child(format!("{:.1} %", op)),
+                                        )
+                                        .child(step_button("+", cx, move |cx| s_op_p.update(cx, |s, cx| { s.nudge_opacity(10.0); cx.notify(); }))),
+                                ),
+
+                            // Switches & Modes Section Header
+                            div()
+                                .font_semibold()
+                                .text_xs()
+                                .text_color(cx.theme().foreground)
+                                .child("▼ Switches & Modes"),
+
+                            // Switch buttons
+                            h_flex()
+                                .gap_2()
+                                .text_xs()
+                                .child(
+                                    div()
+                                        .px_2()
+                                        .py_0p5()
+                                        .bg(if layer.visible { cx.theme().secondary } else { cx.theme().muted })
+                                        .text_color(cx.theme().foreground)
+                                        .rounded_sm()
+                                        .cursor_pointer()
+                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                            s_vis.update(cx, |s, cx| {
+                                                s.toggle_selected_layer_visibility();
+                                                cx.notify();
+                                            });
+                                        })
+                                        .child(if layer.visible { "[✓] Visible" } else { "[ ] Hidden" }),
+                                )
+                                .child(
+                                    div()
+                                        .px_2()
+                                        .py_0p5()
+                                        .bg(if layer.is_solo() { cx.theme().accent } else { cx.theme().muted })
+                                        .text_color(if layer.is_solo() { cx.theme().accent_foreground } else { cx.theme().foreground })
+                                        .rounded_sm()
+                                        .cursor_pointer()
+                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                            s_solo.update(cx, |s, cx| {
+                                                s.toggle_selected_layer_solo();
+                                                cx.notify();
+                                            });
+                                        })
+                                        .child(if layer.is_solo() { "[✓] Solo" } else { "[ ] Solo" }),
+                                ),
+                        ]
+                    } else {
+                        vec![
+                            div()
+                                .p_4()
+                                .text_center()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("No layer selected. Select a layer from the timeline or project panel to inspect its properties.")
+                        ]
+                    }),
             )
     }
 }
@@ -955,17 +1195,33 @@ impl Panel for EffectsPanel {
 
 pub struct TimelinePanel {
     focus_handle: FocusHandle,
+    state: Entity<EditorState>,
+    _subscription: Subscription,
 }
 
 impl TimelinePanel {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(state: Entity<EditorState>, cx: &mut Context<Self>) -> Self {
+        let _subscription = cx.observe(&state, |_this, _state, cx| {
+            cx.notify();
+        });
         Self {
             focus_handle: cx.focus_handle(),
+            state,
+            _subscription,
         }
+    }
+
+    pub fn standalone(cx: &mut Context<Self>) -> Self {
+        let state = cx.new(|_| EditorState::new());
+        Self::new(state, cx)
     }
 
     pub fn focus_handle(&self) -> &FocusHandle {
         &self.focus_handle
+    }
+
+    pub fn state(&self) -> &Entity<EditorState> {
+        &self.state
     }
 }
 
@@ -979,6 +1235,162 @@ impl Focusable for TimelinePanel {
 
 impl Render for TimelinePanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let state = self.state.read(cx);
+        let comp_opt = state.active_composition();
+        let current_tc = state.clock.timecode();
+        let current_frame = state.clock.current_frame();
+        let total_frames = comp_opt.map(|c| c.duration.frames()).unwrap_or(150);
+        let is_playing = state.is_playing;
+
+        let s_start = self.state.clone();
+        let s_step_prev = self.state.clone();
+        let s_play = self.state.clone();
+        let s_step_next = self.state.clone();
+        let s_end = self.state.clone();
+
+        let in_str = "00:00:00:00";
+        let out_str = comp_opt.map(|c| format!("{}", c.duration)).unwrap_or_else(|| "00:00:05:00".to_string());
+
+        let playhead_percent = (current_frame as f32 / total_frames.max(1) as f32 * 100.0).clamp(0.0, 100.0);
+
+        let track_rows: Vec<Div> = match comp_opt {
+            Some(comp) => comp
+                .layers
+                .iter()
+                .enumerate()
+                .map(|(idx, layer)| {
+                    let is_selected = state.selected_layer_id.as_deref() == Some(&layer.id);
+                    let sel_state = self.state.clone();
+                    let vis_state = self.state.clone();
+                    let solo_state = self.state.clone();
+                    let lid = layer.id.clone();
+                    let lid_vis = layer.id.clone();
+                    let lid_solo = layer.id.clone();
+
+                    let in_ratio = (layer.in_point.frames() as f32 / total_frames.max(1) as f32).clamp(0.0, 1.0);
+                    let out_ratio = (layer.out_point.frames() as f32 / total_frames.max(1) as f32).clamp(0.0, 1.0);
+                    let span_w = ((out_ratio - in_ratio) * 100.0).max(5.0);
+                    let span_left = in_ratio * 100.0;
+
+                    let row = h_flex()
+                        .h(px(26.))
+                        .border_b_1()
+                        .border_color(cx.theme().border)
+                        .items_center();
+
+                    let mut left_col = h_flex()
+                        .w(px(240.))
+                        .px_2()
+                        .border_r_1()
+                        .border_color(cx.theme().border)
+                        .items_center()
+                        .justify_between()
+                        .text_xs()
+                        .cursor_pointer()
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(div().w(px(14.)).child(format!("{}", idx + 1)))
+                                .child(
+                                    div()
+                                        .cursor_pointer()
+                                        .text_color(if layer.visible {
+                                            cx.theme().foreground
+                                        } else {
+                                            cx.theme().muted_foreground
+                                        })
+                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                            vis_state.update(cx, |s, cx| {
+                                                s.toggle_layer_visibility(&lid_vis);
+                                                cx.notify();
+                                            });
+                                        })
+                                        .child(if layer.visible { "[V]" } else { "[ ]" }),
+                                )
+                                .child(
+                                    div()
+                                        .cursor_pointer()
+                                        .text_color(if layer.is_solo() {
+                                            rgb(0xf59e0b).into()
+                                        } else {
+                                            cx.theme().muted_foreground
+                                        })
+                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                            solo_state.update(cx, |s, cx| {
+                                                s.toggle_layer_solo(&lid_solo);
+                                                cx.notify();
+                                            });
+                                        })
+                                        .child(if layer.is_solo() { "[S]" } else { "[•]" }),
+                                )
+                                .child(div().font_semibold().child(layer.name.clone())),
+                        )
+                        .child(
+                            div()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Normal"),
+                        );
+
+                    if is_selected {
+                        left_col = left_col
+                            .bg(cx.theme().accent)
+                            .text_color(cx.theme().accent_foreground);
+                    } else {
+                        left_col = left_col.hover(|s| s.bg(cx.theme().muted));
+                    }
+
+                    left_col = left_col.on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        sel_state.update(cx, |s, cx| {
+                            s.select_layer(Some(lid.clone()));
+                            cx.notify();
+                        });
+                    });
+
+                    let track_col = div()
+                        .flex_1()
+                        .h_full()
+                        .relative()
+                        .child(
+                            // Layer span bar
+                            div()
+                                .absolute()
+                                .top(px(4.))
+                                .bottom(px(4.))
+                                .left(relative(span_left / 100.0))
+                                .w(relative(span_w / 100.0))
+                                .rounded_sm()
+                                .bg(if is_selected {
+                                    cx.theme().accent
+                                } else {
+                                    cx.theme().primary
+                                })
+                                .opacity(if layer.visible { 0.85 } else { 0.35 })
+                                .px_2()
+                                .text_xs()
+                                .text_color(cx.theme().primary_foreground)
+                                .child(format!(
+                                    "{} [{} - {}]",
+                                    layer.name, layer.in_point, layer.out_point
+                                )),
+                        )
+                        .child(
+                            // Playhead line across track
+                            div()
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .w(px(1.))
+                                .bg(rgb(0xef4444))
+                                .left(relative(playhead_percent / 100.0)),
+                        );
+
+                    row.child(left_col).child(track_col)
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+
         div()
             .id("timeline_panel")
             .test_support()
@@ -1005,6 +1417,8 @@ impl Render for TimelinePanel {
                             .gap_2()
                             .child(
                                 div()
+                                    .id("timecode_display")
+                                    .test_support()
                                     .px_2()
                                     .py_0p5()
                                     .bg(cx.theme().muted)
@@ -1014,13 +1428,13 @@ impl Render for TimelinePanel {
                                     .font_bold()
                                     .text_sm()
                                     .text_color(cx.theme().primary)
-                                    .child("00:00:00:00"),
+                                    .child(format!("{current_tc}")),
                             )
                             .child(
                                 div()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("Frame 0 / 300"),
+                                    .child(format!("Frame {current_frame} / {total_frames}")),
                             ),
                     )
                     // Transport controls
@@ -1030,49 +1444,99 @@ impl Render for TimelinePanel {
                             .items_center()
                             .child(
                                 div()
+                                    .id("transport_start")
+                                    .test_support()
                                     .px_2()
                                     .py_0p5()
                                     .rounded_sm()
                                     .bg(cx.theme().muted)
+                                    .hover(|s| s.bg(cx.theme().accent))
+                                    .cursor_pointer()
                                     .text_xs()
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        s_start.update(cx, |s, cx| {
+                                            s.jump_to_start();
+                                            cx.notify();
+                                        });
+                                    })
                                     .child("|<"),
                             )
                             .child(
                                 div()
+                                    .id("transport_prev")
+                                    .test_support()
                                     .px_2()
                                     .py_0p5()
                                     .rounded_sm()
                                     .bg(cx.theme().muted)
+                                    .hover(|s| s.bg(cx.theme().accent))
+                                    .cursor_pointer()
                                     .text_xs()
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        s_step_prev.update(cx, |s, cx| {
+                                            s.step_backward();
+                                            cx.notify();
+                                        });
+                                    })
                                     .child("<"),
                             )
                             .child(
                                 div()
+                                    .id("transport_play")
+                                    .test_support()
                                     .px_3()
                                     .py_0p5()
                                     .rounded_sm()
                                     .bg(cx.theme().primary)
+                                    .hover(|s| s.opacity(0.9))
+                                    .cursor_pointer()
                                     .text_color(cx.theme().primary_foreground)
                                     .text_xs()
                                     .font_bold()
-                                    .child("▶ Play"),
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        s_play.update(cx, |s, cx| {
+                                            s.toggle_playback();
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child(if is_playing { "⏸ Pause" } else { "▶ Play" }),
                             )
                             .child(
                                 div()
+                                    .id("transport_next")
+                                    .test_support()
                                     .px_2()
                                     .py_0p5()
                                     .rounded_sm()
                                     .bg(cx.theme().muted)
+                                    .hover(|s| s.bg(cx.theme().accent))
+                                    .cursor_pointer()
                                     .text_xs()
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        s_step_next.update(cx, |s, cx| {
+                                            s.step_forward();
+                                            cx.notify();
+                                        });
+                                    })
                                     .child(">"),
                             )
                             .child(
                                 div()
+                                    .id("transport_end")
+                                    .test_support()
                                     .px_2()
                                     .py_0p5()
                                     .rounded_sm()
                                     .bg(cx.theme().muted)
+                                    .hover(|s| s.bg(cx.theme().accent))
+                                    .cursor_pointer()
                                     .text_xs()
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        s_end.update(cx, |s, cx| {
+                                            s.jump_to_end();
+                                            cx.notify();
+                                        });
+                                    })
                                     .child(">|"),
                             )
                             .child(
@@ -1091,8 +1555,8 @@ impl Render for TimelinePanel {
                             .gap_2()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child(div().child("In: 00:00:00:00"))
-                            .child(div().child("Out: 00:00:10:00")),
+                            .child(div().child(format!("In: {in_str}")))
+                            .child(div().child(format!("Out: {out_str}"))),
                     ),
             )
             // Time Ruler
@@ -1113,16 +1577,33 @@ impl Render for TimelinePanel {
                             .child("Layer Name / Switches"),
                     )
                     .child(
-                        h_flex()
+                        div()
                             .flex_1()
-                            .justify_between()
-                            .px_3()
-                            .child(div().child("00:00s"))
-                            .child(div().child("00:02s"))
-                            .child(div().child("00:04s"))
-                            .child(div().child("00:06s"))
-                            .child(div().child("00:08s"))
-                            .child(div().child("00:10s")),
+                            .relative()
+                            .h_full()
+                            .child(
+                                h_flex()
+                                    .size_full()
+                                    .justify_between()
+                                    .px_3()
+                                    .items_center()
+                                    .child(div().child("00:00s"))
+                                    .child(div().child("00:01s"))
+                                    .child(div().child("00:02s"))
+                                    .child(div().child("00:03s"))
+                                    .child(div().child("00:04s"))
+                                    .child(div().child("00:05s")),
+                            )
+                            .child(
+                                // Playhead marker on ruler
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .bottom_0()
+                                    .w(px(2.))
+                                    .bg(rgb(0xef4444))
+                                    .left(relative(playhead_percent / 100.0)),
+                            ),
                     ),
             )
             // Tracks area
@@ -1132,172 +1613,7 @@ impl Render for TimelinePanel {
                     .test_support()
                     .flex_1()
                     .overflow_hidden()
-                    // Track 1
-                    .child(
-                        h_flex()
-                            .h(px(26.))
-                            .border_b_1()
-                            .border_color(cx.theme().border)
-                            .items_center()
-                            .child(
-                                h_flex()
-                                    .w(px(240.))
-                                    .px_2()
-                                    .border_r_1()
-                                    .border_color(cx.theme().border)
-                                    .items_center()
-                                    .justify_between()
-                                    .text_xs()
-                                    .child(div().child("1  [V] [A] [•]  Layer 1: Text"))
-                                    .child(
-                                        div()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child("Normal"),
-                                    ),
-                            )
-                            .child(
-                                h_flex()
-                                    .flex_1()
-                                    .px_2()
-                                    .items_center()
-                                    .child(
-                                        div()
-                                            .w_full()
-                                            .h(px(16.))
-                                            .rounded_sm()
-                                            .bg(cx.theme().primary)
-                                            .opacity(0.85)
-                                            .px_2()
-                                            .text_xs()
-                                            .text_color(cx.theme().primary_foreground)
-                                            .child("Layer 1: Text [00:00 - 00:10]"),
-                                    ),
-                            ),
-                    )
-                    // Track 2
-                    .child(
-                        h_flex()
-                            .h(px(26.))
-                            .border_b_1()
-                            .border_color(cx.theme().border)
-                            .items_center()
-                            .child(
-                                h_flex()
-                                    .w(px(240.))
-                                    .px_2()
-                                    .border_r_1()
-                                    .border_color(cx.theme().border)
-                                    .items_center()
-                                    .justify_between()
-                                    .text_xs()
-                                    .child(div().child("2  [V] [A] [•]  Footage_01.mp4"))
-                                    .child(
-                                        div()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child("Normal"),
-                                    ),
-                            )
-                            .child(
-                                h_flex()
-                                    .flex_1()
-                                    .px_2()
-                                    .items_center()
-                                    .child(
-                                        div()
-                                            .w(px(380.))
-                                            .h(px(16.))
-                                            .rounded_sm()
-                                            .bg(cx.theme().accent)
-                                            .opacity(0.85)
-                                            .px_2()
-                                            .text_xs()
-                                            .text_color(cx.theme().accent_foreground)
-                                            .child("Footage_01.mp4 [00:00 - 00:08]"),
-                                    ),
-                            ),
-                    )
-                    // Track 3
-                    .child(
-                        h_flex()
-                            .h(px(26.))
-                            .border_b_1()
-                            .border_color(cx.theme().border)
-                            .items_center()
-                            .child(
-                                h_flex()
-                                    .w(px(240.))
-                                    .px_2()
-                                    .border_r_1()
-                                    .border_color(cx.theme().border)
-                                    .items_center()
-                                    .justify_between()
-                                    .text_xs()
-                                    .child(div().child("3  [V] [ ] [•]  Background.png"))
-                                    .child(
-                                        div()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child("Normal"),
-                                    ),
-                            )
-                            .child(
-                                h_flex()
-                                    .flex_1()
-                                    .px_2()
-                                    .items_center()
-                                    .child(
-                                        div()
-                                            .w_full()
-                                            .h(px(16.))
-                                            .rounded_sm()
-                                            .bg(cx.theme().secondary)
-                                            .px_2()
-                                            .text_xs()
-                                            .text_color(cx.theme().foreground)
-                                            .child("Background.png [00:00 - 00:10]"),
-                                    ),
-                            ),
-                    )
-                    // Track 4
-                    .child(
-                        h_flex()
-                            .h(px(26.))
-                            .border_b_1()
-                            .border_color(cx.theme().border)
-                            .items_center()
-                            .child(
-                                h_flex()
-                                    .w(px(240.))
-                                    .px_2()
-                                    .border_r_1()
-                                    .border_color(cx.theme().border)
-                                    .items_center()
-                                    .justify_between()
-                                    .text_xs()
-                                    .child(div().child("4  [ ] [A] [•]  Soundtrack.wav"))
-                                    .child(
-                                        div()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child("Normal"),
-                                    ),
-                            )
-                            .child(
-                                h_flex()
-                                    .flex_1()
-                                    .px_2()
-                                    .items_center()
-                                    .child(
-                                        div()
-                                            .w_full()
-                                            .h(px(16.))
-                                            .rounded_sm()
-                                            .bg(cx.theme().muted)
-                                            .px_2()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child("♫ Soundtrack.wav [00:00 - 00:10]"),
-                                    ),
-                            ),
-                    ),
+                    .children(track_rows),
             )
     }
 }
@@ -1314,7 +1630,7 @@ impl Panel for TimelinePanel {
     }
 
     fn title(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        "Timeline: Comp 1"
+        "Timeline"
     }
 }
 
@@ -1331,15 +1647,15 @@ pub struct AppPanels {
 }
 
 impl AppPanels {
-    pub fn new(cx: &mut App) -> Self {
-        let composition = cx.new(CompositionViewerPanel::new);
+    pub fn new(state: Entity<EditorState>, cx: &mut App) -> Self {
+        let composition = cx.new(|cx| CompositionViewerPanel::new(state.clone(), cx));
         Self {
-            project: cx.new(ProjectPanel::new),
+            project: cx.new(|cx| ProjectPanel::new(state.clone(), cx)),
             composition: composition.clone(),
             viewer: composition,
-            properties: cx.new(PropertiesPanel::new),
+            properties: cx.new(|cx| PropertiesPanel::new(state.clone(), cx)),
             effects: cx.new(EffectsPanel::new),
-            timeline: cx.new(TimelinePanel::new),
+            timeline: cx.new(|cx| TimelinePanel::new(state, cx)),
         }
     }
 }
