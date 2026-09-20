@@ -6,8 +6,8 @@ use gpui_kit::*;
 
 use std::collections::HashSet;
 
-use crate::state::EditorState;
-use project::{BlendMode, Color, EffectType, LayerSource, TimeCode, TrackMatteMode};
+use crate::state::{EditorState, EditorTool};
+use project::{BlendMode, Color, EffectType, LayerSource, TimeCode, TrackMatteMode, Vec2};
 
 fn icon_box(icon: IconName) -> Div {
     div().w(px(14.)).h(px(14.)).flex().items_center().justify_center().child(icon)
@@ -402,15 +402,30 @@ impl Render for ProjectPanel {
                                     .items_center()
                                     .gap_1()
                                     .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                        let file = rfd::FileDialog::new()
-                                            .add_filter("Media Files", &["png", "jpg", "jpeg", "mp4", "mov", "webm"])
-                                            .pick_file();
-                                        if let Some(path) = file {
-                                            import_state.update(cx, |s, cx| {
-                                                let _ = s.import_media_file(path);
-                                                cx.notify();
-                                            });
-                                        }
+                                        let s_import = import_state.clone();
+                                        cx.spawn(|cx: &mut AsyncApp| {
+                                            let cx = cx.clone();
+                                            async move {
+                                                let (tx, rx) = std::sync::mpsc::channel();
+                                                let _ = std::thread::Builder::new()
+                                                    .name("file-dialog-worker".to_string())
+                                                    .stack_size(8 * 1024 * 1024)
+                                                    .spawn(move || {
+                                                        let file = rfd::FileDialog::new()
+                                                            .add_filter("Media Files", &["png", "jpg", "jpeg", "mp4", "mov", "webm"])
+                                                            .pick_file();
+                                                        let _ = tx.send(file);
+                                                    });
+                                                if let Ok(Some(path)) = rx.recv() {
+                                                    cx.update(|cx| {
+                                                        s_import.update(cx, |s, cx| {
+                                                            let _ = s.import_media_file(path);
+                                                            cx.notify();
+                                                        });
+                                                    });
+                                                }
+                                            }
+                                        }).detach();
                                     })
                                     .child(icon_box(IconName::FolderOpen))
                                     .child("Import Media..."),
@@ -548,6 +563,7 @@ pub struct CompositionViewerPanel {
     focus_handle: FocusHandle,
     state: Entity<EditorState>,
     _subscription: Subscription,
+    pub context_menu: Option<String>,
 }
 
 impl CompositionViewerPanel {
@@ -559,6 +575,7 @@ impl CompositionViewerPanel {
             focus_handle: cx.focus_handle(),
             state,
             _subscription,
+            context_menu: None,
         }
     }
 
@@ -708,6 +725,8 @@ impl Render for CompositionViewerPanel {
                     let lid = layer.id.clone();
                     let is_video = matches!(&layer.source, LayerSource::Video { .. });
 
+                    let p_menu = cx.entity().clone();
+                    let lid_menu = layer.id.clone();
                     let mut layer_el = div()
                         .id(ElementId::Name(format!("canvas_layer_{}", layer.id).into()))
                         .test_support()
@@ -727,6 +746,12 @@ impl Render for CompositionViewerPanel {
                         .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                             sel_state.update(cx, |s, cx| {
                                 s.select_layer(Some(lid.clone()));
+                                cx.notify();
+                            });
+                        })
+                        .on_mouse_down(MouseButton::Right, move |_event, _window, cx| {
+                            p_menu.update(cx, |this, cx| {
+                                this.context_menu = Some(lid_menu.clone());
                                 cx.notify();
                             });
                         });
@@ -915,9 +940,12 @@ impl Render for CompositionViewerPanel {
                     .justify_center()
                     .p_4()
                     .overflow_hidden()
-                    .child(
-                        // 16:9 canvas frame
-                        div()
+                    .child({
+                        let active_tool = state.active_tool;
+                        let s_tool = self.state.clone();
+                        let mut canvas_frame = div()
+                            .id("canvas_viewport_frame")
+                            .test_support()
                             .w(px(canvas_w))
                             .h(px(canvas_h))
                             .border_2()
@@ -926,8 +954,195 @@ impl Render for CompositionViewerPanel {
                             .rounded_sm()
                             .relative()
                             .overflow_hidden()
-                            .children(rendered_layers),
-                    ),
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                match active_tool {
+                                    EditorTool::Text => {
+                                        s_tool.update(cx, |s, cx| {
+                                            let _ = s.add_text_layer("New Text Layer", None);
+                                            cx.notify();
+                                        });
+                                    }
+                                    EditorTool::ShapeRect => {
+                                        s_tool.update(cx, |s, cx| {
+                                            let _ = s.add_rectangle_shape_layer(300.0, 200.0, None);
+                                            cx.notify();
+                                        });
+                                    }
+                                    EditorTool::ShapeEllipse => {
+                                        s_tool.update(cx, |s, cx| {
+                                            let _ = s.add_ellipse_shape_layer(150.0, 150.0, None);
+                                            cx.notify();
+                                        });
+                                    }
+                                    EditorTool::Pen => {
+                                        s_tool.update(cx, |s, cx| {
+                                            let _ = s.add_pen_point(Vec2::new(100.0, 100.0));
+                                            cx.notify();
+                                        });
+                                    }
+                                    EditorTool::Rotate => {
+                                        s_tool.update(cx, |s, cx| {
+                                            s.nudge_rotation(15.0);
+                                            cx.notify();
+                                        });
+                                    }
+                                    _ => {}
+                                }
+                            })
+                            .children(rendered_layers);
+
+                        if let Some(ref menu_lid) = self.context_menu {
+                            let s_menu = self.state.clone();
+                            let p_close = cx.entity().clone();
+                            let target_lid = menu_lid.clone();
+
+                            let s1 = s_menu.clone();
+                            let p1 = p_close.clone();
+                            let t1 = target_lid.clone();
+
+                            let s2 = s_menu.clone();
+                            let p2 = p_close.clone();
+                            let t2 = target_lid.clone();
+
+                            let s3 = s_menu.clone();
+                            let p3 = p_close.clone();
+                            let t3 = target_lid.clone();
+
+                            let s4 = s_menu.clone();
+                            let p4 = p_close.clone();
+                            let t4 = target_lid.clone();
+
+                            let p5 = p_close.clone();
+
+                            let canvas_ctx_overlay = div()
+                                .id("canvas_context_menu")
+                                .test_support()
+                                .absolute()
+                                .top(px(40.))
+                                .left(px(100.))
+                                .w(px(200.))
+                                .bg(cx.theme().background)
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .rounded_md()
+                                .shadow_lg()
+                                .p_1()
+                                .child(
+                                    v_flex()
+                                        .gap_0p5()
+                                        .child(
+                                            div()
+                                                .font_bold()
+                                                .text_xs()
+                                                .px_2()
+                                                .py_1()
+                                                .border_b_1()
+                                                .border_color(cx.theme().border)
+                                                .child("Layer Actions"),
+                                        )
+                                        .child(
+                                            div()
+                                                .cursor_pointer()
+                                                .px_2()
+                                                .py_1()
+                                                .rounded_sm()
+                                                .text_xs()
+                                                .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                    s1.update(cx, |s, cx| {
+                                                        let _ = s.duplicate_layer(&t1);
+                                                        cx.notify();
+                                                    });
+                                                    p1.update(cx, |this, cx| {
+                                                        this.context_menu = None;
+                                                        cx.notify();
+                                                    });
+                                                })
+                                                .child("Duplicate Layer"),
+                                        )
+                                        .child(
+                                            div()
+                                                .cursor_pointer()
+                                                .px_2()
+                                                .py_1()
+                                                .rounded_sm()
+                                                .text_xs()
+                                                .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                    s2.update(cx, |s, cx| {
+                                                        s.reset_layer_transform(&t2);
+                                                        cx.notify();
+                                                    });
+                                                    p2.update(cx, |this, cx| {
+                                                        this.context_menu = None;
+                                                        cx.notify();
+                                                    });
+                                                })
+                                                .child("Reset Transform"),
+                                        )
+                                        .child(
+                                            div()
+                                                .cursor_pointer()
+                                                .px_2()
+                                                .py_1()
+                                                .rounded_sm()
+                                                .text_xs()
+                                                .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                    s3.update(cx, |s, cx| {
+                                                        s.add_keyframe_to_all_transforms_at_playhead(&t3);
+                                                        cx.notify();
+                                                    });
+                                                    p3.update(cx, |this, cx| {
+                                                        this.context_menu = None;
+                                                        cx.notify();
+                                                    });
+                                                })
+                                                .child("Keyframe Transform at CTI"),
+                                        )
+                                        .child(
+                                            div()
+                                                .cursor_pointer()
+                                                .px_2()
+                                                .py_1()
+                                                .rounded_sm()
+                                                .text_xs()
+                                                .hover(|s| s.bg(rgb(0xef4444)).text_color(rgb(0xffffff)))
+                                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                    s4.update(cx, |s, cx| {
+                                                        let _ = s.remove_layer_by_id(&t4);
+                                                        cx.notify();
+                                                    });
+                                                    p4.update(cx, |this, cx| {
+                                                        this.context_menu = None;
+                                                        cx.notify();
+                                                    });
+                                                })
+                                                .child("Delete Layer"),
+                                        )
+                                        .child(
+                                            div()
+                                                .cursor_pointer()
+                                                .px_2()
+                                                .py_1()
+                                                .rounded_sm()
+                                                .text_xs()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .hover(|s| s.bg(cx.theme().muted))
+                                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                    p5.update(cx, |this, cx| {
+                                                        this.context_menu = None;
+                                                        cx.notify();
+                                                    });
+                                                })
+                                                .child("Cancel"),
+                                        ),
+                                );
+                            canvas_frame = canvas_frame.child(canvas_ctx_overlay);
+                        }
+
+                        canvas_frame
+                    }),
             )
             // Status bar
             .child(
@@ -2265,22 +2480,16 @@ impl Panel for EffectsPanel {
 
 // --- 5. Timeline Panel ---
 
-fn next_blend_mode(mode: BlendMode) -> BlendMode {
-    match mode {
-        BlendMode::Normal => BlendMode::Multiply,
-        BlendMode::Multiply => BlendMode::Screen,
-        BlendMode::Screen => BlendMode::Overlay,
-        BlendMode::Overlay => BlendMode::Darken,
-        BlendMode::Darken => BlendMode::Lighten,
-        BlendMode::Lighten => BlendMode::ColorDodge,
-        BlendMode::ColorDodge => BlendMode::ColorBurn,
-        BlendMode::ColorBurn => BlendMode::HardLight,
-        BlendMode::HardLight => BlendMode::SoftLight,
-        BlendMode::SoftLight => BlendMode::Difference,
-        BlendMode::Difference => BlendMode::Exclusion,
-        _ => BlendMode::Normal,
-    }
-}
+pub const BLEND_MODE_GROUPS: &[(&str, &[BlendMode])] = &[
+    ("Normal", &[BlendMode::Normal, BlendMode::Dissolve]),
+    ("Darken", &[BlendMode::Darken, BlendMode::Multiply, BlendMode::ColorBurn]),
+    ("Lighten", &[BlendMode::Lighten, BlendMode::Screen, BlendMode::ColorDodge, BlendMode::Add]),
+    ("Contrast", &[BlendMode::Overlay, BlendMode::SoftLight, BlendMode::HardLight]),
+    ("Inversion", &[BlendMode::Difference, BlendMode::Exclusion, BlendMode::Subtract]),
+    ("Component", &[BlendMode::Hue, BlendMode::Saturation, BlendMode::Color, BlendMode::Luminosity]),
+];
+
+
 
 fn next_matte_mode(mode: TrackMatteMode) -> TrackMatteMode {
     match mode {
@@ -2542,12 +2751,26 @@ where
         )
 }
 
+#[derive(Clone, Debug)]
+pub enum ContextMenuTarget {
+    Layer(String),
+    Effect { layer_id: String, effect_id: String },
+    Property { layer_id: String, prop_path: &'static str },
+}
+
+#[derive(Clone, Debug)]
+pub struct ContextMenuState {
+    pub target: ContextMenuTarget,
+}
+
 pub struct TimelinePanel {
     focus_handle: FocusHandle,
     state: Entity<EditorState>,
     _subscription: Subscription,
     expanded_layers: HashSet<String>,
     expanded_groups: HashSet<String>,
+    pub active_blend_dropdown: Option<String>,
+    pub context_menu: Option<ContextMenuState>,
 }
 
 impl TimelinePanel {
@@ -2563,7 +2786,25 @@ impl TimelinePanel {
             _subscription,
             expanded_layers,
             expanded_groups,
+            active_blend_dropdown: None,
+            context_menu: None,
         }
+    }
+
+    pub fn open_blend_dropdown(&mut self, layer_id: String) {
+        self.active_blend_dropdown = Some(layer_id);
+    }
+
+    pub fn close_blend_dropdown(&mut self) {
+        self.active_blend_dropdown = None;
+    }
+
+    pub fn open_context_menu(&mut self, target: ContextMenuTarget) {
+        self.context_menu = Some(ContextMenuState { target });
+    }
+
+    pub fn close_context_menu(&mut self) {
+        self.context_menu = None;
     }
 
     pub fn standalone(cx: &mut Context<Self>) -> Self {
@@ -2651,7 +2892,6 @@ impl Render for TimelinePanel {
                 let vis_state = self.state.clone();
                 let solo_state = self.state.clone();
                 let lock_state = self.state.clone();
-                let blend_state = self.state.clone();
                 let matte_state = self.state.clone();
                 let parent_state = self.state.clone();
                 let s_up = self.state.clone();
@@ -2662,13 +2902,11 @@ impl Render for TimelinePanel {
                 let lid_vis = layer.id.clone();
                 let lid_solo = layer.id.clone();
                 let lid_lock = layer.id.clone();
-                let lid_blend = layer.id.clone();
                 let lid_matte = layer.id.clone();
                 let lid_parent = layer.id.clone();
                 let lid_up = layer.id.clone();
                 let lid_down = layer.id.clone();
                 let lid_del = layer.id.clone();
-                let current_blend = layer.blend_mode;
                 let current_matte = layer.matte_mode;
                 let current_parent = layer.parent_id.clone();
 
@@ -2703,10 +2941,18 @@ impl Render for TimelinePanel {
                         .hover(|s| s.bg(cx.theme().muted));
                 }
 
+                let p_layer_ctx = panel_entity.clone();
+                let lid_layer_ctx = layer.id.clone();
                 let left_col = left_col
                     .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                         sel_state.update(cx, |s, cx| {
                             s.select_layer(Some(lid.clone()));
+                            cx.notify();
+                        });
+                    })
+                    .on_mouse_down(MouseButton::Right, move |_event, _window, cx| {
+                        p_layer_ctx.update(cx, |this, cx| {
+                            this.open_context_menu(ContextMenuTarget::Layer(lid_layer_ctx.clone()));
                             cx.notify();
                         });
                     })
@@ -2825,7 +3071,9 @@ impl Render for TimelinePanel {
                             .gap_1()
                             .items_center()
                             // Blend Mode
-                            .child(
+                            .child({
+                                let p_blend = panel_entity.clone();
+                                let lid_bm = layer.id.clone();
                                 div()
                                     .cursor_pointer()
                                     .px_1p5()
@@ -2836,14 +3084,17 @@ impl Render for TimelinePanel {
                                     .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
                                     .text_xs()
                                     .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                        let next = next_blend_mode(current_blend);
-                                        blend_state.update(cx, |s, cx| {
-                                            s.set_layer_blend_mode(&lid_blend, next);
+                                        p_blend.update(cx, |this, cx| {
+                                            if this.active_blend_dropdown.as_deref() == Some(&lid_bm) {
+                                                this.close_blend_dropdown();
+                                            } else {
+                                                this.open_blend_dropdown(lid_bm.clone());
+                                            }
                                             cx.notify();
                                         });
                                     })
-                                    .child(format!("{:?}", layer.blend_mode)),
-                            )
+                                    .child(layer.blend_mode.as_str())
+                            })
                             // Track Matte
                             .child(
                                 div()
@@ -3043,6 +3294,8 @@ impl Render for TimelinePanel {
                         let lid_ap3 = layer.id.clone();
                         let lid_ap4 = layer.id.clone();
 
+                        let p_prop_ap = panel_entity.clone();
+                        let lid_prop_ap = layer.id.clone();
                         let ap_left = h_flex()
                             .w(px(380.))
                             .h(px(24.))
@@ -3053,6 +3306,16 @@ impl Render for TimelinePanel {
                             .items_center()
                             .justify_between()
                             .text_xs()
+                            .cursor_pointer()
+                            .on_mouse_down(MouseButton::Right, move |_event, _window, cx| {
+                                p_prop_ap.update(cx, |this, cx| {
+                                    this.open_context_menu(ContextMenuTarget::Property {
+                                        layer_id: lid_prop_ap.clone(),
+                                        prop_path: "transform.anchor_point",
+                                    });
+                                    cx.notify();
+                                });
+                            })
                             .child(
                                 h_flex()
                                     .gap_1()
@@ -3085,6 +3348,8 @@ impl Render for TimelinePanel {
                         let lid_pos3 = layer.id.clone();
                         let lid_pos4 = layer.id.clone();
 
+                        let p_prop_pos = panel_entity.clone();
+                        let lid_prop_pos = layer.id.clone();
                         let pos_left = h_flex()
                             .w(px(380.))
                             .h(px(24.))
@@ -3095,6 +3360,16 @@ impl Render for TimelinePanel {
                             .items_center()
                             .justify_between()
                             .text_xs()
+                            .cursor_pointer()
+                            .on_mouse_down(MouseButton::Right, move |_event, _window, cx| {
+                                p_prop_pos.update(cx, |this, cx| {
+                                    this.open_context_menu(ContextMenuTarget::Property {
+                                        layer_id: lid_prop_pos.clone(),
+                                        prop_path: "transform.position",
+                                    });
+                                    cx.notify();
+                                });
+                            })
                             .child(
                                 h_flex()
                                     .gap_1()
@@ -3127,6 +3402,8 @@ impl Render for TimelinePanel {
                         let lid_sc3 = layer.id.clone();
                         let lid_sc4 = layer.id.clone();
 
+                        let p_prop_sc = panel_entity.clone();
+                        let lid_prop_sc = layer.id.clone();
                         let sc_left = h_flex()
                             .w(px(380.))
                             .h(px(24.))
@@ -3137,6 +3414,16 @@ impl Render for TimelinePanel {
                             .items_center()
                             .justify_between()
                             .text_xs()
+                            .cursor_pointer()
+                            .on_mouse_down(MouseButton::Right, move |_event, _window, cx| {
+                                p_prop_sc.update(cx, |this, cx| {
+                                    this.open_context_menu(ContextMenuTarget::Property {
+                                        layer_id: lid_prop_sc.clone(),
+                                        prop_path: "transform.scale",
+                                    });
+                                    cx.notify();
+                                });
+                            })
                             .child(
                                 h_flex()
                                     .gap_1()
@@ -3165,6 +3452,8 @@ impl Render for TimelinePanel {
                         let lid_rot1 = layer.id.clone();
                         let lid_rot2 = layer.id.clone();
 
+                        let p_prop_rot = panel_entity.clone();
+                        let lid_prop_rot = layer.id.clone();
                         let rot_left = h_flex()
                             .w(px(380.))
                             .h(px(24.))
@@ -3175,6 +3464,16 @@ impl Render for TimelinePanel {
                             .items_center()
                             .justify_between()
                             .text_xs()
+                            .cursor_pointer()
+                            .on_mouse_down(MouseButton::Right, move |_event, _window, cx| {
+                                p_prop_rot.update(cx, |this, cx| {
+                                    this.open_context_menu(ContextMenuTarget::Property {
+                                        layer_id: lid_prop_rot.clone(),
+                                        prop_path: "transform.rotation",
+                                    });
+                                    cx.notify();
+                                });
+                            })
                             .child(
                                 h_flex()
                                     .gap_1()
@@ -3200,6 +3499,8 @@ impl Render for TimelinePanel {
                         let lid_op1 = layer.id.clone();
                         let lid_op2 = layer.id.clone();
 
+                        let p_prop_op = panel_entity.clone();
+                        let lid_prop_op = layer.id.clone();
                         let op_left = h_flex()
                             .w(px(380.))
                             .h(px(24.))
@@ -3210,6 +3511,16 @@ impl Render for TimelinePanel {
                             .items_center()
                             .justify_between()
                             .text_xs()
+                            .cursor_pointer()
+                            .on_mouse_down(MouseButton::Right, move |_event, _window, cx| {
+                                p_prop_op.update(cx, |this, cx| {
+                                    this.open_context_menu(ContextMenuTarget::Property {
+                                        layer_id: lid_prop_op.clone(),
+                                        prop_path: "opacity",
+                                    });
+                                    cx.notify();
+                                });
+                            })
                             .child(
                                 h_flex()
                                     .gap_1()
@@ -3359,6 +3670,21 @@ impl Render for TimelinePanel {
                                             .child(icon_box(IconName::Trash)),
                                     );
 
+                                let p_fx_menu = panel_entity.clone();
+                                let lid_fx_menu = layer.id.clone();
+                                let eid_fx_menu = effect.id.clone();
+                                let fx_item_left = fx_item_left
+                                    .cursor_pointer()
+                                    .on_mouse_down(MouseButton::Right, move |_event, _window, cx| {
+                                        p_fx_menu.update(cx, |this, cx| {
+                                            this.open_context_menu(ContextMenuTarget::Effect {
+                                                layer_id: lid_fx_menu.clone(),
+                                                effect_id: eid_fx_menu.clone(),
+                                            });
+                                            cx.notify();
+                                        });
+                                    });
+
                                 let fx_item_lane = div()
                                     .flex_1()
                                     .h(px(24.))
@@ -3486,11 +3812,12 @@ impl Render for TimelinePanel {
             }
         }
 
-        div()
+        let mut root = div()
             .id("timeline_panel")
             .test_support()
             .track_focus(&self.focus_handle)
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .bg(cx.theme().background)
@@ -3758,11 +4085,37 @@ impl Render for TimelinePanel {
                             .border_color(cx.theme().border)
                             .child("Layer Name / Switches / Properties"),
                     )
-                    .child(
-                        div()
+                    .child({
+                        let mut ruler_track = div()
+                            .id("ruler_track")
+                            .test_support()
                             .flex_1()
                             .relative()
                             .h_full()
+                            .cursor_col_resize();
+
+                        // 50 interactive scrub slices across the timeline ruler track
+                        for slice_idx in 0..50 {
+                            let scrub_pct = (slice_idx as f64) / 50.0;
+                            let s_scrub = self.state.clone();
+                            let target_time = scrub_pct * total_duration_secs;
+                            ruler_track = ruler_track.child(
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .bottom_0()
+                                    .left(relative(scrub_pct as f32))
+                                    .w(relative(1.0 / 50.0))
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        s_scrub.update(cx, |s, cx| {
+                                            s.seek(target_time);
+                                            cx.notify();
+                                        });
+                                    }),
+                            );
+                        }
+
+                        ruler_track = ruler_track
                             .child(
                                 h_flex()
                                     .size_full()
@@ -3785,8 +4138,10 @@ impl Render for TimelinePanel {
                                     .w(px(2.))
                                     .bg(rgb(0xef4444))
                                     .left(relative(playhead_percent / 100.0)),
-                            ),
-                    ),
+                            );
+
+                        ruler_track
+                    }),
             )
             // Tracks area
             .child(
@@ -3796,7 +4151,423 @@ impl Render for TimelinePanel {
                     .flex_1()
                     .overflow_hidden()
                     .children(timeline_rows),
-            )
+            );
+
+        // Blend Mode Dropdown Overlay
+        if let Some(ref target_lid) = self.active_blend_dropdown {
+            let s_bm = self.state.clone();
+            let p_close = panel_entity.clone();
+            let target_lid_str = target_lid.clone();
+
+            let mut cat_columns = h_flex().gap_2().p_2();
+
+            for (cat_name, modes) in BLEND_MODE_GROUPS {
+                let mut col = v_flex().gap_0p5().w(px(95.));
+                col = col.child(
+                    div()
+                        .font_semibold()
+                        .text_xs()
+                        .text_color(cx.theme().primary)
+                        .px_1()
+                        .py_0p5()
+                        .border_b_1()
+                        .border_color(cx.theme().border)
+                        .child(*cat_name),
+                );
+
+                for &bm in *modes {
+                    let s_item = s_bm.clone();
+                    let p_close_item = p_close.clone();
+                    let target_lid_item = target_lid_str.clone();
+
+                    col = col.child(
+                        div()
+                            .cursor_pointer()
+                            .px_1p5()
+                            .py_0p5()
+                            .rounded_sm()
+                            .text_xs()
+                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                s_item.update(cx, |s, cx| {
+                                    s.set_layer_blend_mode(&target_lid_item, bm);
+                                    cx.notify();
+                                });
+                                p_close_item.update(cx, |this, cx| {
+                                    this.close_blend_dropdown();
+                                    cx.notify();
+                                });
+                            })
+                            .child(bm.as_str()),
+                    );
+                }
+                cat_columns = cat_columns.child(col);
+            }
+
+            let p_close_bg = p_close.clone();
+            let blend_dropdown_overlay = div()
+                .id("blend_mode_dropdown")
+                .test_support()
+                .absolute()
+                .top(px(40.))
+                .left(px(180.))
+                .bg(cx.theme().background)
+                .border_1()
+                .border_color(cx.theme().border)
+                .rounded_md()
+                .shadow_lg()
+                .child(
+                    v_flex()
+                        .child(
+                            h_flex()
+                                .justify_between()
+                                .items_center()
+                                .px_2()
+                                .py_1()
+                                .border_b_1()
+                                .border_color(cx.theme().border)
+                                .bg(cx.theme().secondary)
+                                .child(div().font_bold().text_xs().child("Blend Modes"))
+                                .child(
+                                    div()
+                                        .cursor_pointer()
+                                        .text_xs()
+                                        .hover(|s| s.text_color(rgb(0xef4444)))
+                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                            p_close_bg.update(cx, |this, cx| {
+                                                this.close_blend_dropdown();
+                                                cx.notify();
+                                            });
+                                        })
+                                        .child("✕"),
+                                ),
+                        )
+                        .child(cat_columns),
+                );
+            root = root.child(blend_dropdown_overlay);
+        }
+
+        // Context Menu Overlay
+        if let Some(ref ctx_menu) = self.context_menu {
+            let p_close = panel_entity.clone();
+            let s_menu = self.state.clone();
+
+            let mut menu_items = v_flex().gap_0p5().p_1();
+
+            match &ctx_menu.target {
+                ContextMenuTarget::Layer(lid) => {
+                    let target_lid = lid.clone();
+                    let s1 = s_menu.clone();
+                    let p1 = p_close.clone();
+                    let t1 = target_lid.clone();
+                    menu_items = menu_items.child(
+                        div()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                s1.update(cx, |s, cx| {
+                                    let _ = s.duplicate_layer(&t1);
+                                    cx.notify();
+                                });
+                                p1.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    cx.notify();
+                                });
+                            })
+                            .child("Duplicate Layer"),
+                    );
+
+                    let s2 = s_menu.clone();
+                    let p2 = p_close.clone();
+                    let t2 = target_lid.clone();
+                    menu_items = menu_items.child(
+                        div()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                s2.update(cx, |s, cx| {
+                                    s.reset_layer_transform(&t2);
+                                    cx.notify();
+                                });
+                                p2.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    cx.notify();
+                                });
+                            })
+                            .child("Reset Transform"),
+                    );
+
+                    let s3 = s_menu.clone();
+                    let p3 = p_close.clone();
+                    let t3 = target_lid.clone();
+                    menu_items = menu_items.child(
+                        div()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                s3.update(cx, |s, cx| {
+                                    s.add_keyframe_to_all_transforms_at_playhead(&t3);
+                                    cx.notify();
+                                });
+                                p3.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    cx.notify();
+                                });
+                            })
+                            .child("Add Keyframe to Transforms at CTI"),
+                    );
+
+                    let s4 = s_menu.clone();
+                    let p4 = p_close.clone();
+                    let t4 = target_lid.clone();
+                    menu_items = menu_items.child(
+                        div()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                s4.update(cx, |s, cx| {
+                                    let _ = s.move_layer_up(&t4);
+                                    cx.notify();
+                                });
+                                p4.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    cx.notify();
+                                });
+                            })
+                            .child("Move Up"),
+                    );
+
+                    let s5 = s_menu.clone();
+                    let p5 = p_close.clone();
+                    let t5 = target_lid.clone();
+                    menu_items = menu_items.child(
+                        div()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                s5.update(cx, |s, cx| {
+                                    let _ = s.move_layer_down(&t5);
+                                    cx.notify();
+                                });
+                                p5.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    cx.notify();
+                                });
+                            })
+                            .child("Move Down"),
+                    );
+
+                    let s6 = s_menu.clone();
+                    let p6 = p_close.clone();
+                    let t6 = target_lid.clone();
+                    menu_items = menu_items.child(
+                        div()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .hover(|s| s.bg(rgb(0xef4444)).text_color(rgb(0xffffff)))
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                s6.update(cx, |s, cx| {
+                                    let _ = s.remove_layer_by_id(&t6);
+                                    cx.notify();
+                                });
+                                p6.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    cx.notify();
+                                });
+                            })
+                            .child("Delete Layer"),
+                    );
+                }
+                ContextMenuTarget::Effect { layer_id, effect_id } => {
+                    let lid = layer_id.clone();
+                    let eid = effect_id.clone();
+                    let s1 = s_menu.clone();
+                    let p1 = p_close.clone();
+                    let l1 = lid.clone();
+                    let e1 = eid.clone();
+                    menu_items = menu_items.child(
+                        div()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                s1.update(cx, |s, cx| {
+                                    let _ = s.duplicate_layer_effect(&l1, &e1);
+                                    cx.notify();
+                                });
+                                p1.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    cx.notify();
+                                });
+                            })
+                            .child("Duplicate Effect"),
+                    );
+
+                    let s2 = s_menu.clone();
+                    let p2 = p_close.clone();
+                    let l2 = lid.clone();
+                    let e2 = eid.clone();
+                    menu_items = menu_items.child(
+                        div()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                s2.update(cx, |s, cx| {
+                                    let _ = s.toggle_layer_effect_enabled(&l2, &e2);
+                                    cx.notify();
+                                });
+                                p2.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    cx.notify();
+                                });
+                            })
+                            .child("Toggle Enabled"),
+                    );
+
+                    let s3 = s_menu.clone();
+                    let p3 = p_close.clone();
+                    let l3 = lid.clone();
+                    let e3 = eid.clone();
+                    menu_items = menu_items.child(
+                        div()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .hover(|s| s.bg(rgb(0xef4444)).text_color(rgb(0xffffff)))
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                s3.update(cx, |s, cx| {
+                                    let _ = s.remove_layer_effect(&l3, &e3);
+                                    cx.notify();
+                                });
+                                p3.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    cx.notify();
+                                });
+                            })
+                            .child("Delete Effect"),
+                    );
+                }
+                ContextMenuTarget::Property { layer_id, prop_path } => {
+                    let lid = layer_id.clone();
+                    let path = *prop_path;
+                    let s1 = s_menu.clone();
+                    let p1 = p_close.clone();
+                    let l1 = lid.clone();
+                    menu_items = menu_items.child(
+                        div()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                s1.update(cx, |s, cx| {
+                                    s.toggle_layer_property_keyframe_at_playhead(&l1, path);
+                                    cx.notify();
+                                });
+                                p1.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    cx.notify();
+                                });
+                            })
+                            .child("Add/Remove Keyframe at CTI"),
+                    );
+
+                    let s2 = s_menu.clone();
+                    let p2 = p_close.clone();
+                    let l2 = lid.clone();
+                    menu_items = menu_items.child(
+                        div()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                s2.update(cx, |s, cx| {
+                                    s.toggle_layer_property_animation(&l2, path);
+                                    cx.notify();
+                                });
+                                p2.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    cx.notify();
+                                });
+                            })
+                            .child("Toggle Stopwatch Animation"),
+                    );
+                }
+            }
+
+            let p_cancel = p_close.clone();
+            menu_items = menu_items.child(
+                div()
+                    .cursor_pointer()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .hover(|s| s.bg(cx.theme().muted))
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        p_cancel.update(cx, |this, cx| {
+                            this.close_context_menu();
+                            cx.notify();
+                        });
+                    })
+                    .child("Cancel"),
+            );
+
+            let context_menu_overlay = div()
+                .id("timeline_context_menu")
+                .test_support()
+                .absolute()
+                .top(px(40.))
+                .left(px(120.))
+                .w(px(220.))
+                .bg(cx.theme().background)
+                .border_1()
+                .border_color(cx.theme().border)
+                .rounded_md()
+                .shadow_lg()
+                .child(menu_items);
+            root = root.child(context_menu_overlay);
+        }
+
+        root
     }
 }
 

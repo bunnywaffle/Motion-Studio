@@ -1,19 +1,33 @@
 use compositor::{EvaluatedStack, LayerStackEvaluator, SceneGraph};
 use project::{
     Asset, BlendMode, Color, Composition, Effect, EffectType, Keyframe, KeyframeTangent, Layer,
-    PlaybackClock, Project, TimeCode, TrackMatteMode, Vec2,
+    LayerSource, PlaybackClock, Project, Property, ShapeType, TimeCode, TrackMatteMode, Vec2,
 };
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// Active editing tool mimicking After Effects tools palette.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum EditorTool {
+    #[default]
+    Move,          // 'V' Selection and translation
+    Hand,          // 'H' Pan view
+    Rotate,        // 'W' Rotation
+    Pen,           // 'G' Vector pen / path drawing
+    Text,          // 'T' Text layer placement
+    ShapeRect,     // 'Q' Rectangle shape
+    ShapeEllipse,  // 'Q' Ellipse shape
+}
+
 /// Central application editor state managing the active project, playback clock,
-/// layer selection, and composition evaluation.
+/// layer selection, active tool, and composition evaluation.
 pub struct EditorState {
     pub project: Project,
     pub active_comp_id: String,
     pub clock: PlaybackClock,
     pub selected_layer_id: Option<String>,
     pub is_playing: bool,
+    pub active_tool: EditorTool,
     evaluator: LayerStackEvaluator,
 }
 
@@ -107,6 +121,7 @@ impl EditorState {
             clock,
             selected_layer_id,
             is_playing: false,
+            active_tool: EditorTool::Move,
             evaluator: LayerStackEvaluator::new(),
         }
     }
@@ -951,6 +966,16 @@ impl EditorState {
         }
     }
 
+    /// Seek the playback clock to `time_seconds`.
+    pub fn seek(&mut self, time_seconds: f64) {
+        self.clock.seek_seconds(time_seconds);
+    }
+
+    /// Toggle a keyframe at the current playhead time for a property path on the layer.
+    pub fn toggle_layer_property_keyframe_at_playhead(&mut self, layer_id: &str, prop_path: &str) {
+        self.toggle_layer_keyframe_at_current_time(layer_id, prop_path);
+    }
+
     /// Seek to the previous keyframe for the given property path on the layer.
     pub fn seek_previous_keyframe(&mut self, layer_id: &str, prop_path: &str) {
         let current_tc = self.clock.timecode();
@@ -1091,6 +1116,363 @@ impl EditorState {
             .map_err(|e| format!("Scene graph error: {e:?}"))?;
         let current_tc = self.clock.timecode();
         Ok(self.evaluator.evaluate(&graph, &current_tc))
+    }
+
+    /// Set the active editor tool (Move, Hand, Rotate, Pen, Text, ShapeRect, ShapeEllipse).
+    pub fn set_tool(&mut self, tool: EditorTool) {
+        self.active_tool = tool;
+    }
+
+    /// Cycle between Shape tool variants (Rectangle <-> Ellipse).
+    pub fn cycle_shape_tool(&mut self) {
+        self.active_tool = match self.active_tool {
+            EditorTool::ShapeRect => EditorTool::ShapeEllipse,
+            _ => EditorTool::ShapeRect,
+        };
+    }
+
+    /// Add a new Text layer with given text and optional position.
+    pub fn add_text_layer(&mut self, text: &str, pos: Option<Vec2>) -> Result<String, String> {
+        let (comp_w, comp_h, frame_rate, duration) = {
+            let comp = self
+                .active_composition()
+                .ok_or_else(|| "No active composition".to_string())?;
+            (comp.width, comp.height, comp.frame_rate, comp.duration)
+        };
+
+        let layer_id = {
+            let comp = self
+                .active_composition()
+                .ok_or_else(|| "No active composition".to_string())?;
+            let mut counter = comp.layers.len() + 1;
+            let mut id = format!("layer_text_{counter}");
+            while comp.get_layer(&id).is_some() {
+                counter += 1;
+                id = format!("layer_text_{counter}");
+            }
+            id
+        };
+
+        let in_pt = TimeCode::zero(frame_rate);
+        let out_pt = duration;
+        let mut layer = Layer::text(
+            &layer_id,
+            if text.is_empty() { "Text Layer" } else { text },
+            text,
+            "Inter",
+            48.0,
+            Color::WHITE,
+            in_pt,
+            out_pt,
+        );
+
+        let target_pos = pos.unwrap_or_else(|| Vec2::new((comp_w / 2) as f32, (comp_h / 2) as f32));
+        layer.transform.position.set_value(target_pos);
+        layer.transform.anchor_point.set_value(Vec2::new(0.0, 0.0));
+
+        let comp_mut = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        comp_mut
+            .add_layer(layer)
+            .map_err(|e| format!("Failed to add text layer: {e:?}"))?;
+
+        self.selected_layer_id = Some(layer_id.clone());
+        Ok(layer_id)
+    }
+
+    /// Add a new Rectangle Shape layer with given dimensions and optional position.
+    pub fn add_rectangle_shape_layer(
+        &mut self,
+        width: f32,
+        height: f32,
+        pos: Option<Vec2>,
+    ) -> Result<String, String> {
+        let (comp_w, comp_h, frame_rate, duration) = {
+            let comp = self
+                .active_composition()
+                .ok_or_else(|| "No active composition".to_string())?;
+            (comp.width, comp.height, comp.frame_rate, comp.duration)
+        };
+
+        let layer_id = {
+            let comp = self
+                .active_composition()
+                .ok_or_else(|| "No active composition".to_string())?;
+            let mut counter = comp.layers.len() + 1;
+            let mut id = format!("layer_rect_{counter}");
+            while comp.get_layer(&id).is_some() {
+                counter += 1;
+                id = format!("layer_rect_{counter}");
+            }
+            id
+        };
+
+        let in_pt = TimeCode::zero(frame_rate);
+        let out_pt = duration;
+        let mut layer = Layer::shape(
+            &layer_id,
+            "Rectangle Shape",
+            ShapeType::Rectangle {
+                width: Property::new("Width", width),
+                height: Property::new("Height", height),
+                corner_radius: Property::new("Corner Radius", 0.0),
+            },
+            in_pt,
+            out_pt,
+        );
+
+        let target_pos = pos.unwrap_or_else(|| Vec2::new((comp_w / 2) as f32, (comp_h / 2) as f32));
+        layer.transform.position.set_value(target_pos);
+        layer.transform.anchor_point.set_value(Vec2::new(width / 2.0, height / 2.0));
+
+        let comp_mut = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        comp_mut
+            .add_layer(layer)
+            .map_err(|e| format!("Failed to add rectangle layer: {e:?}"))?;
+
+        self.selected_layer_id = Some(layer_id.clone());
+        Ok(layer_id)
+    }
+
+    /// Add a new Ellipse Shape layer with given radii and optional position.
+    pub fn add_ellipse_shape_layer(
+        &mut self,
+        radius_x: f32,
+        radius_y: f32,
+        pos: Option<Vec2>,
+    ) -> Result<String, String> {
+        let (comp_w, comp_h, frame_rate, duration) = {
+            let comp = self
+                .active_composition()
+                .ok_or_else(|| "No active composition".to_string())?;
+            (comp.width, comp.height, comp.frame_rate, comp.duration)
+        };
+
+        let layer_id = {
+            let comp = self
+                .active_composition()
+                .ok_or_else(|| "No active composition".to_string())?;
+            let mut counter = comp.layers.len() + 1;
+            let mut id = format!("layer_ellipse_{counter}");
+            while comp.get_layer(&id).is_some() {
+                counter += 1;
+                id = format!("layer_ellipse_{counter}");
+            }
+            id
+        };
+
+        let in_pt = TimeCode::zero(frame_rate);
+        let out_pt = duration;
+        let mut layer = Layer::shape(
+            &layer_id,
+            "Ellipse Shape",
+            ShapeType::Ellipse {
+                radius_x: Property::new("Radius X", radius_x),
+                radius_y: Property::new("Radius Y", radius_y),
+            },
+            in_pt,
+            out_pt,
+        );
+
+        let target_pos = pos.unwrap_or_else(|| Vec2::new((comp_w / 2) as f32, (comp_h / 2) as f32));
+        layer.transform.position.set_value(target_pos);
+        layer.transform.anchor_point.set_value(Vec2::new(radius_x, radius_y));
+
+        let comp_mut = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        comp_mut
+            .add_layer(layer)
+            .map_err(|e| format!("Failed to add ellipse layer: {e:?}"))?;
+
+        self.selected_layer_id = Some(layer_id.clone());
+        Ok(layer_id)
+    }
+
+    /// Add a vector path point using the Pen tool. If the currently selected layer is a Path shape,
+    /// appends the vertex; otherwise creates a new vector Path layer starting at `point`.
+    pub fn add_pen_point(&mut self, point: Vec2) -> Result<String, String> {
+        // Check if selected layer is a Path shape
+        let sel_id = self.selected_layer_id.clone();
+        if let Some(id) = sel_id {
+            if let Some(comp) = self.active_composition_mut() {
+                if let Some(layer) = comp.get_layer_mut(&id) {
+                    if let LayerSource::Shape { shape_type: ShapeType::Path { path_data } } = &mut layer.source {
+                        path_data.push_str(&format!(" L {:.1} {:.1}", point.x, point.y));
+                        return Ok(id);
+                    }
+                }
+            }
+        }
+
+        // Otherwise, create a new Path layer
+        let (frame_rate, duration) = {
+            let comp = self
+                .active_composition()
+                .ok_or_else(|| "No active composition".to_string())?;
+            (comp.frame_rate, comp.duration)
+        };
+
+        let layer_id = {
+            let comp = self
+                .active_composition()
+                .ok_or_else(|| "No active composition".to_string())?;
+            let mut counter = comp.layers.len() + 1;
+            let mut id = format!("layer_path_{counter}");
+            while comp.get_layer(&id).is_some() {
+                counter += 1;
+                id = format!("layer_path_{counter}");
+            }
+            id
+        };
+
+        let in_pt = TimeCode::zero(frame_rate);
+        let out_pt = duration;
+        let layer = Layer::shape(
+            &layer_id,
+            "Pen Path",
+            ShapeType::Path {
+                path_data: format!("M {:.1} {:.1}", point.x, point.y),
+            },
+            in_pt,
+            out_pt,
+        );
+
+        let comp_mut = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        comp_mut
+            .add_layer(layer)
+            .map_err(|e| format!("Failed to add path layer: {e:?}"))?;
+
+        self.selected_layer_id = Some(layer_id.clone());
+        Ok(layer_id)
+    }
+
+    /// Duplicate the specified layer in the active composition.
+    pub fn duplicate_layer(&mut self, layer_id: &str) -> Result<String, String> {
+        let comp = self
+            .active_composition()
+            .ok_or_else(|| "No active composition".to_string())?;
+
+        let layer = comp
+            .get_layer(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?
+            .clone();
+
+        let new_id = {
+            let mut counter = comp.layers.len() + 1;
+            let mut id = format!("{layer_id}_copy_{counter}");
+            while comp.get_layer(&id).is_some() {
+                counter += 1;
+                id = format!("{layer_id}_copy_{counter}");
+            }
+            id
+        };
+
+        let mut dup_layer = layer;
+        dup_layer.id = new_id.clone();
+        dup_layer.name = format!("{} Copy", dup_layer.name);
+
+        let comp_mut = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        comp_mut
+            .add_layer(dup_layer)
+            .map_err(|e| format!("Failed to add duplicated layer: {e:?}"))?;
+
+        self.selected_layer_id = Some(new_id.clone());
+        Ok(new_id)
+    }
+
+    /// Duplicate the currently selected layer.
+    pub fn duplicate_selected_layer(&mut self) -> Result<String, String> {
+        let sel_id = self
+            .selected_layer_id
+            .clone()
+            .ok_or_else(|| "No layer selected".to_string())?;
+        self.duplicate_layer(&sel_id)
+    }
+
+    /// Reset transform properties of the specified layer to defaults.
+    pub fn reset_layer_transform(&mut self, layer_id: &str) {
+        let (comp_w, comp_h) = match self.active_composition() {
+            Some(c) => (c.width as f32, c.height as f32),
+            None => (1920.0, 1080.0),
+        };
+
+        if let Some(comp) = self.active_composition_mut() {
+            if let Some(layer) = comp.get_layer_mut(layer_id) {
+                layer.transform = project::Transform::default();
+                layer.transform.position.set_value(Vec2::new(comp_w / 2.0, comp_h / 2.0));
+                layer.opacity.set_value(100.0);
+            }
+        }
+    }
+
+    /// Duplicate an effect on the specified layer.
+    pub fn duplicate_layer_effect(&mut self, layer_id: &str, effect_id: &str) -> Result<String, String> {
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+
+        let effect = layer
+            .get_effect(effect_id)
+            .ok_or_else(|| format!("Effect {effect_id} not found"))?
+            .clone();
+
+        let mut counter = layer.effects.len() + 1;
+        let mut new_id = format!("{effect_id}_copy_{counter}");
+        while layer.get_effect(&new_id).is_some() {
+            counter += 1;
+            new_id = format!("{effect_id}_copy_{counter}");
+        }
+
+        let mut dup_effect = effect;
+        dup_effect.id = new_id.clone();
+        dup_effect.name = format!("{} Copy", dup_effect.name);
+        layer.add_effect(dup_effect);
+
+        Ok(new_id)
+    }
+
+    /// Add keyframes to all spatial and opacity properties of the specified layer at the current playhead time.
+    pub fn add_keyframe_to_all_transforms_at_playhead(&mut self, layer_id: &str) {
+        let tc = self.clock.timecode();
+        if let Some(comp) = self.active_composition_mut() {
+            if let Some(layer) = comp.get_layer_mut(layer_id) {
+                // Position
+                let pos = layer.transform.position.evaluate_at(&tc);
+                layer.transform.position.set_animated(true);
+                layer.transform.position.add_keyframe(Keyframe::new(tc, pos));
+
+                // Scale
+                let sc = layer.transform.scale.evaluate_at(&tc);
+                layer.transform.scale.set_animated(true);
+                layer.transform.scale.add_keyframe(Keyframe::new(tc, sc));
+
+                // Rotation
+                let rot = layer.transform.rotation.evaluate_at(&tc);
+                layer.transform.rotation.set_animated(true);
+                layer.transform.rotation.add_keyframe(Keyframe::new(tc, rot));
+
+                // Anchor Point
+                let anc = layer.transform.anchor_point.evaluate_at(&tc);
+                layer.transform.anchor_point.set_animated(true);
+                layer.transform.anchor_point.add_keyframe(Keyframe::new(tc, anc));
+
+                // Opacity
+                let op = layer.opacity.evaluate_at(&tc);
+                layer.opacity.set_animated(true);
+                layer.opacity.add_keyframe(Keyframe::new(tc, op));
+            }
+        }
     }
 }
 

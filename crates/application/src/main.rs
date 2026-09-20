@@ -4,7 +4,7 @@ use state::EditorState;
 
 use std::rc::Rc;
 
-pub use gpui_kit::base::TestSupportExt;
+pub use gpui_kit::base::{h_flex, v_flex, StyledExt, TestSupportExt};
 pub use gpui_kit::component::dock::{
     panel_handle, BasePanel, DockArea, DockLayout, DockPlacement, DockSkin, Panel, PanelStyle,
 };
@@ -134,9 +134,219 @@ impl AppView {
     }
 }
 
+fn render_toolbar(state: &Entity<EditorState>, cx: &App) -> impl IntoElement {
+    let s_read = state.read(cx);
+    let active_tool = s_read.active_tool;
+    let sel_layer_name = s_read.selected_layer().map(|l| l.name.clone()).unwrap_or_else(|| "None".to_string());
+
+    let tool_btn = |tool: state::EditorTool, icon: gpui_kit::assets::IconName, label: &'static str, cx: &App| {
+        let is_active = active_tool == tool;
+        let s_click = state.clone();
+        div()
+            .id(SharedString::from(format!("tool_{label}")))
+            .test_support()
+            .cursor_pointer()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .flex()
+            .items_center()
+            .gap_1()
+            .text_xs()
+            .font_medium()
+            .bg(if is_active {
+                cx.theme().primary
+            } else {
+                cx.theme().muted
+            })
+            .text_color(if is_active {
+                cx.theme().primary_foreground
+            } else {
+                cx.theme().foreground
+            })
+            .hover(|s| {
+                if !is_active {
+                    s.bg(cx.theme().accent)
+                } else {
+                    s
+                }
+            })
+            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                s_click.update(cx, |s, cx| {
+                    s.set_tool(tool);
+                    cx.notify();
+                });
+            })
+            .child(div().w(px(14.)).h(px(14.)).flex().items_center().justify_center().child(icon))
+            .child(label)
+    };
+
+    // Tool Options
+    let options_bar = match active_tool {
+        state::EditorTool::Text => {
+            let s_text = state.clone();
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Text Tool:"))
+                .child(
+                    div()
+                        .id("quick_add_text_button")
+                        .test_support()
+                        .cursor_pointer()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(cx.theme().primary)
+                        .text_color(cx.theme().primary_foreground)
+                        .text_xs()
+                        .font_medium()
+                        .hover(|s| s.opacity(0.9))
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            s_text.update(cx, |s, cx| {
+                                let _ = s.add_text_layer("New Text", None);
+                                cx.notify();
+                            });
+                        })
+                        .child("+ Create Text Layer"),
+                )
+                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Font: Inter 48px • Click canvas to place"))
+        }
+        state::EditorTool::ShapeRect => {
+            let s_rect = state.clone();
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Shape:"))
+                .child(
+                    div()
+                        .id("quick_add_rect_button")
+                        .test_support()
+                        .cursor_pointer()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(cx.theme().primary)
+                        .text_color(cx.theme().primary_foreground)
+                        .text_xs()
+                        .font_medium()
+                        .hover(|s| s.opacity(0.9))
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            s_rect.update(cx, |s, cx| {
+                                let _ = s.add_rectangle_shape_layer(400.0, 300.0, None);
+                                cx.notify();
+                            });
+                        })
+                        .child("+ Create Rectangle"),
+                )
+                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("400 x 300 • Click canvas to place"))
+        }
+        state::EditorTool::ShapeEllipse => {
+            let s_el = state.clone();
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Shape:"))
+                .child(
+                    div()
+                        .id("quick_add_ellipse_button")
+                        .test_support()
+                        .cursor_pointer()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(cx.theme().primary)
+                        .text_color(cx.theme().primary_foreground)
+                        .text_xs()
+                        .font_medium()
+                        .hover(|s| s.opacity(0.9))
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            s_el.update(cx, |s, cx| {
+                                let _ = s.add_ellipse_shape_layer(150.0, 150.0, None);
+                                cx.notify();
+                            });
+                        })
+                        .child("+ Create Ellipse"),
+                )
+                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Radius: 150px • Click canvas to place"))
+        }
+        state::EditorTool::Pen => {
+            let s_pen = state.clone();
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Pen Tool:"))
+                .child(
+                    div()
+                        .id("quick_add_path_button")
+                        .test_support()
+                        .cursor_pointer()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(cx.theme().primary)
+                        .text_color(cx.theme().primary_foreground)
+                        .text_xs()
+                        .font_medium()
+                        .hover(|s| s.opacity(0.9))
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            s_pen.update(cx, |s, cx| {
+                                let _ = s.add_pen_point(project::Vec2::new(960.0, 540.0));
+                                cx.notify();
+                            });
+                        })
+                        .child("+ New Path"),
+                )
+                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Click canvas to add vertices"))
+        }
+        _ => {
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(div().text_xs().text_color(cx.theme().muted_foreground).child(format!("Selected: {sel_layer_name}")))
+        }
+    };
+
+    h_flex()
+        .id("top_toolbar")
+        .test_support()
+        .w_full()
+        .h(px(36.))
+        .px_3()
+        .border_b_1()
+        .border_color(cx.theme().border)
+        .bg(cx.theme().secondary)
+        .items_center()
+        .justify_between()
+        .child(
+            h_flex()
+                .gap_1p5()
+                .items_center()
+                .child(
+                    div()
+                        .font_bold()
+                        .text_xs()
+                        .text_color(rgb(0x38bdf8))
+                        .mr_2()
+                        .child("AE MOTION"),
+                )
+                .child(tool_btn(state::EditorTool::Move, gpui_kit::assets::IconName::Move, "V", cx))
+                .child(tool_btn(state::EditorTool::Hand, gpui_kit::assets::IconName::Hand, "H", cx))
+                .child(tool_btn(state::EditorTool::Rotate, gpui_kit::assets::IconName::RotateCw, "W", cx))
+                .child(tool_btn(state::EditorTool::Pen, gpui_kit::assets::IconName::Pen, "G", cx))
+                .child(tool_btn(state::EditorTool::Text, gpui_kit::assets::IconName::Type, "T", cx))
+                .child(tool_btn(state::EditorTool::ShapeRect, gpui_kit::assets::IconName::Square, "Rect", cx))
+                .child(tool_btn(state::EditorTool::ShapeEllipse, gpui_kit::assets::IconName::Circle, "Ellipse", cx))
+                .child(div().w(px(1.)).h(px(18.)).bg(cx.theme().border).mx_2())
+                .child(options_bar),
+        )
+}
+
 impl Render for AppView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state_key = self.state.clone();
+        let toolbar = render_toolbar(&self.state, cx);
+
         div()
             .id("app_view")
             .track_focus(&self.focus_handle)
@@ -156,19 +366,51 @@ impl Render for AppView {
                 }
             })
             .on_key_down(move |event, _window, cx| {
-                if event.keystroke.key == "space" || event.keystroke.key == " " {
+                let key = event.keystroke.key.to_lowercase();
+                if key == "space" || key == " " {
                     state_key.update(cx, |s, cx| {
                         s.toggle_playback();
                         cx.notify();
                     });
-                } else if event.keystroke.key == "delete" || event.keystroke.key == "backspace" {
+                } else if key == "delete" || key == "backspace" {
                     state_key.update(cx, |s, cx| {
                         let _ = s.delete_selected_layer();
                         cx.notify();
                     });
+                } else if key == "v" {
+                    state_key.update(cx, |s, cx| {
+                        s.set_tool(state::EditorTool::Move);
+                        cx.notify();
+                    });
+                } else if key == "h" {
+                    state_key.update(cx, |s, cx| {
+                        s.set_tool(state::EditorTool::Hand);
+                        cx.notify();
+                    });
+                } else if key == "w" {
+                    state_key.update(cx, |s, cx| {
+                        s.set_tool(state::EditorTool::Rotate);
+                        cx.notify();
+                    });
+                } else if key == "g" {
+                    state_key.update(cx, |s, cx| {
+                        s.set_tool(state::EditorTool::Pen);
+                        cx.notify();
+                    });
+                } else if key == "t" {
+                    state_key.update(cx, |s, cx| {
+                        s.set_tool(state::EditorTool::Text);
+                        cx.notify();
+                    });
+                } else if key == "q" {
+                    state_key.update(cx, |s, cx| {
+                        s.cycle_shape_tool();
+                        cx.notify();
+                    });
                 }
             })
-            .child(self.dock_area.clone())
+            .child(toolbar)
+            .child(div().flex_1().size_full().child(self.dock_area.clone()))
     }
 }
 
@@ -1701,5 +1943,208 @@ mod tests {
         // Remove effect directly
         state.remove_layer_effect(layer_id, &fx_id).expect("effect removed");
         assert!(!state.active_composition().unwrap().get_layer(layer_id).unwrap().has_effects());
+    }
+
+    #[test]
+    fn test_editor_tools_switching_and_layer_creation() {
+        use crate::state::{EditorState, EditorTool};
+        use project::{LayerSource, ShapeType, Vec2};
+
+        let mut state = EditorState::new();
+        assert_eq!(state.active_tool, EditorTool::Move);
+
+        // Tool switching
+        state.set_tool(EditorTool::Hand);
+        assert_eq!(state.active_tool, EditorTool::Hand);
+        state.set_tool(EditorTool::Rotate);
+        assert_eq!(state.active_tool, EditorTool::Rotate);
+        state.set_tool(EditorTool::Pen);
+        assert_eq!(state.active_tool, EditorTool::Pen);
+        state.set_tool(EditorTool::Text);
+        assert_eq!(state.active_tool, EditorTool::Text);
+        state.set_tool(EditorTool::ShapeRect);
+        assert_eq!(state.active_tool, EditorTool::ShapeRect);
+
+        // Cycle shape tool
+        state.cycle_shape_tool();
+        assert_eq!(state.active_tool, EditorTool::ShapeEllipse);
+        state.cycle_shape_tool();
+        assert_eq!(state.active_tool, EditorTool::ShapeRect);
+
+        // Add Text layer
+        let text_id = state.add_text_layer("Motion Studio Title", None).unwrap();
+        {
+            let comp = state.active_composition().unwrap();
+            let text_layer = comp.get_layer(&text_id).unwrap();
+            assert!(matches!(&text_layer.source, LayerSource::Text { text, .. } if text.value == "Motion Studio Title"));
+        }
+
+        // Add Rectangle shape layer
+        let rect_id = state.add_rectangle_shape_layer(400.0, 250.0, None).unwrap();
+        {
+            let comp = state.active_composition().unwrap();
+            let rect_layer = comp.get_layer(&rect_id).unwrap();
+            assert!(matches!(&rect_layer.source, LayerSource::Shape { shape_type: ShapeType::Rectangle { width, height, .. } } if width.value == 400.0 && height.value == 250.0));
+        }
+
+        // Add Ellipse shape layer
+        let ellipse_id = state.add_ellipse_shape_layer(120.0, 120.0, None).unwrap();
+        {
+            let comp = state.active_composition().unwrap();
+            let ellipse_layer = comp.get_layer(&ellipse_id).unwrap();
+            assert!(matches!(&ellipse_layer.source, LayerSource::Shape { shape_type: ShapeType::Ellipse { radius_x, radius_y } } if radius_x.value == 120.0 && radius_y.value == 120.0));
+        }
+
+        // Add Pen point -> new path layer
+        state.selected_layer_id = None;
+        let path_id = state.add_pen_point(Vec2::new(50.0, 75.0)).unwrap();
+        {
+            let comp = state.active_composition().unwrap();
+            let path_layer = comp.get_layer(&path_id).unwrap();
+            assert!(matches!(&path_layer.source, LayerSource::Shape { shape_type: ShapeType::Path { path_data } } if path_data.contains("M 50.0 75.0")));
+        }
+
+        // Append next vertex to path layer
+        state.selected_layer_id = Some(path_id.clone());
+        let same_id = state.add_pen_point(Vec2::new(150.0, 200.0)).unwrap();
+        assert_eq!(same_id, path_id);
+        {
+            let comp = state.active_composition().unwrap();
+            let path_layer = comp.get_layer(&path_id).unwrap();
+            assert!(matches!(&path_layer.source, LayerSource::Shape { shape_type: ShapeType::Path { path_data } } if path_data.contains("L 150.0 200.0")));
+        }
+    }
+
+    #[test]
+    fn test_layer_duplication_and_reset_transform() {
+        use crate::state::EditorState;
+        use project::{EffectType, Vec2};
+
+        let mut state = EditorState::new();
+        let orig_id = "layer_accent";
+
+        // 1. Duplicate layer
+        let dup_id = state.duplicate_layer(orig_id).unwrap();
+        assert_ne!(dup_id, orig_id);
+        {
+            let comp = state.active_composition().unwrap();
+            let dup_layer = comp.get_layer(&dup_id).unwrap();
+            assert!(dup_layer.name.ends_with("Copy"));
+        }
+
+        // 2. Modify transform and reset
+        state.nudge_layer_position(&dup_id, 100.0, 50.0);
+        state.nudge_layer_rotation(&dup_id, 45.0);
+        state.reset_layer_transform(&dup_id);
+        {
+            let comp = state.active_composition().unwrap();
+            let dup_layer = comp.get_layer(&dup_id).unwrap();
+            let comp_center = Vec2::new(comp.width as f32 / 2.0, comp.height as f32 / 2.0);
+            assert_eq!(dup_layer.transform.position.value, comp_center);
+            assert_eq!(dup_layer.transform.rotation.value, 0.0);
+            assert_eq!(dup_layer.opacity.value, 100.0);
+        }
+
+        // 3. Duplicate effect
+        state.select_layer(Some(dup_id.clone()));
+        let fx_id = state.add_effect_to_selected_layer(EffectType::gaussian_blur(20.0)).unwrap();
+        let dup_fx_id = state.duplicate_layer_effect(&dup_id, &fx_id).unwrap();
+        assert_ne!(fx_id, dup_fx_id);
+        {
+            let comp = state.active_composition().unwrap();
+            let dup_layer = comp.get_layer(&dup_id).unwrap();
+            assert_eq!(dup_layer.effects.len(), 2);
+            assert!(dup_layer.effects[1].name.ends_with("Copy"));
+        }
+
+        // 4. Add keyframe to all transforms at playhead
+        state.add_keyframe_to_all_transforms_at_playhead(&dup_id);
+        {
+            let comp = state.active_composition().unwrap();
+            let dup_layer = comp.get_layer(&dup_id).unwrap();
+            assert!(dup_layer.transform.position.is_animated());
+            assert_eq!(dup_layer.transform.position.keyframe_count(), 1);
+            assert!(dup_layer.transform.scale.is_animated());
+            assert_eq!(dup_layer.transform.scale.keyframe_count(), 1);
+            assert!(dup_layer.transform.rotation.is_animated());
+            assert_eq!(dup_layer.transform.rotation.keyframe_count(), 1);
+            assert!(dup_layer.transform.anchor_point.is_animated());
+            assert_eq!(dup_layer.transform.anchor_point.keyframe_count(), 1);
+            assert!(dup_layer.opacity.is_animated());
+            assert_eq!(dup_layer.opacity.keyframe_count(), 1);
+        }
+    }
+
+    #[gpui_kit::test]
+    fn test_blend_mode_dropdown_and_context_menus(cx: &mut TestAppContext) {
+        use crate::panels::{BLEND_MODE_GROUPS, ContextMenuTarget, TimelinePanel};
+        use project::BlendMode;
+
+        cx.update(gpui_kit::init);
+        let state_entity = cx.new(|_| crate::state::EditorState::new());
+        let timeline_panel = cx.new(|cx| TimelinePanel::new(state_entity, cx));
+
+        // Verify BLEND_MODE_GROUPS covers all 19 modes in BlendMode::ALL
+        let mut all_grouped_modes = Vec::new();
+        for (_cat, modes) in BLEND_MODE_GROUPS {
+            for &m in *modes {
+                all_grouped_modes.push(m);
+            }
+        }
+        assert_eq!(all_grouped_modes.len(), BlendMode::ALL.len());
+        for mode in BlendMode::ALL {
+            assert!(all_grouped_modes.contains(&mode), "Missing mode: {:?}", mode);
+        }
+
+        // Blend mode dropdown open/close
+        timeline_panel.read_with(cx, |p, _| {
+            assert!(p.active_blend_dropdown.is_none());
+        });
+        timeline_panel.update(cx, |p, _| {
+            p.open_blend_dropdown("layer_accent".to_string());
+        });
+        timeline_panel.read_with(cx, |p, _| {
+            assert_eq!(p.active_blend_dropdown.as_deref(), Some("layer_accent"));
+        });
+        timeline_panel.update(cx, |p, _| {
+            p.close_blend_dropdown();
+        });
+        timeline_panel.read_with(cx, |p, _| {
+            assert!(p.active_blend_dropdown.is_none());
+        });
+
+        // Context menu open/close
+        timeline_panel.read_with(cx, |p, _| {
+            assert!(p.context_menu.is_none());
+        });
+        timeline_panel.update(cx, |p, _| {
+            p.open_context_menu(ContextMenuTarget::Layer("layer_accent".to_string()));
+        });
+        timeline_panel.read_with(cx, |p, _| {
+            assert!(matches!(p.context_menu.as_ref().map(|c| &c.target), Some(ContextMenuTarget::Layer(lid)) if lid == "layer_accent"));
+        });
+        timeline_panel.update(cx, |p, _| {
+            p.close_context_menu();
+        });
+        timeline_panel.read_with(cx, |p, _| {
+            assert!(p.context_menu.is_none());
+        });
+    }
+
+    #[test]
+    fn test_timeline_scrubbing_and_seek() {
+        use crate::state::EditorState;
+
+        let mut state = EditorState::new();
+        assert_eq!(state.clock.current_frame(), 0);
+
+        // Scrub to 2.5 seconds
+        state.seek(2.5);
+        assert_eq!(state.clock.current_frame(), 75);
+        assert!((state.clock.position_seconds() - 2.5).abs() < 0.001);
+
+        // Scrub to 0.0 seconds
+        state.seek(0.0);
+        assert_eq!(state.clock.current_frame(), 0);
     }
 }

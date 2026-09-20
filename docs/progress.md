@@ -432,6 +432,37 @@
     - `test_blit_pipeline_rendering_and_readback`: Validated hardware blit rendering, alpha blending, and pixel readback.
   - All **147 workspace tests passing** across all crates (`cargo test --workspace`) with 0 errors and zero clippy warnings (`cargo clippy --workspace --all-targets -- -D warnings`).
 
+- [x] **After Effects Top Toolbar, Categorized Blend Modes, Timeline Scrubbing & Context Menus**
+  - **Top Toolbar Component** (`crates/application/src/main.rs`):
+    - Professional After Effects-style top toolbar with branding, tool buttons, active tool status bar, and shortcut indicators.
+    - Tools implemented: Move/Selection (`V`), Hand (`H`), Rotate (`W`), Pen (`G`), Text (`T`), Shape tools (`Q` - Rectangle & Ellipse).
+    - Global keyboard shortcuts wired into `AppView::on_key_down` (`v`, `h`, `w`, `g`, `t`, `q`).
+    - Interactive Canvas Handlers:
+      - Text tool (`T`): Clicking on canvas spawns a new Text layer.
+      - Shape Rectangle tool (`Q`): Spawns a Rectangle vector shape layer.
+      - Shape Ellipse tool (`Q`): Spawns an Ellipse vector shape layer.
+      - Pen tool (`G`): Spawns a new Path layer or appends vertex coordinates to the active path shape.
+      - Rotate tool (`W`): Nudges rotation of selected layer by +15°.
+  - **Categorized Blend Mode Dropdown Menu** (`crates/application/src/panels.rs`):
+    - Replaced cycle-on-click button with an AE-style floating dropdown overlay.
+    - Categorized across 6 standard groups covering all 19 blend modes (`Normal`, `Darken`, `Lighten`, `Contrast`, `Inversion`, `Component`).
+  - **Timeline Playhead Mouse Scrubbing** (`crates/application/src/panels.rs`):
+    - Interactive 50-slice mouse scrubbing strip across the timeline time ruler track.
+    - Clicking and dragging scrubs the playhead and updates the playback clock in real-time.
+  - **Context Menus (Right-Click)**:
+    - Layer context menu: Duplicate Layer, Reset Transform, Add Transform Keyframes at CTI, Move Up, Move Down, Delete Layer.
+    - Effect context menu: Duplicate Effect, Toggle Enabled, Delete Effect.
+    - Property context menu: Add/Remove Keyframe at CTI, Toggle Stopwatch Animation.
+    - Canvas layer context menu: Duplicate Layer, Reset Transform, Keyframe Transform at CTI, Delete Layer.
+  - **Import Media Stack Buffer Overrun Fix** (`crates/application/src/panels.rs`):
+    - Fixed `0xc0000409` (`STATUS_STACK_BUFFER_OVERRUN`) on Windows during file picker execution by running `rfd::FileDialog` in an isolated worker thread with an 8MB stack.
+  - **Automated Tests**:
+    - Added `test_editor_tools_switching_and_layer_creation`: tests tool switching, text layer addition, rectangle shape addition, ellipse shape addition, and pen vertex appending.
+    - Added `test_layer_duplication_and_reset_transform`: tests layer cloning, transform reset, effect duplication, and multi-property keyframing.
+    - Added `test_blend_mode_dropdown_and_context_menus`: tests full 19 blend mode catalog, dropdown open/close, and context menu open/close.
+    - Added `test_timeline_scrubbing_and_seek`: tests continuous time scrubbing.
+  - All **148 workspace tests passing** (38 in application) with 0 errors and zero clippy warnings.
+
 
 
 

@@ -158,7 +158,41 @@
 - Project Panel Asset Bin Overhaul:
   - Removed composition layers from Project panel to match After Effects architecture.
   - Project panel is strictly an Asset Bin displaying Compositions, Imported Media Assets, and Solids footage items.
-- Full automated test suite passing with **147 tests** across the workspace (34 application tests + 51 project unit tests + 47 compositor unit tests + 8 compositor integration tests + 7 renderer unit tests).
+- Top Toolbar with Professional After Effects Tooling (`crates/application/src/main.rs`):
+  - Tools implemented: Selection / Move tool (`V`), Hand tool (`H`), Rotate tool (`W`), Pen tool (`G`), Text tool (`T`), Shape tools (`Q` - Rectangle & Ellipse).
+  - Keyboard shortcuts wired globally (`V`, `H`, `W`, `G`, `T`, `Q`).
+  - Active tool options bar dynamically reflecting active tool properties and presets.
+  - Interactive Canvas Tool Handlers:
+    - Text tool (`T`): Clicking on canvas creates a new Text layer in the composition.
+    - Rectangle tool (`Q`): Clicking on canvas creates a new Rectangle vector shape layer.
+    - Ellipse tool (`Q`): Clicking on canvas creates a new Ellipse vector shape layer.
+    - Pen tool (`G`): Clicking on canvas creates a new vector Path layer or appends vertex coordinates to existing path shapes.
+    - Rotate tool (`W`): Clicking on canvas rotates the selected layer by +15°.
+- Categorized Blend Mode Dropdown Menu (`TimelinePanel`):
+  - Replaced single-click cycling button with an authentic After Effects floating dropdown popup.
+  - Categorized across 6 standard groups: Normal (Normal, Dissolve), Darken (Darken, Multiply, Color Burn), Lighten (Lighten, Screen, Color Dodge, Add), Contrast (Overlay, Soft Light, Hard Light), Inversion (Difference, Exclusion, Subtract), and Component (Hue, Saturation, Color, Luminosity).
+  - Covers all 19 industry-standard compositing blend modes.
+- Real-Time Timeline Playhead Mouse Scrubbing:
+  - Interactive scrubbing strip across time ruler track with 50 responsive slices.
+  - Mouse down and drag across time ruler seeks the playback clock position in real time.
+- Context Menus (Right-Click) for Layers, Effects, and Properties:
+  - Right-clicking any layer in the timeline or canvas opens the Layer Context Menu:
+    - Duplicate Layer (creates exact copy with unique ID and "Copy" name suffix).
+    - Reset Transform (restores position to comp center, rotation 0°, scale 100%, opacity 100%).
+    - Add Keyframe to Transforms at CTI (records simultaneous keyframes on position, scale, rotation, anchor point, and opacity).
+    - Move Up / Move Down layer stack reordering.
+    - Delete Layer.
+  - Right-clicking any effect row opens the Effect Context Menu:
+    - Duplicate Effect.
+    - Toggle Enabled / Disabled.
+    - Delete Effect.
+  - Right-clicking any property row opens the Property Context Menu:
+    - Add/Remove Keyframe at CTI.
+    - Toggle Stopwatch Animation.
+- Native File Dialog Crash Fix (`0xc0000409` `STATUS_STACK_BUFFER_OVERRUN`):
+  - Solved Windows shell extension stack overrun in `rfd::FileDialog` by offloading `pick_file` to a dedicated OS worker thread with an 8MB stack size (`std::thread::Builder::new().stack_size(8 * 1024 * 1024)`).
+  - Dispatches imported path back to GPUI async context smoothly with zero UI thread blocking.
+- Full automated test suite passing with **148 tests** across the workspace (38 application tests + 51 project unit tests + 47 compositor unit tests + 8 compositor integration tests + 7 renderer unit tests).
 - Workspace compiles, builds, and passes all checks cleanly with 0 errors and 0 warnings (`cargo check --workspace`, `cargo build --workspace`, `cargo test --workspace`, and `cargo clippy --workspace --all-targets -- -D warnings`).
 
 ## What Is Currently Being Developed
