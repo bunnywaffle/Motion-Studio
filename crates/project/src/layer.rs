@@ -119,6 +119,8 @@ pub struct Layer {
     pub loop_mode: LoopMode,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effects: Vec<Effect>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_color: Option<Color>,
 }
 
 impl Layer {
@@ -151,6 +153,7 @@ impl Layer {
             time_remapping: None,
             loop_mode: LoopMode::default(),
             effects: Vec::new(),
+            label_color: None,
         }
     }
 
@@ -405,6 +408,43 @@ impl Layer {
     pub fn set_matte(&mut self, mode: TrackMatteMode, matte_layer_id: Option<impl Into<String>>) {
         self.matte_mode = mode;
         self.matte_layer_id = matte_layer_id.map(Into::into);
+    }
+
+    /// Return the After Effects-style label color for this layer.
+    pub fn label_color(&self, index: usize) -> Color {
+        if let Some(color) = self.label_color {
+            return color;
+        }
+        match &self.source {
+            LayerSource::Solid { color, .. } => *color,
+            LayerSource::Image { .. } => Color::rgb(0.93, 0.45, 0.65), // Pink / Lavender
+            LayerSource::Video { .. } => Color::rgb(0.24, 0.51, 0.96), // AE Royal Blue
+            LayerSource::Text { .. } => Color::rgb(0.96, 0.58, 0.19),  // AE Orange
+            LayerSource::Shape { .. } => Color::rgb(0.13, 0.77, 0.55), // AE Teal / Green
+            LayerSource::NestedComposition { .. } => Color::rgb(0.68, 0.42, 0.88), // AE Purple
+            LayerSource::Procedural { .. } => {
+                const PALETTE: [Color; 6] = [
+                    Color::rgb(0.93, 0.45, 0.65),
+                    Color::rgb(0.24, 0.51, 0.96),
+                    Color::rgb(0.96, 0.58, 0.19),
+                    Color::rgb(0.13, 0.77, 0.55),
+                    Color::rgb(0.68, 0.42, 0.88),
+                    Color::rgb(0.92, 0.80, 0.20),
+                ];
+                PALETTE[index % PALETTE.len()]
+            }
+        }
+    }
+
+    /// Set an explicit label color.
+    pub fn set_label_color(&mut self, color: Option<Color>) {
+        self.label_color = color;
+    }
+
+    /// Builder to set an explicit label color.
+    pub fn with_label_color(mut self, color: Color) -> Self {
+        self.label_color = Some(color);
+        self
     }
 
     /// Builder to set track matte mode and optional matte layer ID.

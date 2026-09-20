@@ -4,8 +4,10 @@ use gpui_kit::component::dock::{BasePanel, Panel, PanelEvent};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::*;
 
+use std::collections::HashSet;
+
 use crate::state::EditorState;
-use project::{Color, EffectType, LayerSource};
+use project::{BlendMode, Color, EffectType, LayerSource, TimeCode, TrackMatteMode};
 
 fn icon_box(icon: IconName) -> Div {
     div().w(px(14.)).h(px(14.)).flex().items_center().justify_center().child(icon)
@@ -275,7 +277,7 @@ impl Render for ProjectPanel {
                 }
             }
 
-            // --- Section 3: Project Solids & Generators ---
+            // --- Section 3: Project Solids & Footage Bin ---
             let solids: Vec<_> = comp
                 .layers
                 .iter()
@@ -298,8 +300,8 @@ impl Render for ProjectPanel {
                         h_flex()
                             .gap_1p5()
                             .items_center()
-                            .child(icon_box(IconName::Layers))
-                            .child("SOLIDS & GENERATORS"),
+                            .child(icon_box(IconName::Folder))
+                            .child("SOLIDS BIN"),
                     )
                     .child(
                         div()
@@ -318,32 +320,24 @@ impl Render for ProjectPanel {
                         .py_2()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child("No solid layers. Click '+ Solid' to create one."),
+                        .child("No solid footage items. Click '+ Solid' to create one."),
                 );
             } else {
                 for solid in solids {
-                    let sel_state = self.state.clone();
-                    let lid = solid.id.clone();
-                    let is_selected = state.selected_layer_id.as_deref() == Some(&solid.id);
                     let (w, h, col) = match &solid.source {
                         LayerSource::Solid { width, height, color } => (*width, *height, *color),
                         _ => (1920, 1080, Color::WHITE),
                     };
 
-                    let mut row = h_flex()
+                    let row = h_flex()
                         .px_2()
                         .py_1()
                         .rounded_sm()
                         .text_xs()
                         .items_center()
                         .justify_between()
-                        .cursor_pointer()
-                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                            sel_state.update(cx, |s, cx| {
-                                s.select_layer(Some(lid.clone()));
-                                cx.notify();
-                            });
-                        })
+                        .text_color(cx.theme().foreground)
+                        .hover(|s| s.bg(cx.theme().muted))
                         .child(
                             h_flex()
                                 .gap_1p5()
@@ -355,23 +349,13 @@ impl Render for ProjectPanel {
                                         .rounded_sm()
                                         .bg(Rgba { r: col.r, g: col.g, b: col.b, a: col.a }),
                                 )
-                                .child(div().font_medium().child(solid.name.clone())),
+                                .child(div().font_medium().child(format!("{} (Footage)", solid.name))),
                         )
                         .child(
                             div()
                                 .text_color(cx.theme().muted_foreground)
                                 .child(format!("{}x{}", w, h)),
                         );
-
-                    if is_selected {
-                        row = row
-                            .bg(cx.theme().accent)
-                            .text_color(cx.theme().accent_foreground);
-                    } else {
-                        row = row
-                            .text_color(cx.theme().foreground)
-                            .hover(|s| s.bg(cx.theme().muted));
-                    }
                     bin_items.push(row);
                 }
             }
@@ -2281,10 +2265,289 @@ impl Panel for EffectsPanel {
 
 // --- 5. Timeline Panel ---
 
+fn next_blend_mode(mode: BlendMode) -> BlendMode {
+    match mode {
+        BlendMode::Normal => BlendMode::Multiply,
+        BlendMode::Multiply => BlendMode::Screen,
+        BlendMode::Screen => BlendMode::Overlay,
+        BlendMode::Overlay => BlendMode::Darken,
+        BlendMode::Darken => BlendMode::Lighten,
+        BlendMode::Lighten => BlendMode::ColorDodge,
+        BlendMode::ColorDodge => BlendMode::ColorBurn,
+        BlendMode::ColorBurn => BlendMode::HardLight,
+        BlendMode::HardLight => BlendMode::SoftLight,
+        BlendMode::SoftLight => BlendMode::Difference,
+        BlendMode::Difference => BlendMode::Exclusion,
+        _ => BlendMode::Normal,
+    }
+}
+
+fn next_matte_mode(mode: TrackMatteMode) -> TrackMatteMode {
+    match mode {
+        TrackMatteMode::None => TrackMatteMode::Alpha,
+        TrackMatteMode::Alpha => TrackMatteMode::AlphaInverted,
+        TrackMatteMode::AlphaInverted => TrackMatteMode::Luma,
+        TrackMatteMode::Luma => TrackMatteMode::LumaInverted,
+        TrackMatteMode::LumaInverted => TrackMatteMode::None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn timeline_stopwatch_nav(
+    state: &Entity<EditorState>,
+    layer_id: &str,
+    prop_path: &'static str,
+    is_animated: bool,
+    has_kf_at_playhead: bool,
+    has_prev_kf: bool,
+    has_next_kf: bool,
+    cx: &App,
+) -> Div {
+    let s_toggle = state.clone();
+    let s_prev = state.clone();
+    let s_kf = state.clone();
+    let s_next = state.clone();
+    let lid1 = layer_id.to_string();
+    let lid2 = layer_id.to_string();
+    let lid3 = layer_id.to_string();
+    let lid4 = layer_id.to_string();
+
+    let stopwatch_btn = div()
+        .cursor_pointer()
+        .p_0p5()
+        .rounded_sm()
+        .hover(|s| s.bg(cx.theme().muted))
+        .text_color(if is_animated {
+            rgb(0x38bdf8).into()
+        } else {
+            cx.theme().muted_foreground
+        })
+        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+            s_toggle.update(cx, |s, cx| {
+                s.toggle_layer_property_animation(&lid1, prop_path);
+                cx.notify();
+            });
+        })
+        .child(icon_box(IconName::Timer));
+
+    let nav = if is_animated {
+        h_flex()
+            .gap_0p5()
+            .items_center()
+            .child(
+                div()
+                    .cursor_pointer()
+                    .px_0p5()
+                    .text_xs()
+                    .text_color(if has_prev_kf {
+                        cx.theme().foreground
+                    } else {
+                        cx.theme().muted_foreground.opacity(0.3)
+                    })
+                    .hover(|s| s.bg(cx.theme().muted))
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        if has_prev_kf {
+                            s_prev.update(cx, |s, cx| {
+                                s.seek_previous_keyframe(&lid2, prop_path);
+                                cx.notify();
+                            });
+                        }
+                    })
+                    .child("◂"),
+            )
+            .child(
+                div()
+                    .cursor_pointer()
+                    .px_0p5()
+                    .text_xs()
+                    .text_color(if has_kf_at_playhead {
+                        rgb(0xf59e0b).into()
+                    } else {
+                        cx.theme().muted_foreground
+                    })
+                    .hover(|s| s.text_color(rgb(0xffffff)))
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        s_kf.update(cx, |s, cx| {
+                            s.toggle_layer_keyframe_at_current_time(&lid3, prop_path);
+                            cx.notify();
+                        });
+                    })
+                    .child("◆"),
+            )
+            .child(
+                div()
+                    .cursor_pointer()
+                    .px_0p5()
+                    .text_xs()
+                    .text_color(if has_next_kf {
+                        cx.theme().foreground
+                    } else {
+                        cx.theme().muted_foreground.opacity(0.3)
+                    })
+                    .hover(|s| s.bg(cx.theme().muted))
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        if has_next_kf {
+                            s_next.update(cx, |s, cx| {
+                                s.seek_next_keyframe(&lid4, prop_path);
+                                cx.notify();
+                            });
+                        }
+                    })
+                    .child("▸"),
+            )
+    } else {
+        h_flex().w(px(28.))
+    };
+
+    h_flex()
+        .gap_1()
+        .items_center()
+        .child(stopwatch_btn)
+        .child(nav)
+}
+
+fn timeline_keyframe_lane(
+    keyframe_times: &[f64],
+    total_duration_secs: f64,
+    current_time_secs: f64,
+    fps: f64,
+    playhead_percent: f32,
+    state: &Entity<EditorState>,
+    cx: &App,
+) -> Div {
+    let mut lane = div()
+        .flex_1()
+        .h(px(24.))
+        .relative()
+        .border_b_1()
+        .border_color(cx.theme().border.opacity(0.3));
+
+    lane = lane.child(
+        div()
+            .absolute()
+            .top(px(11.))
+            .left_0()
+            .right_0()
+            .h(px(1.))
+            .bg(cx.theme().border.opacity(0.15)),
+    );
+
+    for &t in keyframe_times {
+        let percent = (t / total_duration_secs.max(0.001) * 100.0).clamp(0.0, 100.0) as f32;
+        let is_at_playhead = (t - current_time_secs).abs() < (0.5 / fps);
+        let s_seek = state.clone();
+        let target_tc = TimeCode::from_seconds(t, fps);
+
+        lane = lane.child(
+            div()
+                .absolute()
+                .top(px(4.))
+                .left(relative(percent / 100.0))
+                .ml(px(-6.))
+                .w(px(12.))
+                .h(px(14.))
+                .cursor_pointer()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_xs()
+                .font_bold()
+                .text_color(if is_at_playhead {
+                    rgb(0xf59e0b)
+                } else {
+                    rgb(0x38bdf8)
+                })
+                .hover(|s| s.text_color(rgb(0xffffff)))
+                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    s_seek.update(cx, |s, cx| {
+                        s.clock.seek(target_tc);
+                        cx.notify();
+                    });
+                })
+                .child("◆"),
+        );
+    }
+
+    lane = lane.child(
+        div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .w(px(1.))
+            .bg(rgb(0xef4444))
+            .left(relative(playhead_percent / 100.0)),
+    );
+
+    lane
+}
+
+fn timeline_stepper<FM, FP>(
+    label: &'static str,
+    val_str: String,
+    on_minus: FM,
+    on_plus: FP,
+    cx: &App,
+) -> Div
+where
+    FM: Fn(&mut App) + 'static,
+    FP: Fn(&mut App) + 'static,
+{
+    h_flex()
+        .gap_1()
+        .items_center()
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(label),
+        )
+        .child(
+            div()
+                .cursor_pointer()
+                .px_1()
+                .rounded_sm()
+                .bg(cx.theme().muted)
+                .hover(|s| s.bg(cx.theme().accent))
+                .text_xs()
+                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    on_minus(cx);
+                })
+                .child("-"),
+        )
+        .child(
+            div()
+                .px_1p5()
+                .py_0p5()
+                .rounded_sm()
+                .bg(cx.theme().secondary)
+                .border_1()
+                .border_color(cx.theme().border)
+                .text_xs()
+                .font_medium()
+                .text_color(cx.theme().foreground)
+                .child(val_str),
+        )
+        .child(
+            div()
+                .cursor_pointer()
+                .px_1()
+                .rounded_sm()
+                .bg(cx.theme().muted)
+                .hover(|s| s.bg(cx.theme().accent))
+                .text_xs()
+                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    on_plus(cx);
+                })
+                .child("+"),
+        )
+}
+
 pub struct TimelinePanel {
     focus_handle: FocusHandle,
     state: Entity<EditorState>,
     _subscription: Subscription,
+    expanded_layers: HashSet<String>,
+    expanded_groups: HashSet<String>,
 }
 
 impl TimelinePanel {
@@ -2292,16 +2555,44 @@ impl TimelinePanel {
         let _subscription = cx.observe(&state, |_this, _state, cx| {
             cx.notify();
         });
+        let expanded_layers = HashSet::new();
+        let expanded_groups = HashSet::new();
         Self {
             focus_handle: cx.focus_handle(),
             state,
             _subscription,
+            expanded_layers,
+            expanded_groups,
         }
     }
 
     pub fn standalone(cx: &mut Context<Self>) -> Self {
         let state = cx.new(|_| EditorState::new());
         Self::new(state, cx)
+    }
+
+    pub fn is_layer_expanded(&self, id: &str) -> bool {
+        self.expanded_layers.contains(id)
+    }
+
+    pub fn toggle_layer_expanded(&mut self, id: &str) {
+        if self.expanded_layers.contains(id) {
+            self.expanded_layers.remove(id);
+        } else {
+            self.expanded_layers.insert(id.to_string());
+        }
+    }
+
+    pub fn is_group_expanded(&self, key: &str) -> bool {
+        self.expanded_groups.contains(key)
+    }
+
+    pub fn toggle_group_expanded(&mut self, key: &str) {
+        if self.expanded_groups.contains(key) {
+            self.expanded_groups.remove(key);
+        } else {
+            self.expanded_groups.insert(key.to_string());
+        }
     }
 
     pub fn focus_handle(&self) -> &FocusHandle {
@@ -2329,6 +2620,9 @@ impl Render for TimelinePanel {
         let current_frame = state.clock.current_frame();
         let total_frames = comp_opt.map(|c| c.duration.frames()).unwrap_or(150);
         let is_playing = state.is_playing;
+        let fps = comp_opt.map(|c| c.frame_rate).unwrap_or(30.0);
+        let total_duration_secs = comp_opt.map(|c| c.duration_seconds()).unwrap_or(5.0);
+        let current_time_secs = state.clock.position_seconds();
 
         let s_start = self.state.clone();
         let s_step_prev = self.state.clone();
@@ -2343,194 +2637,376 @@ impl Render for TimelinePanel {
         let out_str = comp_opt.map(|c| format!("{}", c.duration)).unwrap_or_else(|| "00:00:05:00".to_string());
 
         let playhead_percent = (current_frame as f32 / total_frames.max(1) as f32 * 100.0).clamp(0.0, 100.0);
+        let panel_entity = cx.entity().clone();
 
-        let track_rows: Vec<Div> = match comp_opt {
-            Some(comp) => comp
-                .layers
-                .iter()
-                .enumerate()
-                .map(|(idx, layer)| {
-                    let is_selected = state.selected_layer_id.as_deref() == Some(&layer.id);
-                    let sel_state = self.state.clone();
-                    let vis_state = self.state.clone();
-                    let solo_state = self.state.clone();
-                    let s_up = self.state.clone();
-                    let s_down = self.state.clone();
-                    let s_del = self.state.clone();
-                    let lid = layer.id.clone();
-                    let lid_vis = layer.id.clone();
-                    let lid_solo = layer.id.clone();
-                    let lid_up = layer.id.clone();
-                    let lid_down = layer.id.clone();
-                    let lid_del = layer.id.clone();
+        let mut timeline_rows: Vec<Div> = Vec::new();
 
-                    let in_ratio = (layer.in_point.frames() as f32 / total_frames.max(1) as f32).clamp(0.0, 1.0);
-                    let out_ratio = (layer.out_point.frames() as f32 / total_frames.max(1) as f32).clamp(0.0, 1.0);
-                    let span_w = ((out_ratio - in_ratio) * 100.0).max(5.0);
-                    let span_left = in_ratio * 100.0;
+        if let Some(comp) = comp_opt {
+            for (idx, layer) in comp.layers.iter().enumerate() {
+                let is_selected = state.selected_layer_id.as_deref() == Some(&layer.id);
+                let label_color = layer.label_color(idx);
+                let is_layer_exp = self.expanded_layers.contains(&layer.id);
 
-                    let row = h_flex()
-                        .h(px(26.))
-                        .border_b_1()
-                        .border_color(cx.theme().border)
-                        .items_center();
+                let sel_state = self.state.clone();
+                let vis_state = self.state.clone();
+                let solo_state = self.state.clone();
+                let lock_state = self.state.clone();
+                let blend_state = self.state.clone();
+                let matte_state = self.state.clone();
+                let parent_state = self.state.clone();
+                let s_up = self.state.clone();
+                let s_down = self.state.clone();
+                let s_del = self.state.clone();
 
-                    let mut left_col = h_flex()
-                        .w(px(280.))
-                        .px_2()
-                        .border_r_1()
-                        .border_color(cx.theme().border)
-                        .items_center()
-                        .justify_between()
-                        .text_xs()
-                        .cursor_pointer()
-                        .child(
-                            h_flex()
-                                .gap_1p5()
-                                .items_center()
-                                .child(div().w(px(14.)).child(format!("{}", idx + 1)))
-                                .child(
-                                    div()
-                                        .cursor_pointer()
-                                        .text_color(if layer.visible {
-                                            cx.theme().foreground
-                                        } else {
-                                            cx.theme().muted_foreground
-                                        })
-                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                            vis_state.update(cx, |s, cx| {
-                                                s.toggle_layer_visibility(&lid_vis);
-                                                cx.notify();
-                                            });
-                                        })
-                                        .child(icon_box(if layer.visible {
-                                            IconName::Eye
-                                        } else {
-                                            IconName::EyeOff
-                                        })),
-                                )
-                                .child(
-                                    div()
-                                        .cursor_pointer()
-                                        .text_color(if layer.is_solo() {
-                                            rgb(0xf59e0b).into()
-                                        } else {
-                                            cx.theme().muted_foreground
-                                        })
-                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                            solo_state.update(cx, |s, cx| {
-                                                s.toggle_layer_solo(&lid_solo);
-                                                cx.notify();
-                                            });
-                                        })
-                                        .child(icon_box(IconName::Sparkles)),
-                                )
-                                .child(
-                                    div()
-                                        .cursor_pointer()
-                                        .p_0p5()
-                                        .rounded_sm()
-                                        .hover(|s| s.bg(cx.theme().muted))
-                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                            s_up.update(cx, |s, cx| {
-                                                let _ = s.move_layer_up(&lid_up);
-                                                cx.notify();
-                                            });
-                                        })
-                                        .child(icon_box(IconName::ChevronUp)),
-                                )
-                                .child(
-                                    div()
-                                        .cursor_pointer()
-                                        .p_0p5()
-                                        .rounded_sm()
-                                        .hover(|s| s.bg(cx.theme().muted))
-                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                            s_down.update(cx, |s, cx| {
-                                                let _ = s.move_layer_down(&lid_down);
-                                                cx.notify();
-                                            });
-                                        })
-                                        .child(icon_box(IconName::ChevronDown)),
-                                )
-                                .child(
-                                    div()
-                                        .cursor_pointer()
-                                        .p_0p5()
-                                        .rounded_sm()
-                                        .hover(|s| s.bg(rgb(0xef4444)).text_color(rgb(0xffffff)))
-                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                            s_del.update(cx, |s, cx| {
-                                                let _ = s.remove_layer_by_id(&lid_del);
-                                                cx.notify();
-                                            });
-                                        })
-                                        .child(icon_box(IconName::Trash)),
-                                )
-                                .child(div().font_semibold().child(layer.name.clone())),
-                        )
-                        .child(
-                            div()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("Normal"),
-                        );
+                let lid = layer.id.clone();
+                let lid_vis = layer.id.clone();
+                let lid_solo = layer.id.clone();
+                let lid_lock = layer.id.clone();
+                let lid_blend = layer.id.clone();
+                let lid_matte = layer.id.clone();
+                let lid_parent = layer.id.clone();
+                let lid_up = layer.id.clone();
+                let lid_down = layer.id.clone();
+                let lid_del = layer.id.clone();
+                let current_blend = layer.blend_mode;
+                let current_matte = layer.matte_mode;
+                let current_parent = layer.parent_id.clone();
 
-                    if is_selected {
-                        left_col = left_col
-                            .bg(cx.theme().accent)
-                            .text_color(cx.theme().accent_foreground);
-                    } else {
-                        left_col = left_col.hover(|s| s.bg(cx.theme().muted));
-                    }
+                let p_twirl = panel_entity.clone();
+                let lid_twirl = layer.id.clone();
 
-                    left_col = left_col.on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                let in_ratio = (layer.in_point.frames() as f32 / total_frames.max(1) as f32).clamp(0.0, 1.0);
+                let out_ratio = (layer.out_point.frames() as f32 / total_frames.max(1) as f32).clamp(0.0, 1.0);
+                let span_w = ((out_ratio - in_ratio) * 100.0).max(5.0);
+                let span_left = in_ratio * 100.0;
+
+                // --- 1. Main Layer Row ---
+                let mut left_col = h_flex()
+                    .w(px(380.))
+                    .h(px(26.))
+                    .px_2()
+                    .border_r_1()
+                    .border_color(cx.theme().border)
+                    .items_center()
+                    .justify_between()
+                    .text_xs()
+                    .cursor_pointer();
+
+                if is_selected {
+                    left_col = left_col
+                        .bg(cx.theme().accent)
+                        .text_color(cx.theme().accent_foreground);
+                } else {
+                    left_col = left_col
+                        .bg(cx.theme().background)
+                        .text_color(cx.theme().foreground)
+                        .hover(|s| s.bg(cx.theme().muted));
+                }
+
+                let left_col = left_col
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                         sel_state.update(cx, |s, cx| {
                             s.select_layer(Some(lid.clone()));
                             cx.notify();
                         });
-                    });
+                    })
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .items_center()
+                            // Twirl arrow
+                            .child(
+                                div()
+                                    .cursor_pointer()
+                                    .w(px(12.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .hover(|s| s.text_color(rgb(0x38bdf8)))
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        p_twirl.update(cx, |this, cx| {
+                                            this.toggle_layer_expanded(&lid_twirl);
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child(if is_layer_exp { "▾" } else { "▸" }),
+                            )
+                            // Layer index
+                            .child(div().w(px(14.)).text_color(cx.theme().muted_foreground).child(format!("{}", idx + 1)))
+                            // Visibility (Eye)
+                            .child(
+                                div()
+                                    .cursor_pointer()
+                                    .text_color(if layer.visible { cx.theme().foreground } else { cx.theme().muted_foreground })
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        vis_state.update(cx, |s, cx| {
+                                            s.toggle_layer_visibility(&lid_vis);
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child(icon_box(if layer.visible { IconName::Eye } else { IconName::EyeOff })),
+                            )
+                            // Lock
+                            .child(
+                                div()
+                                    .cursor_pointer()
+                                    .text_color(if layer.locked { rgb(0xf59e0b).into() } else { cx.theme().muted_foreground.opacity(0.5) })
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        lock_state.update(cx, |s, cx| {
+                                            s.toggle_layer_lock(&lid_lock);
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child(icon_box(IconName::Lock)),
+                            )
+                            // Solo
+                            .child(
+                                div()
+                                    .cursor_pointer()
+                                    .px_1()
+                                    .rounded_sm()
+                                    .font_bold()
+                                    .text_xs()
+                                    .bg(if layer.is_solo() { rgb(0xf59e0b).into() } else { cx.theme().secondary })
+                                    .text_color(if layer.is_solo() { rgb(0x000000).into() } else { cx.theme().muted_foreground })
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        solo_state.update(cx, |s, cx| {
+                                            s.toggle_layer_solo(&lid_solo);
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child("S"),
+                            )
+                            // AE Color Tag Swatch
+                            .child(
+                                div()
+                                    .w(px(10.))
+                                    .h(px(10.))
+                                    .rounded_sm()
+                                    .bg(Rgba { r: label_color.r, g: label_color.g, b: label_color.b, a: label_color.a }),
+                            )
+                            // Reorder arrows
+                            .child(
+                                div()
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(cx.theme().muted))
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        s_up.update(cx, |s, cx| {
+                                            let _ = s.move_layer_up(&lid_up);
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child(icon_box(IconName::ChevronUp)),
+                            )
+                            .child(
+                                div()
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(cx.theme().muted))
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        s_down.update(cx, |s, cx| {
+                                            let _ = s.move_layer_down(&lid_down);
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child(icon_box(IconName::ChevronDown)),
+                            )
+                            // Layer Name
+                            .child(
+                                div()
+                                    .max_w(px(110.))
+                                    .truncate()
+                                    .font_semibold()
+                                    .child(layer.name.clone()),
+                            ),
+                    )
+                    // Right controls: Mode, Matte, Parent, Delete
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .items_center()
+                            // Blend Mode
+                            .child(
+                                div()
+                                    .cursor_pointer()
+                                    .px_1p5()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .bg(cx.theme().secondary)
+                                    .text_color(cx.theme().muted_foreground)
+                                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                    .text_xs()
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        let next = next_blend_mode(current_blend);
+                                        blend_state.update(cx, |s, cx| {
+                                            s.set_layer_blend_mode(&lid_blend, next);
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child(format!("{:?}", layer.blend_mode)),
+                            )
+                            // Track Matte
+                            .child(
+                                div()
+                                    .cursor_pointer()
+                                    .px_1p5()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .bg(cx.theme().secondary)
+                                    .text_color(cx.theme().muted_foreground)
+                                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                    .text_xs()
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        let next = next_matte_mode(current_matte);
+                                        matte_state.update(cx, |s, cx| {
+                                            s.set_layer_track_matte(&lid_matte, next, None);
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child(match layer.matte_mode {
+                                        TrackMatteMode::None => "None",
+                                        TrackMatteMode::Alpha => "Alpha",
+                                        TrackMatteMode::AlphaInverted => "Inv Alpha",
+                                        TrackMatteMode::Luma => "Luma",
+                                        TrackMatteMode::LumaInverted => "Inv Luma",
+                                    }),
+                            )
+                            // Parent & Link
+                            .child(
+                                div()
+                                    .cursor_pointer()
+                                    .px_1p5()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .bg(cx.theme().secondary)
+                                    .text_color(cx.theme().muted_foreground)
+                                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                    .text_xs()
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        parent_state.update(cx, |s, cx| {
+                                            let next_p = if current_parent.is_some() { None } else { Some("layer_bg".to_string()) };
+                                            s.set_layer_parent(&lid_parent, next_p);
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child(layer.parent_id.clone().unwrap_or_else(|| "None".to_string())),
+                            )
+                            // Delete Layer
+                            .child(
+                                div()
+                                    .cursor_pointer()
+                                    .p_0p5()
+                                    .rounded_sm()
+                                    .hover(|s| s.bg(rgb(0xef4444)).text_color(rgb(0xffffff)))
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        s_del.update(cx, |s, cx| {
+                                            let _ = s.remove_layer_by_id(&lid_del);
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child(icon_box(IconName::Trash)),
+                            ),
+                    );
 
-                    let span_state = self.state.clone();
-                    let lid_span = layer.id.clone();
+                let span_state = self.state.clone();
+                let lid_span = layer.id.clone();
 
-                    let track_col = div()
+                let track_col = div()
+                    .flex_1()
+                    .h(px(26.))
+                    .relative()
+                    .child(
+                        // Layer span bar
+                        div()
+                            .id(SharedString::from(format!("track_span_{}", layer.id)))
+                            .test_support()
+                            .cursor_pointer()
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                span_state.update(cx, |s, cx| {
+                                    s.select_layer(Some(lid_span.clone()));
+                                    cx.notify();
+                                });
+                            })
+                            .absolute()
+                            .top(px(4.))
+                            .bottom(px(4.))
+                            .left(relative(span_left / 100.0))
+                            .w(relative(span_w / 100.0))
+                            .rounded_sm()
+                            .bg(Rgba {
+                                r: label_color.r,
+                                g: label_color.g,
+                                b: label_color.b,
+                                a: if is_selected { 0.95 } else { 0.75 },
+                            })
+                            .border_1()
+                            .border_color(Rgba { r: label_color.r, g: label_color.g, b: label_color.b, a: 1.0 })
+                            .opacity(if layer.visible { 1.0 } else { 0.35 })
+                            .px_2()
+                            .text_xs()
+                            .text_color(rgb(0xffffff))
+                            .child(format!("{} [{} - {}]", layer.name, layer.in_point, layer.out_point)),
+                    )
+                    .child(
+                        // Playhead line across track
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .w(px(1.))
+                            .bg(rgb(0xef4444))
+                            .left(relative(playhead_percent / 100.0)),
+                    );
+
+                let main_row = h_flex()
+                    .h(px(26.))
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .items_center()
+                    .child(left_col)
+                    .child(track_col);
+
+                timeline_rows.push(main_row);
+
+                // --- 2. Twirled-Down Hierarchy ---
+                if is_layer_exp {
+                    // Group: Transform
+                    let trans_key = format!("{}:transform", layer.id);
+                    let is_trans_exp = self.expanded_groups.contains(&trans_key);
+                    let p_trans = panel_entity.clone();
+                    let tkey_click = trans_key.clone();
+
+                    let trans_header_left = h_flex()
+                        .w(px(380.))
+                        .h(px(24.))
+                        .pl_6()
+                        .pr_2()
+                        .border_r_1()
+                        .border_color(cx.theme().border)
+                        .items_center()
+                        .gap_1p5()
+                        .bg(cx.theme().secondary.opacity(0.4))
+                        .text_xs()
+                        .font_semibold()
+                        .text_color(cx.theme().foreground)
+                        .cursor_pointer()
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            p_trans.update(cx, |this, cx| {
+                                this.toggle_group_expanded(&tkey_click);
+                                cx.notify();
+                            });
+                        })
+                        .child(div().w(px(10.)).child(if is_trans_exp { "▾" } else { "▸" }))
+                        .child(icon_box(IconName::Move))
+                        .child("Transform");
+
+                    let trans_header_lane = div()
                         .flex_1()
-                        .h_full()
+                        .h(px(24.))
                         .relative()
+                        .bg(cx.theme().secondary.opacity(0.2))
+                        .border_b_1()
+                        .border_color(cx.theme().border.opacity(0.2))
                         .child(
-                            // Layer span bar
-                            div()
-                                .id(SharedString::from(format!("track_span_{}", layer.id)))
-                                .test_support()
-                                .cursor_pointer()
-                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                    span_state.update(cx, |s, cx| {
-                                        s.select_layer(Some(lid_span.clone()));
-                                        cx.notify();
-                                    });
-                                })
-                                .absolute()
-                                .top(px(4.))
-                                .bottom(px(4.))
-                                .left(relative(span_left / 100.0))
-                                .w(relative(span_w / 100.0))
-                                .rounded_sm()
-                                .bg(if is_selected {
-                                    cx.theme().accent
-                                } else {
-                                    cx.theme().primary
-                                })
-                                .opacity(if layer.visible { 0.85 } else { 0.35 })
-                                .px_2()
-                                .text_xs()
-                                .text_color(cx.theme().primary_foreground)
-                                .child(format!(
-                                    "{} [{} - {}]",
-                                    layer.name, layer.in_point, layer.out_point
-                                )),
-                        )
-                        .child(
-                            // Playhead line across track
                             div()
                                 .absolute()
                                 .top_0()
@@ -2540,11 +3016,475 @@ impl Render for TimelinePanel {
                                 .left(relative(playhead_percent / 100.0)),
                         );
 
-                    row.child(left_col).child(track_col)
-                })
-                .collect(),
-            None => Vec::new(),
-        };
+                    timeline_rows.push(
+                        h_flex()
+                            .h(px(24.))
+                            .border_b_1()
+                            .border_color(cx.theme().border)
+                            .items_center()
+                            .child(trans_header_left)
+                            .child(trans_header_lane),
+                    );
+
+                    if is_trans_exp {
+                        // 1. Anchor Point
+                        let ap = layer.transform.anchor_point.evaluate_at(&current_tc);
+                        let ap_anim = layer.transform.anchor_point.is_animated();
+                        let ap_has_kf = layer.transform.anchor_point.has_keyframe_at(&current_tc);
+                        let ap_prev = layer.transform.anchor_point.previous_keyframe_time(&current_tc).is_some();
+                        let ap_next = layer.transform.anchor_point.next_keyframe_time(&current_tc).is_some();
+                        let ap_times: Vec<f64> = layer.transform.anchor_point.keyframes().iter().map(|k| k.time_seconds()).collect();
+                        let s_ap_mx = self.state.clone();
+                        let s_ap_px = self.state.clone();
+                        let s_ap_my = self.state.clone();
+                        let s_ap_py = self.state.clone();
+                        let lid_ap1 = layer.id.clone();
+                        let lid_ap2 = layer.id.clone();
+                        let lid_ap3 = layer.id.clone();
+                        let lid_ap4 = layer.id.clone();
+
+                        let ap_left = h_flex()
+                            .w(px(380.))
+                            .h(px(24.))
+                            .pl(px(32.))
+                            .pr_2()
+                            .border_r_1()
+                            .border_color(cx.theme().border)
+                            .items_center()
+                            .justify_between()
+                            .text_xs()
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(timeline_stopwatch_nav(&self.state, &layer.id, "transform.anchor_point", ap_anim, ap_has_kf, ap_prev, ap_next, cx))
+                                    .child(div().w(px(80.)).text_color(cx.theme().foreground).child("Anchor Point")),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_1p5()
+                                    .child(timeline_stepper("X", format!("{:.0}", ap.x), move |cx| s_ap_mx.update(cx, |s, cx| { s.nudge_layer_anchor(&lid_ap1, -10.0, 0.0); cx.notify(); }), move |cx| s_ap_px.update(cx, |s, cx| { s.nudge_layer_anchor(&lid_ap2, 10.0, 0.0); cx.notify(); }), cx))
+                                    .child(timeline_stepper("Y", format!("{:.0}", ap.y), move |cx| s_ap_my.update(cx, |s, cx| { s.nudge_layer_anchor(&lid_ap3, 0.0, -10.0); cx.notify(); }), move |cx| s_ap_py.update(cx, |s, cx| { s.nudge_layer_anchor(&lid_ap4, 0.0, 10.0); cx.notify(); }), cx)),
+                            );
+                        let ap_lane = timeline_keyframe_lane(&ap_times, total_duration_secs, current_time_secs, fps, playhead_percent, &self.state, cx);
+                        timeline_rows.push(h_flex().h(px(24.)).items_center().child(ap_left).child(ap_lane));
+
+                        // 2. Position
+                        let pos = layer.transform.position.evaluate_at(&current_tc);
+                        let pos_anim = layer.transform.position.is_animated();
+                        let pos_has_kf = layer.transform.position.has_keyframe_at(&current_tc);
+                        let pos_prev = layer.transform.position.previous_keyframe_time(&current_tc).is_some();
+                        let pos_next = layer.transform.position.next_keyframe_time(&current_tc).is_some();
+                        let pos_times: Vec<f64> = layer.transform.position.keyframes().iter().map(|k| k.time_seconds()).collect();
+                        let s_pos_mx = self.state.clone();
+                        let s_pos_px = self.state.clone();
+                        let s_pos_my = self.state.clone();
+                        let s_pos_py = self.state.clone();
+                        let lid_pos1 = layer.id.clone();
+                        let lid_pos2 = layer.id.clone();
+                        let lid_pos3 = layer.id.clone();
+                        let lid_pos4 = layer.id.clone();
+
+                        let pos_left = h_flex()
+                            .w(px(380.))
+                            .h(px(24.))
+                            .pl(px(32.))
+                            .pr_2()
+                            .border_r_1()
+                            .border_color(cx.theme().border)
+                            .items_center()
+                            .justify_between()
+                            .text_xs()
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(timeline_stopwatch_nav(&self.state, &layer.id, "transform.position", pos_anim, pos_has_kf, pos_prev, pos_next, cx))
+                                    .child(div().w(px(80.)).text_color(cx.theme().foreground).child("Position")),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_1p5()
+                                    .child(timeline_stepper("X", format!("{:.0}", pos.x), move |cx| s_pos_mx.update(cx, |s, cx| { s.nudge_layer_position(&lid_pos1, -10.0, 0.0); cx.notify(); }), move |cx| s_pos_px.update(cx, |s, cx| { s.nudge_layer_position(&lid_pos2, 10.0, 0.0); cx.notify(); }), cx))
+                                    .child(timeline_stepper("Y", format!("{:.0}", pos.y), move |cx| s_pos_my.update(cx, |s, cx| { s.nudge_layer_position(&lid_pos3, 0.0, -10.0); cx.notify(); }), move |cx| s_pos_py.update(cx, |s, cx| { s.nudge_layer_position(&lid_pos4, 0.0, 10.0); cx.notify(); }), cx)),
+                            );
+                        let pos_lane = timeline_keyframe_lane(&pos_times, total_duration_secs, current_time_secs, fps, playhead_percent, &self.state, cx);
+                        timeline_rows.push(h_flex().h(px(24.)).items_center().child(pos_left).child(pos_lane));
+
+                        // 3. Scale
+                        let sc = layer.transform.scale.evaluate_at(&current_tc);
+                        let sc_anim = layer.transform.scale.is_animated();
+                        let sc_has_kf = layer.transform.scale.has_keyframe_at(&current_tc);
+                        let sc_prev = layer.transform.scale.previous_keyframe_time(&current_tc).is_some();
+                        let sc_next = layer.transform.scale.next_keyframe_time(&current_tc).is_some();
+                        let sc_times: Vec<f64> = layer.transform.scale.keyframes().iter().map(|k| k.time_seconds()).collect();
+                        let s_sc_mx = self.state.clone();
+                        let s_sc_px = self.state.clone();
+                        let s_sc_my = self.state.clone();
+                        let s_sc_py = self.state.clone();
+                        let lid_sc1 = layer.id.clone();
+                        let lid_sc2 = layer.id.clone();
+                        let lid_sc3 = layer.id.clone();
+                        let lid_sc4 = layer.id.clone();
+
+                        let sc_left = h_flex()
+                            .w(px(380.))
+                            .h(px(24.))
+                            .pl(px(32.))
+                            .pr_2()
+                            .border_r_1()
+                            .border_color(cx.theme().border)
+                            .items_center()
+                            .justify_between()
+                            .text_xs()
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(timeline_stopwatch_nav(&self.state, &layer.id, "transform.scale", sc_anim, sc_has_kf, sc_prev, sc_next, cx))
+                                    .child(div().w(px(80.)).text_color(cx.theme().foreground).child("Scale")),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_1p5()
+                                    .child(timeline_stepper("X", format!("{:.0}%", sc.x), move |cx| s_sc_mx.update(cx, |s, cx| { s.nudge_layer_scale(&lid_sc1, -10.0, 0.0); cx.notify(); }), move |cx| s_sc_px.update(cx, |s, cx| { s.nudge_layer_scale(&lid_sc2, 10.0, 0.0); cx.notify(); }), cx))
+                                    .child(timeline_stepper("Y", format!("{:.0}%", sc.y), move |cx| s_sc_my.update(cx, |s, cx| { s.nudge_layer_scale(&lid_sc3, 0.0, -10.0); cx.notify(); }), move |cx| s_sc_py.update(cx, |s, cx| { s.nudge_layer_scale(&lid_sc4, 0.0, 10.0); cx.notify(); }), cx)),
+                            );
+                        let sc_lane = timeline_keyframe_lane(&sc_times, total_duration_secs, current_time_secs, fps, playhead_percent, &self.state, cx);
+                        timeline_rows.push(h_flex().h(px(24.)).items_center().child(sc_left).child(sc_lane));
+
+                        // 4. Rotation
+                        let rot = layer.transform.rotation.evaluate_at(&current_tc);
+                        let rot_anim = layer.transform.rotation.is_animated();
+                        let rot_has_kf = layer.transform.rotation.has_keyframe_at(&current_tc);
+                        let rot_prev = layer.transform.rotation.previous_keyframe_time(&current_tc).is_some();
+                        let rot_next = layer.transform.rotation.next_keyframe_time(&current_tc).is_some();
+                        let rot_times: Vec<f64> = layer.transform.rotation.keyframes().iter().map(|k| k.time_seconds()).collect();
+                        let s_rot_m = self.state.clone();
+                        let s_rot_p = self.state.clone();
+                        let lid_rot1 = layer.id.clone();
+                        let lid_rot2 = layer.id.clone();
+
+                        let rot_left = h_flex()
+                            .w(px(380.))
+                            .h(px(24.))
+                            .pl(px(32.))
+                            .pr_2()
+                            .border_r_1()
+                            .border_color(cx.theme().border)
+                            .items_center()
+                            .justify_between()
+                            .text_xs()
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(timeline_stopwatch_nav(&self.state, &layer.id, "transform.rotation", rot_anim, rot_has_kf, rot_prev, rot_next, cx))
+                                    .child(div().w(px(80.)).text_color(cx.theme().foreground).child("Rotation")),
+                            )
+                            .child(
+                                timeline_stepper("Angle", format!("{:.1}°", rot), move |cx| s_rot_m.update(cx, |s, cx| { s.nudge_layer_rotation(&lid_rot1, -15.0); cx.notify(); }), move |cx| s_rot_p.update(cx, |s, cx| { s.nudge_layer_rotation(&lid_rot2, 15.0); cx.notify(); }), cx),
+                            );
+                        let rot_lane = timeline_keyframe_lane(&rot_times, total_duration_secs, current_time_secs, fps, playhead_percent, &self.state, cx);
+                        timeline_rows.push(h_flex().h(px(24.)).items_center().child(rot_left).child(rot_lane));
+
+                        // 5. Opacity
+                        let op = layer.opacity.evaluate_at(&current_tc);
+                        let op_anim = layer.opacity.is_animated();
+                        let op_has_kf = layer.opacity.has_keyframe_at(&current_tc);
+                        let op_prev = layer.opacity.previous_keyframe_time(&current_tc).is_some();
+                        let op_next = layer.opacity.next_keyframe_time(&current_tc).is_some();
+                        let op_times: Vec<f64> = layer.opacity.keyframes().iter().map(|k| k.time_seconds()).collect();
+                        let s_op_m = self.state.clone();
+                        let s_op_p = self.state.clone();
+                        let lid_op1 = layer.id.clone();
+                        let lid_op2 = layer.id.clone();
+
+                        let op_left = h_flex()
+                            .w(px(380.))
+                            .h(px(24.))
+                            .pl(px(32.))
+                            .pr_2()
+                            .border_r_1()
+                            .border_color(cx.theme().border)
+                            .items_center()
+                            .justify_between()
+                            .text_xs()
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(timeline_stopwatch_nav(&self.state, &layer.id, "opacity", op_anim, op_has_kf, op_prev, op_next, cx))
+                                    .child(div().w(px(80.)).text_color(cx.theme().foreground).child("Opacity")),
+                            )
+                            .child(
+                                timeline_stepper("Op", format!("{:.0}%", op), move |cx| s_op_m.update(cx, |s, cx| { s.nudge_layer_opacity(&lid_op1, -10.0); cx.notify(); }), move |cx| s_op_p.update(cx, |s, cx| { s.nudge_layer_opacity(&lid_op2, 10.0); cx.notify(); }), cx),
+                            );
+                        let op_lane = timeline_keyframe_lane(&op_times, total_duration_secs, current_time_secs, fps, playhead_percent, &self.state, cx);
+                        timeline_rows.push(h_flex().h(px(24.)).items_center().child(op_left).child(op_lane));
+                    }
+
+                    // Group: Effects
+                    if !layer.effects.is_empty() {
+                        let fx_grp_key = format!("{}:effects", layer.id);
+                        let is_fx_grp_exp = self.expanded_groups.contains(&fx_grp_key);
+                        let p_fx_grp = panel_entity.clone();
+                        let fx_grp_click = fx_grp_key.clone();
+
+                        let fx_header_left = h_flex()
+                            .w(px(380.))
+                            .h(px(24.))
+                            .pl_6()
+                            .pr_2()
+                            .border_r_1()
+                            .border_color(cx.theme().border)
+                            .items_center()
+                            .justify_between()
+                            .bg(cx.theme().secondary.opacity(0.4))
+                            .text_xs()
+                            .font_semibold()
+                            .text_color(cx.theme().foreground)
+                            .cursor_pointer()
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                p_fx_grp.update(cx, |this, cx| {
+                                    this.toggle_group_expanded(&fx_grp_click);
+                                    cx.notify();
+                                });
+                            })
+                            .child(
+                                h_flex()
+                                    .gap_1p5()
+                                    .items_center()
+                                    .child(div().w(px(10.)).child(if is_fx_grp_exp { "▾" } else { "▸" }))
+                                    .child(icon_box(IconName::SlidersHorizontal))
+                                    .child(format!("Effects ({})", layer.effects.len())),
+                            );
+
+                        let fx_header_lane = div()
+                            .flex_1()
+                            .h(px(24.))
+                            .relative()
+                            .bg(cx.theme().secondary.opacity(0.2))
+                            .border_b_1()
+                            .border_color(cx.theme().border.opacity(0.2))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .bottom_0()
+                                    .w(px(1.))
+                                    .bg(rgb(0xef4444))
+                                    .left(relative(playhead_percent / 100.0)),
+                            );
+
+                        timeline_rows.push(
+                            h_flex()
+                                .h(px(24.))
+                                .border_b_1()
+                                .border_color(cx.theme().border)
+                                .items_center()
+                                .child(fx_header_left)
+                                .child(fx_header_lane),
+                        );
+
+                        if is_fx_grp_exp {
+                            for effect in &layer.effects {
+                                let fx_item_key = format!("{}:effect:{}", layer.id, effect.id);
+                                let is_fx_item_exp = self.expanded_groups.contains(&fx_item_key);
+                                let p_fx_item = panel_entity.clone();
+                                let fx_item_click = fx_item_key.clone();
+
+                                let s_fx_toggle = self.state.clone();
+                                let s_fx_del = self.state.clone();
+                                let lid_fx1 = layer.id.clone();
+                                let lid_fx2 = layer.id.clone();
+                                let eid1 = effect.id.clone();
+                                let eid2 = effect.id.clone();
+
+                                let fx_item_left = h_flex()
+                                    .w(px(380.))
+                                    .h(px(24.))
+                                    .pl(px(32.))
+                                    .pr_2()
+                                    .border_r_1()
+                                    .border_color(cx.theme().border)
+                                    .items_center()
+                                    .justify_between()
+                                    .text_xs()
+                                    .bg(cx.theme().muted.opacity(0.3))
+                                    .child(
+                                        h_flex()
+                                            .gap_1p5()
+                                            .items_center()
+                                            .child(
+                                                div()
+                                                    .cursor_pointer()
+                                                    .w(px(10.))
+                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                        p_fx_item.update(cx, |this, cx| {
+                                                            this.toggle_group_expanded(&fx_item_click);
+                                                            cx.notify();
+                                                        });
+                                                    })
+                                                    .child(if is_fx_item_exp { "▾" } else { "▸" }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .cursor_pointer()
+                                                    .text_color(if effect.enabled { cx.theme().foreground } else { cx.theme().muted_foreground })
+                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                        s_fx_toggle.update(cx, |s, cx| {
+                                                            let _ = s.toggle_layer_effect_enabled(&lid_fx1, &eid1);
+                                                            cx.notify();
+                                                        });
+                                                    })
+                                                    .child(icon_box(if effect.enabled { IconName::Eye } else { IconName::EyeOff })),
+                                            )
+                                            .child(div().font_medium().child(effect.name.clone())),
+                                    )
+                                    .child(
+                                        // Trash Delete Effect button
+                                        div()
+                                            .cursor_pointer()
+                                            .p_0p5()
+                                            .rounded_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .hover(|s| s.bg(rgb(0xef4444)).text_color(rgb(0xffffff)))
+                                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                s_fx_del.update(cx, |s, cx| {
+                                                    let _ = s.remove_layer_effect(&lid_fx2, &eid2);
+                                                    cx.notify();
+                                                });
+                                            })
+                                            .child(icon_box(IconName::Trash)),
+                                    );
+
+                                let fx_item_lane = div()
+                                    .flex_1()
+                                    .h(px(24.))
+                                    .relative()
+                                    .border_b_1()
+                                    .border_color(cx.theme().border.opacity(0.2))
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .top_0()
+                                            .bottom_0()
+                                            .w(px(1.))
+                                            .bg(rgb(0xef4444))
+                                            .left(relative(playhead_percent / 100.0)),
+                                    );
+
+                                timeline_rows.push(
+                                    h_flex()
+                                        .h(px(24.))
+                                        .border_b_1()
+                                        .border_color(cx.theme().border)
+                                        .items_center()
+                                        .child(fx_item_left)
+                                        .child(fx_item_lane),
+                                );
+
+                                if is_fx_item_exp {
+                                    // Render animatable parameters for this effect
+                                    let mut param_entries: Vec<(&'static str, &'static str, f32, f32)> = Vec::new();
+                                    match &effect.effect_type {
+                                        EffectType::GaussianBlur { radius } => {
+                                            param_entries.push(("radius", "Blur Radius", radius.evaluate_at(&current_tc), 2.0));
+                                        }
+                                        EffectType::BrightnessContrast { brightness, contrast } => {
+                                            param_entries.push(("brightness", "Brightness", brightness.evaluate_at(&current_tc), 5.0));
+                                            param_entries.push(("contrast", "Contrast", contrast.evaluate_at(&current_tc), 5.0));
+                                        }
+                                        EffectType::Tint { amount, .. } => {
+                                            param_entries.push(("amount", "Amount", amount.evaluate_at(&current_tc), 5.0));
+                                        }
+                                        EffectType::Invert { amount } => {
+                                            param_entries.push(("amount", "Amount", amount.evaluate_at(&current_tc), 5.0));
+                                        }
+                                        EffectType::DropShadow { distance, softness, opacity, .. } => {
+                                            param_entries.push(("distance", "Distance", distance.evaluate_at(&current_tc), 2.0));
+                                            param_entries.push(("softness", "Softness", softness.evaluate_at(&current_tc), 2.0));
+                                            param_entries.push(("opacity", "Opacity", opacity.evaluate_at(&current_tc), 5.0));
+                                        }
+                                        EffectType::GlslShader { param1, param2, param3, param4, .. } => {
+                                            param_entries.push(("param1", "Param 1 (Speed)", param1.evaluate_at(&current_tc), 0.2));
+                                            param_entries.push(("param2", "Param 2 (Boost)", param2.evaluate_at(&current_tc), 5.0));
+                                            param_entries.push(("param3", "Param 3 (Scale)", param3.evaluate_at(&current_tc), 0.2));
+                                            param_entries.push(("param4", "Param 4 (Blend)", param4.evaluate_at(&current_tc), 5.0));
+                                        }
+                                    }
+
+                                    for (p_slug, p_label, p_val, p_step) in param_entries {
+                                        let prop_path_static: &'static str = match p_slug {
+                                            "radius" => "effect:radius",
+                                            "brightness" => "effect:brightness",
+                                            "contrast" => "effect:contrast",
+                                            "amount" => "effect:amount",
+                                            "distance" => "effect:distance",
+                                            "softness" => "effect:softness",
+                                            "opacity" => "effect:opacity",
+                                            "param1" => "effect:param1",
+                                            "param2" => "effect:param2",
+                                            "param3" => "effect:param3",
+                                            "param4" => "effect:param4",
+                                            _ => "effect:param",
+                                        };
+
+                                        let prop_ref = effect.get_param_property(p_slug);
+                                        let is_anim = prop_ref.map(|p| p.is_animated()).unwrap_or(false);
+                                        let has_kf = prop_ref.map(|p| p.has_keyframe_at(&current_tc)).unwrap_or(false);
+                                        let prev_kf = prop_ref.and_then(|p| p.previous_keyframe_time(&current_tc)).is_some();
+                                        let next_kf = prop_ref.and_then(|p| p.next_keyframe_time(&current_tc)).is_some();
+                                        let kf_times: Vec<f64> = prop_ref.map(|p| p.keyframes().iter().map(|k| k.time_seconds()).collect()).unwrap_or_default();
+
+                                        let s_pm = self.state.clone();
+                                        let s_pp = self.state.clone();
+                                        let lid_p1 = layer.id.clone();
+                                        let lid_p2 = layer.id.clone();
+                                        let eid_p1 = effect.id.clone();
+                                        let eid_p2 = effect.id.clone();
+
+                                        let param_left = h_flex()
+                                            .w(px(380.))
+                                            .h(px(24.))
+                                            .pl(px(44.))
+                                            .pr_2()
+                                            .border_r_1()
+                                            .border_color(cx.theme().border)
+                                            .items_center()
+                                            .justify_between()
+                                            .text_xs()
+                                            .child(
+                                                h_flex()
+                                                    .gap_1()
+                                                    .items_center()
+                                                    .child(timeline_stopwatch_nav(&self.state, &layer.id, prop_path_static, is_anim, has_kf, prev_kf, next_kf, cx))
+                                                    .child(div().w(px(100.)).truncate().text_color(cx.theme().foreground).child(p_label)),
+                                            )
+                                            .child(
+                                                timeline_stepper("Val", format!("{:.1}", p_val), move |cx| s_pm.update(cx, |s, cx| { let _ = s.nudge_layer_effect_param(&lid_p1, &eid_p1, p_slug, -p_step); cx.notify(); }), move |cx| s_pp.update(cx, |s, cx| { let _ = s.nudge_layer_effect_param(&lid_p2, &eid_p2, p_slug, p_step); cx.notify(); }), cx),
+                                            );
+
+                                        let param_lane = timeline_keyframe_lane(&kf_times, total_duration_secs, current_time_secs, fps, playhead_percent, &self.state, cx);
+
+                                        timeline_rows.push(
+                                            h_flex()
+                                                .h(px(24.))
+                                                .border_b_1()
+                                                .border_color(cx.theme().border)
+                                                .items_center()
+                                                .child(param_left)
+                                                .child(param_lane),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         div()
             .id("timeline_panel")
@@ -2812,11 +3752,11 @@ impl Render for TimelinePanel {
                     .text_color(cx.theme().muted_foreground)
                     .child(
                         div()
-                            .w(px(280.))
+                            .w(px(380.))
                             .px_3()
                             .border_r_1()
                             .border_color(cx.theme().border)
-                            .child("Layer Name / Switches"),
+                            .child("Layer Name / Switches / Properties"),
                     )
                     .child(
                         div()
@@ -2855,7 +3795,7 @@ impl Render for TimelinePanel {
                     .test_support()
                     .flex_1()
                     .overflow_hidden()
-                    .children(track_rows),
+                    .children(timeline_rows),
             )
     }
 }

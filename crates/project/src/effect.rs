@@ -310,4 +310,158 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
         }
         false
     }
+
+    /// Retrieve an immutable reference to an animatable parameter property by name.
+    pub fn get_param_property(&self, param_name: &str) -> Option<&Property<f32>> {
+        match &self.effect_type {
+            EffectType::GaussianBlur { radius } => {
+                if param_name.eq_ignore_ascii_case("radius") {
+                    Some(radius)
+                } else {
+                    None
+                }
+            }
+            EffectType::BrightnessContrast {
+                brightness,
+                contrast,
+            } => {
+                if param_name.eq_ignore_ascii_case("brightness") {
+                    Some(brightness)
+                } else if param_name.eq_ignore_ascii_case("contrast") {
+                    Some(contrast)
+                } else {
+                    None
+                }
+            }
+            EffectType::Tint { amount, .. } => {
+                if param_name.eq_ignore_ascii_case("amount") {
+                    Some(amount)
+                } else {
+                    None
+                }
+            }
+            EffectType::Invert { amount } => {
+                if param_name.eq_ignore_ascii_case("amount") {
+                    Some(amount)
+                } else {
+                    None
+                }
+            }
+            EffectType::DropShadow {
+                distance,
+                angle,
+                softness,
+                opacity,
+                ..
+            } => {
+                if param_name.eq_ignore_ascii_case("distance") {
+                    Some(distance)
+                } else if param_name.eq_ignore_ascii_case("angle") {
+                    Some(angle)
+                } else if param_name.eq_ignore_ascii_case("softness") {
+                    Some(softness)
+                } else if param_name.eq_ignore_ascii_case("opacity") {
+                    Some(opacity)
+                } else {
+                    None
+                }
+            }
+            EffectType::GlslShader {
+                param1,
+                param2,
+                param3,
+                param4,
+                ..
+            } => {
+                if param_name.eq_ignore_ascii_case("param1") || param_name.eq_ignore_ascii_case("p1") {
+                    Some(param1)
+                } else if param_name.eq_ignore_ascii_case("param2") || param_name.eq_ignore_ascii_case("p2") {
+                    Some(param2)
+                } else if param_name.eq_ignore_ascii_case("param3") || param_name.eq_ignore_ascii_case("p3") {
+                    Some(param3)
+                } else if param_name.eq_ignore_ascii_case("param4") || param_name.eq_ignore_ascii_case("p4") {
+                    Some(param4)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// Retrieve a mutable reference to an animatable parameter property by name.
+    pub fn get_param_property_mut(&mut self, param_name: &str) -> Option<&mut Property<f32>> {
+        match &mut self.effect_type {
+            EffectType::GaussianBlur { radius } => {
+                if param_name.eq_ignore_ascii_case("radius") {
+                    Some(radius)
+                } else {
+                    None
+                }
+            }
+            EffectType::BrightnessContrast {
+                brightness,
+                contrast,
+            } => {
+                if param_name.eq_ignore_ascii_case("brightness") {
+                    Some(brightness)
+                } else if param_name.eq_ignore_ascii_case("contrast") {
+                    Some(contrast)
+                } else {
+                    None
+                }
+            }
+            EffectType::Tint { amount, .. } => {
+                if param_name.eq_ignore_ascii_case("amount") {
+                    Some(amount)
+                } else {
+                    None
+                }
+            }
+            EffectType::Invert { amount } => {
+                if param_name.eq_ignore_ascii_case("amount") {
+                    Some(amount)
+                } else {
+                    None
+                }
+            }
+            EffectType::DropShadow {
+                distance,
+                angle,
+                softness,
+                opacity,
+                ..
+            } => {
+                if param_name.eq_ignore_ascii_case("distance") {
+                    Some(distance)
+                } else if param_name.eq_ignore_ascii_case("angle") {
+                    Some(angle)
+                } else if param_name.eq_ignore_ascii_case("softness") {
+                    Some(softness)
+                } else if param_name.eq_ignore_ascii_case("opacity") {
+                    Some(opacity)
+                } else {
+                    None
+                }
+            }
+            EffectType::GlslShader {
+                param1,
+                param2,
+                param3,
+                param4,
+                ..
+            } => {
+                if param_name.eq_ignore_ascii_case("param1") || param_name.eq_ignore_ascii_case("p1") {
+                    Some(param1)
+                } else if param_name.eq_ignore_ascii_case("param2") || param_name.eq_ignore_ascii_case("p2") {
+                    Some(param2)
+                } else if param_name.eq_ignore_ascii_case("param3") || param_name.eq_ignore_ascii_case("p3") {
+                    Some(param3)
+                } else if param_name.eq_ignore_ascii_case("param4") || param_name.eq_ignore_ascii_case("p4") {
+                    Some(param4)
+                } else {
+                    None
+                }
+            }
+        }
+    }
 }

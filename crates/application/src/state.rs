@@ -1,7 +1,7 @@
 use compositor::{EvaluatedStack, LayerStackEvaluator, SceneGraph};
 use project::{
-    Asset, Color, Composition, Effect, EffectType, Keyframe, KeyframeTangent, Layer, PlaybackClock,
-    Project, TimeCode, Vec2,
+    Asset, BlendMode, Color, Composition, Effect, EffectType, Keyframe, KeyframeTangent, Layer,
+    PlaybackClock, Project, TimeCode, TrackMatteMode, Vec2,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -546,23 +546,43 @@ impl EditorState {
         Ok(id)
     }
 
+    /// Remove an effect by ID from a specific layer.
+    pub fn remove_layer_effect(&mut self, layer_id: &str, effect_id: &str) -> Result<(), String> {
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+
+        layer
+            .remove_effect(effect_id)
+            .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
+        Ok(())
+    }
+
     /// Remove an effect by ID from the currently selected layer.
     pub fn remove_effect_from_selected_layer(&mut self, effect_id: &str) -> Result<(), String> {
         let selected_id = self
             .selected_layer_id
             .clone()
             .ok_or_else(|| "No layer selected".to_string())?;
+        self.remove_layer_effect(&selected_id, effect_id)
+    }
 
+    /// Toggle enabled state of an effect on a specific layer.
+    pub fn toggle_layer_effect_enabled(&mut self, layer_id: &str, effect_id: &str) -> Result<(), String> {
         let comp = self
             .active_composition_mut()
             .ok_or_else(|| "No active composition".to_string())?;
         let layer = comp
-            .get_layer_mut(&selected_id)
-            .ok_or_else(|| format!("Layer {selected_id} not found"))?;
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
 
-        layer
-            .remove_effect(effect_id)
+        let effect = layer
+            .get_effect_mut(effect_id)
             .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
+        effect.toggle_enabled();
         Ok(())
     }
 
@@ -572,19 +592,48 @@ impl EditorState {
             .selected_layer_id
             .clone()
             .ok_or_else(|| "No layer selected".to_string())?;
+        self.toggle_layer_effect_enabled(&selected_id, effect_id)
+    }
 
+    /// Nudge an effect parameter on a specified layer.
+    pub fn nudge_layer_effect_param(
+        &mut self,
+        layer_id: &str,
+        effect_id: &str,
+        param_name: &str,
+        delta: f32,
+    ) -> Result<(), String> {
+        let current_tc = self.clock.timecode();
         let comp = self
             .active_composition_mut()
             .ok_or_else(|| "No active composition".to_string())?;
         let layer = comp
-            .get_layer_mut(&selected_id)
-            .ok_or_else(|| format!("Layer {selected_id} not found"))?;
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
 
         let effect = layer
             .get_effect_mut(effect_id)
             .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
-        effect.toggle_enabled();
-        Ok(())
+
+        if let Some(prop) = effect.get_param_property_mut(param_name) {
+            let current = if prop.is_animated() {
+                prop.evaluate_at(&current_tc)
+            } else {
+                prop.value
+            };
+            let new_val = (current + delta).max(0.0);
+            prop.set_value(new_val);
+            if prop.is_animated() {
+                prop.add_keyframe(Keyframe::new(current_tc, new_val));
+            }
+            Ok(())
+        } else if effect.nudge_param(param_name, delta) {
+            Ok(())
+        } else {
+            Err(format!(
+                "Parameter {param_name} not found on effect {effect_id}"
+            ))
+        }
     }
 
     /// Nudge an effect parameter on the currently selected layer.
@@ -598,24 +647,7 @@ impl EditorState {
             .selected_layer_id
             .clone()
             .ok_or_else(|| "No layer selected".to_string())?;
-
-        let comp = self
-            .active_composition_mut()
-            .ok_or_else(|| "No active composition".to_string())?;
-        let layer = comp
-            .get_layer_mut(&selected_id)
-            .ok_or_else(|| format!("Layer {selected_id} not found"))?;
-
-        let effect = layer
-            .get_effect_mut(effect_id)
-            .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
-        if effect.nudge_param(param_name, delta) {
-            Ok(())
-        } else {
-            Err(format!(
-                "Parameter {param_name} not found on effect {effect_id}"
-            ))
-        }
+        self.nudge_layer_effect_param(&selected_id, effect_id, param_name, delta)
     }
 
     /// Set custom GLSL shader code on the selected layer.
@@ -647,61 +679,394 @@ impl EditorState {
         }
     }
 
+    /// Nudge position on the specified layer.
+    pub fn nudge_layer_position(&mut self, layer_id: &str, dx: f32, dy: f32) {
+        let delta = Vec2::new(dx, dy);
+        let current_tc = self.clock.timecode();
+        let comp = match self.active_composition_mut() {
+            Some(c) => c,
+            None => return,
+        };
+        if let Some(layer) = comp.get_layer_mut(layer_id) {
+            let current = if layer.transform.position.is_animated() {
+                layer.transform.position.evaluate_at(&current_tc)
+            } else {
+                layer.transform.position.value
+            };
+            let new_val = current + delta;
+            layer.transform.position.set_value(new_val);
+            if layer.transform.position.is_animated() {
+                layer.transform.position.add_keyframe(Keyframe::new(current_tc, new_val));
+            }
+        }
+    }
+
     /// Nudge position of the selected layer by `(dx, dy)`.
     pub fn nudge_position(&mut self, dx: f32, dy: f32) {
+        if let Some(id) = self.selected_layer_id.clone() {
+            self.nudge_layer_position(&id, dx, dy);
+        }
+    }
+
+    /// Nudge anchor point on the specified layer.
+    pub fn nudge_layer_anchor(&mut self, layer_id: &str, dx: f32, dy: f32) {
         let delta = Vec2::new(dx, dy);
-        if let Some(layer) = self.selected_layer_mut() {
-            let current = layer.transform.position.value;
-            layer.transform.position.set_value(current + delta);
-            for kf in layer.transform.position.keyframes_mut() {
-                kf.value += delta;
+        let current_tc = self.clock.timecode();
+        let comp = match self.active_composition_mut() {
+            Some(c) => c,
+            None => return,
+        };
+        if let Some(layer) = comp.get_layer_mut(layer_id) {
+            let current = if layer.transform.anchor_point.is_animated() {
+                layer.transform.anchor_point.evaluate_at(&current_tc)
+            } else {
+                layer.transform.anchor_point.value
+            };
+            let new_val = current + delta;
+            layer.transform.anchor_point.set_value(new_val);
+            if layer.transform.anchor_point.is_animated() {
+                layer.transform.anchor_point.add_keyframe(Keyframe::new(current_tc, new_val));
             }
         }
     }
 
     /// Nudge anchor point of the selected layer by `(dx, dy)`.
     pub fn nudge_anchor(&mut self, dx: f32, dy: f32) {
+        if let Some(id) = self.selected_layer_id.clone() {
+            self.nudge_layer_anchor(&id, dx, dy);
+        }
+    }
+
+    /// Nudge scale on the specified layer.
+    pub fn nudge_layer_scale(&mut self, layer_id: &str, dx: f32, dy: f32) {
         let delta = Vec2::new(dx, dy);
-        if let Some(layer) = self.selected_layer_mut() {
-            let current = layer.transform.anchor_point.value;
-            layer.transform.anchor_point.set_value(current + delta);
-            for kf in layer.transform.anchor_point.keyframes_mut() {
-                kf.value += delta;
+        let current_tc = self.clock.timecode();
+        let comp = match self.active_composition_mut() {
+            Some(c) => c,
+            None => return,
+        };
+        if let Some(layer) = comp.get_layer_mut(layer_id) {
+            let current = if layer.transform.scale.is_animated() {
+                layer.transform.scale.evaluate_at(&current_tc)
+            } else {
+                layer.transform.scale.value
+            };
+            let new_val = current + delta;
+            layer.transform.scale.set_value(new_val);
+            if layer.transform.scale.is_animated() {
+                layer.transform.scale.add_keyframe(Keyframe::new(current_tc, new_val));
             }
         }
     }
 
     /// Nudge scale of the selected layer by `(dx, dy)` percent.
     pub fn nudge_scale(&mut self, dx: f32, dy: f32) {
-        let delta = Vec2::new(dx, dy);
-        if let Some(layer) = self.selected_layer_mut() {
-            let current = layer.transform.scale.value;
-            layer.transform.scale.set_value(current + delta);
-            for kf in layer.transform.scale.keyframes_mut() {
-                kf.value += delta;
+        if let Some(id) = self.selected_layer_id.clone() {
+            self.nudge_layer_scale(&id, dx, dy);
+        }
+    }
+
+    /// Nudge rotation on the specified layer.
+    pub fn nudge_layer_rotation(&mut self, layer_id: &str, ddeg: f32) {
+        let current_tc = self.clock.timecode();
+        let comp = match self.active_composition_mut() {
+            Some(c) => c,
+            None => return,
+        };
+        if let Some(layer) = comp.get_layer_mut(layer_id) {
+            let current = if layer.transform.rotation.is_animated() {
+                layer.transform.rotation.evaluate_at(&current_tc)
+            } else {
+                layer.transform.rotation.value
+            };
+            let new_val = current + ddeg;
+            layer.transform.rotation.set_value(new_val);
+            if layer.transform.rotation.is_animated() {
+                layer.transform.rotation.add_keyframe(Keyframe::new(current_tc, new_val));
             }
         }
     }
 
     /// Nudge rotation of the selected layer by `ddeg` degrees.
     pub fn nudge_rotation(&mut self, ddeg: f32) {
-        if let Some(layer) = self.selected_layer_mut() {
-            let current = layer.transform.rotation.value;
-            layer.transform.rotation.set_value(current + ddeg);
-            for kf in layer.transform.rotation.keyframes_mut() {
-                kf.value += ddeg;
+        if let Some(id) = self.selected_layer_id.clone() {
+            self.nudge_layer_rotation(&id, ddeg);
+        }
+    }
+
+    /// Nudge opacity on the specified layer.
+    pub fn nudge_layer_opacity(&mut self, layer_id: &str, dop: f32) {
+        let current_tc = self.clock.timecode();
+        let comp = match self.active_composition_mut() {
+            Some(c) => c,
+            None => return,
+        };
+        if let Some(layer) = comp.get_layer_mut(layer_id) {
+            let current = if layer.opacity.is_animated() {
+                layer.opacity.evaluate_at(&current_tc)
+            } else {
+                layer.opacity.value
+            };
+            let new_val = (current + dop).clamp(0.0, 100.0);
+            layer.opacity.set_value(new_val);
+            if layer.opacity.is_animated() {
+                layer.opacity.add_keyframe(Keyframe::new(current_tc, new_val));
             }
         }
     }
 
     /// Nudge opacity of the selected layer by `dop` percent.
     pub fn nudge_opacity(&mut self, dop: f32) {
-        if let Some(layer) = self.selected_layer_mut() {
-            let current = layer.opacity.value;
-            let new_op = (current + dop).clamp(0.0, 100.0);
-            layer.opacity.set_value(new_op);
-            for kf in layer.opacity.keyframes_mut() {
-                kf.value = (kf.value + dop).clamp(0.0, 100.0);
+        if let Some(id) = self.selected_layer_id.clone() {
+            self.nudge_layer_opacity(&id, dop);
+        }
+    }
+
+    /// Toggle stopwatch / animation status for a property path on the specified layer.
+    /// In After Effects:
+    /// - If toggled ON: records an initial keyframe at the current playback time with the current value.
+    /// - If toggled OFF: clears all keyframes on the property.
+    pub fn toggle_layer_property_animation(&mut self, layer_id: &str, prop_path: &str) {
+        let current_tc = self.clock.timecode();
+        let comp = match self.active_composition_mut() {
+            Some(c) => c,
+            None => return,
+        };
+        let layer = match comp.get_layer_mut(layer_id) {
+            Some(l) => l,
+            None => return,
+        };
+
+        match prop_path {
+            "transform.anchor_point" => {
+                if layer.transform.anchor_point.is_animated() {
+                    layer.transform.anchor_point.clear_keyframes();
+                } else {
+                    let val = layer.transform.anchor_point.value;
+                    layer.transform.anchor_point.add_keyframe(Keyframe::new(current_tc, val));
+                }
+            }
+            "transform.position" => {
+                if layer.transform.position.is_animated() {
+                    layer.transform.position.clear_keyframes();
+                } else {
+                    let val = layer.transform.position.value;
+                    layer.transform.position.add_keyframe(Keyframe::new(current_tc, val));
+                }
+            }
+            "transform.scale" => {
+                if layer.transform.scale.is_animated() {
+                    layer.transform.scale.clear_keyframes();
+                } else {
+                    let val = layer.transform.scale.value;
+                    layer.transform.scale.add_keyframe(Keyframe::new(current_tc, val));
+                }
+            }
+            "transform.rotation" => {
+                if layer.transform.rotation.is_animated() {
+                    layer.transform.rotation.clear_keyframes();
+                } else {
+                    let val = layer.transform.rotation.value;
+                    layer.transform.rotation.add_keyframe(Keyframe::new(current_tc, val));
+                }
+            }
+            "opacity" => {
+                if layer.opacity.is_animated() {
+                    layer.opacity.clear_keyframes();
+                } else {
+                    let val = layer.opacity.value;
+                    layer.opacity.add_keyframe(Keyframe::new(current_tc, val));
+                }
+            }
+            _ => {
+                if let Some(rest) = prop_path.strip_prefix("effect:") {
+                    let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                    if parts.len() == 2 {
+                        let fx_id = parts[0];
+                        let param_name = parts[1];
+                        if let Some(fx) = layer.get_effect_mut(fx_id) {
+                            if let Some(prop) = fx.get_param_property_mut(param_name) {
+                                if prop.is_animated() {
+                                    prop.clear_keyframes();
+                                } else {
+                                    let val = prop.value;
+                                    prop.add_keyframe(Keyframe::new(current_tc, val));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Toggle a keyframe at the current playback timecode for a property path on the layer.
+    pub fn toggle_layer_keyframe_at_current_time(&mut self, layer_id: &str, prop_path: &str) {
+        let current_tc = self.clock.timecode();
+        let comp = match self.active_composition_mut() {
+            Some(c) => c,
+            None => return,
+        };
+        let layer = match comp.get_layer_mut(layer_id) {
+            Some(l) => l,
+            None => return,
+        };
+
+        match prop_path {
+            "transform.anchor_point" => {
+                let val = layer.transform.anchor_point.value;
+                layer.transform.anchor_point.toggle_keyframe(current_tc, val);
+            }
+            "transform.position" => {
+                let val = layer.transform.position.value;
+                layer.transform.position.toggle_keyframe(current_tc, val);
+            }
+            "transform.scale" => {
+                let val = layer.transform.scale.value;
+                layer.transform.scale.toggle_keyframe(current_tc, val);
+            }
+            "transform.rotation" => {
+                let val = layer.transform.rotation.value;
+                layer.transform.rotation.toggle_keyframe(current_tc, val);
+            }
+            "opacity" => {
+                let val = layer.opacity.value;
+                layer.opacity.toggle_keyframe(current_tc, val);
+            }
+            _ => {
+                if let Some(rest) = prop_path.strip_prefix("effect:") {
+                    let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                    if parts.len() == 2 {
+                        let fx_id = parts[0];
+                        let param_name = parts[1];
+                        if let Some(fx) = layer.get_effect_mut(fx_id) {
+                            if let Some(prop) = fx.get_param_property_mut(param_name) {
+                                let val = prop.value;
+                                prop.toggle_keyframe(current_tc, val);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Seek to the previous keyframe for the given property path on the layer.
+    pub fn seek_previous_keyframe(&mut self, layer_id: &str, prop_path: &str) {
+        let current_tc = self.clock.timecode();
+        let prev_time = {
+            let comp = match self.active_composition() {
+                Some(c) => c,
+                None => return,
+            };
+            let layer = match comp.get_layer(layer_id) {
+                Some(l) => l,
+                None => return,
+            };
+            match prop_path {
+                "transform.anchor_point" => layer.transform.anchor_point.previous_keyframe_time(&current_tc),
+                "transform.position" => layer.transform.position.previous_keyframe_time(&current_tc),
+                "transform.scale" => layer.transform.scale.previous_keyframe_time(&current_tc),
+                "transform.rotation" => layer.transform.rotation.previous_keyframe_time(&current_tc),
+                "opacity" => layer.opacity.previous_keyframe_time(&current_tc),
+                _ => {
+                    if let Some(rest) = prop_path.strip_prefix("effect:") {
+                        let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                        if parts.len() == 2 {
+                            let fx_id = parts[0];
+                            let param_name = parts[1];
+                            layer.get_effect(fx_id)
+                                .and_then(|fx| fx.get_param_property(param_name))
+                                .and_then(|prop| prop.previous_keyframe_time(&current_tc))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }
+            }
+        };
+
+        if let Some(tc) = prev_time {
+            self.clock.seek(tc);
+        }
+    }
+
+    /// Seek to the next keyframe for the given property path on the layer.
+    pub fn seek_next_keyframe(&mut self, layer_id: &str, prop_path: &str) {
+        let current_tc = self.clock.timecode();
+        let next_time = {
+            let comp = match self.active_composition() {
+                Some(c) => c,
+                None => return,
+            };
+            let layer = match comp.get_layer(layer_id) {
+                Some(l) => l,
+                None => return,
+            };
+            match prop_path {
+                "transform.anchor_point" => layer.transform.anchor_point.next_keyframe_time(&current_tc),
+                "transform.position" => layer.transform.position.next_keyframe_time(&current_tc),
+                "transform.scale" => layer.transform.scale.next_keyframe_time(&current_tc),
+                "transform.rotation" => layer.transform.rotation.next_keyframe_time(&current_tc),
+                "opacity" => layer.opacity.next_keyframe_time(&current_tc),
+                _ => {
+                    if let Some(rest) = prop_path.strip_prefix("effect:") {
+                        let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                        if parts.len() == 2 {
+                            let fx_id = parts[0];
+                            let param_name = parts[1];
+                            layer.get_effect(fx_id)
+                                .and_then(|fx| fx.get_param_property(param_name))
+                                .and_then(|prop| prop.next_keyframe_time(&current_tc))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }
+            }
+        };
+
+        if let Some(tc) = next_time {
+            self.clock.seek(tc);
+        }
+    }
+
+    /// Set blend mode on the specified layer.
+    pub fn set_layer_blend_mode(&mut self, layer_id: &str, mode: BlendMode) {
+        if let Some(comp) = self.active_composition_mut() {
+            if let Some(layer) = comp.get_layer_mut(layer_id) {
+                layer.blend_mode = mode;
+            }
+        }
+    }
+
+    /// Set track matte mode and optional target matte layer ID on the specified layer.
+    pub fn set_layer_track_matte(&mut self, layer_id: &str, mode: TrackMatteMode, target_id: Option<String>) {
+        if let Some(comp) = self.active_composition_mut() {
+            if let Some(layer) = comp.get_layer_mut(layer_id) {
+                layer.set_matte(mode, target_id);
+            }
+        }
+    }
+
+    /// Set parent layer ID on the specified layer.
+    pub fn set_layer_parent(&mut self, layer_id: &str, parent_id: Option<String>) {
+        if let Some(comp) = self.active_composition_mut() {
+            if let Some(layer) = comp.get_layer_mut(layer_id) {
+                layer.set_parent(parent_id);
+            }
+        }
+    }
+
+    /// Toggle lock state on the specified layer.
+    pub fn toggle_layer_lock(&mut self, layer_id: &str) {
+        if let Some(comp) = self.active_composition_mut() {
+            if let Some(layer) = comp.get_layer_mut(layer_id) {
+                layer.locked = !layer.locked;
             }
         }
     }

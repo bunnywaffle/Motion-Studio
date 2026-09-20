@@ -140,9 +140,19 @@
 - Media Import & Instant Testing Generators:
   - `EditorState::import_sample_image`: Generates a 400x400 PNG gradient file to the temp directory and imports it into the project and active composition for instant testing.
   - `EditorState::import_sample_video`: Generates a demo video file placeholder and imports it.
-- Project Panel UI Decluttering:
-  - Clutter removed: replaced repetitive duplicate full layer list with clean categorized bins (`Compositions`, `Imported Media Assets`, `Solids & Generators`).
-- Full automated test suite passing with **139 tests** across the workspace (30 application tests + 51 project unit tests + 47 compositor unit tests + 8 compositor integration tests + 3 renderer unit tests).
+- Real After Effects Timeline Hierarchy (`Layers → Layer Controls → Properties → Keyframes`):
+  - Twirl-down expansion for each layer exposing `v Transform` and `v Effects`.
+  - Comprehensive Layer Controls: Layer index, Eye/Visibility toggle, Lock toggle, Solo toggle, AE canonical color label badge, Layer name selection, Blend Mode cycler, Track Matte mode cycler, Parent cycler, and Delete button.
+  - Full Keyframing System:
+    - Stopwatch button (`IconName::Timer`) on all animatable properties (Transform: Anchor Point, Position, Scale, Rotation, Opacity; Effects: all numeric parameters).
+    - Toggling stopwatch ON records initial keyframe at active playhead timecode; toggling OFF clears animation.
+    - Inline keyframe navigation controls `<` `◆` `>` to step between previous/next keyframes and add/remove keyframes at the playhead.
+    - Timeline track lane renders diamond keyframe markers (`◆`) at exact relative positions along the timeline, highlighting gold at the playhead and cyan elsewhere. Clicking any keyframe seeks the playhead directly to that keyframe.
+    - Real-time keyframe recording on value nudge/scrub when a property is animated.
+- Project Panel Asset Bin Overhaul:
+  - Removed composition layers from Project panel to match After Effects architecture.
+  - Project panel is strictly an Asset Bin displaying Compositions, Imported Media Assets, and Solids footage items.
+- Full automated test suite passing with **143 tests** across the workspace (34 application tests + 51 project unit tests + 47 compositor unit tests + 8 compositor integration tests + 3 renderer unit tests).
 - Workspace compiles, builds, and passes all checks cleanly with 0 errors and 0 warnings (`cargo check --workspace`, `cargo build --workspace`, `cargo test --workspace`, and `cargo clippy --workspace --all-targets -- -D warnings`).
 
 ## What Is Currently Being Developed

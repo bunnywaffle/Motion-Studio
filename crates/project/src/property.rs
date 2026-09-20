@@ -176,6 +176,43 @@ impl<T> Property<T> {
         let t = time.seconds();
         self.keyframes.iter().find(|k| (k.time_seconds() - t).abs() < 1e-5)
     }
+
+    /// Check whether a keyframe exists at the specified timecode (within 1e-5s).
+    pub fn has_keyframe_at(&self, time: &TimeCode) -> bool {
+        self.keyframe_at(time).is_some()
+    }
+
+    /// Return the timecode of the keyframe immediately preceding `time`, if any.
+    pub fn previous_keyframe_time(&self, time: &TimeCode) -> Option<TimeCode> {
+        let t = time.seconds();
+        self.keyframes
+            .iter()
+            .rev()
+            .find(|k| k.time_seconds() < t - 1e-5)
+            .map(|k| k.time)
+    }
+
+    /// Return the timecode of the keyframe immediately following `time`, if any.
+    pub fn next_keyframe_time(&self, time: &TimeCode) -> Option<TimeCode> {
+        let t = time.seconds();
+        self.keyframes
+            .iter()
+            .find(|k| k.time_seconds() > t + 1e-5)
+            .map(|k| k.time)
+    }
+
+    /// Toggle a keyframe at the specified timecode:
+    /// If a keyframe already exists, remove it and return `false`.
+    /// Otherwise, add a keyframe with the provided value and return `true`.
+    pub fn toggle_keyframe(&mut self, time: TimeCode, value: T) -> bool {
+        if self.has_keyframe_at(&time) {
+            self.remove_keyframe_at(&time);
+            false
+        } else {
+            self.add_keyframe(Keyframe::new(time, value));
+            true
+        }
+    }
 }
 
 impl<T: Interpolate> Property<T> {

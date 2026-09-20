@@ -364,4 +364,42 @@
     - Added `test_layer_reordering_and_deletion`, `test_glsl_presets_and_shader_code_update`, `test_sample_media_generators`, and `test_property_scrubbing_delta`.
     - All **139 workspace tests passing** (30 in application) with 0 errors and zero clippy warnings.
 
+- [x] **Enhancement: Real After Effects Timeline Hierarchy, Keyframe System & Project Asset Bin Overhaul**
+  - **Real After Effects Timeline Hierarchy**:
+    - Modeled strictly after After Effects: `Layers → Layer Controls → Properties → Keyframes`.
+    - Composition -> Layer Row with:
+      - Twirl chevron (`ChevronRight` / `ChevronDown`) to toggle layer expansion.
+      - Layer index number, Eye/Visibility toggle (`IconName::Eye`), Lock toggle (`IconName::Lock` / `IconName::LockOpen`), Solo toggle (`IconName::Sparkles`), After Effects canonical color swatch badge (Red, Yellow, Aqua, Pink, Lavender, Peach, Seafoam, Blue).
+      - Layer Name with selection highlight.
+      - Inline Blend Mode cycle button (Normal, Multiply, Screen, Overlay, etc.).
+      - Inline Track Matte cycle button (`None`, `Alpha`, `AlphaInverted`, `Luma`, `LumaInverted`).
+      - Inline Parent & Link cycle button.
+      - Delete layer button (`IconName::Trash`).
+    - Twirl-down `v Transform` hierarchy exposing:
+      - Anchor Point, Position, Scale, Rotation, Opacity.
+      - Stopwatch toggle button (`IconName::Timer`) on each property: toggling ON enables animation and records an initial keyframe at current playhead frame/timecode; toggling OFF clears animation.
+      - Keyframe navigation controls `<` `◆` `>`: steps to previous keyframe, toggles keyframe at current playhead position, and steps to next keyframe.
+      - Inline `-` `[value]` `+` numeric steppers.
+    - Twirl-down `v Effects` hierarchy exposing:
+      - Applied effects list with effect eye enable toggle and trash delete button.
+      - Individual effect parameters with stopwatches, `<` `◆` `>` keyframe navigators, and `-` `[value]` `+` steppers.
+  - **Timeline Keyframe Lane**:
+    - Property sub-rows render dedicated timeline track lanes showing diamond keyframe markers (`◆`) positioned at exact relative timeline positions ($t / \text{duration} \times 100\%$).
+    - Keyframe diamonds highlight gold when playhead aligns with the keyframe time, cyan otherwise.
+    - Clicking any keyframe diamond instantly seeks the timeline playback clock to that keyframe.
+    - Red playhead line spans across all keyframe lanes.
+  - **Project Panel Asset Bin Overhaul**:
+    - Removed individual composition layers from the Project panel.
+    - Preserved Project panel strictly as an Asset Bin showing:
+      - Compositions bin
+      - Imported Media Assets (Images, Videos, Audios)
+      - Solids Bin (Footage items)
+  - **Automated Tests**:
+    - Added `test_timeline_stopwatch_and_keyframe_navigation`: tests stopwatch toggle, keyframe recording at playhead, previous/next keyframe navigation, and keyframe clearing.
+    - Added `test_timeline_panel_expansion_state`: tests layer expansion state toggle and group expansion toggle.
+    - Added `test_layer_controls_mutations`: tests blend mode cycling, track matte mode cycling, parent ID cycling, and lock toggle.
+    - Added `test_remove_layer_effect_directly`: tests targeted layer effect deletion and enabled state toggle.
+  - All **143 workspace tests passing** (34 in application) with 0 errors and zero clippy warnings.
+
+
 

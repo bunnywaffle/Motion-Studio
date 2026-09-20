@@ -1569,4 +1569,137 @@ mod tests {
         let updated_rot = state_entity.read_with(cx, |s, _| s.selected_layer().unwrap().transform.rotation.value);
         assert_eq!(updated_rot, initial_rot - 5.0);
     }
+
+    #[test]
+    fn test_timeline_stopwatch_and_keyframe_navigation() {
+        use crate::state::EditorState;
+        use project::TimeCode;
+
+        let mut state = EditorState::new();
+        let fps = 30.0;
+
+        // Position on layer_bg starts with animated = false and 0 keyframes
+        let layer_id = "layer_bg";
+        let prop_path = "transform.position";
+        {
+            let comp = state.active_composition().unwrap();
+            let layer = comp.get_layer(layer_id).unwrap();
+            assert!(!layer.transform.position.is_animated());
+            assert_eq!(layer.transform.position.keyframe_count(), 0);
+        }
+
+        // 1. Toggle stopwatch ON at frame 0 -> records initial keyframe at frame 0
+        state.clock.seek(TimeCode::from_frames(0, fps));
+        state.toggle_layer_property_animation(layer_id, prop_path);
+        {
+            let comp = state.active_composition().unwrap();
+            let layer = comp.get_layer(layer_id).unwrap();
+            assert!(layer.transform.position.is_animated());
+            assert_eq!(layer.transform.position.keyframe_count(), 1);
+            assert!(layer.transform.position.has_keyframe_at(&TimeCode::from_frames(0, fps)));
+        }
+
+        // 2. Seek to frame 30 and nudge position -> records keyframe at frame 30
+        state.clock.seek(TimeCode::from_frames(30, fps));
+        state.nudge_layer_position(layer_id, 100.0, 50.0);
+        {
+            let comp = state.active_composition().unwrap();
+            let layer = comp.get_layer(layer_id).unwrap();
+            assert_eq!(layer.transform.position.keyframe_count(), 2);
+            assert!(layer.transform.position.has_keyframe_at(&TimeCode::from_frames(30, fps)));
+        }
+
+        // 3. Keyframe navigation: previous keyframe from frame 30 seeks back to frame 0
+        state.seek_previous_keyframe(layer_id, prop_path);
+        assert_eq!(state.clock.current_frame(), 0);
+
+        // 4. Next keyframe from frame 0 seeks forward to frame 30
+        state.seek_next_keyframe(layer_id, prop_path);
+        assert_eq!(state.clock.current_frame(), 30);
+
+        // 5. Toggle keyframe at current time (frame 30) -> removes it
+        state.toggle_layer_keyframe_at_current_time(layer_id, prop_path);
+        {
+            let comp = state.active_composition().unwrap();
+            let layer = comp.get_layer(layer_id).unwrap();
+            assert_eq!(layer.transform.position.keyframe_count(), 1);
+            assert!(!layer.transform.position.has_keyframe_at(&TimeCode::from_frames(30, fps)));
+        }
+
+        // 6. Toggle stopwatch OFF -> clears all keyframes and disables animation
+        state.toggle_layer_property_animation(layer_id, prop_path);
+        {
+            let comp = state.active_composition().unwrap();
+            let layer = comp.get_layer(layer_id).unwrap();
+            assert!(!layer.transform.position.is_animated());
+            assert_eq!(layer.transform.position.keyframe_count(), 0);
+        }
+    }
+
+    #[gpui_kit::test]
+    fn test_timeline_panel_expansion_state(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let state_entity = cx.new(|_| crate::state::EditorState::new());
+        let timeline_panel = cx.new(|cx| crate::panels::TimelinePanel::new(state_entity, cx));
+
+        timeline_panel.read_with(cx, |panel, _| {
+            assert!(!panel.is_layer_expanded("layer_bg"));
+            assert!(!panel.is_group_expanded("layer_bg:transform"));
+        });
+
+        // Toggle layer expansion
+        timeline_panel.update(cx, |panel, _| {
+            panel.toggle_layer_expanded("layer_bg");
+            panel.toggle_group_expanded("layer_bg:transform");
+        });
+
+        timeline_panel.read_with(cx, |panel, _| {
+            assert!(panel.is_layer_expanded("layer_bg"));
+            assert!(panel.is_group_expanded("layer_bg:transform"));
+        });
+    }
+
+    #[test]
+    fn test_layer_controls_mutations() {
+        use crate::state::EditorState;
+        use project::{BlendMode, TrackMatteMode};
+
+        let mut state = EditorState::new();
+        let layer_id = "layer_accent";
+
+        // Blend mode
+        state.set_layer_blend_mode(layer_id, BlendMode::Multiply);
+        assert_eq!(state.active_composition().unwrap().get_layer(layer_id).unwrap().blend_mode, BlendMode::Multiply);
+
+        // Track Matte
+        state.set_layer_track_matte(layer_id, TrackMatteMode::Alpha, Some("layer_bg".to_string()));
+        let layer = state.active_composition().unwrap().get_layer(layer_id).unwrap();
+        assert_eq!(layer.matte_mode, TrackMatteMode::Alpha);
+        assert_eq!(layer.matte_layer_id.as_deref(), Some("layer_bg"));
+
+        // Parenting
+        state.set_layer_parent(layer_id, Some("layer_bg".to_string()));
+        assert_eq!(state.active_composition().unwrap().get_layer(layer_id).unwrap().parent_id.as_deref(), Some("layer_bg"));
+
+        // Lock
+        state.toggle_layer_lock(layer_id);
+        assert!(state.active_composition().unwrap().get_layer(layer_id).unwrap().is_locked());
+    }
+
+    #[test]
+    fn test_remove_layer_effect_directly() {
+        use crate::state::EditorState;
+        use project::EffectType;
+
+        let mut state = EditorState::new();
+        let layer_id = "layer_accent";
+        state.select_layer(Some(layer_id.to_string()));
+
+        let fx_id = state.add_effect_to_selected_layer(EffectType::gaussian_blur(15.0)).unwrap();
+        assert!(state.active_composition().unwrap().get_layer(layer_id).unwrap().has_effects());
+
+        // Remove effect directly
+        state.remove_layer_effect(layer_id, &fx_id).expect("effect removed");
+        assert!(!state.active_composition().unwrap().get_layer(layer_id).unwrap().has_effects());
+    }
 }
