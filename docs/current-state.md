@@ -109,12 +109,12 @@
   - Reactive GPUI panels in `crates/application/src/panels.rs`:
     - `ProjectPanel`: Displays live project composition and layer assets, interactive row selection, and working `+ Solid` button adding new solid layers dynamically to the composition.
     - `CompositionViewerPanel`: Observes `EditorState`, evaluates frames at current playback timecode, maps world bounding boxes to canvas dimensions (512x288 16:9 frame), renders visible layers in painter's composite order with effective opacities, supports click selection, and highlights selected layer with an accent border.
-    - `PropertiesPanel`: Real-time inspector for the selected layer displaying Anchor, Position, Scale, Rotation, and Opacity with clickable `-`/`+` nudge step buttons, and toggleable `[✓] Visible` and `[✓] Solo` switches (empty state when no layer is selected).
-    - `TimelinePanel`: Live SMPTE timecode and frame counter, transport buttons (`|<`, `<`, `▶ Play`/`⏸ Pause`, `>`, `>|`), time ruler with dynamic playhead marker, and layer track lanes with index, `[V]` eye toggle, `[S]` solo toggle, track span bars, selection state, and track playhead line.
+    - `PropertiesPanel`: Real-time inspector for the selected layer displaying dynamic layer type (Solid, Image, Video, Text, Shape, Pre-comp), Anchor, Position, Scale, Rotation, and true Opacity percentage (evaluated at active timecode) with clickable `-`/`+` nudge step buttons, and toggleable `[✓] Visible` and `[✓] Solo` switches (empty state when no layer is selected).
+    - `TimelinePanel`: Live SMPTE timecode and frame counter, transport buttons (`|<`, `<`, `▶ Play`/`⏸ Pause`, `>`, `>|`), time ruler with dynamic playhead marker, and layer track lanes with index, `[V]` eye toggle, `[S]` solo toggle, interactive clickable track span bars for layer selection, selection state, and track playhead line.
   - Application shell & input in `crates/application/src/main.rs`:
     - Spacebar keybinding and `TogglePlayback` action for play/pause control.
     - 60Hz asynchronous background playback loop advancing `PlaybackClock` with delta time and notifying GPUI observers.
-- Full automated test suite passing with **123 tests** across the workspace (19 application tests + 50 project unit tests + 46 compositor unit tests + 8 compositor integration tests).
+- Full automated test suite passing with **126 tests** across the workspace (22 application tests + 50 project unit tests + 46 compositor unit tests + 8 compositor integration tests).
 - Workspace compiles, builds, and passes all checks cleanly with 0 errors and 0 warnings (`cargo check --workspace`, `cargo build --workspace`, `cargo test --workspace`, and `cargo clippy --workspace --all-targets -- -D warnings`).
 
 ## What Is Currently Being Developed

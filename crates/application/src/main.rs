@@ -998,8 +998,6 @@ mod tests {
 
     #[gpui_kit::test]
     fn test_spacebar_action_playback_toggle(cx: &mut TestAppContext) {
-        use super::TogglePlayback;
-
         cx.update(gpui_kit::init);
         let mut app_view_entity = None;
         let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
@@ -1019,8 +1017,7 @@ mod tests {
             // Initially paused
             assert!(!app_view.read(cx).state().read(cx).is_playing);
 
-            // Dispatch TogglePlayback action (deferred by GPUI)
-            window.dispatch_action(Box::new(TogglePlayback), cx);
+            window.dispatch_keystroke(gpui_kit::Keystroke::parse("space").unwrap(), cx);
         })
         .expect("update_window failed");
 
@@ -1028,13 +1025,171 @@ mod tests {
         assert!(app_view.read_with(cx, |view, cx| view.state().read(cx).is_playing));
 
         cx.update_window(handle.into(), |_, window, cx| {
-            // Dispatch TogglePlayback again (deferred by GPUI)
-            window.dispatch_action(Box::new(TogglePlayback), cx);
+            // Dispatch spacebar keystroke again to pause
+            window.dispatch_keystroke(gpui_kit::Keystroke::parse("space").unwrap(), cx);
         })
         .expect("update_window failed");
 
         cx.run_until_parked();
         assert!(!app_view.read_with(cx, |view, cx| view.state().read(cx).is_playing));
+    }
+
+    #[gpui_kit::test]
+    fn test_properties_panel_layer_type_and_opacity_evaluation(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (_root, app_view) = setup_test_window(cx);
+        cx.run_until_parked();
+
+        // 1. Initial selection is accent solid (100% opacity at frame 0)
+        app_view.read_with(cx, |view, cx| {
+            let state = view.state().read(cx);
+            let layer = state.selected_layer().unwrap();
+            let tc = state.clock.timecode();
+            let op = layer.opacity.evaluate_at(&tc).clamp(0.0, 100.0);
+            assert_eq!(op, 100.0, "Opacity must evaluate to 100% (not normalized 1.0)");
+        });
+
+        // 2. Select badge layer with animated opacity fade-in
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.select_layer(Some("layer_badge".to_string()));
+                // Jump to frame 30 (mid-fade: 15->45)
+                s.seek_frame(30);
+                cx.notify();
+            });
+        });
+
+        app_view.read_with(cx, |view, cx| {
+            let state = view.state().read(cx);
+            let layer = state.selected_layer().unwrap();
+            let tc = state.clock.timecode();
+            let op = layer.opacity.evaluate_at(&tc).clamp(0.0, 100.0);
+            assert!((op - 50.0).abs() < 1e-3, "At frame 30, badge opacity should be 50%");
+        });
+
+        // 3. Jump to frame 45 (end of fade)
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.seek_frame(45);
+                cx.notify();
+            });
+        });
+
+        app_view.read_with(cx, |view, cx| {
+            let state = view.state().read(cx);
+            let layer = state.selected_layer().unwrap();
+            let tc = state.clock.timecode();
+            let op = layer.opacity.evaluate_at(&tc).clamp(0.0, 100.0);
+            assert_eq!(op, 100.0, "At frame 45, badge opacity should reach 100%");
+        });
+
+        // 4. Nudge opacity down by -20% and toggle visibility off
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.nudge_opacity(-20.0);
+                s.toggle_selected_layer_visibility();
+                cx.notify();
+            });
+        });
+
+        app_view.read_with(cx, |view, cx| {
+            let state = view.state().read(cx);
+            let layer = state.selected_layer().unwrap();
+            assert!(!layer.visible);
+            let tc = state.clock.timecode();
+            let op = layer.opacity.evaluate_at(&tc).clamp(0.0, 100.0);
+            assert_eq!(op, 80.0, "Layer opacity property should remain 80% even when visibility is toggled off");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn test_add_solid_centers_in_composition_and_unique_ids(cx: &mut TestAppContext) {
+        use project::Color;
+
+        cx.update(gpui_kit::init);
+        let (_root, app_view) = setup_test_window(cx);
+        cx.run_until_parked();
+
+        // Add 1st solid
+        let id1 = app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                let id = s
+                    .add_solid_layer("Centered Red", Color::RED, 600, 400)
+                    .expect("added 1st solid");
+                cx.notify();
+                id
+            })
+        });
+
+        app_view.read_with(cx, |view, cx| {
+            let state = view.state().read(cx);
+            let comp = state.active_composition().unwrap();
+            let l = comp.get_layer(&id1).unwrap();
+
+            // Layer should be centered in 1920x1080 comp: (960, 540)
+            assert_eq!(l.transform.position.value.x, 960.0);
+            assert_eq!(l.transform.position.value.y, 540.0);
+            // Anchor point should be center of 600x400: (300, 200)
+            assert_eq!(l.transform.anchor_point.value.x, 300.0);
+            assert_eq!(l.transform.anchor_point.value.y, 200.0);
+        });
+
+        // Add 2nd solid: verify distinct unique ID
+        let id2 = app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                let id = s
+                    .add_solid_layer("Centered Blue", Color::BLUE, 400, 400)
+                    .expect("added 2nd solid");
+                cx.notify();
+                id
+            })
+        });
+
+        assert_ne!(id1, id2);
+        app_view.read_with(cx, |view, cx| {
+            let state = view.state().read(cx);
+            let comp = state.active_composition().unwrap();
+            assert!(comp.get_layer(&id1).is_some());
+            assert!(comp.get_layer(&id2).is_some());
+            assert_eq!(comp.layers.len(), 5);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn test_rendered_frame_canvas_layers_and_timeline_tracks(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+
+        let _app_view = app_view_entity.expect("AppView created");
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+
+            // Verify canvas elements rendered
+            assert!(window.find("canvas_layer_layer_bg").visible());
+            assert!(window.find("canvas_layer_layer_accent").visible());
+
+            // Verify timeline track spans rendered
+            assert!(window.find("track_span_layer_bg").visible());
+            assert!(window.find("track_span_layer_accent").visible());
+            assert!(window.find("track_span_layer_badge").visible());
+
+            // Verify transport and timecode controls
+            assert!(window.find("timecode_display").visible());
+            assert!(window.find("transport_start").visible());
+            assert!(window.find("transport_prev").visible());
+            assert!(window.find("transport_play").visible());
+            assert!(window.find("transport_next").visible());
+            assert!(window.find("transport_end").visible());
+            assert!(window.find("add_solid_button").visible());
+        })
+        .expect("update_window failed");
     }
 }
 

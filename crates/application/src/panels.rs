@@ -389,7 +389,7 @@ impl Render for CompositionViewerPanel {
                             r: col.r,
                             g: col.g,
                             b: col.b,
-                            a: col.a * (layer.effective_opacity / 100.0).clamp(0.0, 1.0),
+                            a: col.a * layer.effective_opacity.clamp(0.0, 1.0),
                         })
                         .cursor_pointer()
                         .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
@@ -589,9 +589,20 @@ impl Render for PropertiesPanel {
         let selected_layer = state.selected_layer();
         let eval_stack = state.evaluate_current_frame().ok();
 
-        let header_title = match selected_layer {
-            Some(l) => format!("Selected: {}", l.name),
-            None => "No Layer Selected".to_string(),
+        let (header_title, layer_type_title) = match selected_layer {
+            Some(l) => {
+                let type_str = match &l.source {
+                    LayerSource::Solid { .. } => "Solid Layer",
+                    LayerSource::Image { .. } => "Image Layer",
+                    LayerSource::Video { .. } => "Video Layer",
+                    LayerSource::Text { .. } => "Text Layer",
+                    LayerSource::Shape { .. } => "Shape Layer",
+                    LayerSource::NestedComposition { .. } => "Pre-comp Layer",
+                    _ => "2D Layer",
+                };
+                (format!("Selected: {}", l.name), type_str.to_string())
+            }
+            None => ("No Layer Selected".to_string(), "-".to_string()),
         };
 
         div()
@@ -621,7 +632,7 @@ impl Render for PropertiesPanel {
                             .rounded_sm()
                             .bg(cx.theme().muted)
                             .text_xs()
-                            .child("2D Layer"),
+                            .child(layer_type_title),
                     ),
             )
             // Inspector fields
@@ -639,7 +650,8 @@ impl Render for PropertiesPanel {
                         let pos = eval_layer.map(|l| l.transform.position).unwrap_or(layer.transform.position.value);
                         let sc = eval_layer.map(|l| l.transform.scale).unwrap_or(layer.transform.scale.value);
                         let rot = eval_layer.map(|l| l.transform.rotation).unwrap_or(layer.transform.rotation.value);
-                        let op = eval_layer.map(|l| l.effective_opacity).unwrap_or(layer.opacity.value);
+                        let current_tc = state.clock.timecode();
+                        let op = layer.opacity.evaluate_at(&current_tc).clamp(0.0, 100.0);
 
                         let s_anchor_mx = self.state.clone();
                         let s_anchor_px = self.state.clone();
@@ -1347,6 +1359,9 @@ impl Render for TimelinePanel {
                         });
                     });
 
+                    let span_state = self.state.clone();
+                    let lid_span = layer.id.clone();
+
                     let track_col = div()
                         .flex_1()
                         .h_full()
@@ -1354,6 +1369,15 @@ impl Render for TimelinePanel {
                         .child(
                             // Layer span bar
                             div()
+                                .id(SharedString::from(format!("track_span_{}", layer.id)))
+                                .test_support()
+                                .cursor_pointer()
+                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                    span_state.update(cx, |s, cx| {
+                                        s.select_layer(Some(lid_span.clone()));
+                                        cx.notify();
+                                    });
+                                })
                                 .absolute()
                                 .top(px(4.))
                                 .bottom(px(4.))

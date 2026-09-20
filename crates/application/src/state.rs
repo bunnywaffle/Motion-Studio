@@ -224,19 +224,29 @@ impl EditorState {
         width: u32,
         height: u32,
     ) -> Result<String, String> {
-        let (id, in_pt, out_pt) = {
+        let (id, in_pt, out_pt, comp_w, comp_h) = {
             let comp = self
                 .active_composition()
                 .ok_or_else(|| "No active composition".to_string())?;
-            let idx = comp.layers.len() + 1;
-            let id = format!("layer_solid_{idx}");
-            (id, TimeCode::zero(comp.frame_rate), comp.duration)
+            let mut counter = comp.layers.len() + 1;
+            let mut id = format!("layer_solid_{counter}");
+            while comp.get_layer(&id).is_some() {
+                counter += 1;
+                id = format!("layer_solid_{counter}");
+            }
+            (
+                id,
+                TimeCode::zero(comp.frame_rate),
+                comp.duration,
+                comp.width,
+                comp.height,
+            )
         };
 
         let mut layer = Layer::solid(&id, name, color, width, height, in_pt, out_pt);
         layer.transform.position.set_value(Vec2::new(
-            (width / 2) as f32,
-            (height / 2) as f32,
+            (comp_w / 2) as f32,
+            (comp_h / 2) as f32,
         ));
         layer.transform.anchor_point.set_value(Vec2::new(
             (width / 2) as f32,
