@@ -344,6 +344,48 @@ impl EditorState {
         Ok(layer_id)
     }
 
+    /// Import a generated sample image (400x400 PNG gradient) for immediate testing.
+    pub fn import_sample_image(&mut self) -> Result<String, String> {
+        let sample_path = std::env::temp_dir().join("motion_studio_sample_gradient.png");
+        let mut imgbuf = image::ImageBuffer::new(400, 400);
+        for (x, y, pixel) in imgbuf.enumerate_pixels_mut() {
+            let r = (x as f32 / 400.0 * 255.0) as u8;
+            let g = (y as f32 / 400.0 * 255.0) as u8;
+            let b = 220u8;
+            *pixel = image::Rgba([r, g, b, 255]);
+        }
+        imgbuf
+            .save(&sample_path)
+            .map_err(|e| format!("Failed to create sample image: {e}"))?;
+        self.import_media_file(sample_path)
+    }
+
+    /// Import a generated sample video placeholder for immediate testing.
+    pub fn import_sample_video(&mut self) -> Result<String, String> {
+        let sample_path = std::env::temp_dir().join("motion_studio_sample_footage.mp4");
+        if !sample_path.exists() {
+            let _ = std::fs::write(&sample_path, b"DEMO_MP4_VIDEO_FOOTAGE");
+        }
+        self.import_media_file(sample_path)
+    }
+
+    /// Pre-defined GLSL shader presets that users can immediately apply and learn from.
+    pub const GLSL_PRESETS: &'static [(&'static str, &'static str)] = &[
+        ("Default Boost", project::Effect::default_glsl_code()),
+        (
+            "Color Wave",
+            "// Color Wave Shader\nvoid mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {\n    float wave = sin(uv.x * param3 * 10.0 + param1 * 3.0) * 0.5 + 0.5;\n    vec3 col = mix(inColor.rgb, vec3(wave, 1.0 - wave, 0.8), param2 / 100.0);\n    fragColor = vec4(col, inColor.a * (param4 / 100.0));\n}",
+        ),
+        (
+            "Glow Shimmer",
+            "// Glow Shimmer Shader\nvoid mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {\n    float glow = 1.0 + (param2 / 50.0) * sin(param1 * 4.0);\n    fragColor = vec4(clamp(inColor.rgb * glow, 0.0, 1.0), inColor.a);\n}",
+        ),
+        (
+            "CRT Scanlines",
+            "// CRT Scanlines Shader\nvoid mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {\n    float line = sin(uv.y * param3 * 100.0) * 0.5 + 0.5;\n    vec3 col = inColor.rgb * (1.0 - (param2 / 100.0) * (1.0 - line));\n    fragColor = vec4(col, inColor.a);\n}",
+        ),
+    ];
+
     /// Delete the currently selected layer from the active composition.
     pub fn delete_selected_layer(&mut self) -> Result<String, String> {
         let sel_id = self
@@ -573,6 +615,35 @@ impl EditorState {
             Err(format!(
                 "Parameter {param_name} not found on effect {effect_id}"
             ))
+        }
+    }
+
+    /// Set custom GLSL shader code on the selected layer.
+    pub fn set_glsl_code(
+        &mut self,
+        effect_id: &str,
+        code: String,
+    ) -> Result<(), String> {
+        let selected_id = self
+            .selected_layer_id
+            .clone()
+            .ok_or_else(|| "No layer selected".to_string())?;
+
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(&selected_id)
+            .ok_or_else(|| format!("Layer {selected_id} not found"))?;
+
+        let effect = layer
+            .get_effect_mut(effect_id)
+            .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
+        if let project::EffectType::GlslShader { code: c, .. } = &mut effect.effect_type {
+            *c = code;
+            Ok(())
+        } else {
+            Err(format!("Effect {effect_id} is not a GlslShader"))
         }
     }
 

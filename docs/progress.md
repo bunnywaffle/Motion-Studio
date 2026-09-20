@@ -337,4 +337,31 @@
   - Added unit and UI tests: `test_layer_effects_crud_and_serialization`, `test_layer_effects_evaluation_over_time`, `test_effects_crud_and_parameter_nudging`, `test_ui_effects_panel_addition_and_properties_inspector_manipulation`.
   - All **135 workspace tests passing** with 0 errors and zero clippy warnings.
 
+- [x] **Enhancement: Scrubbable Properties, Layer Ordering/Deletion, GLSL Shaders & Media Import**
+  - **Interactive Horizontal Property Scrubbing**:
+    - Mouse horizontal drag scrubbing (`cursor_col_resize`) on value fields in `PropertiesPanel` for Anchor Point, Position, Scale, Rotation, Opacity, and all effect parameters.
+    - Scroll wheel support with directional step increments.
+    - `-`/`+` step buttons with test IDs preserved.
+    - Entity-level drag tracking in `PropertiesPanel` (`scrub_prop`, `scrub_last_x`, `apply_scrub_delta`).
+  - **Layer Reordering & Deletion**:
+    - Global `Delete` and `Backspace` keyboard shortcuts delete the currently selected layer immediately.
+    - Timeline track rows feature direct Move Up (`ChevronUp`), Move Down (`ChevronDown`), and Delete (`Trash`) buttons.
+    - Properties panel header and Timeline header provide Move Up, Move Down, and Delete action buttons for the active layer.
+    - Added `EditorState::move_selected_layer_up`, `move_selected_layer_down`, `delete_selected_layer`, and `remove_layer_by_id`.
+  - **Canvas Visual Effects & Custom GLSL Shaders**:
+    - Gaussian blur aura rendered dynamically behind blurred layers on the canvas.
+    - Canvas visual overlays for Tint and Invert effects on image layers.
+    - Video preview cards with filmstrip badges, duration, and resolution indicators.
+    - Custom GLSL Shader effect with interactive parameter controls (`param1`..`param4`), code preview, and preset bar (`Default Boost`, `Color Wave`, `Glow Shimmer`, `CRT Scanlines`).
+    - Added `EditorState::set_glsl_code` to easily swap shader presets or customize code.
+  - **Media Import & Instant Testing Generators**:
+    - Fixed media import file dialog and asset bin display.
+    - Added `EditorState::import_sample_image` (generates 400x400 PNG gradient into temp directory).
+    - Added `EditorState::import_sample_video` (generates sample video file placeholder).
+  - **Project Panel UI Decluttering**:
+    - Replaced duplicate layer listing with clean categorized bins (`Compositions`, `Imported Media Assets`, `Solids & Generators`).
+  - **Testing**:
+    - Added `test_layer_reordering_and_deletion`, `test_glsl_presets_and_shader_code_update`, `test_sample_media_generators`, and `test_property_scrubbing_delta`.
+    - All **139 workspace tests passing** (30 in application) with 0 errors and zero clippy warnings.
+
 

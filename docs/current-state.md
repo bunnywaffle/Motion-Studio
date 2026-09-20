@@ -123,15 +123,26 @@
   - Project panel: `Folder`, `Layers`, `Image`, `Film`, `Music`, `Type`, `Sparkles`, `FolderOpen` ("Import Media..."), `Plus` ("Solid").
   - Properties inspector: `Layers`, `Move`, `Maximize2`, `RotateCw`, `Sun`, `SlidersHorizontal`, `Eye`/`EyeOff`, `Trash`.
   - Effects panel: `SlidersHorizontal`, `Palette`, `WandSparkles`, `Sparkles`, `RotateCw`, `Plus`.
-- Media Import Pipeline:
-  - Cross-platform file picker (`rfd`) in `ProjectPanel` toolbar.
-  - `EditorState::import_media_file`: Automatic dimension decoding via `image`, asset registration in `project.assets`, centered layer instantiation in active composition, and automatic selection.
-  - Project panel asset bin: Renders imported assets (`Image`, `Video`, `Audio` with `IconName::Music`) alongside compositions and layers.
-- Real Layer Effects Architecture:
-  - `crates/project/src/effect.rs`: `Effect`, `EffectType` (`GaussianBlur`, `BrightnessContrast`, `Tint`, `Invert`, `DropShadow`), attached to `Layer.effects`.
-  - `crates/compositor/src/evaluation.rs`: `EvaluatedEffect` evaluated per-layer at current `TimeCode`, preserved in `EvaluatedLayer` and `FlattenedRenderLayer`.
-  - `crates/application/src/panels.rs`: 13 real built-in clickable effects in `EffectsPanel`, and interactive **"▼ Effects"** inspector in `PropertiesPanel` with eye toggle, delete, and `-`/`+` numeric parameter nudging.
-- Full automated test suite passing with **135 tests** across the workspace (26 application tests + 51 project unit tests + 47 compositor unit tests + 8 compositor integration tests + 2 renderer unit tests).
+- Interactive Horizontal Scrubbing Properties (`PropertiesPanel`):
+  - After Effects / Blender style horizontal mouse drag scrubbing (`cursor_col_resize`) on value fields to smoothly increase/decrease values.
+  - Scroll wheel support with directional step increments.
+  - `-`/`+` step buttons with test IDs for Anchor Point, Position, Scale, Rotation, Opacity, and all effect parameters.
+- Comprehensive Layer Reordering & Deletion:
+  - Global `Delete` and `Backspace` keyboard shortcuts delete the currently selected layer immediately.
+  - Timeline track rows feature direct Move Up (`ChevronUp`), Move Down (`ChevronDown`), and Delete (`Trash`) buttons.
+  - Properties panel header and Timeline header provide Move Up, Move Down, and Delete action buttons for the active layer.
+  - `EditorState::move_selected_layer_up`, `move_selected_layer_down`, `delete_selected_layer`, `remove_layer_by_id`.
+- Real Visible Canvas Effects & Custom GLSL Shaders:
+  - Gaussian blur visual aura box rendered dynamically behind blurred layers.
+  - Canvas overlays for Tint and Invert effects on image layers.
+  - Video preview cards with filmstrip badges, duration, and resolution indicators.
+  - Custom GLSL Shader effect with interactive parameter controls (`param1`..`param4`), code preview, and preset bar (`Default Boost`, `Color Wave`, `Glow Shimmer`, `CRT Scanlines`).
+- Media Import & Instant Testing Generators:
+  - `EditorState::import_sample_image`: Generates a 400x400 PNG gradient file to the temp directory and imports it into the project and active composition for instant testing.
+  - `EditorState::import_sample_video`: Generates a demo video file placeholder and imports it.
+- Project Panel UI Decluttering:
+  - Clutter removed: replaced repetitive duplicate full layer list with clean categorized bins (`Compositions`, `Imported Media Assets`, `Solids & Generators`).
+- Full automated test suite passing with **139 tests** across the workspace (30 application tests + 51 project unit tests + 47 compositor unit tests + 8 compositor integration tests + 3 renderer unit tests).
 - Workspace compiles, builds, and passes all checks cleanly with 0 errors and 0 warnings (`cargo check --workspace`, `cargo build --workspace`, `cargo test --workspace`, and `cargo clippy --workspace --all-targets -- -D warnings`).
 
 ## What Is Currently Being Developed

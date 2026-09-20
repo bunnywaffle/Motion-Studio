@@ -161,6 +161,11 @@ impl Render for AppView {
                         s.toggle_playback();
                         cx.notify();
                     });
+                } else if event.keystroke.key == "delete" || event.keystroke.key == "backspace" {
+                    state_key.update(cx, |s, cx| {
+                        let _ = s.delete_selected_layer();
+                        cx.notify();
+                    });
                 }
             })
             .child(self.dock_area.clone())
@@ -1428,5 +1433,140 @@ mod tests {
             let _ = std::fs::remove_file(test_img_path);
         })
         .expect("update_window failed");
+    }
+
+    #[test]
+    fn test_layer_reordering_and_deletion() {
+        use crate::state::EditorState;
+
+        let mut state = EditorState::new();
+        let initial_count = state.active_composition().unwrap().layers.len();
+        assert!(initial_count >= 3);
+
+        let initial_first_id = state.active_composition().unwrap().layers[0].id.clone();
+        let initial_second_id = state.active_composition().unwrap().layers[1].id.clone();
+
+        // Select second layer and move it up to index 0
+        state.select_layer(Some(initial_second_id.clone()));
+        assert!(state.move_selected_layer_up().is_ok());
+
+        // Verify reordering succeeded
+        assert_eq!(state.active_composition().unwrap().layers[0].id, initial_second_id);
+        assert_eq!(state.active_composition().unwrap().layers[1].id, initial_first_id);
+
+        // Move it back down
+        assert!(state.move_selected_layer_down().is_ok());
+        assert_eq!(state.active_composition().unwrap().layers[0].id, initial_first_id);
+        assert_eq!(state.active_composition().unwrap().layers[1].id, initial_second_id);
+
+        // Delete selected layer
+        let deleted_id = state.delete_selected_layer().expect("deleted layer");
+        assert_eq!(deleted_id, initial_second_id);
+        assert_eq!(state.active_composition().unwrap().layers.len(), initial_count - 1);
+        assert!(!state.active_composition().unwrap().layers.iter().any(|l| l.id == initial_second_id));
+    }
+
+    #[test]
+    fn test_glsl_presets_and_shader_code_update() {
+        use crate::state::EditorState;
+        use project::EffectType;
+
+        let mut state = EditorState::new();
+        state.select_layer(Some("layer_bg".to_string()));
+
+        // Add custom GLSL shader
+        let fx_id = state
+            .add_effect_to_selected_layer(EffectType::glsl_shader(
+                project::Effect::default_glsl_code(),
+                1.0,
+                50.0,
+                1.0,
+                100.0,
+            ))
+            .expect("effect added");
+
+        // Verify preset list is populated
+        assert_eq!(EditorState::GLSL_PRESETS.len(), 4);
+        assert_eq!(EditorState::GLSL_PRESETS[1].0, "Color Wave");
+
+        // Set GLSL code from preset
+        let color_wave_code = EditorState::GLSL_PRESETS[1].1.to_string();
+        state
+            .set_glsl_code(&fx_id, color_wave_code.clone())
+            .expect("set glsl code");
+
+        // Verify shader code updated on layer
+        let layer = state.selected_layer().unwrap();
+        let eff = layer.get_effect(&fx_id).unwrap();
+        if let EffectType::GlslShader { code, param1, .. } = &eff.effect_type {
+            assert_eq!(code, &color_wave_code);
+            assert_eq!(param1.value, 1.0);
+        } else {
+            panic!("Expected GlslShader effect type");
+        }
+
+        // Nudge param1 and param2
+        state.nudge_effect_param(&fx_id, "param1", 0.5).unwrap();
+        state.nudge_effect_param(&fx_id, "param2", 15.0).unwrap();
+
+        let layer2 = state.selected_layer().unwrap();
+        let eff2 = layer2.get_effect(&fx_id).unwrap();
+        if let EffectType::GlslShader { param1, param2, .. } = &eff2.effect_type {
+            assert_eq!(param1.value, 1.5);
+            assert_eq!(param2.value, 65.0);
+        }
+    }
+
+    #[test]
+    fn test_sample_media_generators() {
+        use crate::state::EditorState;
+        use project::LayerSource;
+
+        let mut state = EditorState::new();
+        let initial_layer_count = state.active_composition().unwrap().layers.len();
+
+        // 1. Generate and import sample image
+        let img_layer_id = state.import_sample_image().expect("sample image created and imported");
+        assert_eq!(state.active_composition().unwrap().layers.len(), initial_layer_count + 1);
+        let img_layer = state.active_composition().unwrap().get_layer(&img_layer_id).unwrap();
+        assert!(matches!(img_layer.source, LayerSource::Image { .. }));
+
+        // 2. Generate and import sample video
+        let vid_layer_id = state.import_sample_video().expect("sample video created and imported");
+        assert_eq!(state.active_composition().unwrap().layers.len(), initial_layer_count + 2);
+        let vid_layer = state.active_composition().unwrap().get_layer(&vid_layer_id).unwrap();
+        assert!(matches!(vid_layer.source, LayerSource::Video { .. }));
+    }
+
+    #[gpui_kit::test]
+    fn test_property_scrubbing_delta(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let state_entity = cx.new(|_| crate::state::EditorState::new());
+        let panel_entity = cx.new(|cx| crate::panels::PropertiesPanel::new(state_entity.clone(), cx));
+
+        // Select background layer
+        state_entity.update(cx, |s, cx| {
+            s.select_layer(Some("layer_bg".to_string()));
+            cx.notify();
+        });
+
+        let initial_pos = state_entity.read_with(cx, |s, _| s.selected_layer().unwrap().transform.position.value);
+        let initial_rot = state_entity.read_with(cx, |s, _| s.selected_layer().unwrap().transform.rotation.value);
+
+        // Apply scrub delta dx = +20.0 to pos_x
+        panel_entity.update(cx, |panel, cx| {
+            panel.apply_scrub_delta("pos_x", 20.0, cx);
+        });
+
+        let updated_pos = state_entity.read_with(cx, |s, _| s.selected_layer().unwrap().transform.position.value);
+        assert_eq!(updated_pos.x, initial_pos.x + 20.0);
+
+        // Apply scrub delta dx = -10.0 to rotation
+        panel_entity.update(cx, |panel, cx| {
+            panel.apply_scrub_delta("rotation", -10.0, cx);
+        });
+
+        let updated_rot = state_entity.read_with(cx, |s, _| s.selected_layer().unwrap().transform.rotation.value);
+        assert_eq!(updated_rot, initial_rot - 5.0);
     }
 }

@@ -275,7 +275,13 @@ impl Render for ProjectPanel {
                 }
             }
 
-            // --- Section 3: Active Composition Layers ---
+            // --- Section 3: Project Solids & Generators ---
+            let solids: Vec<_> = comp
+                .layers
+                .iter()
+                .filter(|l| matches!(&l.source, LayerSource::Solid { .. }))
+                .collect();
+
             bin_items.push(
                 h_flex()
                     .px_2()
@@ -293,7 +299,7 @@ impl Render for ProjectPanel {
                             .gap_1p5()
                             .items_center()
                             .child(icon_box(IconName::Layers))
-                            .child("COMPOSITION LAYERS"),
+                            .child("SOLIDS & GENERATORS"),
                     )
                     .child(
                         div()
@@ -301,129 +307,77 @@ impl Render for ProjectPanel {
                             .rounded_sm()
                             .bg(cx.theme().muted)
                             .text_color(cx.theme().muted_foreground)
-                            .child(format!("{}", comp.layers.len())),
+                            .child(format!("{}", solids.len())),
                     ),
             );
 
-            for (idx, layer) in comp.layers.iter().enumerate() {
-                let is_selected = state.selected_layer_id.as_deref() == Some(&layer.id);
-                let type_str = match &layer.source {
-                    LayerSource::Solid { .. } => "Solid",
-                    LayerSource::Image { .. } => "Image",
-                    LayerSource::Video { .. } => "Video",
-                    LayerSource::Text { .. } => "Text",
-                    LayerSource::Shape { .. } => "Shape",
-                    LayerSource::NestedComposition { .. } => "Pre-comp",
-                    _ => "2D",
-                };
+            if solids.is_empty() {
+                bin_items.push(
+                    div()
+                        .px_2()
+                        .py_2()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("No solid layers. Click '+ Solid' to create one."),
+                );
+            } else {
+                for solid in solids {
+                    let sel_state = self.state.clone();
+                    let lid = solid.id.clone();
+                    let is_selected = state.selected_layer_id.as_deref() == Some(&solid.id);
+                    let (w, h, col) = match &solid.source {
+                        LayerSource::Solid { width, height, color } => (*width, *height, *color),
+                        _ => (1920, 1080, Color::WHITE),
+                    };
 
-                let sel_state = self.state.clone();
-                let lid = layer.id.clone();
-                let lid_up = layer.id.clone();
-                let lid_down = layer.id.clone();
-                let lid_del = layer.id.clone();
-                let s_up = self.state.clone();
-                let s_down = self.state.clone();
-                let s_layer_del = self.state.clone();
+                    let mut row = h_flex()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .text_xs()
+                        .items_center()
+                        .justify_between()
+                        .cursor_pointer()
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            sel_state.update(cx, |s, cx| {
+                                s.select_layer(Some(lid.clone()));
+                                cx.notify();
+                            });
+                        })
+                        .child(
+                            h_flex()
+                                .gap_1p5()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .w(px(10.))
+                                        .h(px(10.))
+                                        .rounded_sm()
+                                        .bg(Rgba { r: col.r, g: col.g, b: col.b, a: col.a }),
+                                )
+                                .child(div().font_medium().child(solid.name.clone())),
+                        )
+                        .child(
+                            div()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(format!("{}x{}", w, h)),
+                        );
 
-                let icon_elem = match &layer.source {
-                    LayerSource::Solid { .. } => icon_box(IconName::Layers),
-                    LayerSource::Image { .. } => icon_box(IconName::Image),
-                    LayerSource::Video { .. } => icon_box(IconName::Film),
-                    LayerSource::Text { .. } => icon_box(IconName::Type),
-                    LayerSource::Shape { .. } => icon_box(IconName::Sparkles),
-                    LayerSource::NestedComposition { .. } => icon_box(IconName::Folder),
-                    _ => icon_box(IconName::Layers),
-                };
-
-                let mut row = h_flex()
-                    .px_2()
-                    .py_1()
-                    .rounded_sm()
-                    .text_xs()
-                    .items_center()
-                    .justify_between()
-                    .cursor_pointer()
-                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                        sel_state.update(cx, |s, cx| {
-                            s.select_layer(Some(lid.clone()));
-                            cx.notify();
-                        });
-                    })
-                    .child(
-                        h_flex()
-                            .gap_1p5()
-                            .items_center()
-                            .child(div().w(px(16.)).text_color(cx.theme().muted_foreground).child(format!("{}", idx + 1)))
-                            .child(icon_elem)
-                            .child(div().font_medium().child(layer.name.clone())),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_1p5()
-                            .items_center()
-                            .child(
-                                div()
-                                    .px_1p5()
-                                    .py_0p5()
-                                    .rounded_sm()
-                                    .bg(cx.theme().secondary)
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(type_str),
-                            )
-                            .child(
-                                div()
-                                    .cursor_pointer()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .hover(|s| s.text_color(cx.theme().foreground))
-                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                        s_up.update(cx, |s, cx| {
-                                            let _ = s.move_layer_up(&lid_up);
-                                            cx.notify();
-                                        });
-                                    })
-                                    .child(icon_box(IconName::ChevronUp)),
-                            )
-                            .child(
-                                div()
-                                    .cursor_pointer()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .hover(|s| s.text_color(cx.theme().foreground))
-                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                        s_down.update(cx, |s, cx| {
-                                            let _ = s.move_layer_down(&lid_down);
-                                            cx.notify();
-                                        });
-                                    })
-                                    .child(icon_box(IconName::ChevronDown)),
-                            )
-                            .child(
-                                div()
-                                    .cursor_pointer()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .hover(|s| s.text_color(rgb(0xef4444)))
-                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                        s_layer_del.update(cx, |s, cx| {
-                                            let _ = s.remove_layer_by_id(&lid_del);
-                                            cx.notify();
-                                        });
-                                    })
-                                    .child(icon_box(IconName::Trash)),
-                            ),
-                    );
-
-                if is_selected {
-                    row = row
-                        .bg(cx.theme().accent)
-                        .text_color(cx.theme().accent_foreground);
-                } else {
-                    row = row
-                        .text_color(cx.theme().foreground)
-                        .hover(|s| s.bg(cx.theme().muted));
+                    if is_selected {
+                        row = row
+                            .bg(cx.theme().accent)
+                            .text_color(cx.theme().accent_foreground);
+                    } else {
+                        row = row
+                            .text_color(cx.theme().foreground)
+                            .hover(|s| s.bg(cx.theme().muted));
+                    }
+                    bin_items.push(row);
                 }
-                bin_items.push(row);
             }
         }
+
+        let sample_state = self.state.clone();
 
         div()
             .id("project_panel")
@@ -501,6 +455,30 @@ impl Render for ProjectPanel {
                                     })
                                     .child(icon_box(IconName::Plus))
                                     .child("Solid"),
+                            )
+                            .child(
+                                div()
+                                    .id("sample_media_button")
+                                    .test_support()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .bg(cx.theme().muted)
+                                    .hover(|s| s.bg(cx.theme().accent))
+                                    .text_color(cx.theme().foreground)
+                                    .text_xs()
+                                    .cursor_pointer()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        sample_state.update(cx, |s, cx| {
+                                            let _ = s.import_sample_image();
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child(icon_box(IconName::Image))
+                                    .child("Sample"),
                             )
                             .child(
                                 div()
@@ -713,8 +691,38 @@ impl Render for CompositionViewerPanel {
                         }
                     }
 
+                    // Render Gaussian Blur aura if present
+                    let mut blur_rad = 0.0f32;
+                    for eff in &layer.effects {
+                        if eff.enabled {
+                            if let compositor::EvaluatedEffectType::GaussianBlur { radius } = &eff.effect_type {
+                                blur_rad += *radius;
+                            }
+                        }
+                    }
+                    if blur_rad > 0.0 {
+                        let expand = (blur_rad * 0.25).clamp(2.0, 16.0);
+                        elements.push(
+                            div()
+                                .absolute()
+                                .left(px(l_x - expand))
+                                .top(px(l_y - expand))
+                                .w(px(l_w + expand * 2.0))
+                                .h(px(l_h + expand * 2.0))
+                                .rounded_md()
+                                .bg(Rgba {
+                                    r: processed_col.r,
+                                    g: processed_col.g,
+                                    b: processed_col.b,
+                                    a: (processed_col.a * layer.effective_opacity.clamp(0.0, 1.0) * 0.35).clamp(0.0, 1.0),
+                                })
+                                .into_any_element(),
+                        );
+                    }
+
                     let sel_state = self.state.clone();
                     let lid = layer.id.clone();
+                    let is_video = matches!(&layer.source, LayerSource::Video { .. });
 
                     let mut layer_el = div()
                         .id(ElementId::Name(format!("canvas_layer_{}", layer.id).into()))
@@ -739,12 +747,91 @@ impl Render for CompositionViewerPanel {
                             });
                         });
 
-                    if let Some(ref img_path) = image_path {
+                    if is_video {
+                        layer_el = layer_el.child(
+                            div()
+                                .size_full()
+                                .bg(rgb(0x0f172a))
+                                .flex()
+                                .flex_col()
+                                .items_center()
+                                .justify_center()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .w(px(24.))
+                                        .h(px(24.))
+                                        .rounded_full()
+                                        .bg(cx.theme().primary)
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_color(cx.theme().primary_foreground)
+                                        .child(icon_box(IconName::Film)),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_semibold()
+                                        .text_color(rgb(0xffffff))
+                                        .child(layer.name.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(0x94a3b8))
+                                        .child("1920x1080 • Video Footage"),
+                                ),
+                        );
+                    } else if let Some(ref img_path) = image_path {
                         layer_el = layer_el.child(
                             gpui::img(img_path.clone())
                                 .size_full()
                                 .opacity(layer.effective_opacity.clamp(0.0, 1.0)),
                         );
+
+                        // Image effect overlays
+                        for eff in &layer.effects {
+                            if eff.enabled {
+                                match &eff.effect_type {
+                                    compositor::EvaluatedEffectType::Tint { map_white, amount, .. } => {
+                                        let alpha = (*amount / 100.0).clamp(0.0, 0.75);
+                                        layer_el = layer_el.child(
+                                            div()
+                                                .absolute()
+                                                .top_0()
+                                                .left_0()
+                                                .size_full()
+                                                .bg(Rgba { r: map_white.r, g: map_white.g, b: map_white.b, a: alpha }),
+                                        );
+                                    }
+                                    compositor::EvaluatedEffectType::Invert { amount } => {
+                                        let alpha = (*amount / 100.0).clamp(0.0, 0.6);
+                                        layer_el = layer_el.child(
+                                            div()
+                                                .absolute()
+                                                .top_0()
+                                                .left_0()
+                                                .size_full()
+                                                .bg(Rgba { r: 1.0, g: 1.0, b: 1.0, a: alpha }),
+                                        );
+                                    }
+                                    compositor::EvaluatedEffectType::GlslShader { param1, param2, .. } => {
+                                        let pulse = ((current_frame as f32 * param1 * 0.1).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
+                                        let alpha = (*param2 / 100.0 * 0.4 * pulse).clamp(0.0, 0.7);
+                                        layer_el = layer_el.child(
+                                            div()
+                                                .absolute()
+                                                .top_0()
+                                                .left_0()
+                                                .size_full()
+                                                .bg(Rgba { r: 0.2 + 0.6 * pulse, g: 0.3, b: 0.9, a: alpha }),
+                                        );
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
                     }
 
                     if is_selected {
@@ -896,6 +983,8 @@ pub struct PropertiesPanel {
     focus_handle: FocusHandle,
     state: Entity<EditorState>,
     _subscription: Subscription,
+    pub scrub_prop: Option<String>,
+    pub scrub_last_x: Option<f32>,
 }
 
 impl PropertiesPanel {
@@ -907,12 +996,41 @@ impl PropertiesPanel {
             focus_handle: cx.focus_handle(),
             state,
             _subscription,
+            scrub_prop: None,
+            scrub_last_x: None,
         }
     }
 
     pub fn standalone(cx: &mut Context<Self>) -> Self {
         let state = cx.new(|_| EditorState::new());
         Self::new(state, cx)
+    }
+
+    pub fn apply_scrub_delta(&mut self, prop: &str, dx: f32, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| {
+            match prop {
+                "anchor_x" => s.nudge_anchor(dx * 1.0, 0.0),
+                "anchor_y" => s.nudge_anchor(0.0, dx * 1.0),
+                "pos_x" => s.nudge_position(dx * 1.0, 0.0),
+                "pos_y" => s.nudge_position(0.0, dx * 1.0),
+                "scale_x" => s.nudge_scale(dx * 0.5, 0.0),
+                "scale_y" => s.nudge_scale(0.0, dx * 0.5),
+                "rotation" => s.nudge_rotation(dx * 0.5),
+                "opacity" => s.nudge_opacity(dx * 0.5),
+                other => {
+                    if let Some(rest) = other.strip_prefix("fx:") {
+                        let parts: Vec<&str> = rest.split(':').collect();
+                        if parts.len() >= 2 {
+                            let eff_id = parts[0];
+                            let param = parts[1];
+                            let mult = parts.get(2).and_then(|m| m.parse::<f32>().ok()).unwrap_or(50.0) / 100.0;
+                            let _ = s.nudge_effect_param(eff_id, param, dx * mult);
+                        }
+                    }
+                }
+            }
+            cx.notify();
+        });
     }
 
     pub fn focus_handle(&self) -> &FocusHandle {
@@ -922,6 +1040,101 @@ impl PropertiesPanel {
     pub fn state(&self) -> &Entity<EditorState> {
         &self.state
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scrub_field<FMinus, FPlus>(
+    id: impl Into<ElementId>,
+    prop_key: String,
+    label: String,
+    minus_id: Option<ElementId>,
+    plus_id: Option<ElementId>,
+    state: &Entity<EditorState>,
+    panel_entity: &Entity<PropertiesPanel>,
+    cx: &App,
+    on_minus: FMinus,
+    on_plus: FPlus,
+) -> Div
+where
+    FMinus: Fn(&mut App) + 'static,
+    FPlus: Fn(&mut App) + 'static,
+{
+    let panel_down = panel_entity.clone();
+    let state_scroll = state.clone();
+    let prop_for_wheel = prop_key.clone();
+
+    let btn_minus: AnyElement = if let Some(mid) = minus_id {
+        step_button_with_id(mid, "-", cx, on_minus).into_any_element()
+    } else {
+        step_button("-", cx, on_minus).into_any_element()
+    };
+
+    let btn_plus: AnyElement = if let Some(pid) = plus_id {
+        step_button_with_id(pid, "+", cx, on_plus).into_any_element()
+    } else {
+        step_button("+", cx, on_plus).into_any_element()
+    };
+
+    h_flex()
+        .gap_1()
+        .items_center()
+        .child(btn_minus)
+        .child(
+            div()
+                .id(id)
+                .test_support()
+                .px_2()
+                .py_0p5()
+                .bg(cx.theme().muted)
+                .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                .border_1()
+                .border_color(cx.theme().border)
+                .rounded_sm()
+                .cursor_col_resize()
+                .text_xs()
+                .font_medium()
+                .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+                    let curr_x = event.position.x / px(1.0);
+                    let p = prop_key.clone();
+                    panel_down.update(cx, |this, _| {
+                        this.scrub_prop = Some(p);
+                        this.scrub_last_x = Some(curr_x);
+                    });
+                })
+                .on_scroll_wheel(move |event, _window, cx| {
+                    let dy = match event.delta {
+                        ScrollDelta::Pixels(p) => p.y / px(1.0),
+                        ScrollDelta::Lines(l) => l.y * 5.0,
+                    };
+                    if dy != 0.0 {
+                        let step = if dy > 0.0 { 1.0 } else { -1.0 };
+                        let pk = prop_for_wheel.clone();
+                        state_scroll.update(cx, |s, cx| {
+                            match pk.as_str() {
+                                "anchor_x" => s.nudge_anchor(step, 0.0),
+                                "anchor_y" => s.nudge_anchor(0.0, step),
+                                "pos_x" => s.nudge_position(step, 0.0),
+                                "pos_y" => s.nudge_position(0.0, step),
+                                "scale_x" => s.nudge_scale(step * 0.5, 0.0),
+                                "scale_y" => s.nudge_scale(0.0, step * 0.5),
+                                "rotation" => s.nudge_rotation(step * 0.5),
+                                "opacity" => s.nudge_opacity(step * 0.5),
+                                other => {
+                                    if let Some(rest) = other.strip_prefix("fx:") {
+                                        let parts: Vec<&str> = rest.split(':').collect();
+                                        if parts.len() >= 2 {
+                                            let _ = s.nudge_effect_param(parts[0], parts[1], step * 2.0);
+                                        }
+                                    }
+                                }
+                            }
+                            cx.notify();
+                        });
+                    }
+                })
+                .child(label),
+        )
+        .child(btn_plus)
 }
 
 impl EventEmitter<PanelEvent> for PropertiesPanel {}
@@ -954,6 +1167,70 @@ impl Render for PropertiesPanel {
             None => ("No Layer Selected".to_string(), "-".to_string()),
         };
 
+        let panel_entity = cx.entity();
+        let s_up_prop = self.state.clone();
+        let s_down_prop = self.state.clone();
+        let s_del_prop = self.state.clone();
+
+        let mut header_actions = h_flex()
+            .gap_1p5()
+            .items_center()
+            .child(
+                div()
+                    .px_1p5()
+                    .py_0p5()
+                    .rounded_sm()
+                    .bg(cx.theme().muted)
+                    .text_xs()
+                    .child(layer_type_title),
+            );
+
+        if selected_layer.is_some() {
+            header_actions = header_actions
+                .child(
+                    div()
+                        .cursor_pointer()
+                        .p_0p5()
+                        .rounded_sm()
+                        .hover(|s| s.bg(cx.theme().muted))
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            s_up_prop.update(cx, |s, cx| {
+                                let _ = s.move_selected_layer_up();
+                                cx.notify();
+                            });
+                        })
+                        .child(icon_box(IconName::ChevronUp)),
+                )
+                .child(
+                    div()
+                        .cursor_pointer()
+                        .p_0p5()
+                        .rounded_sm()
+                        .hover(|s| s.bg(cx.theme().muted))
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            s_down_prop.update(cx, |s, cx| {
+                                let _ = s.move_selected_layer_down();
+                                cx.notify();
+                            });
+                        })
+                        .child(icon_box(IconName::ChevronDown)),
+                )
+                .child(
+                    div()
+                        .cursor_pointer()
+                        .p_0p5()
+                        .rounded_sm()
+                        .hover(|s| s.bg(rgb(0xef4444)).text_color(rgb(0xffffff)))
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            s_del_prop.update(cx, |s, cx| {
+                                let _ = s.delete_selected_layer();
+                                cx.notify();
+                            });
+                        })
+                        .child(icon_box(IconName::Trash)),
+                );
+        }
+
         div()
             .id("properties_panel")
             .test_support()
@@ -963,6 +1240,31 @@ impl Render for PropertiesPanel {
             .flex_col()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                if !event.dragging() {
+                    if this.scrub_prop.is_some() {
+                        this.scrub_prop = None;
+                        this.scrub_last_x = None;
+                    }
+                    return;
+                }
+                if let (Some(prop), Some(last_x)) = (this.scrub_prop.clone(), this.scrub_last_x) {
+                    let curr_x = event.position.x / px(1.0);
+                    let dx = curr_x - last_x;
+                    if dx.abs() >= 1.0 {
+                        this.apply_scrub_delta(&prop, dx, cx);
+                        this.scrub_last_x = Some(curr_x);
+                    }
+                }
+            }))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| {
+                this.scrub_prop = None;
+                this.scrub_last_x = None;
+            }))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, _| {
+                this.scrub_prop = None;
+                this.scrub_last_x = None;
+            }))
             // Header
             .child(
                 h_flex()
@@ -980,15 +1282,7 @@ impl Render for PropertiesPanel {
                             .child(icon_box(IconName::Layers))
                             .child(div().font_semibold().text_xs().child(header_title)),
                     )
-                    .child(
-                        div()
-                            .px_1p5()
-                            .py_0p5()
-                            .rounded_sm()
-                            .bg(cx.theme().muted)
-                            .text_xs()
-                            .child(layer_type_title),
-                    ),
+                    .child(header_actions),
             )
             // Inspector fields
             .child(
@@ -1137,24 +1431,18 @@ impl Render for PropertiesPanel {
                                                 .justify_between()
                                                 .text_xs()
                                                 .child(div().text_color(cx.theme().muted_foreground).child("Radius"))
-                                                .child(
-                                                    h_flex()
-                                                        .gap_1()
-                                                        .items_center()
-                                                        .child(step_button_with_id(
-                                                            SharedString::from(format!("param_radius_minus_{}", eff_id)),
-                                                            "-",
-                                                            cx,
-                                                            move |cx| s_m.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_m, "radius", -5.0); cx.notify(); }),
-                                                        ))
-                                                        .child(div().id(SharedString::from(format!("param_radius_{}", eff_id))).test_support().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("{:.1} px", r)))
-                                                        .child(step_button_with_id(
-                                                            SharedString::from(format!("param_radius_plus_{}", eff_id)),
-                                                            "+",
-                                                            cx,
-                                                            move |cx| s_p.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p, "radius", 5.0); cx.notify(); }),
-                                                        )),
-                                                ),
+                                                .child(scrub_field(
+                                                    SharedString::from(format!("param_radius_{}", eff_id)),
+                                                    format!("fx:{}:radius:100", eff_id),
+                                                    format!("{:.1} px", r),
+                                                    Some(ElementId::from(SharedString::from(format!("param_radius_minus_{}", eff_id)))),
+                                                    Some(ElementId::from(SharedString::from(format!("param_radius_plus_{}", eff_id)))),
+                                                    &self.state,
+                                                    &panel_entity,
+                                                    cx,
+                                                    move |cx| s_m.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_m, "radius", -5.0); cx.notify(); }),
+                                                    move |cx| s_p.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p, "radius", 5.0); cx.notify(); }),
+                                                )),
                                         );
                                     }
                                     EffectType::BrightnessContrast { brightness, contrast } => {
@@ -1175,14 +1463,18 @@ impl Render for PropertiesPanel {
                                                     .justify_between()
                                                     .text_xs()
                                                     .child(div().text_color(cx.theme().muted_foreground).child("Brightness"))
-                                                    .child(
-                                                        h_flex()
-                                                            .gap_1()
-                                                            .items_center()
-                                                            .child(step_button("-", cx, move |cx| s_bm.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_bm, "brightness", -5.0); cx.notify(); })))
-                                                            .child(div().id(SharedString::from(format!("param_brightness_{}", eff_id))).test_support().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("{:.1}", b)))
-                                                            .child(step_button("+", cx, move |cx| s_bp.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_bp, "brightness", 5.0); cx.notify(); }))),
-                                                    ),
+                                                    .child(scrub_field(
+                                                        SharedString::from(format!("param_brightness_{}", eff_id)),
+                                                        format!("fx:{}:brightness:100", eff_id),
+                                                        format!("{:.1}", b),
+                                                        None,
+                                                        None,
+                                                        &self.state,
+                                                        &panel_entity,
+                                                        cx,
+                                                        move |cx| s_bm.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_bm, "brightness", -5.0); cx.notify(); }),
+                                                        move |cx| s_bp.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_bp, "brightness", 5.0); cx.notify(); }),
+                                                    )),
                                             )
                                             .child(
                                                 h_flex()
@@ -1190,14 +1482,18 @@ impl Render for PropertiesPanel {
                                                     .justify_between()
                                                     .text_xs()
                                                     .child(div().text_color(cx.theme().muted_foreground).child("Contrast"))
-                                                    .child(
-                                                        h_flex()
-                                                            .gap_1()
-                                                            .items_center()
-                                                            .child(step_button("-", cx, move |cx| s_cm.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_cm, "contrast", -5.0); cx.notify(); })))
-                                                            .child(div().id(SharedString::from(format!("param_contrast_{}", eff_id))).test_support().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("{:.1}", c)))
-                                                            .child(step_button("+", cx, move |cx| s_cp.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_cp, "contrast", 5.0); cx.notify(); }))),
-                                                    ),
+                                                    .child(scrub_field(
+                                                        SharedString::from(format!("param_contrast_{}", eff_id)),
+                                                        format!("fx:{}:contrast:100", eff_id),
+                                                        format!("{:.1}", c),
+                                                        None,
+                                                        None,
+                                                        &self.state,
+                                                        &panel_entity,
+                                                        cx,
+                                                        move |cx| s_cm.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_cm, "contrast", -5.0); cx.notify(); }),
+                                                        move |cx| s_cp.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_cp, "contrast", 5.0); cx.notify(); }),
+                                                    )),
                                             );
                                     }
                                     EffectType::Tint { amount, .. } => {
@@ -1212,14 +1508,18 @@ impl Render for PropertiesPanel {
                                                 .justify_between()
                                                 .text_xs()
                                                 .child(div().text_color(cx.theme().muted_foreground).child("Amount"))
-                                                .child(
-                                                    h_flex()
-                                                        .gap_1()
-                                                        .items_center()
-                                                        .child(step_button("-", cx, move |cx| s_m.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_m, "amount", -10.0); cx.notify(); })))
-                                                        .child(div().id(SharedString::from(format!("param_amount_{}", eff_id))).test_support().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("{:.0} %", a)))
-                                                        .child(step_button("+", cx, move |cx| s_p.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p, "amount", 10.0); cx.notify(); }))),
-                                                ),
+                                                .child(scrub_field(
+                                                    SharedString::from(format!("param_amount_{}", eff_id)),
+                                                    format!("fx:{}:amount:100", eff_id),
+                                                    format!("{:.0} %", a),
+                                                    None,
+                                                    None,
+                                                    &self.state,
+                                                    &panel_entity,
+                                                    cx,
+                                                    move |cx| s_m.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_m, "amount", -10.0); cx.notify(); }),
+                                                    move |cx| s_p.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p, "amount", 10.0); cx.notify(); }),
+                                                )),
                                         );
                                     }
                                     EffectType::Invert { amount } => {
@@ -1234,14 +1534,18 @@ impl Render for PropertiesPanel {
                                                 .justify_between()
                                                 .text_xs()
                                                 .child(div().text_color(cx.theme().muted_foreground).child("Amount"))
-                                                .child(
-                                                    h_flex()
-                                                        .gap_1()
-                                                        .items_center()
-                                                        .child(step_button("-", cx, move |cx| s_m.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_m, "amount", -10.0); cx.notify(); })))
-                                                        .child(div().id(SharedString::from(format!("param_amount_{}", eff_id))).test_support().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("{:.0} %", a)))
-                                                        .child(step_button("+", cx, move |cx| s_p.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p, "amount", 10.0); cx.notify(); }))),
-                                                ),
+                                                .child(scrub_field(
+                                                    SharedString::from(format!("param_amount_{}", eff_id)),
+                                                    format!("fx:{}:amount:100", eff_id),
+                                                    format!("{:.0} %", a),
+                                                    None,
+                                                    None,
+                                                    &self.state,
+                                                    &panel_entity,
+                                                    cx,
+                                                    move |cx| s_m.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_m, "amount", -10.0); cx.notify(); }),
+                                                    move |cx| s_p.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p, "amount", 10.0); cx.notify(); }),
+                                                )),
                                         );
                                     }
                                     EffectType::DropShadow { distance, softness, opacity, .. } => {
@@ -1267,14 +1571,18 @@ impl Render for PropertiesPanel {
                                                     .justify_between()
                                                     .text_xs()
                                                     .child(div().text_color(cx.theme().muted_foreground).child("Distance"))
-                                                    .child(
-                                                        h_flex()
-                                                            .gap_1()
-                                                            .items_center()
-                                                            .child(step_button("-", cx, move |cx| s_dm.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_dm, "distance", -2.0); cx.notify(); })))
-                                                            .child(div().id(SharedString::from(format!("param_distance_{}", eff_id))).test_support().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("{:.1} px", d)))
-                                                            .child(step_button("+", cx, move |cx| s_dp.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_dp, "distance", 2.0); cx.notify(); }))),
-                                                    ),
+                                                    .child(scrub_field(
+                                                        SharedString::from(format!("param_distance_{}", eff_id)),
+                                                        format!("fx:{}:distance:50", eff_id),
+                                                        format!("{:.1} px", d),
+                                                        None,
+                                                        None,
+                                                        &self.state,
+                                                        &panel_entity,
+                                                        cx,
+                                                        move |cx| s_dm.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_dm, "distance", -2.0); cx.notify(); }),
+                                                        move |cx| s_dp.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_dp, "distance", 2.0); cx.notify(); }),
+                                                    )),
                                             )
                                             .child(
                                                 h_flex()
@@ -1282,14 +1590,18 @@ impl Render for PropertiesPanel {
                                                     .justify_between()
                                                     .text_xs()
                                                     .child(div().text_color(cx.theme().muted_foreground).child("Softness"))
-                                                    .child(
-                                                        h_flex()
-                                                            .gap_1()
-                                                            .items_center()
-                                                            .child(step_button("-", cx, move |cx| s_sm.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_sm, "softness", -2.0); cx.notify(); })))
-                                                            .child(div().id(SharedString::from(format!("param_softness_{}", eff_id))).test_support().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("{:.1} px", s_val)))
-                                                            .child(step_button("+", cx, move |cx| s_sp.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_sp, "softness", 2.0); cx.notify(); }))),
-                                                    ),
+                                                    .child(scrub_field(
+                                                        SharedString::from(format!("param_softness_{}", eff_id)),
+                                                        format!("fx:{}:softness:50", eff_id),
+                                                        format!("{:.1} px", s_val),
+                                                        None,
+                                                        None,
+                                                        &self.state,
+                                                        &panel_entity,
+                                                        cx,
+                                                        move |cx| s_sm.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_sm, "softness", -2.0); cx.notify(); }),
+                                                        move |cx| s_sp.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_sp, "softness", 2.0); cx.notify(); }),
+                                                    )),
                                             )
                                             .child(
                                                 h_flex()
@@ -1297,14 +1609,18 @@ impl Render for PropertiesPanel {
                                                     .justify_between()
                                                     .text_xs()
                                                     .child(div().text_color(cx.theme().muted_foreground).child("Opacity"))
-                                                    .child(
-                                                        h_flex()
-                                                            .gap_1()
-                                                            .items_center()
-                                                            .child(step_button("-", cx, move |cx| s_om.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_om, "opacity", -10.0); cx.notify(); })))
-                                                            .child(div().id(SharedString::from(format!("param_opacity_{}", eff_id))).test_support().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("{:.0} %", o)))
-                                                            .child(step_button("+", cx, move |cx| s_op.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_op, "opacity", 10.0); cx.notify(); }))),
-                                                    ),
+                                                    .child(scrub_field(
+                                                        SharedString::from(format!("param_opacity_{}", eff_id)),
+                                                        format!("fx:{}:opacity:100", eff_id),
+                                                        format!("{:.0} %", o),
+                                                        None,
+                                                        None,
+                                                        &self.state,
+                                                        &panel_entity,
+                                                        cx,
+                                                        move |cx| s_om.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_om, "opacity", -10.0); cx.notify(); }),
+                                                        move |cx| s_op.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_op, "opacity", 10.0); cx.notify(); }),
+                                                    )),
                                             );
                                     }
                                     EffectType::GlslShader { param1, param2, param3, param4, code } => {
@@ -1333,6 +1649,34 @@ impl Render for PropertiesPanel {
                                         } else {
                                             code.clone()
                                         };
+
+                                        let mut presets_bar = h_flex().gap_1().items_center().flex_wrap();
+                                        for (p_name, p_code) in EditorState::GLSL_PRESETS {
+                                            let s_preset = self.state.clone();
+                                            let eff_id_preset = eff_id.clone();
+                                            let p_name_str = *p_name;
+                                            let p_code_str = (*p_code).to_string();
+                                            presets_bar = presets_bar.child(
+                                                div()
+                                                    .cursor_pointer()
+                                                    .px_1p5()
+                                                    .py_0p5()
+                                                    .rounded_sm()
+                                                    .bg(cx.theme().muted)
+                                                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                                    .text_xs()
+                                                    .child(p_name_str)
+                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                        let c = p_code_str.clone();
+                                                        let id = eff_id_preset.clone();
+                                                        s_preset.update(cx, |s, cx| {
+                                                            let _ = s.set_glsl_code(&id, c);
+                                                            cx.notify();
+                                                        });
+                                                    }),
+                                            );
+                                        }
+
                                         effect_box = effect_box
                                             .child(
                                                 h_flex()
@@ -1340,14 +1684,18 @@ impl Render for PropertiesPanel {
                                                     .justify_between()
                                                     .text_xs()
                                                     .child(div().text_color(cx.theme().muted_foreground).child("P1 (Speed)"))
-                                                    .child(
-                                                        h_flex()
-                                                            .gap_1()
-                                                            .items_center()
-                                                            .child(step_button("-", cx, move |cx| s_p1m.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p1m, "param1", -0.5); cx.notify(); })))
-                                                            .child(div().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("{:.2}", p1)))
-                                                            .child(step_button("+", cx, move |cx| s_p1p.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p1p, "param1", 0.5); cx.notify(); }))),
-                                                    ),
+                                                    .child(scrub_field(
+                                                        SharedString::from(format!("param_p1_{}", eff_id)),
+                                                        format!("fx:{}:param1:10", eff_id),
+                                                        format!("{:.2}", p1),
+                                                        None,
+                                                        None,
+                                                        &self.state,
+                                                        &panel_entity,
+                                                        cx,
+                                                        move |cx| s_p1m.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p1m, "param1", -0.5); cx.notify(); }),
+                                                        move |cx| s_p1p.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p1p, "param1", 0.5); cx.notify(); }),
+                                                    )),
                                             )
                                             .child(
                                                 h_flex()
@@ -1355,14 +1703,18 @@ impl Render for PropertiesPanel {
                                                     .justify_between()
                                                     .text_xs()
                                                     .child(div().text_color(cx.theme().muted_foreground).child("P2 (Intensity)"))
-                                                    .child(
-                                                        h_flex()
-                                                            .gap_1()
-                                                            .items_center()
-                                                            .child(step_button("-", cx, move |cx| s_p2m.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p2m, "param2", -5.0); cx.notify(); })))
-                                                            .child(div().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("{:.1}", p2)))
-                                                            .child(step_button("+", cx, move |cx| s_p2p.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p2p, "param2", 5.0); cx.notify(); }))),
-                                                    ),
+                                                    .child(scrub_field(
+                                                        SharedString::from(format!("param_p2_{}", eff_id)),
+                                                        format!("fx:{}:param2:100", eff_id),
+                                                        format!("{:.1}", p2),
+                                                        None,
+                                                        None,
+                                                        &self.state,
+                                                        &panel_entity,
+                                                        cx,
+                                                        move |cx| s_p2m.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p2m, "param2", -5.0); cx.notify(); }),
+                                                        move |cx| s_p2p.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p2p, "param2", 5.0); cx.notify(); }),
+                                                    )),
                                             )
                                             .child(
                                                 h_flex()
@@ -1370,14 +1722,18 @@ impl Render for PropertiesPanel {
                                                     .justify_between()
                                                     .text_xs()
                                                     .child(div().text_color(cx.theme().muted_foreground).child("P3 (Scale)"))
-                                                    .child(
-                                                        h_flex()
-                                                            .gap_1()
-                                                            .items_center()
-                                                            .child(step_button("-", cx, move |cx| s_p3m.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p3m, "param3", -0.5); cx.notify(); })))
-                                                            .child(div().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("{:.2}", p3)))
-                                                            .child(step_button("+", cx, move |cx| s_p3p.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p3p, "param3", 0.5); cx.notify(); }))),
-                                                    ),
+                                                    .child(scrub_field(
+                                                        SharedString::from(format!("param_p3_{}", eff_id)),
+                                                        format!("fx:{}:param3:10", eff_id),
+                                                        format!("{:.2}", p3),
+                                                        None,
+                                                        None,
+                                                        &self.state,
+                                                        &panel_entity,
+                                                        cx,
+                                                        move |cx| s_p3m.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p3m, "param3", -0.5); cx.notify(); }),
+                                                        move |cx| s_p3p.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p3p, "param3", 0.5); cx.notify(); }),
+                                                    )),
                                             )
                                             .child(
                                                 h_flex()
@@ -1385,25 +1741,35 @@ impl Render for PropertiesPanel {
                                                     .justify_between()
                                                     .text_xs()
                                                     .child(div().text_color(cx.theme().muted_foreground).child("P4 (Opacity)"))
-                                                    .child(
-                                                        h_flex()
-                                                            .gap_1()
-                                                            .items_center()
-                                                            .child(step_button("-", cx, move |cx| s_p4m.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p4m, "param4", -5.0); cx.notify(); })))
-                                                            .child(div().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("{:.1}", p4)))
-                                                            .child(step_button("+", cx, move |cx| s_p4p.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p4p, "param4", 5.0); cx.notify(); }))),
-                                                    ),
+                                                    .child(scrub_field(
+                                                        SharedString::from(format!("param_p4_{}", eff_id)),
+                                                        format!("fx:{}:param4:100", eff_id),
+                                                        format!("{:.1}", p4),
+                                                        None,
+                                                        None,
+                                                        &self.state,
+                                                        &panel_entity,
+                                                        cx,
+                                                        move |cx| s_p4m.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p4m, "param4", -5.0); cx.notify(); }),
+                                                        move |cx| s_p4p.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p4p, "param4", 5.0); cx.notify(); }),
+                                                    )),
                                             )
                                             .child(
-                                                div()
+                                                v_flex()
+                                                    .gap_1()
                                                     .mt_1()
-                                                    .p_1p5()
-                                                    .rounded_sm()
-                                                    .bg(cx.theme().muted)
-                                                    .text_xs()
-                                                    .text_color(cx.theme().muted_foreground)
-                                                    .overflow_hidden()
-                                                    .child(code_preview),
+                                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Presets:"))
+                                                    .child(presets_bar)
+                                                    .child(
+                                                        div()
+                                                            .p_1p5()
+                                                            .rounded_sm()
+                                                            .bg(cx.theme().muted)
+                                                            .text_xs()
+                                                            .text_color(cx.theme().muted_foreground)
+                                                            .overflow_hidden()
+                                                            .child(code_preview),
+                                                    ),
                                             );
                                     }
                                 }
@@ -1442,22 +1808,30 @@ impl Render for PropertiesPanel {
                                     h_flex()
                                         .gap_1()
                                         .items_center()
-                                        .child(
-                                            h_flex()
-                                                .gap_1()
-                                                .items_center()
-                                                .child(step_button("-", cx, move |cx| s_anchor_mx.update(cx, |s, cx| { s.nudge_anchor(-10.0, 0.0); cx.notify(); })))
-                                                .child(div().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("X: {:.1}", anchor.x)))
-                                                .child(step_button("+", cx, move |cx| s_anchor_px.update(cx, |s, cx| { s.nudge_anchor(10.0, 0.0); cx.notify(); }))),
-                                        )
-                                        .child(
-                                            h_flex()
-                                                .gap_1()
-                                                .items_center()
-                                                .child(step_button("-", cx, move |cx| s_anchor_my.update(cx, |s, cx| { s.nudge_anchor(0.0, -10.0); cx.notify(); })))
-                                                .child(div().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("Y: {:.1}", anchor.y)))
-                                                .child(step_button("+", cx, move |cx| s_anchor_py.update(cx, |s, cx| { s.nudge_anchor(0.0, 10.0); cx.notify(); }))),
-                                        ),
+                                        .child(scrub_field(
+                                            "prop_anchor_x",
+                                            "anchor_x".to_string(),
+                                            format!("X: {:.1}", anchor.x),
+                                            None,
+                                            None,
+                                            &self.state,
+                                            &panel_entity,
+                                            cx,
+                                            move |cx| s_anchor_mx.update(cx, |s, cx| { s.nudge_anchor(-10.0, 0.0); cx.notify(); }),
+                                            move |cx| s_anchor_px.update(cx, |s, cx| { s.nudge_anchor(10.0, 0.0); cx.notify(); }),
+                                        ))
+                                        .child(scrub_field(
+                                            "prop_anchor_y",
+                                            "anchor_y".to_string(),
+                                            format!("Y: {:.1}", anchor.y),
+                                            None,
+                                            None,
+                                            &self.state,
+                                            &panel_entity,
+                                            cx,
+                                            move |cx| s_anchor_my.update(cx, |s, cx| { s.nudge_anchor(0.0, -10.0); cx.notify(); }),
+                                            move |cx| s_anchor_py.update(cx, |s, cx| { s.nudge_anchor(0.0, 10.0); cx.notify(); }),
+                                        )),
                                 ),
 
                             // Position (X, Y)
@@ -1478,22 +1852,30 @@ impl Render for PropertiesPanel {
                                     h_flex()
                                         .gap_1()
                                         .items_center()
-                                        .child(
-                                            h_flex()
-                                                .gap_1()
-                                                .items_center()
-                                                .child(step_button("-", cx, move |cx| s_pos_mx.update(cx, |s, cx| { s.nudge_position(-10.0, 0.0); cx.notify(); })))
-                                                .child(div().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("X: {:.1}", pos.x)))
-                                                .child(step_button("+", cx, move |cx| s_pos_px.update(cx, |s, cx| { s.nudge_position(10.0, 0.0); cx.notify(); }))),
-                                        )
-                                        .child(
-                                            h_flex()
-                                                .gap_1()
-                                                .items_center()
-                                                .child(step_button("-", cx, move |cx| s_pos_my.update(cx, |s, cx| { s.nudge_position(0.0, -10.0); cx.notify(); })))
-                                                .child(div().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("Y: {:.1}", pos.y)))
-                                                .child(step_button("+", cx, move |cx| s_pos_py.update(cx, |s, cx| { s.nudge_position(0.0, 10.0); cx.notify(); }))),
-                                        ),
+                                        .child(scrub_field(
+                                            "prop_pos_x",
+                                            "pos_x".to_string(),
+                                            format!("X: {:.1}", pos.x),
+                                            None,
+                                            None,
+                                            &self.state,
+                                            &panel_entity,
+                                            cx,
+                                            move |cx| s_pos_mx.update(cx, |s, cx| { s.nudge_position(-10.0, 0.0); cx.notify(); }),
+                                            move |cx| s_pos_px.update(cx, |s, cx| { s.nudge_position(10.0, 0.0); cx.notify(); }),
+                                        ))
+                                        .child(scrub_field(
+                                            "prop_pos_y",
+                                            "pos_y".to_string(),
+                                            format!("Y: {:.1}", pos.y),
+                                            None,
+                                            None,
+                                            &self.state,
+                                            &panel_entity,
+                                            cx,
+                                            move |cx| s_pos_my.update(cx, |s, cx| { s.nudge_position(0.0, -10.0); cx.notify(); }),
+                                            move |cx| s_pos_py.update(cx, |s, cx| { s.nudge_position(0.0, 10.0); cx.notify(); }),
+                                        )),
                                 ),
 
                             // Scale (X, Y)
@@ -1514,22 +1896,30 @@ impl Render for PropertiesPanel {
                                     h_flex()
                                         .gap_1()
                                         .items_center()
-                                        .child(
-                                            h_flex()
-                                                .gap_1()
-                                                .items_center()
-                                                .child(step_button("-", cx, move |cx| s_scale_mx.update(cx, |s, cx| { s.nudge_scale(-10.0, 0.0); cx.notify(); })))
-                                                .child(div().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("{:.1} %", sc.x)))
-                                                .child(step_button("+", cx, move |cx| s_scale_px.update(cx, |s, cx| { s.nudge_scale(10.0, 0.0); cx.notify(); }))),
-                                        )
-                                        .child(
-                                            h_flex()
-                                                .gap_1()
-                                                .items_center()
-                                                .child(step_button("-", cx, move |cx| s_scale_my.update(cx, |s, cx| { s.nudge_scale(0.0, -10.0); cx.notify(); })))
-                                                .child(div().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("{:.1} %", sc.y)))
-                                                .child(step_button("+", cx, move |cx| s_scale_py.update(cx, |s, cx| { s.nudge_scale(0.0, 10.0); cx.notify(); }))),
-                                        ),
+                                        .child(scrub_field(
+                                            "prop_scale_x",
+                                            "scale_x".to_string(),
+                                            format!("{:.1} %", sc.x),
+                                            None,
+                                            None,
+                                            &self.state,
+                                            &panel_entity,
+                                            cx,
+                                            move |cx| s_scale_mx.update(cx, |s, cx| { s.nudge_scale(-10.0, 0.0); cx.notify(); }),
+                                            move |cx| s_scale_px.update(cx, |s, cx| { s.nudge_scale(10.0, 0.0); cx.notify(); }),
+                                        ))
+                                        .child(scrub_field(
+                                            "prop_scale_y",
+                                            "scale_y".to_string(),
+                                            format!("{:.1} %", sc.y),
+                                            None,
+                                            None,
+                                            &self.state,
+                                            &panel_entity,
+                                            cx,
+                                            move |cx| s_scale_my.update(cx, |s, cx| { s.nudge_scale(0.0, -10.0); cx.notify(); }),
+                                            move |cx| s_scale_py.update(cx, |s, cx| { s.nudge_scale(0.0, 10.0); cx.notify(); }),
+                                        )),
                                 ),
 
                             // Rotation
@@ -1546,21 +1936,18 @@ impl Render for PropertiesPanel {
                                         .child(icon_box(IconName::RotateCw))
                                         .child("Rotation"),
                                 )
-                                .child(
-                                    h_flex()
-                                        .gap_1()
-                                        .items_center()
-                                        .child(step_button("-", cx, move |cx| s_rot_m.update(cx, |s, cx| { s.nudge_rotation(-15.0); cx.notify(); })))
-                                        .child(
-                                            div()
-                                                .px_2()
-                                                .py_0p5()
-                                                .bg(cx.theme().muted)
-                                                .rounded_sm()
-                                                .child(format!("{:.1}°", rot)),
-                                        )
-                                        .child(step_button("+", cx, move |cx| s_rot_p.update(cx, |s, cx| { s.nudge_rotation(15.0); cx.notify(); }))),
-                                ),
+                                .child(scrub_field(
+                                    "prop_rotation",
+                                    "rotation".to_string(),
+                                    format!("{:.1}°", rot),
+                                    None,
+                                    None,
+                                    &self.state,
+                                    &panel_entity,
+                                    cx,
+                                    move |cx| s_rot_m.update(cx, |s, cx| { s.nudge_rotation(-15.0); cx.notify(); }),
+                                    move |cx| s_rot_p.update(cx, |s, cx| { s.nudge_rotation(15.0); cx.notify(); }),
+                                )),
 
                             // Opacity
                             h_flex()
@@ -1576,21 +1963,18 @@ impl Render for PropertiesPanel {
                                         .child(icon_box(IconName::Sun))
                                         .child("Opacity"),
                                 )
-                                .child(
-                                    h_flex()
-                                        .gap_1()
-                                        .items_center()
-                                        .child(step_button("-", cx, move |cx| s_op_m.update(cx, |s, cx| { s.nudge_opacity(-10.0); cx.notify(); })))
-                                        .child(
-                                            div()
-                                                .px_2()
-                                                .py_0p5()
-                                                .bg(cx.theme().muted)
-                                                .rounded_sm()
-                                                .child(format!("{:.1} %", op)),
-                                        )
-                                        .child(step_button("+", cx, move |cx| s_op_p.update(cx, |s, cx| { s.nudge_opacity(10.0); cx.notify(); }))),
-                                ),
+                                .child(scrub_field(
+                                    "prop_opacity",
+                                    "opacity".to_string(),
+                                    format!("{:.1} %", op),
+                                    None,
+                                    None,
+                                    &self.state,
+                                    &panel_entity,
+                                    cx,
+                                    move |cx| s_op_m.update(cx, |s, cx| { s.nudge_opacity(-10.0); cx.notify(); }),
+                                    move |cx| s_op_p.update(cx, |s, cx| { s.nudge_opacity(10.0); cx.notify(); }),
+                                )),
 
                             // Switches & Modes Section Header
                             h_flex()
@@ -1951,6 +2335,9 @@ impl Render for TimelinePanel {
         let s_play = self.state.clone();
         let s_step_next = self.state.clone();
         let s_end = self.state.clone();
+        let s_up_header = self.state.clone();
+        let s_down_header = self.state.clone();
+        let s_del_header = self.state.clone();
 
         let in_str = "00:00:00:00";
         let out_str = comp_opt.map(|c| format!("{}", c.duration)).unwrap_or_else(|| "00:00:05:00".to_string());
@@ -1967,9 +2354,15 @@ impl Render for TimelinePanel {
                     let sel_state = self.state.clone();
                     let vis_state = self.state.clone();
                     let solo_state = self.state.clone();
+                    let s_up = self.state.clone();
+                    let s_down = self.state.clone();
+                    let s_del = self.state.clone();
                     let lid = layer.id.clone();
                     let lid_vis = layer.id.clone();
                     let lid_solo = layer.id.clone();
+                    let lid_up = layer.id.clone();
+                    let lid_down = layer.id.clone();
+                    let lid_del = layer.id.clone();
 
                     let in_ratio = (layer.in_point.frames() as f32 / total_frames.max(1) as f32).clamp(0.0, 1.0);
                     let out_ratio = (layer.out_point.frames() as f32 / total_frames.max(1) as f32).clamp(0.0, 1.0);
@@ -1983,7 +2376,7 @@ impl Render for TimelinePanel {
                         .items_center();
 
                     let mut left_col = h_flex()
-                        .w(px(240.))
+                        .w(px(280.))
                         .px_2()
                         .border_r_1()
                         .border_color(cx.theme().border)
@@ -1993,7 +2386,7 @@ impl Render for TimelinePanel {
                         .cursor_pointer()
                         .child(
                             h_flex()
-                                .gap_2()
+                                .gap_1p5()
                                 .items_center()
                                 .child(div().w(px(14.)).child(format!("{}", idx + 1)))
                                 .child(
@@ -2031,6 +2424,48 @@ impl Render for TimelinePanel {
                                             });
                                         })
                                         .child(icon_box(IconName::Sparkles)),
+                                )
+                                .child(
+                                    div()
+                                        .cursor_pointer()
+                                        .p_0p5()
+                                        .rounded_sm()
+                                        .hover(|s| s.bg(cx.theme().muted))
+                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                            s_up.update(cx, |s, cx| {
+                                                let _ = s.move_layer_up(&lid_up);
+                                                cx.notify();
+                                            });
+                                        })
+                                        .child(icon_box(IconName::ChevronUp)),
+                                )
+                                .child(
+                                    div()
+                                        .cursor_pointer()
+                                        .p_0p5()
+                                        .rounded_sm()
+                                        .hover(|s| s.bg(cx.theme().muted))
+                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                            s_down.update(cx, |s, cx| {
+                                                let _ = s.move_layer_down(&lid_down);
+                                                cx.notify();
+                                            });
+                                        })
+                                        .child(icon_box(IconName::ChevronDown)),
+                                )
+                                .child(
+                                    div()
+                                        .cursor_pointer()
+                                        .p_0p5()
+                                        .rounded_sm()
+                                        .hover(|s| s.bg(rgb(0xef4444)).text_color(rgb(0xffffff)))
+                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                            s_del.update(cx, |s, cx| {
+                                                let _ = s.remove_layer_by_id(&lid_del);
+                                                cx.notify();
+                                            });
+                                        })
+                                        .child(icon_box(IconName::Trash)),
                                 )
                                 .child(div().font_semibold().child(layer.name.clone())),
                         )
@@ -2280,6 +2715,80 @@ impl Render for TimelinePanel {
                                     .items_center()
                                     .child(icon_box(IconName::Repeat))
                                     .child("Loop"),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .cursor_pointer()
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_sm()
+                                            .bg(cx.theme().muted)
+                                            .hover(|s| s.bg(cx.theme().accent))
+                                            .text_xs()
+                                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                s_up_header.update(cx, |s, cx| {
+                                                    let _ = s.move_selected_layer_up();
+                                                    cx.notify();
+                                                });
+                                            })
+                                            .child(
+                                                h_flex()
+                                                    .gap_0p5()
+                                                    .items_center()
+                                                    .child(icon_box(IconName::ChevronUp))
+                                                    .child("Up"),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .cursor_pointer()
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_sm()
+                                            .bg(cx.theme().muted)
+                                            .hover(|s| s.bg(cx.theme().accent))
+                                            .text_xs()
+                                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                s_down_header.update(cx, |s, cx| {
+                                                    let _ = s.move_selected_layer_down();
+                                                    cx.notify();
+                                                });
+                                            })
+                                            .child(
+                                                h_flex()
+                                                    .gap_0p5()
+                                                    .items_center()
+                                                    .child(icon_box(IconName::ChevronDown))
+                                                    .child("Down"),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .cursor_pointer()
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_sm()
+                                            .bg(cx.theme().muted)
+                                            .hover(|s| s.bg(rgb(0xef4444)).text_color(rgb(0xffffff)))
+                                            .text_xs()
+                                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                s_del_header.update(cx, |s, cx| {
+                                                    let _ = s.delete_selected_layer();
+                                                    cx.notify();
+                                                });
+                                            })
+                                            .child(
+                                                h_flex()
+                                                    .gap_0p5()
+                                                    .items_center()
+                                                    .child(icon_box(IconName::Trash))
+                                                    .child("Delete"),
+                                            ),
+                                    ),
                             ),
                     )
                     // Duration & In/Out
@@ -2303,7 +2812,7 @@ impl Render for TimelinePanel {
                     .text_color(cx.theme().muted_foreground)
                     .child(
                         div()
-                            .w(px(240.))
+                            .w(px(280.))
                             .px_3()
                             .border_r_1()
                             .border_color(cx.theme().border)
