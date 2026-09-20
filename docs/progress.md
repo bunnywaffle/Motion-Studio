@@ -283,8 +283,56 @@
 
 ---
 
-## Phase 2: Hardware-Accelerated Rendering Architecture
+- [x] **Task 2.1: Initialize wgpu context and render device**
+  - Created `crates/renderer` workspace crate with `wgpu = "24.0"`, `pollster = "0.4"`, `bytemuck = "1.21"`, and `thiserror = "2.0"`.
+  - Implemented `GpuContext` (`crates/renderer/src/device.rs`):
+    - Headless initialization via `GpuContext::new_headless()`.
+    - Hardware GPU adapter selection with automatic fallback to secondary/software adapter if primary is unavailable.
+    - Limits configuration: downlevel defaults compatible with all modern and fallback graphics APIs (DirectX 12, Vulkan, Metal).
+    - Query accessors: `device()`, `queue()`, `adapter_info()`.
+  - Implemented `RenderTarget` (`crates/renderer/src/device.rs`):
+    - Texture allocation with `wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING`.
+    - Default standard `Rgba8Unorm` texture format with color `TextureView`.
+    - CPU texture readback via `read_texture_to_cpu(&self, gpu: &GpuContext)` respecting wgpu's 256-byte alignment (`COPY_BYTES_PER_ROW_ALIGNMENT`) and unpadding back to tight RGBA8 rows.
+  - Added unit tests in `crates/renderer`:
+    - `test_gpu_context_headless_initialization`: verifies device creation and valid adapter backend info.
+    - `test_render_target_invalid_dimensions`: verifies zero-dimension error rejection.
 
-- [ ] **Task 2.1: Initialize wgpu context and render device**
+- [x] **Enhancement: Real Lucide Vector Icons Integration**
+  - Integrated `gpui_kit::assets::IconName` across all application panels, replacing raw Unicode text glyphs:
+    - `TimelinePanel`: Transport controls use `IconName::SkipBack`, `IconName::StepBack`, `IconName::Play` / `IconName::Pause`, `IconName::StepForward`, `IconName::SkipForward`, and `IconName::Repeat`.
+    - Layer Switches: `IconName::Eye` / `IconName::EyeOff` for visibility toggle, `IconName::Sparkles` for solo toggle.
+    - `ProjectPanel`: Asset classification icons (`IconName::Folder` for compositions, `IconName::Layers` for solids, `IconName::Image` for images, `IconName::Film` for videos, `IconName::Type` for text, `IconName::Sparkles` for shapes). Toolbar uses `IconName::FolderOpen` ("Import") and `IconName::Plus` ("Solid").
+    - `PropertiesPanel`: Section headers and transform row icons (`IconName::Layers`, `IconName::Move`, `IconName::Maximize2`, `IconName::RotateCw`, `IconName::Sun`, `IconName::SlidersHorizontal`).
+    - `EffectsPanel`: Category and action icons (`IconName::SlidersHorizontal`, `IconName::Sun`, `IconName::WandSparkles`, `IconName::Layers`, `IconName::RotateCw`, `IconName::Plus`, `IconName::Sparkles`).
+
+- [x] **Enhancement: Media Import Pipeline**
+  - Integrated `rfd = "0.15"` for native cross-platform file dialogs and `image = "0.25"` for media metadata decoding.
+  - Implemented `EditorState::import_media_file(path)`:
+    - Reads dimensions automatically using `image::image_dimensions` (with 1920x1080 fallback for video).
+    - Registers new `Asset` in `project.assets`.
+    - Instantiates a new centered `Layer` in active composition with anchor point centered at `(width/2, height/2)`.
+    - Automatically selects the newly imported layer in canvas and timeline.
+  - Added "Import" button to `ProjectPanel` toolbar with file picker filter for images and videos (`png`, `jpg`, `jpeg`, `mp4`, `mov`, `webm`).
+  - Added unit test `test_media_import_and_layer_creation` in `crates/application`.
+
+- [x] **Enhancement: Real Layer Effects Architecture**
+  - Data model in `crates/project/src/effect.rs`:
+    - `Effect`: (`id`, `name`, `enabled`, `effect_type`).
+    - `EffectType`: `GaussianBlur` (radius), `BrightnessContrast` (brightness, contrast), `Tint` (amount, map_black, map_white), `Invert` (amount), `DropShadow` (distance, angle, softness, opacity, color).
+    - Factory constructors on `Effect` and `EffectType`.
+    - Parameter nudging: `nudge_param(param_name, delta)` with clamping.
+    - Attached to `Layer`: `effects: Vec<Effect>` with CRUD helpers (`add_effect`, `remove_effect`, `get_effect`, `get_effect_mut`, `toggle_enabled`).
+  - Compositor evaluation in `crates/compositor/src/evaluation.rs`:
+    - `EvaluatedEffect` and `EvaluatedEffectType`.
+    - Attached to `EvaluatedLayer`: `effects: Vec<EvaluatedEffect>`.
+    - Dynamic keyframe/property evaluation over time in `LayerStackEvaluator`.
+  - Editor state mutation in `crates/application/src/state.rs`:
+    - `add_effect_to_selected_layer`, `remove_effect_from_selected_layer`, `toggle_effect_enabled`, `nudge_effect_param`.
+  - UI panels in `crates/application/src/panels.rs`:
+    - `EffectsPanel`: 13 real built-in clickable effects that add real effect instances to the selected layer.
+    - `PropertiesPanel`: Working **"▼ Effects"** inspector section rendering applied effects with eye visibility toggle, trash delete button, and live `-`/`+` numeric parameter nudging.
+  - Added unit and UI tests: `test_layer_effects_crud_and_serialization`, `test_layer_effects_evaluation_over_time`, `test_effects_crud_and_parameter_nudging`.
+  - All **132 workspace tests passing** with 0 errors and zero clippy warnings.
 
 

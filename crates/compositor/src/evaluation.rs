@@ -3,8 +3,10 @@ use crate::graph::SceneGraph;
 use crate::node::SceneNode;
 use crate::transform::{AffineTransform2D, BoundingBox2D, EvaluatedTransform, TransformResolver};
 use project::{
-    BlendMode, Composition, LayerSource, LoopMode, Project, TimeCode, TrackMatteMode, Vec2,
+    BlendMode, Color, Composition, EffectType, LayerSource, LoopMode, Project, TimeCode,
+    TrackMatteMode, Vec2,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 /// The evaluated state and frame context of an inner composition nested inside a layer.
@@ -143,6 +145,55 @@ pub struct RenderPassDescriptor {
     pub layer_ids: Vec<String>,
 }
 
+/// Evaluated parameter values for an effect at a specific timecode.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum EvaluatedEffectType {
+    GaussianBlur {
+        radius: f32,
+    },
+    BrightnessContrast {
+        brightness: f32,
+        contrast: f32,
+    },
+    Tint {
+        map_black: Color,
+        map_white: Color,
+        amount: f32,
+    },
+    Invert {
+        amount: f32,
+    },
+    DropShadow {
+        distance: f32,
+        angle: f32,
+        softness: f32,
+        opacity: f32,
+        color: Color,
+    },
+}
+
+impl EvaluatedEffectType {
+    pub const fn type_name(&self) -> &'static str {
+        match self {
+            Self::GaussianBlur { .. } => "Gaussian Blur",
+            Self::BrightnessContrast { .. } => "Brightness & Contrast",
+            Self::Tint { .. } => "Tint",
+            Self::Invert { .. } => "Invert",
+            Self::DropShadow { .. } => "Drop Shadow",
+        }
+    }
+}
+
+/// The evaluated state of an individual layer effect at target timecode.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvaluatedEffect {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub effect_type: EvaluatedEffectType,
+}
+
 /// The evaluated state of a single layer at a specific timeline position.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EvaluatedLayer {
@@ -164,6 +215,7 @@ pub struct EvaluatedLayer {
     pub parent_id: Option<String>,
     pub transform: EvaluatedTransform,
     pub nested_composition: Option<Box<NestedCompositionEvaluation>>,
+    pub effects: Vec<EvaluatedEffect>,
 }
 
 impl EvaluatedLayer {
@@ -819,6 +871,57 @@ impl LayerStackEvaluator {
                 }
             }
 
+            let mut evaluated_effects = Vec::with_capacity(node.effects.len());
+            for eff in &node.effects {
+                if eff.enabled {
+                    let eval_type = match &eff.effect_type {
+                        EffectType::GaussianBlur { radius } => {
+                            EvaluatedEffectType::GaussianBlur {
+                                radius: radius.evaluate_at(time),
+                            }
+                        }
+                        EffectType::BrightnessContrast {
+                            brightness,
+                            contrast,
+                        } => EvaluatedEffectType::BrightnessContrast {
+                            brightness: brightness.evaluate_at(time),
+                            contrast: contrast.evaluate_at(time),
+                        },
+                        EffectType::Tint {
+                            map_black,
+                            map_white,
+                            amount,
+                        } => EvaluatedEffectType::Tint {
+                            map_black: *map_black,
+                            map_white: *map_white,
+                            amount: amount.evaluate_at(time),
+                        },
+                        EffectType::Invert { amount } => EvaluatedEffectType::Invert {
+                            amount: amount.evaluate_at(time),
+                        },
+                        EffectType::DropShadow {
+                            distance,
+                            angle,
+                            softness,
+                            opacity,
+                            color,
+                        } => EvaluatedEffectType::DropShadow {
+                            distance: distance.evaluate_at(time),
+                            angle: angle.evaluate_at(time),
+                            softness: softness.evaluate_at(time),
+                            opacity: opacity.evaluate_at(time),
+                            color: *color,
+                        },
+                    };
+                    evaluated_effects.push(EvaluatedEffect {
+                        id: eff.id.clone(),
+                        name: eff.name.clone(),
+                        enabled: true,
+                        effect_type: eval_type,
+                    });
+                }
+            }
+
             evaluated_layers.push(EvaluatedLayer {
                 id: node.id.clone(),
                 name: node.name.clone(),
@@ -838,6 +941,7 @@ impl LayerStackEvaluator {
                 parent_id: node.parent_id.clone(),
                 transform,
                 nested_composition,
+                effects: evaluated_effects,
             });
         }
 

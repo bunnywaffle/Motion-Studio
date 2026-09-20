@@ -3,6 +3,7 @@ pub mod blend_mode;
 pub mod clock;
 pub mod color;
 pub mod composition;
+pub mod effect;
 pub mod error;
 pub mod frame_rate;
 pub mod keyframe;
@@ -23,6 +24,7 @@ pub use clock::{
 };
 pub use color::Color;
 pub use composition::Composition;
+pub use effect::{Effect, EffectType};
 pub use error::{ColorError, ProjectError, TimeCodeError, ValidationError};
 pub use frame_rate::FrameRate;
 pub use keyframe::{
@@ -2082,6 +2084,72 @@ mod tests {
 
         assert!(clock.jump_to_prev_marker_in_comp(&comp));
         assert_eq!(clock.current_frame(), 75);
+    }
+
+    #[test]
+    fn test_layer_effects_crud_and_serialization() {
+        let tc0 = TimeCode::from_frames(0, 30.0);
+        let tc100 = TimeCode::from_frames(100, 30.0);
+        let mut layer = Layer::solid("layer_fx", "Effects Layer", Color::RED, 1920, 1080, tc0, tc100);
+        assert!(!layer.has_effects());
+
+        // 1. Create Gaussian Blur
+        let blur = Effect::gaussian_blur("fx_blur", 25.0);
+        assert_eq!(blur.name, "Gaussian Blur");
+        assert_eq!(blur.type_name(), "Gaussian Blur");
+        assert!(blur.enabled);
+
+        // 2. Create Brightness & Contrast
+        let mut bc = Effect::brightness_contrast("fx_bc", 10.0, -15.0);
+        assert!(bc.nudge_param("brightness", 5.0));
+        assert!(bc.nudge_param("contrast", -5.0));
+
+        // 3. Create Tint
+        let tint = Effect::tint("fx_tint", Color::BLACK, Color::WHITE, 80.0);
+
+        // 4. Create Invert
+        let mut invert = Effect::invert("fx_inv", 100.0);
+        invert.toggle_enabled();
+        assert!(!invert.enabled);
+
+        // 5. Create Drop Shadow
+        let shadow = Effect::drop_shadow("fx_shadow", 12.0, 45.0, 8.0, 60.0, Color::BLACK);
+
+        // Add effects to layer
+        let id_blur = layer.add_effect(blur);
+        assert_eq!(id_blur, "fx_blur");
+        layer.add_effect(bc);
+        layer.add_effect(tint);
+        layer.add_effect(invert);
+        layer.add_effect(shadow);
+
+        assert!(layer.has_effects());
+        assert_eq!(layer.effects.len(), 5);
+
+        // Test querying
+        let retrieved_blur = layer.get_effect("fx_blur").expect("found blur");
+        assert_eq!(retrieved_blur.id, "fx_blur");
+
+        // Test mutation
+        let retrieved_mut = layer.get_effect_mut("fx_blur").expect("found blur mut");
+        retrieved_mut.nudge_param("radius", 10.0);
+        if let EffectType::GaussianBlur { radius } = &layer.get_effect("fx_blur").unwrap().effect_type {
+            assert_eq!(radius.value, 35.0);
+        } else {
+            panic!("Expected GaussianBlur");
+        }
+
+        // Test remove
+        let removed = layer.remove_effect("fx_inv").expect("removed invert");
+        assert_eq!(removed.id, "fx_inv");
+        assert_eq!(layer.effects.len(), 4);
+        assert!(layer.get_effect("fx_inv").is_none());
+
+        // Test JSON serialization roundtrip
+        let json_str = serde_json::to_string_pretty(&layer).expect("serialize layer with effects");
+        let deserialized_layer: Layer = serde_json::from_str(&json_str).expect("deserialize layer");
+        assert_eq!(layer, deserialized_layer);
+        assert_eq!(deserialized_layer.effects.len(), 4);
     }
 }
 

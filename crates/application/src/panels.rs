@@ -1,10 +1,15 @@
+use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex, StyledExt, TestSupportExt};
 use gpui_kit::component::dock::{BasePanel, Panel, PanelEvent};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::*;
 
 use crate::state::EditorState;
-use project::{Color, LayerSource};
+use project::{Color, EffectType, LayerSource};
+
+fn icon_box(icon: IconName) -> Div {
+    div().w(px(14.)).h(px(14.)).flex().items_center().justify_center().child(icon)
+}
 
 fn step_button<F>(label: &'static str, cx: &App, on_click: F) -> impl IntoElement
 where
@@ -86,7 +91,15 @@ impl Render for ProjectPanel {
                         .bg(cx.theme().muted)
                         .text_xs()
                         .items_center()
-                        .child(div().w(px(110.)).font_semibold().child(format!("📁 {}", comp.name)))
+                        .child(
+                            h_flex()
+                                .w(px(110.))
+                                .gap_1()
+                                .items_center()
+                                .font_semibold()
+                                .child(icon_box(IconName::Folder))
+                                .child(comp.name.clone()),
+                        )
                         .child(div().w(px(70.)).child("Composition"))
                         .child(div().w(px(70.)).child(format!("{}x{}", comp.width, comp.height)))
                         .child(div().flex_1().child(format!("{}", comp.duration))),
@@ -111,14 +124,14 @@ impl Render for ProjectPanel {
 
                     let sel_state = self.state.clone();
                     let lid = layer.id.clone();
-                    let icon = match &layer.source {
-                        LayerSource::Solid { .. } => "⏹",
-                        LayerSource::Image { .. } => "🖼",
-                        LayerSource::Video { .. } => "🎬",
-                        LayerSource::Text { .. } => "🔤",
-                        LayerSource::Shape { .. } => "⬡",
-                        LayerSource::NestedComposition { .. } => "🎞",
-                        _ => "⚙",
+                    let icon_elem = match &layer.source {
+                        LayerSource::Solid { .. } => icon_box(IconName::Layers),
+                        LayerSource::Image { .. } => icon_box(IconName::Image),
+                        LayerSource::Video { .. } => icon_box(IconName::Film),
+                        LayerSource::Text { .. } => icon_box(IconName::Type),
+                        LayerSource::Shape { .. } => icon_box(IconName::Sparkles),
+                        LayerSource::NestedComposition { .. } => icon_box(IconName::Folder),
+                        _ => icon_box(IconName::Layers),
                     };
 
                     let mut row = h_flex()
@@ -134,7 +147,14 @@ impl Render for ProjectPanel {
                                 cx.notify();
                             });
                         })
-                        .child(div().w(px(110.)).child(format!("{icon} {}", layer.name)))
+                        .child(
+                            h_flex()
+                                .w(px(110.))
+                                .gap_1()
+                                .items_center()
+                                .child(icon_elem)
+                                .child(layer.name.clone()),
+                        )
                         .child(div().w(px(70.)).child(type_str))
                         .child(div().w(px(70.)).child(res_str))
                         .child(div().flex_1().child(format!("{} - {}", layer.in_point, layer.out_point)));
@@ -155,6 +175,8 @@ impl Render for ProjectPanel {
             }
             None => Vec::new(),
         };
+
+        let import_state = self.state.clone();
 
         div()
             .id("project_panel")
@@ -177,13 +199,15 @@ impl Render for ProjectPanel {
                     .child(
                         h_flex()
                             .flex_1()
+                            .min_w(px(0.))
+                            .overflow_hidden()
                             .px_2()
                             .py_1()
                             .rounded_sm()
                             .bg(cx.theme().muted)
                             .text_color(cx.theme().muted_foreground)
                             .text_xs()
-                            .child("Search Project..."),
+                            .child("Search..."),
                     )
                     .child(
                         h_flex()
@@ -200,6 +224,9 @@ impl Render for ProjectPanel {
                                     .text_color(cx.theme().foreground)
                                     .text_xs()
                                     .cursor_pointer()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
                                     .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                                         add_state.update(cx, |s, cx| {
                                             let color = Color::from_rgba_u8(245, 158, 11, 255);
@@ -207,7 +234,37 @@ impl Render for ProjectPanel {
                                             cx.notify();
                                         });
                                     })
-                                    .child("+ Solid"),
+                                    .child(icon_box(IconName::Plus))
+                                    .child("Solid"),
+                            )
+                            .child(
+                                div()
+                                    .id("import_media_button")
+                                    .test_support()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .bg(cx.theme().muted)
+                                    .hover(|s| s.bg(cx.theme().accent))
+                                    .text_color(cx.theme().foreground)
+                                    .text_xs()
+                                    .cursor_pointer()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        let file = rfd::FileDialog::new()
+                                            .add_filter("Media Files", &["png", "jpg", "jpeg", "mp4", "mov", "webm"])
+                                            .pick_file();
+                                        if let Some(path) = file {
+                                            import_state.update(cx, |s, cx| {
+                                                let _ = s.import_media_file(path);
+                                                cx.notify();
+                                            });
+                                        }
+                                    })
+                                    .child(icon_box(IconName::FolderOpen))
+                                    .child("Import"),
                             )
                             .child(
                                 div()
@@ -217,7 +274,11 @@ impl Render for ProjectPanel {
                                     .bg(cx.theme().muted)
                                     .text_color(cx.theme().foreground)
                                     .text_xs()
-                                    .child("+ Comp"),
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(icon_box(IconName::Folder))
+                                    .child("Comp"),
                             ),
                     ),
             )
@@ -624,7 +685,13 @@ impl Render for PropertiesPanel {
                     .bg(cx.theme().secondary)
                     .items_center()
                     .justify_between()
-                    .child(div().font_semibold().text_xs().child(header_title))
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .items_center()
+                            .child(icon_box(IconName::Layers))
+                            .child(div().font_semibold().text_xs().child(header_title)),
+                    )
                     .child(
                         div()
                             .px_1p5()
@@ -677,13 +744,288 @@ impl Render for PropertiesPanel {
                         let s_vis = self.state.clone();
                         let s_solo = self.state.clone();
 
+                        let effects_list = if layer.effects.is_empty() {
+                            div()
+                                .id("no_effects_applied")
+                                .test_support()
+                                .p_2()
+                                .rounded_sm()
+                                .bg(cx.theme().secondary)
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("No effects applied. Click an effect in the Effects tab to apply.")
+                        } else {
+                            let mut fx_col = v_flex().id("applied_effects_list").test_support().gap_2();
+                            for effect in &layer.effects {
+                                let eff_id = effect.id.clone();
+                                let eff_id_toggle = effect.id.clone();
+                                let eff_id_del = effect.id.clone();
+                                let s_toggle = self.state.clone();
+                                let s_del = self.state.clone();
+
+                                let mut effect_box = v_flex()
+                                    .id(SharedString::from(format!("applied_effect_{}", effect.id)))
+                                    .test_support()
+                                    .p_2()
+                                    .rounded_sm()
+                                    .bg(cx.theme().secondary)
+                                    .gap_1p5();
+
+                                let header_row = h_flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .text_xs()
+                                    .child(
+                                        h_flex()
+                                            .gap_1p5()
+                                            .items_center()
+                                            .child(
+                                                div()
+                                                    .id(SharedString::from(format!("effect_toggle_{}", effect.id)))
+                                                    .test_support()
+                                                    .cursor_pointer()
+                                                    .w(px(14.))
+                                                    .h(px(14.))
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .text_color(if effect.enabled {
+                                                        cx.theme().foreground
+                                                    } else {
+                                                        cx.theme().muted_foreground
+                                                    })
+                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                        s_toggle.update(cx, |s, cx| {
+                                                            let _ = s.toggle_effect_enabled(&eff_id_toggle);
+                                                            cx.notify();
+                                                        });
+                                                    })
+                                                    .child(if effect.enabled { icon_box(IconName::Eye) } else { icon_box(IconName::EyeOff) }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .font_semibold()
+                                                    .text_color(if effect.enabled {
+                                                        cx.theme().foreground
+                                                    } else {
+                                                        cx.theme().muted_foreground
+                                                    })
+                                                    .child(effect.name.clone()),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!("effect_delete_{}", effect.id)))
+                                            .test_support()
+                                            .cursor_pointer()
+                                            .w(px(14.))
+                                            .h(px(14.))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .hover(|s| s.text_color(rgb(0xef4444)))
+                                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                s_del.update(cx, |s, cx| {
+                                                    let _ = s.remove_effect_from_selected_layer(&eff_id_del);
+                                                    cx.notify();
+                                                });
+                                            })
+                                            .child(icon_box(IconName::Trash)),
+                                    );
+
+                                effect_box = effect_box.child(header_row);
+
+                                match &effect.effect_type {
+                                    EffectType::GaussianBlur { radius } => {
+                                        let r = radius.value;
+                                        let s_m = self.state.clone();
+                                        let s_p = self.state.clone();
+                                        let id_m = eff_id.clone();
+                                        let id_p = eff_id.clone();
+                                        effect_box = effect_box.child(
+                                            h_flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .text_xs()
+                                                .child(div().text_color(cx.theme().muted_foreground).child("Radius"))
+                                                .child(
+                                                    h_flex()
+                                                        .gap_1()
+                                                        .items_center()
+                                                        .child(step_button("-", cx, move |cx| s_m.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_m, "radius", -5.0); cx.notify(); })))
+                                                        .child(div().id(SharedString::from(format!("param_radius_{}", eff_id))).test_support().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("{:.1} px", r)))
+                                                        .child(step_button("+", cx, move |cx| s_p.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p, "radius", 5.0); cx.notify(); }))),
+                                                ),
+                                        );
+                                    }
+                                    EffectType::BrightnessContrast { brightness, contrast } => {
+                                        let b = brightness.value;
+                                        let c = contrast.value;
+                                        let s_bm = self.state.clone();
+                                        let s_bp = self.state.clone();
+                                        let s_cm = self.state.clone();
+                                        let s_cp = self.state.clone();
+                                        let id_bm = eff_id.clone();
+                                        let id_bp = eff_id.clone();
+                                        let id_cm = eff_id.clone();
+                                        let id_cp = eff_id.clone();
+                                        effect_box = effect_box
+                                            .child(
+                                                h_flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .text_xs()
+                                                    .child(div().text_color(cx.theme().muted_foreground).child("Brightness"))
+                                                    .child(
+                                                        h_flex()
+                                                            .gap_1()
+                                                            .items_center()
+                                                            .child(step_button("-", cx, move |cx| s_bm.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_bm, "brightness", -5.0); cx.notify(); })))
+                                                            .child(div().id(SharedString::from(format!("param_brightness_{}", eff_id))).test_support().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("{:.1}", b)))
+                                                            .child(step_button("+", cx, move |cx| s_bp.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_bp, "brightness", 5.0); cx.notify(); }))),
+                                                    ),
+                                            )
+                                            .child(
+                                                h_flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .text_xs()
+                                                    .child(div().text_color(cx.theme().muted_foreground).child("Contrast"))
+                                                    .child(
+                                                        h_flex()
+                                                            .gap_1()
+                                                            .items_center()
+                                                            .child(step_button("-", cx, move |cx| s_cm.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_cm, "contrast", -5.0); cx.notify(); })))
+                                                            .child(div().id(SharedString::from(format!("param_contrast_{}", eff_id))).test_support().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("{:.1}", c)))
+                                                            .child(step_button("+", cx, move |cx| s_cp.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_cp, "contrast", 5.0); cx.notify(); }))),
+                                                    ),
+                                            );
+                                    }
+                                    EffectType::Tint { amount, .. } => {
+                                        let a = amount.value;
+                                        let s_m = self.state.clone();
+                                        let s_p = self.state.clone();
+                                        let id_m = eff_id.clone();
+                                        let id_p = eff_id.clone();
+                                        effect_box = effect_box.child(
+                                            h_flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .text_xs()
+                                                .child(div().text_color(cx.theme().muted_foreground).child("Amount"))
+                                                .child(
+                                                    h_flex()
+                                                        .gap_1()
+                                                        .items_center()
+                                                        .child(step_button("-", cx, move |cx| s_m.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_m, "amount", -10.0); cx.notify(); })))
+                                                        .child(div().id(SharedString::from(format!("param_amount_{}", eff_id))).test_support().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("{:.0} %", a)))
+                                                        .child(step_button("+", cx, move |cx| s_p.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p, "amount", 10.0); cx.notify(); }))),
+                                                ),
+                                        );
+                                    }
+                                    EffectType::Invert { amount } => {
+                                        let a = amount.value;
+                                        let s_m = self.state.clone();
+                                        let s_p = self.state.clone();
+                                        let id_m = eff_id.clone();
+                                        let id_p = eff_id.clone();
+                                        effect_box = effect_box.child(
+                                            h_flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .text_xs()
+                                                .child(div().text_color(cx.theme().muted_foreground).child("Amount"))
+                                                .child(
+                                                    h_flex()
+                                                        .gap_1()
+                                                        .items_center()
+                                                        .child(step_button("-", cx, move |cx| s_m.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_m, "amount", -10.0); cx.notify(); })))
+                                                        .child(div().id(SharedString::from(format!("param_amount_{}", eff_id))).test_support().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("{:.0} %", a)))
+                                                        .child(step_button("+", cx, move |cx| s_p.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p, "amount", 10.0); cx.notify(); }))),
+                                                ),
+                                        );
+                                    }
+                                    EffectType::DropShadow { distance, softness, opacity, .. } => {
+                                        let d = distance.value;
+                                        let s_val = softness.value;
+                                        let o = opacity.value;
+                                        let s_dm = self.state.clone();
+                                        let s_dp = self.state.clone();
+                                        let s_sm = self.state.clone();
+                                        let s_sp = self.state.clone();
+                                        let s_om = self.state.clone();
+                                        let s_op = self.state.clone();
+                                        let id_dm = eff_id.clone();
+                                        let id_dp = eff_id.clone();
+                                        let id_sm = eff_id.clone();
+                                        let id_sp = eff_id.clone();
+                                        let id_om = eff_id.clone();
+                                        let id_op = eff_id.clone();
+                                        effect_box = effect_box
+                                            .child(
+                                                h_flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .text_xs()
+                                                    .child(div().text_color(cx.theme().muted_foreground).child("Distance"))
+                                                    .child(
+                                                        h_flex()
+                                                            .gap_1()
+                                                            .items_center()
+                                                            .child(step_button("-", cx, move |cx| s_dm.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_dm, "distance", -2.0); cx.notify(); })))
+                                                            .child(div().id(SharedString::from(format!("param_distance_{}", eff_id))).test_support().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("{:.1} px", d)))
+                                                            .child(step_button("+", cx, move |cx| s_dp.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_dp, "distance", 2.0); cx.notify(); }))),
+                                                    ),
+                                            )
+                                            .child(
+                                                h_flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .text_xs()
+                                                    .child(div().text_color(cx.theme().muted_foreground).child("Softness"))
+                                                    .child(
+                                                        h_flex()
+                                                            .gap_1()
+                                                            .items_center()
+                                                            .child(step_button("-", cx, move |cx| s_sm.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_sm, "softness", -2.0); cx.notify(); })))
+                                                            .child(div().id(SharedString::from(format!("param_softness_{}", eff_id))).test_support().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("{:.1} px", s_val)))
+                                                            .child(step_button("+", cx, move |cx| s_sp.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_sp, "softness", 2.0); cx.notify(); }))),
+                                                    ),
+                                            )
+                                            .child(
+                                                h_flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .text_xs()
+                                                    .child(div().text_color(cx.theme().muted_foreground).child("Opacity"))
+                                                    .child(
+                                                        h_flex()
+                                                            .gap_1()
+                                                            .items_center()
+                                                            .child(step_button("-", cx, move |cx| s_om.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_om, "opacity", -10.0); cx.notify(); })))
+                                                            .child(div().id(SharedString::from(format!("param_opacity_{}", eff_id))).test_support().px_2().py_0p5().bg(cx.theme().muted).rounded_sm().child(format!("{:.0} %", o)))
+                                                            .child(step_button("+", cx, move |cx| s_op.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_op, "opacity", 10.0); cx.notify(); }))),
+                                                    ),
+                                            );
+                                    }
+                                }
+
+                                fx_col = fx_col.child(effect_box);
+                            }
+                            fx_col
+                        };
+
                         vec![
                             // Transform Section Header
-                            div()
+                            h_flex()
+                                .gap_1p5()
+                                .items_center()
                                 .font_semibold()
                                 .text_xs()
                                 .text_color(cx.theme().foreground)
-                                .child("▼ Transform"),
+                                .child(icon_box(IconName::Move))
+                                .child("Transform"),
 
                             // Anchor Point (X, Y)
                             h_flex()
@@ -691,9 +1033,12 @@ impl Render for PropertiesPanel {
                                 .justify_between()
                                 .text_xs()
                                 .child(
-                                    div()
+                                    h_flex()
                                         .w(px(70.))
+                                        .gap_1()
+                                        .items_center()
                                         .text_color(cx.theme().muted_foreground)
+                                        .child(icon_box(IconName::Move))
                                         .child("Anchor Pt"),
                                 )
                                 .child(
@@ -724,9 +1069,12 @@ impl Render for PropertiesPanel {
                                 .justify_between()
                                 .text_xs()
                                 .child(
-                                    div()
+                                    h_flex()
                                         .w(px(70.))
+                                        .gap_1()
+                                        .items_center()
                                         .text_color(cx.theme().muted_foreground)
+                                        .child(icon_box(IconName::Move))
                                         .child("Position"),
                                 )
                                 .child(
@@ -757,9 +1105,12 @@ impl Render for PropertiesPanel {
                                 .justify_between()
                                 .text_xs()
                                 .child(
-                                    div()
+                                    h_flex()
                                         .w(px(70.))
+                                        .gap_1()
+                                        .items_center()
                                         .text_color(cx.theme().muted_foreground)
+                                        .child(icon_box(IconName::Maximize2))
                                         .child("Scale"),
                                 )
                                 .child(
@@ -790,9 +1141,12 @@ impl Render for PropertiesPanel {
                                 .justify_between()
                                 .text_xs()
                                 .child(
-                                    div()
+                                    h_flex()
                                         .w(px(70.))
+                                        .gap_1()
+                                        .items_center()
                                         .text_color(cx.theme().muted_foreground)
+                                        .child(icon_box(IconName::RotateCw))
                                         .child("Rotation"),
                                 )
                                 .child(
@@ -817,9 +1171,12 @@ impl Render for PropertiesPanel {
                                 .justify_between()
                                 .text_xs()
                                 .child(
-                                    div()
+                                    h_flex()
                                         .w(px(70.))
+                                        .gap_1()
+                                        .items_center()
                                         .text_color(cx.theme().muted_foreground)
+                                        .child(icon_box(IconName::Sun))
                                         .child("Opacity"),
                                 )
                                 .child(
@@ -839,11 +1196,14 @@ impl Render for PropertiesPanel {
                                 ),
 
                             // Switches & Modes Section Header
-                            div()
+                            h_flex()
+                                .gap_1p5()
+                                .items_center()
                                 .font_semibold()
                                 .text_xs()
                                 .text_color(cx.theme().foreground)
-                                .child("▼ Switches & Modes"),
+                                .child(icon_box(IconName::Eye))
+                                .child("Switches & Modes"),
 
                             // Switch buttons
                             h_flex()
@@ -857,13 +1217,17 @@ impl Render for PropertiesPanel {
                                         .text_color(cx.theme().foreground)
                                         .rounded_sm()
                                         .cursor_pointer()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
                                         .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                                             s_vis.update(cx, |s, cx| {
                                                 s.toggle_selected_layer_visibility();
                                                 cx.notify();
                                             });
                                         })
-                                        .child(if layer.visible { "[✓] Visible" } else { "[ ] Hidden" }),
+                                        .child(icon_box(if layer.visible { IconName::Eye } else { IconName::EyeOff }))
+                                        .child(if layer.visible { "Visible" } else { "Hidden" }),
                                 )
                                 .child(
                                     div()
@@ -873,14 +1237,31 @@ impl Render for PropertiesPanel {
                                         .text_color(if layer.is_solo() { cx.theme().accent_foreground } else { cx.theme().foreground })
                                         .rounded_sm()
                                         .cursor_pointer()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
                                         .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                                             s_solo.update(cx, |s, cx| {
                                                 s.toggle_selected_layer_solo();
                                                 cx.notify();
                                             });
                                         })
-                                        .child(if layer.is_solo() { "[✓] Solo" } else { "[ ] Solo" }),
+                                        .child(icon_box(IconName::Sparkles))
+                                        .child("Solo"),
                                 ),
+
+                            // Effects Section Header
+                            h_flex()
+                                .gap_1p5()
+                                .items_center()
+                                .font_semibold()
+                                .text_xs()
+                                .text_color(cx.theme().foreground)
+                                .child(icon_box(IconName::SlidersHorizontal))
+                                .child(format!("Effects ({})", layer.effects.len())),
+
+                            // Applied Effects List
+                            div().child(effects_list),
                         ]
                     } else {
                         vec![
@@ -916,12 +1297,27 @@ impl Panel for PropertiesPanel {
 
 pub struct EffectsPanel {
     focus_handle: FocusHandle,
+    state: Option<Entity<EditorState>>,
+    _subscription: Option<Subscription>,
 }
 
 impl EffectsPanel {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
+            state: None,
+            _subscription: None,
+        }
+    }
+
+    pub fn new_with_state(state: Entity<EditorState>, cx: &mut Context<Self>) -> Self {
+        let _subscription = cx.observe(&state, |_this, _state, cx| {
+            cx.notify();
+        });
+        Self {
+            focus_handle: cx.focus_handle(),
+            state: Some(state),
+            _subscription: Some(_subscription),
         }
     }
 
@@ -936,6 +1332,66 @@ impl Focusable for EffectsPanel {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
+}
+
+fn effect_item_row(
+    id_str: &'static str,
+    title: &'static str,
+    effect_type: EffectType,
+    state: &Option<Entity<EditorState>>,
+    cx: &App,
+) -> impl IntoElement {
+    let mut row = h_flex()
+        .id(SharedString::from(format!("effect_item_{id_str}")))
+        .test_support()
+        .px_3()
+        .py_1()
+        .rounded_sm()
+        .items_center()
+        .justify_between()
+        .cursor_pointer()
+        .hover(|s| s.bg(cx.theme().muted));
+
+    if let Some(state) = state {
+        let state = state.clone();
+        let et = effect_type.clone();
+        row = row.on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+            state.update(cx, |s, cx| {
+                let _ = s.add_effect_to_selected_layer(et.clone());
+                cx.notify();
+            });
+        });
+    }
+
+    row.child(
+        h_flex()
+            .gap_1p5()
+            .items_center()
+            .child(icon_box(IconName::Sparkles))
+            .child(div().text_xs().text_color(cx.theme().foreground).child(title)),
+    )
+    .child(
+        h_flex()
+            .gap_1()
+            .items_center()
+            .text_xs()
+            .text_color(cx.theme().primary)
+            .child(icon_box(IconName::Plus))
+            .child("Add"),
+    )
+}
+
+fn category_header(title: &'static str, icon: IconName, cx: &App) -> Div {
+    h_flex()
+        .px_2()
+        .py_1()
+        .gap_1p5()
+        .items_center()
+        .font_semibold()
+        .text_xs()
+        .text_color(cx.theme().foreground)
+        .child(icon_box(icon))
+        .child(title)
 }
 
 impl Render for EffectsPanel {
@@ -966,6 +1422,9 @@ impl Render for EffectsPanel {
                             .bg(cx.theme().muted)
                             .text_color(cx.theme().muted_foreground)
                             .text_xs()
+                            .gap_1p5()
+                            .items_center()
+                            .child(icon_box(IconName::FolderOpen))
                             .child("Search Effects & Presets..."),
                     ),
             )
@@ -979,199 +1438,29 @@ impl Render for EffectsPanel {
                     .p_2()
                     .gap_1()
                     // Category 1: Blur & Sharpen
-                    .child(
-                        div()
-                            .px_2()
-                            .py_1()
-                            .font_semibold()
-                            .text_xs()
-                            .text_color(cx.theme().foreground)
-                            .child("▼ Blur & Sharpen (4)"),
-                    )
-                    .child(
-                        div()
-                            .px_4()
-                            .py_0p5()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("• Gaussian Blur"),
-                    )
-                    .child(
-                        div()
-                            .px_4()
-                            .py_0p5()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("• Fast Box Blur"),
-                    )
-                    .child(
-                        div()
-                            .px_4()
-                            .py_0p5()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("• Directional Blur"),
-                    )
-                    .child(
-                        div()
-                            .px_4()
-                            .py_0p5()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("• Sharpen"),
-                    )
+                    .child(category_header("▼ Blur & Sharpen", IconName::SlidersHorizontal, cx))
+                    .child(effect_item_row("gaussian_blur", "Gaussian Blur", EffectType::gaussian_blur(10.0), &self.state, cx))
+                    .child(effect_item_row("fast_box_blur", "Fast Box Blur", EffectType::gaussian_blur(5.0), &self.state, cx))
+                    .child(effect_item_row("directional_blur", "Directional Blur", EffectType::gaussian_blur(15.0), &self.state, cx))
+                    .child(effect_item_row("sharpen", "Sharpen", EffectType::brightness_contrast(0.0, 25.0), &self.state, cx))
                     // Category 2: Color Correction
-                    .child(
-                        div()
-                            .px_2()
-                            .py_1()
-                            .font_semibold()
-                            .text_xs()
-                            .text_color(cx.theme().foreground)
-                            .child("▼ Color Correction (5)"),
-                    )
-                    .child(
-                        div()
-                            .px_4()
-                            .py_0p5()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("• Curves"),
-                    )
-                    .child(
-                        div()
-                            .px_4()
-                            .py_0p5()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("• Levels"),
-                    )
-                    .child(
-                        div()
-                            .px_4()
-                            .py_0p5()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("• Color Balance (HLS)"),
-                    )
-                    .child(
-                        div()
-                            .px_4()
-                            .py_0p5()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("• Hue / Saturation"),
-                    )
-                    .child(
-                        div()
-                            .px_4()
-                            .py_0p5()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("• Lumetri Color"),
-                    )
-                    // Category 3: Distort
-                    .child(
-                        div()
-                            .px_2()
-                            .py_1()
-                            .font_semibold()
-                            .text_xs()
-                            .text_color(cx.theme().foreground)
-                            .child("▼ Distort (3)"),
-                    )
-                    .child(
-                        div()
-                            .px_4()
-                            .py_0p5()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("• Transform"),
-                    )
-                    .child(
-                        div()
-                            .px_4()
-                            .py_0p5()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("• Ripple"),
-                    )
-                    .child(
-                        div()
-                            .px_4()
-                            .py_0p5()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("• Displacement Map"),
-                    )
-                    // Category 4: Generate
-                    .child(
-                        div()
-                            .px_2()
-                            .py_1()
-                            .font_semibold()
-                            .text_xs()
-                            .text_color(cx.theme().foreground)
-                            .child("▼ Generate (3)"),
-                    )
-                    .child(
-                        div()
-                            .px_4()
-                            .py_0p5()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("• Gradient Ramp"),
-                    )
-                    .child(
-                        div()
-                            .px_4()
-                            .py_0p5()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("• Fill"),
-                    )
-                    .child(
-                        div()
-                            .px_4()
-                            .py_0p5()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("• Stroke"),
-                    )
+                    .child(category_header("▼ Color Correction", IconName::Sun, cx))
+                    .child(effect_item_row("brightness_contrast", "Brightness & Contrast", EffectType::brightness_contrast(15.0, 10.0), &self.state, cx))
+                    .child(effect_item_row("tint", "Tint", EffectType::tint(Color::BLACK, Color::WHITE, 100.0), &self.state, cx))
+                    .child(effect_item_row("invert", "Invert", EffectType::invert(100.0), &self.state, cx))
+                    .child(effect_item_row("color_balance", "Color Balance (HLS)", EffectType::tint(Color::rgb(0.1, 0.0, 0.0), Color::rgb(1.0, 0.9, 0.8), 50.0), &self.state, cx))
+                    .child(effect_item_row("lumetri_color", "Lumetri Color", EffectType::brightness_contrast(5.0, 15.0), &self.state, cx))
+                    // Category 3: Distort & Perspective
+                    .child(category_header("▼ Distort & Perspective", IconName::WandSparkles, cx))
+                    .child(effect_item_row("drop_shadow", "Drop Shadow", EffectType::drop_shadow(8.0, 45.0, 10.0, 75.0, Color::BLACK), &self.state, cx))
+                    .child(effect_item_row("transform", "Transform", EffectType::drop_shadow(0.0, 0.0, 0.0, 100.0, Color::BLACK), &self.state, cx))
+                    // Category 4: Generate & Stylize
+                    .child(category_header("▼ Generate & Stylize", IconName::Layers, cx))
+                    .child(effect_item_row("fill", "Fill", EffectType::tint(Color::rgb(0.2, 0.4, 0.8), Color::rgb(0.2, 0.4, 0.8), 100.0), &self.state, cx))
+                    .child(effect_item_row("gradient_ramp", "Gradient Ramp", EffectType::tint(Color::BLACK, Color::rgb(0.9, 0.3, 0.1), 75.0), &self.state, cx))
                     // Category 5: Transition
-                    .child(
-                        div()
-                            .px_2()
-                            .py_1()
-                            .font_semibold()
-                            .text_xs()
-                            .text_color(cx.theme().foreground)
-                            .child("▼ Transition (3)"),
-                    )
-                    .child(
-                        div()
-                            .px_4()
-                            .py_0p5()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("• Linear Wipe"),
-                    )
-                    .child(
-                        div()
-                            .px_4()
-                            .py_0p5()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("• Radial Wipe"),
-                    )
-                    .child(
-                        div()
-                            .px_4()
-                            .py_0p5()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("• Block Dissolve"),
-                    ),
+                    .child(category_header("▼ Transition", IconName::RotateCw, cx))
+                    .child(effect_item_row("linear_wipe", "Linear Wipe", EffectType::invert(50.0), &self.state, cx)),
             )
             // Footer
             .child(
@@ -1182,7 +1471,10 @@ impl Render for EffectsPanel {
                     .border_color(cx.theme().border)
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child("18 built-in effects available"),
+                    .gap_1p5()
+                    .items_center()
+                    .child(icon_box(IconName::Sparkles))
+                    .child("13 real built-in effects available • Click to apply"),
             )
     }
 }
@@ -1318,7 +1610,11 @@ impl Render for TimelinePanel {
                                                 cx.notify();
                                             });
                                         })
-                                        .child(if layer.visible { "[V]" } else { "[ ]" }),
+                                        .child(icon_box(if layer.visible {
+                                            IconName::Eye
+                                        } else {
+                                            IconName::EyeOff
+                                        })),
                                 )
                                 .child(
                                     div()
@@ -1334,7 +1630,7 @@ impl Render for TimelinePanel {
                                                 cx.notify();
                                             });
                                         })
-                                        .child(if layer.is_solo() { "[S]" } else { "[•]" }),
+                                        .child(icon_box(IconName::Sparkles)),
                                 )
                                 .child(div().font_semibold().child(layer.name.clone())),
                         )
@@ -1483,7 +1779,7 @@ impl Render for TimelinePanel {
                                             cx.notify();
                                         });
                                     })
-                                    .child("|<"),
+                                    .child(icon_box(IconName::SkipBack)),
                             )
                             .child(
                                 div()
@@ -1502,7 +1798,7 @@ impl Render for TimelinePanel {
                                             cx.notify();
                                         });
                                     })
-                                    .child("<"),
+                                    .child(icon_box(IconName::StepBack)),
                             )
                             .child(
                                 div()
@@ -1523,7 +1819,17 @@ impl Render for TimelinePanel {
                                             cx.notify();
                                         });
                                     })
-                                    .child(if is_playing { "⏸ Pause" } else { "▶ Play" }),
+                                    .child(
+                                        h_flex()
+                                            .gap_1()
+                                            .items_center()
+                                            .child(icon_box(if is_playing {
+                                                IconName::Pause
+                                            } else {
+                                                IconName::Play
+                                            }))
+                                            .child(if is_playing { "Pause" } else { "Play" }),
+                                    ),
                             )
                             .child(
                                 div()
@@ -1542,7 +1848,7 @@ impl Render for TimelinePanel {
                                             cx.notify();
                                         });
                                     })
-                                    .child(">"),
+                                    .child(icon_box(IconName::StepForward)),
                             )
                             .child(
                                 div()
@@ -1561,16 +1867,19 @@ impl Render for TimelinePanel {
                                             cx.notify();
                                         });
                                     })
-                                    .child(">|"),
+                                    .child(icon_box(IconName::SkipForward)),
                             )
                             .child(
-                                div()
+                                h_flex()
                                     .px_2()
                                     .py_0p5()
                                     .rounded_sm()
                                     .bg(cx.theme().secondary)
                                     .text_xs()
-                                    .child("Loop: On"),
+                                    .gap_1()
+                                    .items_center()
+                                    .child(icon_box(IconName::Repeat))
+                                    .child("Loop"),
                             ),
                     )
                     // Duration & In/Out
@@ -1678,7 +1987,7 @@ impl AppPanels {
             composition: composition.clone(),
             viewer: composition,
             properties: cx.new(|cx| PropertiesPanel::new(state.clone(), cx)),
-            effects: cx.new(EffectsPanel::new),
+            effects: cx.new(|cx| EffectsPanel::new_with_state(state.clone(), cx)),
             timeline: cx.new(|cx| TimelinePanel::new(state, cx)),
         }
     }

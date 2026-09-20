@@ -1,6 +1,7 @@
 use crate::blend_mode::BlendMode;
 use crate::clock::LoopMode;
 use crate::color::Color;
+use crate::effect::Effect;
 use crate::error::ValidationError;
 use crate::marker::Marker;
 use crate::matte::TrackMatteMode;
@@ -116,6 +117,8 @@ pub struct Layer {
     pub time_remapping: Option<Property<f64>>,
     #[serde(default)]
     pub loop_mode: LoopMode,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<Effect>,
 }
 
 impl Layer {
@@ -147,6 +150,7 @@ impl Layer {
             time_stretch: 1.0,
             time_remapping: None,
             loop_mode: LoopMode::default(),
+            effects: Vec::new(),
         }
     }
 
@@ -190,6 +194,24 @@ impl Layer {
             in_point,
             out_point,
         )
+    }
+
+    /// Factory for creating an Image layer referencing an asset with known resolution.
+    pub fn image_with_dimensions(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        asset_id: impl Into<String>,
+        width: u32,
+        height: u32,
+        in_point: TimeCode,
+        out_point: TimeCode,
+    ) -> Self {
+        let mut layer = Self::image(id, name, asset_id, in_point, out_point);
+        layer.transform.anchor_point.set_value(crate::vec2::Vec2::new(
+            (width / 2) as f32,
+            (height / 2) as f32,
+        ));
+        layer
     }
 
     /// Factory for creating a Video layer referencing an asset.
@@ -468,6 +490,34 @@ impl Layer {
     /// Check if the layer is a procedural generator layer.
     pub fn is_procedural(&self) -> bool {
         matches!(self.source, LayerSource::Procedural { .. })
+    }
+
+    /// Add an effect to this layer's post-processing stack and return its ID.
+    pub fn add_effect(&mut self, effect: Effect) -> String {
+        let id = effect.id.clone();
+        self.effects.push(effect);
+        id
+    }
+
+    /// Remove an effect from this layer by its unique ID.
+    pub fn remove_effect(&mut self, effect_id: &str) -> Option<Effect> {
+        let pos = self.effects.iter().position(|e| e.id == effect_id)?;
+        Some(self.effects.remove(pos))
+    }
+
+    /// Retrieve an immutable reference to an effect on this layer.
+    pub fn get_effect(&self, effect_id: &str) -> Option<&Effect> {
+        self.effects.iter().find(|e| e.id == effect_id)
+    }
+
+    /// Retrieve a mutable reference to an effect on this layer.
+    pub fn get_effect_mut(&mut self, effect_id: &str) -> Option<&mut Effect> {
+        self.effects.iter_mut().find(|e| e.id == effect_id)
+    }
+
+    /// Check if this layer has any effects.
+    pub fn has_effects(&self) -> bool {
+        !self.effects.is_empty()
     }
 
     /// Validate the internal integrity of this layer.

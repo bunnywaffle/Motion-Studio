@@ -4,6 +4,7 @@ members = [
     "crates/application",
     "crates/project",
     "crates/compositor",
+    "crates/renderer",
 ]
 exclude = [
     "flux-files-gpui",
@@ -20,6 +21,13 @@ license = "MIT OR Apache-2.0"
 gpui-kit = "0.6.1"
 project = { path = "crates/project" }
 compositor = { path = "crates/compositor" }
+renderer = { path = "crates/renderer" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+rfd = "0.15"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+wgpu = "24.0"
+pollster = "0.4"
+bytemuck = { version = "1.21", features = ["derive"] }
+thiserror = "2.0"
 

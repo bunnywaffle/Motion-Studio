@@ -6,8 +6,8 @@ pub mod transform;
 
 pub use error::SceneGraphError;
 pub use evaluation::{
-    resolve_nested_time, EvaluatedLayer, EvaluatedStack, FlattenedRenderLayer, LayerStackEvaluator,
-    NestedCompositionEvaluation, RenderPassDescriptor,
+    resolve_nested_time, EvaluatedEffect, EvaluatedEffectType, EvaluatedLayer, EvaluatedStack,
+    FlattenedRenderLayer, LayerStackEvaluator, NestedCompositionEvaluation, RenderPassDescriptor,
 };
 pub use graph::SceneGraph;
 pub use node::SceneNode;
@@ -2417,6 +2417,82 @@ mod tests {
         let node_remap = SceneNode::from_layer(&layer_remap, 0);
         let t_remap = resolve_nested_time(&node_remap, &tc0, &comp);
         assert_eq!(t_remap.frames(), 0);
+    }
+
+    #[test]
+    fn test_layer_effects_evaluation_over_time() {
+        use project::{Effect, EffectType, Keyframe};
+
+        let tc0 = TimeCode::from_frames(0, 30.0);
+        let tc100 = TimeCode::from_frames(100, 30.0);
+        let mut comp = Composition::hd_1080p_30fps("comp_fx", "Effects Comp", 5.0);
+
+        let mut layer = Layer::solid("layer_fx", "Solid", Color::RED, 1920, 1080, tc0, tc100);
+
+        // Animated Gaussian Blur: radius 0.0 at frame 0 -> 50.0 at frame 50
+        let mut blur_effect = Effect::gaussian_blur("fx_blur_anim", 0.0);
+        if let EffectType::GaussianBlur { ref mut radius } = blur_effect.effect_type {
+            radius.add_keyframe(Keyframe::linear(TimeCode::from_frames(0, 30.0), 0.0));
+            radius.add_keyframe(Keyframe::linear(TimeCode::from_frames(50, 30.0), 50.0));
+        }
+        layer.add_effect(blur_effect);
+
+        // Invert effect (initially disabled)
+        let mut invert_effect = Effect::invert("fx_inv", 100.0);
+        invert_effect.enabled = false;
+        layer.add_effect(invert_effect);
+
+        comp.add_layer(layer).unwrap();
+
+        let graph = SceneGraph::from_composition(&comp).unwrap();
+        let evaluator = LayerStackEvaluator::new();
+
+        // 1. Evaluate at frame 0
+        let eval0 = evaluator.evaluate(&graph, &TimeCode::from_frames(0, 30.0));
+        let l0 = eval0.get_layer("layer_fx").expect("layer at frame 0");
+        // Disabled effect should not be included in evaluated effects
+        assert_eq!(l0.effects.len(), 1);
+        assert_eq!(l0.effects[0].id, "fx_blur_anim");
+        match &l0.effects[0].effect_type {
+            EvaluatedEffectType::GaussianBlur { radius } => {
+                assert_eq!(*radius, 0.0);
+            }
+            _ => panic!("Expected GaussianBlur"),
+        }
+
+        // 2. Evaluate at frame 25 (halfway)
+        let eval25 = evaluator.evaluate(&graph, &TimeCode::from_frames(25, 30.0));
+        let l25 = eval25.get_layer("layer_fx").unwrap();
+        match &l25.effects[0].effect_type {
+            EvaluatedEffectType::GaussianBlur { radius } => {
+                assert!((*radius - 25.0).abs() < 1e-3);
+            }
+            _ => panic!("Expected GaussianBlur"),
+        }
+
+        // 3. Evaluate at frame 50 (end of keyframes)
+        let eval50 = evaluator.evaluate(&graph, &TimeCode::from_frames(50, 30.0));
+        let l50 = eval50.get_layer("layer_fx").unwrap();
+        match &l50.effects[0].effect_type {
+            EvaluatedEffectType::GaussianBlur { radius } => {
+                assert_eq!(*radius, 50.0);
+            }
+            _ => panic!("Expected GaussianBlur"),
+        }
+
+        // 4. Enable invert and verify both effects are evaluated
+        comp.get_layer_mut("layer_fx").unwrap().get_effect_mut("fx_inv").unwrap().enabled = true;
+        let graph2 = SceneGraph::from_composition(&comp).unwrap();
+        let eval_enabled = evaluator.evaluate(&graph2, &TimeCode::from_frames(50, 30.0));
+        let l_both = eval_enabled.get_layer("layer_fx").unwrap();
+        assert_eq!(l_both.effects.len(), 2);
+        assert_eq!(l_both.effects[1].id, "fx_inv");
+        match &l_both.effects[1].effect_type {
+            EvaluatedEffectType::Invert { amount } => {
+                assert_eq!(*amount, 100.0);
+            }
+            _ => panic!("Expected Invert"),
+        }
     }
 }
 

@@ -1191,5 +1191,91 @@ mod tests {
         })
         .expect("update_window failed");
     }
+
+    #[test]
+    fn test_media_import_and_layer_creation() {
+        use crate::state::EditorState;
+        use project::LayerSource;
+
+        let temp_dir = std::env::temp_dir();
+        let test_img_path = temp_dir.join("motion_studio_test_import.png");
+        let img = image::RgbaImage::new(320, 240);
+        img.save(&test_img_path).expect("failed to create test image");
+
+        let mut state = EditorState::new();
+        let layer_id = state
+            .import_media_file(test_img_path.clone())
+            .expect("import_media_file failed");
+
+        // Verify layer selection
+        assert_eq!(state.selected_layer_id.as_deref(), Some(layer_id.as_str()));
+
+        // Verify asset registered
+        assert!(state.project.assets.iter().any(|a| a.path == test_img_path));
+
+        // Verify layer properties in active composition
+        let comp = state.active_composition().expect("active comp");
+        let layer = comp.get_layer(&layer_id).expect("media layer found");
+
+        match &layer.source {
+            LayerSource::Image { asset_id } => {
+                assert!(!asset_id.is_empty());
+            }
+            other => panic!("Expected Image layer source, got {other:?}"),
+        }
+
+        // Layer should be centered in 1920x1080 composition
+        assert_eq!(layer.transform.position.value.x, 960.0);
+        assert_eq!(layer.transform.position.value.y, 540.0);
+        // Anchor point centered on image dimensions 320x240
+        assert_eq!(layer.transform.anchor_point.value.x, 160.0);
+        assert_eq!(layer.transform.anchor_point.value.y, 120.0);
+
+        let _ = std::fs::remove_file(test_img_path);
+    }
+
+    #[test]
+    fn test_effects_crud_and_parameter_nudging() {
+        use crate::state::EditorState;
+        use project::EffectType;
+
+        let mut state = EditorState::new();
+        let fx1_id = state
+            .add_effect_to_selected_layer(EffectType::gaussian_blur(15.0))
+            .expect("added gaussian blur");
+
+        let fx2_id = state
+            .add_effect_to_selected_layer(EffectType::brightness_contrast(10.0, -5.0))
+            .expect("added brightness & contrast");
+
+        let layer = state.selected_layer().expect("layer selected");
+        assert_eq!(layer.effects.len(), 2);
+        assert_eq!(layer.effects[0].id, fx1_id);
+        assert_eq!(layer.effects[1].id, fx2_id);
+
+        // Nudge radius
+        state
+            .nudge_effect_param(&fx1_id, "radius", 5.0)
+            .expect("nudged radius");
+        let layer = state.selected_layer().expect("layer selected");
+        if let EffectType::GaussianBlur { radius } = &layer.effects[0].effect_type {
+            assert_eq!(radius.value, 20.0);
+        } else {
+            panic!("Expected GaussianBlur");
+        }
+
+        // Toggle enabled
+        state.toggle_effect_enabled(&fx1_id).expect("toggled enabled");
+        let layer = state.selected_layer().expect("layer selected");
+        assert!(!layer.effects[0].enabled);
+
+        // Remove effect
+        state
+            .remove_effect_from_selected_layer(&fx1_id)
+            .expect("removed effect");
+        let layer = state.selected_layer().expect("layer selected");
+        assert_eq!(layer.effects.len(), 1);
+        assert_eq!(layer.effects[0].id, fx2_id);
+    }
 }
 

@@ -114,21 +114,37 @@
   - Application shell & input in `crates/application/src/main.rs`:
     - Spacebar keybinding and `TogglePlayback` action for play/pause control.
     - 60Hz asynchronous background playback loop advancing `PlaybackClock` with delta time and notifying GPUI observers.
-- Full automated test suite passing with **126 tests** across the workspace (22 application tests + 50 project unit tests + 46 compositor unit tests + 8 compositor integration tests).
+- Hardware-Accelerated Rendering Architecture initiated in `crates/renderer` (Phase 2 Task 2.1):
+  - `GpuContext`: Headless wgpu 24 initialization with automatic hardware adapter selection and software adapter fallback, downlevel capabilities configuration, and device/queue accessors.
+  - `RenderTarget`: Standard `Rgba8Unorm` texture allocation (`RENDER_ATTACHMENT | COPY_SRC | TEXTURE_BINDING`), color `TextureView`, and CPU texture readback (`read_texture_to_cpu`) handling wgpu 256-byte alignment (`COPY_BYTES_PER_ROW_ALIGNMENT`).
+- Real Lucide Vector Icons Integration across GPUI panels (`gpui_kit::assets::IconName`):
+  - Timeline transport: `SkipBack`, `StepBack`, `Play`/`Pause`, `StepForward`, `SkipForward`, `Repeat`.
+  - Layer switches: `Eye`/`EyeOff` for visibility, `Sparkles` for solo.
+  - Project panel: `Folder`, `Layers`, `Image`, `Film`, `Type`, `Sparkles`, `FolderOpen`, `Plus`.
+  - Properties inspector: `Layers`, `Move`, `Maximize2`, `RotateCw`, `Sun`, `SlidersHorizontal`, `Eye`, `Trash`.
+  - Effects panel: `SlidersHorizontal`, `Sun`, `WandSparkles`, `Layers`, `RotateCw`, `Plus`, `Sparkles`.
+- Media Import Pipeline:
+  - Cross-platform file picker (`rfd`) in `ProjectPanel` toolbar.
+  - `EditorState::import_media_file`: Automatic dimension decoding via `image`, asset registration in `project.assets`, centered layer instantiation in active composition, and automatic selection.
+- Real Layer Effects Architecture:
+  - `crates/project/src/effect.rs`: `Effect`, `EffectType` (`GaussianBlur`, `BrightnessContrast`, `Tint`, `Invert`, `DropShadow`), attached to `Layer.effects`.
+  - `crates/compositor/src/evaluation.rs`: `EvaluatedEffect` evaluated per-layer at current `TimeCode`.
+  - `crates/application/src/panels.rs`: 13 real built-in clickable effects in `EffectsPanel`, and interactive **"▼ Effects"** inspector in `PropertiesPanel` with eye toggle, delete, and `-`/`+` numeric parameter nudging.
+- Full automated test suite passing with **132 tests** across the workspace (24 application tests + 51 project unit tests + 47 compositor unit tests + 8 compositor integration tests + 2 renderer unit tests).
 - Workspace compiles, builds, and passes all checks cleanly with 0 errors and 0 warnings (`cargo check --workspace`, `cargo build --workspace`, `cargo test --workspace`, and `cargo clippy --workspace --all-targets -- -D warnings`).
 
 ## What Is Currently Being Developed
-- Phase 2: Hardware-Accelerated Rendering Architecture (wgpu GPU context, render pipelines, shaders).
+- Phase 2: Hardware-Accelerated Rendering Architecture (pipelines, shaders, layer blit).
 
 ## Known Problems
 - None.
 
 ## Next Single Task
 
-### Task 2.1: Initialize wgpu context and render device
+### Task 2.2: Create offscreen render target and readback
 
-- Configure and initialize `wgpu` graphics backend (Instance, Adapter, Device, Queue).
-- Establish headless and offscreen rendering targets and surface capabilities.
-- Prepare device and queue abstractions for pipeline caching and texture upload.
+- Expand render target abstraction with multi-buffer pipelining and color format conversions.
+- Create vertex/fragment shader pipelines for compositing layers onto render targets.
+- Implement texture cache for uploaded assets and cached pre-comps.
 
 

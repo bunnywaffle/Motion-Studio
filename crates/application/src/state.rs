@@ -1,7 +1,9 @@
 use compositor::{EvaluatedStack, LayerStackEvaluator, SceneGraph};
 use project::{
-    Color, Composition, Keyframe, KeyframeTangent, Layer, PlaybackClock, Project, TimeCode, Vec2,
+    Asset, Color, Composition, Effect, EffectType, Keyframe, KeyframeTangent, Layer, PlaybackClock,
+    Project, TimeCode, Vec2,
 };
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// Central application editor state managing the active project, playback clock,
@@ -262,6 +264,182 @@ impl EditorState {
 
         self.selected_layer_id = Some(id.clone());
         Ok(id)
+    }
+
+    /// Import a media file from disk (image or video), register it in project assets,
+    /// and add a new centered layer to the active composition.
+    pub fn import_media_file(&mut self, path: PathBuf) -> Result<String, String> {
+        let (comp_w, comp_h, frame_rate, duration) = {
+            let comp = self
+                .active_composition()
+                .ok_or_else(|| "No active composition".to_string())?;
+            (comp.width, comp.height, comp.frame_rate, comp.duration)
+        };
+
+        // Determine dimensions: if image, use image::image_dimensions; otherwise default 1920x1080
+        let (width, height) = match image::image_dimensions(&path) {
+            Ok((w, h)) => (w, h),
+            Err(_) => (1920, 1080),
+        };
+
+        let file_stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Media")
+            .to_string();
+
+        let asset_id = {
+            let mut counter = self.project.assets.len() + 1;
+            let mut id = format!("asset_media_{counter}");
+            while self.project.assets.iter().any(|a| a.id == id) {
+                counter += 1;
+                id = format!("asset_media_{counter}");
+            }
+            id
+        };
+
+        let asset = Asset::from_path(&asset_id, &file_stem, &path);
+        let is_image = asset.is_image();
+        self.project.assets.push(asset);
+
+        let layer_id = {
+            let comp = self
+                .active_composition()
+                .ok_or_else(|| "No active composition".to_string())?;
+            let mut counter = comp.layers.len() + 1;
+            let mut id = format!("layer_media_{counter}");
+            while comp.get_layer(&id).is_some() {
+                counter += 1;
+                id = format!("layer_media_{counter}");
+            }
+            id
+        };
+
+        let in_pt = TimeCode::zero(frame_rate);
+        let out_pt = duration;
+
+        let mut layer = if is_image {
+            Layer::image_with_dimensions(&layer_id, &file_stem, &asset_id, width, height, in_pt, out_pt)
+        } else {
+            Layer::video(&layer_id, &file_stem, &asset_id, in_pt, in_pt, out_pt)
+        };
+
+        layer.transform.position.set_value(Vec2::new(
+            (comp_w / 2) as f32,
+            (comp_h / 2) as f32,
+        ));
+        layer.transform.anchor_point.set_value(Vec2::new(
+            (width / 2) as f32,
+            (height / 2) as f32,
+        ));
+
+        let comp_mut = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        comp_mut
+            .add_layer(layer)
+            .map_err(|e| format!("Failed to add media layer: {e:?}"))?;
+
+        self.selected_layer_id = Some(layer_id.clone());
+        Ok(layer_id)
+    }
+
+    /// Add an effect of `effect_type` to the currently selected layer.
+    pub fn add_effect_to_selected_layer(
+        &mut self,
+        effect_type: EffectType,
+    ) -> Result<String, String> {
+        let type_name = effect_type.type_name();
+        let selected_id = self
+            .selected_layer_id
+            .clone()
+            .ok_or_else(|| "No layer selected".to_string())?;
+
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(&selected_id)
+            .ok_or_else(|| format!("Layer {selected_id} not found"))?;
+
+        let slug = type_name.to_lowercase().replace([' ', '&'], "_");
+        let fx_id = format!("fx_{slug}_{}", layer.effects.len() + 1);
+
+        let effect = Effect::new(&fx_id, type_name, effect_type);
+        let id = layer.add_effect(effect);
+        Ok(id)
+    }
+
+    /// Remove an effect by ID from the currently selected layer.
+    pub fn remove_effect_from_selected_layer(&mut self, effect_id: &str) -> Result<(), String> {
+        let selected_id = self
+            .selected_layer_id
+            .clone()
+            .ok_or_else(|| "No layer selected".to_string())?;
+
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(&selected_id)
+            .ok_or_else(|| format!("Layer {selected_id} not found"))?;
+
+        layer
+            .remove_effect(effect_id)
+            .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
+        Ok(())
+    }
+
+    /// Toggle enabled state of an effect on the currently selected layer.
+    pub fn toggle_effect_enabled(&mut self, effect_id: &str) -> Result<(), String> {
+        let selected_id = self
+            .selected_layer_id
+            .clone()
+            .ok_or_else(|| "No layer selected".to_string())?;
+
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(&selected_id)
+            .ok_or_else(|| format!("Layer {selected_id} not found"))?;
+
+        let effect = layer
+            .get_effect_mut(effect_id)
+            .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
+        effect.toggle_enabled();
+        Ok(())
+    }
+
+    /// Nudge an effect parameter on the currently selected layer.
+    pub fn nudge_effect_param(
+        &mut self,
+        effect_id: &str,
+        param_name: &str,
+        delta: f32,
+    ) -> Result<(), String> {
+        let selected_id = self
+            .selected_layer_id
+            .clone()
+            .ok_or_else(|| "No layer selected".to_string())?;
+
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(&selected_id)
+            .ok_or_else(|| format!("Layer {selected_id} not found"))?;
+
+        let effect = layer
+            .get_effect_mut(effect_id)
+            .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
+        if effect.nudge_param(param_name, delta) {
+            Ok(())
+        } else {
+            Err(format!(
+                "Parameter {param_name} not found on effect {effect_id}"
+            ))
+        }
     }
 
     /// Nudge position of the selected layer by `(dx, dy)`.

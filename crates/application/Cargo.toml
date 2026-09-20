@@ -8,7 +8,9 @@ license.workspace = true
 gpui-kit.workspace = true
 project.workspace = true
 compositor.workspace = true
+renderer.workspace = true
+rfd.workspace = true
+image.workspace = true
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
-
