@@ -88,7 +88,9 @@ impl Composition {
 
     // --- Layer Stack Management ---
 
-    /// Append a layer to the top of the layer stack.
+    /// Append a layer to the end of the layer stack (the bottom, behind all
+    /// other layers). Index 0 is the topmost layer (After Effects convention);
+    /// use [`Self::insert_layer`] with index 0 to place a new layer on top.
     pub fn add_layer(&mut self, layer: Layer) -> Result<(), ValidationError> {
         if self.layers.iter().any(|l| l.id == layer.id) {
             return Err(ValidationError::DuplicateLayerId(layer.id));

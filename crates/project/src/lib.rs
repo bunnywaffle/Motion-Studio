@@ -564,6 +564,29 @@ mod tests {
     }
 
     #[test]
+    fn test_blend_modes_composite_source_over_with_alpha() {
+        let backdrop = Color::rgb(0.2, 0.4, 0.8);
+        let source = Color::rgba(0.8, 0.5, 0.25, 1.0);
+
+        let normal = BlendMode::Normal.composite(backdrop, source);
+        assert_eq!(normal, source, "opaque normal source replaces backdrop");
+
+        let multiply = BlendMode::Multiply.composite(backdrop, source);
+        assert!((multiply.r - 0.16).abs() < 1e-5);
+        assert!((multiply.g - 0.20).abs() < 1e-5);
+        assert!((multiply.b - 0.20).abs() < 1e-5);
+
+        let half_source = Color::rgba(1.0, 0.0, 0.0, 0.5);
+        let result = BlendMode::Normal.composite(Color::BLACK, half_source);
+        assert!((result.r - 0.5).abs() < 1e-5);
+        assert!((result.a - 1.0).abs() < 1e-5);
+
+        let hue = BlendMode::Hue.composite(backdrop, source);
+        assert_eq!(hue.a, 1.0);
+        assert_ne!(hue, backdrop);
+    }
+
+    #[test]
     fn test_negative_timecode_and_robustness() {
         // Formatting negative timecode
         let neg_tc = TimeCode::from_frames(-30, 30.0);
@@ -2152,4 +2175,3 @@ mod tests {
         assert_eq!(deserialized_layer.effects.len(), 4);
     }
 }
-

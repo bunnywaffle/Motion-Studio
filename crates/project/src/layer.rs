@@ -67,6 +67,7 @@ pub enum LayerSource {
     Procedural {
         generator_type: String,
     },
+    Adjustment,
 }
 
 impl LayerSource {
@@ -80,6 +81,7 @@ impl LayerSource {
             Self::Shape { .. } => "Shape",
             Self::NestedComposition { .. } => "NestedComposition",
             Self::Procedural { .. } => "Procedural",
+            Self::Adjustment => "Adjustment",
         }
     }
 }
@@ -313,6 +315,21 @@ impl Layer {
         )
     }
 
+    /// Factory for creating an Adjustment layer.
+    pub fn adjustment(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        in_point: TimeCode,
+        out_point: TimeCode,
+    ) -> Self {
+        Self::new(id, name, LayerSource::Adjustment, in_point, out_point)
+    }
+
+    /// Check if this layer is an adjustment layer.
+    pub fn is_adjustment(&self) -> bool {
+        matches!(self.source, LayerSource::Adjustment)
+    }
+
     /// Check if this layer is active at the specified timecode (in_point <= time < out_point).
     pub fn is_active_at(&self, time: &TimeCode) -> bool {
         time.frames() >= self.in_point.frames() && time.frames() < self.out_point.frames()
@@ -433,6 +450,7 @@ impl Layer {
                 ];
                 PALETTE[index % PALETTE.len()]
             }
+            LayerSource::Adjustment => Color::rgb(0.95, 0.45, 0.25), // AE Coral / Peach
         }
     }
 

@@ -114,6 +114,13 @@ pub struct FlattenedRenderLayer {
 }
 
 impl FlattenedRenderLayer {
+    /// True when this entry is an After Effects-style adjustment layer.
+    /// Adjustment entries carry no pixels of their own; their `effects`
+    /// apply to the composite of the layers beneath them.
+    pub fn is_adjustment(&self) -> bool {
+        matches!(self.source, LayerSource::Adjustment)
+    }
+
     /// Compute root composition bounding box for this layer given its untransformed dimensions.
     pub fn root_bounds(&self, width: f32, height: f32) -> BoundingBox2D {
         let bbox = BoundingBox2D::from_origin_size(Vec2::ZERO, Vec2::new(width, height));
@@ -180,6 +187,19 @@ pub enum EvaluatedEffectType {
         param3: f32,
         param4: f32,
     },
+    DisplacementMap {
+        max_horizontal: f32,
+        max_vertical: f32,
+    },
+    ChromaKey {
+        key_color: Color,
+        tolerance: f32,
+        feather: f32,
+    },
+    NoiseGenerator {
+        amount: f32,
+        monochrome: bool,
+    },
 }
 
 impl EvaluatedEffectType {
@@ -191,21 +211,38 @@ impl EvaluatedEffectType {
             Self::Invert { .. } => "Invert",
             Self::DropShadow { .. } => "Drop Shadow",
             Self::GlslShader { .. } => "Custom GLSL Shader",
+            Self::DisplacementMap { .. } => "Displacement Map",
+            Self::ChromaKey { .. } => "Chroma Key",
+            Self::NoiseGenerator { .. } => "Noise Generator",
+        }
+    }
+
+    /// True for effects that need neighboring pixels (currently Gaussian blur).
+    /// Such effects are the identity in [`Self::process_color`] and must be
+    /// resolved by the rasterizer / preview renderer instead.
+    pub const fn is_spatial(&self) -> bool {
+        matches!(self, Self::GaussianBlur { .. })
+    }
+
+    /// Blur radius in pixels when this is a Gaussian blur, otherwise `None`.
+    pub const fn blur_radius(&self) -> Option<f32> {
+        match self {
+            Self::GaussianBlur { radius } => Some(*radius),
+            _ => None,
         }
     }
 
     /// Visually process an input Color through this evaluated effect algorithm.
+    ///
+    /// NOTE: Gaussian blur is a *spatial* effect — it mixes neighboring pixels
+    /// and therefore cannot change a single isolated color sample. It is
+    /// intentionally the identity here; real diffusion happens in the
+    /// rasterizer (`renderer::blur`, WGSL blur pipeline) and in the viewport
+    /// preview (multi-tap sprite approximation). Use [`Self::is_spatial`] /
+    /// [`Self::blur_radius`] to branch on it.
     pub fn process_color(&self, c: Color) -> Color {
         match self {
-            Self::GaussianBlur { radius } => {
-                let softness = (*radius / 100.0).clamp(0.0, 0.4);
-                Color::rgba(
-                    c.r * (1.0 - softness) + 0.5 * softness,
-                    c.g * (1.0 - softness) + 0.5 * softness,
-                    c.b * (1.0 - softness) + 0.5 * softness,
-                    c.a,
-                )
-            }
+            Self::GaussianBlur { .. } => c,
             Self::BrightnessContrast { brightness, contrast } => {
                 let b = *brightness / 100.0;
                 let k = (1.0 + *contrast / 100.0).max(0.0);
@@ -252,6 +289,57 @@ impl EvaluatedEffectType {
                     (c.b * gain - shift * 0.5).clamp(0.0, 1.0),
                     (c.a * mod_alpha).clamp(0.0, 1.0),
                 )
+            }
+            Self::DisplacementMap { max_horizontal, max_vertical } => {
+                let shift_r = *max_horizontal * 0.002;
+                let shift_b = *max_vertical * 0.002;
+                Color::rgba(
+                    (c.r * (1.0 + shift_r)).clamp(0.0, 1.0),
+                    c.g,
+                    (c.b * (1.0 - shift_b)).clamp(0.0, 1.0),
+                    c.a,
+                )
+            }
+            Self::ChromaKey { key_color, tolerance, feather } => {
+                let dr = c.r - key_color.r;
+                let dg = c.g - key_color.g;
+                let db = c.b - key_color.b;
+                let dist = (dr * dr + dg * dg + db * db).sqrt();
+                let tol_threshold = (*tolerance / 100.0).max(0.01);
+                let f_threshold = (*feather / 100.0).max(0.001);
+                if dist < tol_threshold {
+                    let alpha_mult = if dist < (tol_threshold - f_threshold).max(0.0) {
+                        0.0
+                    } else {
+                        ((dist - (tol_threshold - f_threshold).max(0.0)) / f_threshold).clamp(0.0, 1.0)
+                    };
+                    Color::rgba(c.r, c.g, c.b, c.a * alpha_mult)
+                } else {
+                    c
+                }
+            }
+            Self::NoiseGenerator { amount, monochrome } => {
+                let n_amount = (*amount / 100.0).clamp(0.0, 1.0);
+                if *monochrome {
+                    let hash = ((c.r * 12.9898 + c.g * 78.233 + c.b * 45.164).sin() * 43758.5453).fract();
+                    let noise = (hash - 0.5) * n_amount;
+                    Color::rgba(
+                        (c.r + noise).clamp(0.0, 1.0),
+                        (c.g + noise).clamp(0.0, 1.0),
+                        (c.b + noise).clamp(0.0, 1.0),
+                        c.a,
+                    )
+                } else {
+                    let hr = ((c.r * 12.9898).sin() * 43758.5453).fract();
+                    let hg = ((c.g * 78.2330).sin() * 43758.5453).fract();
+                    let hb = ((c.b * 45.1640).sin() * 43758.5453).fract();
+                    Color::rgba(
+                        (c.r + (hr - 0.5) * n_amount).clamp(0.0, 1.0),
+                        (c.g + (hg - 0.5) * n_amount).clamp(0.0, 1.0),
+                        (c.b + (hb - 0.5) * n_amount).clamp(0.0, 1.0),
+                        c.a,
+                    )
+                }
             }
         }
     }
@@ -320,6 +408,20 @@ impl EvaluatedLayer {
     /// Return true if this layer references a nested composition.
     pub fn is_nested_composition(&self) -> bool {
         matches!(self.source, LayerSource::NestedComposition { .. })
+    }
+
+    /// Return true if this layer is an adjustment layer.
+    pub fn is_adjustment(&self) -> bool {
+        matches!(self.source, LayerSource::Adjustment)
+    }
+
+    /// True when this layer acts as an After Effects-style adjustment layer:
+    /// active, visible, and carrying the Adjustment source. Such layers render
+    /// nothing themselves — their enabled effects apply to the composite of
+    /// all layers beneath them (see
+    /// [`EvaluatedStack::adjustment_effects_applying_to`]).
+    pub fn applies_as_adjustment(&self) -> bool {
+        self.is_adjustment() && self.is_active && self.is_visible
     }
 
     /// Retrieve the nested composition evaluation, if present.
@@ -542,6 +644,27 @@ impl EvaluatedStack {
             .iter()
             .find(|l| l.layer_path.as_slice() == layer_path)
             .map(|l| l.root_world_matrix)
+    }
+
+    /// After Effects adjustment-layer semantics: return the enabled effects of
+    /// every active, visible adjustment layer positioned *above* `layer_id`
+    /// in composite (bottom-to-top) order, i.e. the adjustments that apply
+    /// to that layer's composite. Layers are affected only by adjustments
+    /// stacked above them; adjustments below have no effect on them.
+    pub fn adjustment_effects_applying_to(&self, layer_id: &str) -> Vec<EvaluatedEffect> {
+        let pos = self.render_list.iter().position(|id| id == layer_id);
+        let Some(pos) = pos else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for above_id in &self.render_list[pos + 1..] {
+            if let Some(adj) = self.get_layer(above_id) {
+                if adj.applies_as_adjustment() {
+                    out.extend(adj.effects.iter().filter(|e| e.enabled).cloned());
+                }
+            }
+        }
+        out
     }
 
     /// Collect all composition render passes in bottom-up dependency order.
@@ -1018,6 +1141,29 @@ impl LayerStackEvaluator {
                             param2: param2.evaluate_at(time),
                             param3: param3.evaluate_at(time),
                             param4: param4.evaluate_at(time),
+                        },
+                        EffectType::DisplacementMap {
+                            max_horizontal,
+                            max_vertical,
+                        } => EvaluatedEffectType::DisplacementMap {
+                            max_horizontal: max_horizontal.evaluate_at(time),
+                            max_vertical: max_vertical.evaluate_at(time),
+                        },
+                        EffectType::ChromaKey {
+                            key_color,
+                            tolerance,
+                            feather,
+                        } => EvaluatedEffectType::ChromaKey {
+                            key_color: *key_color,
+                            tolerance: tolerance.evaluate_at(time),
+                            feather: feather.evaluate_at(time),
+                        },
+                        EffectType::NoiseGenerator {
+                            amount,
+                            monochrome,
+                        } => EvaluatedEffectType::NoiseGenerator {
+                            amount: amount.evaluate_at(time),
+                            monochrome: *monochrome,
                         },
                     };
                     evaluated_effects.push(EvaluatedEffect {

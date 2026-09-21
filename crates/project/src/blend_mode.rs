@@ -1,3 +1,4 @@
+use crate::Color;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 
@@ -127,6 +128,105 @@ impl BlendMode {
             _ => None,
         }
     }
+
+    /// Blend the source and backdrop RGB values, without applying alpha.
+    ///
+    /// This follows the W3C compositing model.  [`composite`] should normally
+    /// be used instead, as it also handles transparent pixels correctly.
+    pub fn blend_rgb(self, backdrop: Color, source: Color) -> Color {
+        if matches!(
+            self,
+            Self::Hue | Self::Saturation | Self::Color | Self::Luminosity
+        ) {
+            return component_blend(self, backdrop, source);
+        }
+        let b = |cb: f32, cs: f32| match self {
+            Self::Normal | Self::Dissolve => cs,
+            Self::Multiply => cb * cs,
+            Self::Screen => cb + cs - cb * cs,
+            Self::Overlay => if cb <= 0.5 { 2.0 * cb * cs } else { 1.0 - 2.0 * (1.0 - cb) * (1.0 - cs) },
+            Self::Darken => cb.min(cs),
+            Self::Lighten => cb.max(cs),
+            Self::ColorDodge => if cs >= 1.0 { 1.0 } else { (cb / (1.0 - cs)).min(1.0) },
+            Self::ColorBurn => if cs <= 0.0 { 0.0 } else { 1.0 - ((1.0 - cb) / cs).min(1.0) },
+            Self::HardLight => if cs <= 0.5 { 2.0 * cb * cs } else { 1.0 - 2.0 * (1.0 - cb) * (1.0 - cs) },
+            Self::SoftLight => soft_light(cb, cs),
+            Self::Difference => (cb - cs).abs(),
+            Self::Exclusion => cb + cs - 2.0 * cb * cs,
+            Self::Add => (cb + cs).min(1.0),
+            Self::Subtract => (cb - cs).max(0.0),
+            Self::Hue | Self::Saturation | Self::Color | Self::Luminosity => unreachable!(),
+        };
+        Color::rgba(b(backdrop.r, source.r), b(backdrop.g, source.g), b(backdrop.b, source.b), source.a)
+    }
+
+    /// Composite `source` over `backdrop` using this blend mode.
+    ///
+    /// Both colors use straight alpha. This is suitable for preview, export,
+    /// and GPU pass validation; it is not merely a color swatch approximation.
+    pub fn composite(self, backdrop: Color, source: Color) -> Color {
+        let sa = source.a;
+        let da = backdrop.a;
+        let blended = self.blend_rgb(backdrop, source);
+        let out_a = sa + da - sa * da;
+        if out_a <= f32::EPSILON {
+            return Color::TRANSPARENT;
+        }
+        let channel = |cb: f32, cs: f32, blend: f32| {
+            (((1.0 - sa) * da * cb) + ((1.0 - da) * sa * cs) + (sa * da * blend)) / out_a
+        };
+        Color::rgba(
+            channel(backdrop.r, source.r, blended.r),
+            channel(backdrop.g, source.g, blended.g),
+            channel(backdrop.b, source.b, blended.b),
+            out_a,
+        )
+    }
+}
+
+fn soft_light(cb: f32, cs: f32) -> f32 {
+    if cs <= 0.5 {
+        cb - (1.0 - 2.0 * cs) * cb * (1.0 - cb)
+    } else {
+        let d = if cb <= 0.25 { ((16.0 * cb - 12.0) * cb + 4.0) * cb } else { cb.sqrt() };
+        cb + (2.0 * cs - 1.0) * (d - cb)
+    }
+}
+
+fn component_blend(mode: BlendMode, backdrop: Color, source: Color) -> Color {
+    let (bh, bs, bl) = rgb_to_hsl(backdrop);
+    let (sh, ss, sl) = rgb_to_hsl(source);
+    let (h, s, l) = match mode {
+        BlendMode::Hue => (sh, bs, bl),
+        BlendMode::Saturation => (bh, ss, bl),
+        BlendMode::Color => (sh, ss, bl),
+        BlendMode::Luminosity => (bh, bs, sl),
+        _ => unreachable!("component_blend is only called for component modes"),
+    };
+    let (r, g, b) = hsl_to_rgb(h, s, l);
+    Color::rgba(r, g, b, source.a)
+}
+
+fn rgb_to_hsl(c: Color) -> (f32, f32, f32) {
+    let max = c.r.max(c.g).max(c.b);
+    let min = c.r.min(c.g).min(c.b);
+    let l = (max + min) * 0.5;
+    let delta = max - min;
+    if delta <= f32::EPSILON { return (0.0, 0.0, l); }
+    let s = delta / (1.0 - (2.0 * l - 1.0).abs());
+    let h = if max == c.r { ((c.g - c.b) / delta).rem_euclid(6.0) }
+        else if max == c.g { (c.b - c.r) / delta + 2.0 }
+        else { (c.r - c.g) / delta + 4.0 } / 6.0;
+    (h, s, l)
+}
+
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
+    if s <= f32::EPSILON { return (l, l, l); }
+    let hue = |n: f32| {
+        let k = (n + h * 12.0).rem_euclid(12.0);
+        l - s * l.min(1.0 - l) * (-1.0f32).max((k - 3.0).min(9.0 - k).min(1.0))
+    };
+    (hue(0.0), hue(8.0), hue(4.0))
 }
 
 impl fmt::Display for BlendMode {

@@ -30,4 +30,7 @@ wgpu = "24.0"
 pollster = "0.4"
 bytemuck = { version = "1.21", features = ["derive"] }
 thiserror = "2.0"
+fontdb = "0.23.0"
 
+[profile.test]
+opt-level = 1

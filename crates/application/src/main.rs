@@ -137,9 +137,9 @@ impl AppView {
 fn render_toolbar(state: &Entity<EditorState>, cx: &App) -> impl IntoElement {
     let s_read = state.read(cx);
     let active_tool = s_read.active_tool;
-    let sel_layer_name = s_read.selected_layer().map(|l| l.name.clone()).unwrap_or_else(|| "None".to_string());
+    let _sel_layer_name = s_read.selected_layer().map(|l| l.name.clone()).unwrap_or_else(|| "None".to_string());
 
-    let tool_btn = |tool: state::EditorTool, icon: gpui_kit::assets::IconName, label: &'static str, cx: &App| {
+    let _tool_btn = |tool: state::EditorTool, icon: gpui_kit::assets::IconName, label: &'static str, cx: &App| {
         let is_active = active_tool == tool;
         let s_click = state.clone();
         div()
@@ -177,135 +177,156 @@ fn render_toolbar(state: &Entity<EditorState>, cx: &App) -> impl IntoElement {
                     cx.notify();
                 });
             })
-            .child(div().w(px(14.)).h(px(14.)).flex().items_center().justify_center().child(icon))
-            .child(label)
+            .w(px(30.))
+            .h(px(28.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(div().w(px(16.)).h(px(16.)).flex().items_center().justify_center().child(icon))
     };
 
-    // Tool Options
-    let options_bar = match active_tool {
+    // Tool Options live in the viewport side rail (CompositionViewerPanel);
+    // the top bar only shows which tool is active.
+    let _options_bar = match active_tool {
         state::EditorTool::Text => {
             let s_text = state.clone();
             h_flex()
-                .gap_2()
+                .gap_1p5()
                 .items_center()
-                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Text Tool:"))
                 .child(
                     div()
                         .id("quick_add_text_button")
                         .test_support()
                         .cursor_pointer()
                         .px_2()
-                        .py_0p5()
+                        .py_1()
                         .rounded_sm()
                         .bg(cx.theme().primary)
                         .text_color(cx.theme().primary_foreground)
-                        .text_xs()
-                        .font_medium()
                         .hover(|s| s.opacity(0.9))
+                        .flex()
+                        .items_center()
+                        .justify_center()
                         .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                             s_text.update(cx, |s, cx| {
                                 let _ = s.add_text_layer("New Text", None);
                                 cx.notify();
                             });
                         })
-                        .child("+ Create Text Layer"),
+                        .child(h_flex().gap_1().items_center().child(gpui_kit::assets::IconName::Plus).child(gpui_kit::assets::IconName::Type)),
                 )
-                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Font: Inter 48px • Click canvas to place"))
         }
         state::EditorTool::ShapeRect => {
             let s_rect = state.clone();
             h_flex()
-                .gap_2()
+                .gap_1p5()
                 .items_center()
-                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Shape:"))
                 .child(
                     div()
                         .id("quick_add_rect_button")
                         .test_support()
                         .cursor_pointer()
                         .px_2()
-                        .py_0p5()
+                        .py_1()
                         .rounded_sm()
                         .bg(cx.theme().primary)
                         .text_color(cx.theme().primary_foreground)
-                        .text_xs()
-                        .font_medium()
                         .hover(|s| s.opacity(0.9))
+                        .flex()
+                        .items_center()
+                        .justify_center()
                         .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                             s_rect.update(cx, |s, cx| {
                                 let _ = s.add_rectangle_shape_layer(400.0, 300.0, None);
                                 cx.notify();
                             });
                         })
-                        .child("+ Create Rectangle"),
+                        .child(h_flex().gap_1().items_center().child(gpui_kit::assets::IconName::Plus).child(gpui_kit::assets::IconName::Square)),
                 )
-                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("400 x 300 • Click canvas to place"))
         }
         state::EditorTool::ShapeEllipse => {
             let s_el = state.clone();
             h_flex()
-                .gap_2()
+                .gap_1p5()
                 .items_center()
-                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Shape:"))
                 .child(
                     div()
                         .id("quick_add_ellipse_button")
                         .test_support()
                         .cursor_pointer()
                         .px_2()
-                        .py_0p5()
+                        .py_1()
                         .rounded_sm()
                         .bg(cx.theme().primary)
                         .text_color(cx.theme().primary_foreground)
-                        .text_xs()
-                        .font_medium()
                         .hover(|s| s.opacity(0.9))
+                        .flex()
+                        .items_center()
+                        .justify_center()
                         .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                             s_el.update(cx, |s, cx| {
                                 let _ = s.add_ellipse_shape_layer(150.0, 150.0, None);
                                 cx.notify();
                             });
                         })
-                        .child("+ Create Ellipse"),
+                        .child(h_flex().gap_1().items_center().child(gpui_kit::assets::IconName::Plus).child(gpui_kit::assets::IconName::Circle)),
                 )
-                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Radius: 150px • Click canvas to place"))
         }
         state::EditorTool::Pen => {
             let s_pen = state.clone();
             h_flex()
-                .gap_2()
+                .gap_1p5()
                 .items_center()
-                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Pen Tool:"))
                 .child(
                     div()
                         .id("quick_add_path_button")
                         .test_support()
                         .cursor_pointer()
                         .px_2()
-                        .py_0p5()
+                        .py_1()
                         .rounded_sm()
                         .bg(cx.theme().primary)
                         .text_color(cx.theme().primary_foreground)
-                        .text_xs()
-                        .font_medium()
                         .hover(|s| s.opacity(0.9))
+                        .flex()
+                        .items_center()
+                        .justify_center()
                         .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                             s_pen.update(cx, |s, cx| {
-                                let _ = s.add_pen_point(project::Vec2::new(960.0, 540.0));
+                                let _ = s.add_pen_point(project::Vec2::ZERO);
                                 cx.notify();
                             });
                         })
-                        .child("+ New Path"),
+                        .child(h_flex().gap_1().items_center().child(gpui_kit::assets::IconName::Plus).child(gpui_kit::assets::IconName::Pen)),
                 )
-                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Click canvas to add vertices"))
         }
-        _ => {
-            h_flex()
-                .gap_2()
-                .items_center()
-                .child(div().text_xs().text_color(cx.theme().muted_foreground).child(format!("Selected: {sel_layer_name}")))
-        }
+        _ => h_flex(),
     };
+
+    let s_full = state.clone();
+    let is_full_width = s_read.timeline_full_width;
+    let full_width_btn = div()
+        .id("toggle_timeline_full_width_button")
+        .test_support()
+        .cursor_pointer()
+        .px_2()
+        .py_1()
+        .rounded_sm()
+        .flex()
+        .items_center()
+        .gap_1()
+        .text_xs()
+        .bg(if is_full_width { cx.theme().primary } else { cx.theme().muted })
+        .text_color(if is_full_width { cx.theme().primary_foreground } else { cx.theme().foreground })
+        .hover(|s| s.opacity(0.85))
+        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+            s_full.update(cx, |s, cx| {
+                s.toggle_timeline_full_width();
+                cx.notify();
+            });
+        })
+        .child(div().w(px(14.)).h(px(14.)).flex().items_center().justify_center().child(if is_full_width { gpui_kit::assets::IconName::Minimize2 } else { gpui_kit::assets::IconName::Maximize2 }))
+        .child(if is_full_width { "Timeline: Full Width" } else { "Timeline: Docked" });
 
     h_flex()
         .id("top_toolbar")
@@ -320,32 +341,68 @@ fn render_toolbar(state: &Entity<EditorState>, cx: &App) -> impl IntoElement {
         .justify_between()
         .child(
             h_flex()
-                .gap_1p5()
+                .gap_2()
                 .items_center()
                 .child(
-                    div()
+                    h_flex()
+                        .gap_1p5()
+                        .items_center()
                         .font_bold()
                         .text_xs()
-                        .text_color(rgb(0x38bdf8))
-                        .mr_2()
-                        .child("AE MOTION"),
+                        .child(div().w(px(16.)).h(px(16.)).flex().items_center().justify_center().child(gpui_kit::assets::IconName::Film))
+                        .child("Motion Studio"),
                 )
-                .child(tool_btn(state::EditorTool::Move, gpui_kit::assets::IconName::Move, "V", cx))
-                .child(tool_btn(state::EditorTool::Hand, gpui_kit::assets::IconName::Hand, "H", cx))
-                .child(tool_btn(state::EditorTool::Rotate, gpui_kit::assets::IconName::RotateCw, "W", cx))
-                .child(tool_btn(state::EditorTool::Pen, gpui_kit::assets::IconName::Pen, "G", cx))
-                .child(tool_btn(state::EditorTool::Text, gpui_kit::assets::IconName::Type, "T", cx))
-                .child(tool_btn(state::EditorTool::ShapeRect, gpui_kit::assets::IconName::Square, "Rect", cx))
-                .child(tool_btn(state::EditorTool::ShapeEllipse, gpui_kit::assets::IconName::Circle, "Ellipse", cx))
-                .child(div().w(px(1.)).h(px(18.)).bg(cx.theme().border).mx_2())
-                .child(options_bar),
+                .child(div().w(px(1.)).h(px(16.)).bg(cx.theme().border).mx_1())
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!("Tool: {active_tool:?}")),
+                ),
+        )
+        .child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(full_width_btn),
         )
 }
 
 impl Render for AppView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state_key = self.state.clone();
         let toolbar = render_toolbar(&self.state, cx);
+
+        let is_full = self.state.read(cx).timeline_full_width;
+        let dock_open = self.dock_area.read(cx).is_dock_open(DockPlacement::Bottom);
+        if is_full && dock_open {
+            self.dock_area.update(cx, |dock, cx| {
+                dock.toggle_dock(DockPlacement::Bottom, window, cx);
+            });
+        } else if !is_full && !dock_open {
+            self.dock_area.update(cx, |dock, cx| {
+                dock.toggle_dock(DockPlacement::Bottom, window, cx);
+            });
+        }
+
+        let main_workspace = if is_full {
+            v_flex()
+                .flex_1()
+                .size_full()
+                .overflow_hidden()
+                .child(div().flex_1().size_full().child(self.dock_area.clone()))
+                .child(
+                    div()
+                        .w_full()
+                        .h(px(260.))
+                        .border_t_1()
+                        .border_color(cx.theme().border)
+                        .child(self.panels.timeline.clone()),
+                )
+                .into_any_element()
+        } else {
+            div().flex_1().size_full().child(self.dock_area.clone()).into_any_element()
+        };
 
         div()
             .id("app_view")
@@ -407,15 +464,25 @@ impl Render for AppView {
                         s.cycle_shape_tool();
                         cx.notify();
                     });
+                } else if key == "[" {
+                    state_key.update(cx, |s, cx| {
+                        let _ = s.trim_selected_layer_in_to_playhead();
+                        cx.notify();
+                    });
+                } else if key == "]" {
+                    state_key.update(cx, |s, cx| {
+                        let _ = s.trim_selected_layer_out_to_playhead();
+                        cx.notify();
+                    });
                 }
             })
             .child(toolbar)
-            .child(div().flex_1().size_full().child(self.dock_area.clone()))
+            .child(main_workspace)
     }
 }
 
 fn main() {
-    let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
+    let app = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
     app.run(|cx| {
         gpui_kit::init(cx);
         Theme::change(ThemeMode::Dark, None, cx);
@@ -1373,9 +1440,9 @@ mod tests {
             let comp = state.active_composition().unwrap();
             let l = comp.get_layer(&id1).unwrap();
 
-            // Layer should be centered in 1920x1080 comp: (960, 540)
-            assert_eq!(l.transform.position.value.x, 960.0);
-            assert_eq!(l.transform.position.value.y, 540.0);
+            // Layer should be centered in composition: (0, 0)
+            assert_eq!(l.transform.position.value.x, 0.0);
+            assert_eq!(l.transform.position.value.y, 0.0);
             // Anchor point should be center of 600x400: (300, 200)
             assert_eq!(l.transform.anchor_point.value.x, 300.0);
             assert_eq!(l.transform.anchor_point.value.y, 200.0);
@@ -1471,9 +1538,9 @@ mod tests {
             other => panic!("Expected Image layer source, got {other:?}"),
         }
 
-        // Layer should be centered in 1920x1080 composition
-        assert_eq!(layer.transform.position.value.x, 960.0);
-        assert_eq!(layer.transform.position.value.y, 540.0);
+        // Layer should be centered in composition: (0, 0)
+        assert_eq!(layer.transform.position.value.x, 0.0);
+        assert_eq!(layer.transform.position.value.y, 0.0);
         // Anchor point centered on image dimensions 320x240
         assert_eq!(layer.transform.anchor_point.value.x, 160.0);
         assert_eq!(layer.transform.anchor_point.value.y, 120.0);
@@ -2039,8 +2106,7 @@ mod tests {
         {
             let comp = state.active_composition().unwrap();
             let dup_layer = comp.get_layer(&dup_id).unwrap();
-            let comp_center = Vec2::new(comp.width as f32 / 2.0, comp.height as f32 / 2.0);
-            assert_eq!(dup_layer.transform.position.value, comp_center);
+            assert_eq!(dup_layer.transform.position.value, Vec2::ZERO);
             assert_eq!(dup_layer.transform.rotation.value, 0.0);
             assert_eq!(dup_layer.opacity.value, 100.0);
         }
@@ -2146,5 +2212,390 @@ mod tests {
         // Scrub to 0.0 seconds
         state.seek(0.0);
         assert_eq!(state.clock.current_frame(), 0);
+    }
+
+    #[test]
+    fn test_layer_source_properties_inspection_and_mutation() {
+        use crate::state::EditorState;
+        use project::{Color, LayerSource, ShapeType};
+
+        let mut state = EditorState::new();
+
+        // 1. Solid layer source mutation
+        let _ = state.nudge_layer_solid_color("layer_bg", 0.1, 0.0, -0.1);
+        let layer_bg = state.active_composition().unwrap().get_layer("layer_bg").unwrap().clone();
+        if let LayerSource::Solid { color, width, height } = layer_bg.source {
+            assert!(color.r > 0.05);
+            assert_eq!(width, 1920);
+            assert_eq!(height, 1080);
+        } else {
+            panic!("Expected solid layer");
+        }
+
+        let _ = state.set_layer_solid_dimensions("layer_bg", 1280, 720);
+        let layer_bg = state.active_composition().unwrap().get_layer("layer_bg").unwrap().clone();
+        if let LayerSource::Solid { width, height, .. } = layer_bg.source {
+            assert_eq!(width, 1280);
+            assert_eq!(height, 720);
+        }
+
+        let _ = state.set_layer_solid_color("layer_bg", Color::from_hex("#FF0000").unwrap());
+        let layer_bg = state.active_composition().unwrap().get_layer("layer_bg").unwrap().clone();
+        if let LayerSource::Solid { color, .. } = layer_bg.source {
+            assert!((color.r - 1.0).abs() < 0.01);
+            assert!((color.g - 0.0).abs() < 0.01);
+            assert!((color.b - 0.0).abs() < 0.01);
+        }
+
+        // 2. Text layer source mutation
+        let text_id = state.add_text_layer("Initial Text", None).unwrap();
+        let _ = state.set_layer_text(&text_id, "Antigravity Studio");
+        let _ = state.set_layer_font_size(&text_id, 48.0);
+        let _ = state.nudge_layer_font_size(&text_id, 4.0);
+        let layer_title = state.active_composition().unwrap().get_layer(&text_id).unwrap().clone();
+        if let LayerSource::Text { text, font_size, .. } = layer_title.source {
+            assert_eq!(text.value, "Antigravity Studio");
+            assert!((font_size.value - 52.0).abs() < 0.01);
+        } else {
+            panic!("Expected text layer");
+        }
+
+        // 3. Shape layer source mutation
+        let shape_id = state.add_rectangle_shape_layer(200.0, 100.0, None).unwrap();
+        let _ = state.set_layer_rect_dimensions(&shape_id, 250.0, 150.0, 12.0);
+        let layer_shape = state.active_composition().unwrap().get_layer(&shape_id).unwrap().clone();
+        if let LayerSource::Shape {
+            shape_type: ShapeType::Rectangle { width, height, corner_radius },
+        } = layer_shape.source {
+            assert!((width.value - 250.0).abs() < 0.01);
+            assert!((height.value - 150.0).abs() < 0.01);
+            assert!((corner_radius.value - 12.0).abs() < 0.01);
+        } else {
+            panic!("Expected rectangle shape layer");
+        }
+
+        let _ = state.nudge_layer_rect_dimensions(&shape_id, 20.0, -10.0, 2.0);
+        let layer_shape = state.active_composition().unwrap().get_layer(&shape_id).unwrap().clone();
+        if let LayerSource::Shape {
+            shape_type: ShapeType::Rectangle { width, height, corner_radius },
+        } = layer_shape.source {
+            assert!((width.value - 270.0).abs() < 0.01);
+            assert!((height.value - 140.0).abs() < 0.01);
+            assert!((corner_radius.value - 14.0).abs() < 0.01);
+        } else {
+            panic!("Expected rectangle shape layer");
+        }
+    }
+
+    #[test]
+    fn test_timeline_layer_trimming_and_slipping() {
+        use crate::state::EditorState;
+        use project::TimeCode;
+
+        let mut state = EditorState::new();
+        state.select_layer(Some("layer_bg".to_string()));
+
+        // Initial in/out
+        let l = state.active_composition().unwrap().get_layer("layer_bg").unwrap().clone();
+        assert_eq!(l.in_point.frames(), 0);
+        assert_eq!(l.out_point.frames(), 150);
+
+        // Trim In-point to frame 15
+        let _ = state.trim_layer_in_point("layer_bg", TimeCode::from_frames(15, 30.0));
+        let l = state.active_composition().unwrap().get_layer("layer_bg").unwrap().clone();
+        assert_eq!(l.in_point.frames(), 15);
+        assert_eq!(l.out_point.frames(), 150);
+
+        // Trim Out-point to frame 120
+        let _ = state.trim_layer_out_point("layer_bg", TimeCode::from_frames(120, 30.0));
+        let l = state.active_composition().unwrap().get_layer("layer_bg").unwrap().clone();
+        assert_eq!(l.in_point.frames(), 15);
+        assert_eq!(l.out_point.frames(), 120);
+
+        // Nudge In-point and Out-point
+        let _ = state.nudge_layer_in_point("layer_bg", 5);
+        let _ = state.nudge_layer_out_point("layer_bg", -5);
+        let l = state.active_composition().unwrap().get_layer("layer_bg").unwrap().clone();
+        assert_eq!(l.in_point.frames(), 20);
+        assert_eq!(l.out_point.frames(), 115);
+
+        // Slip layer forward 10 frames (duration stays 95 frames)
+        let dur_before = l.out_point.frames() - l.in_point.frames();
+        let _ = state.slip_layer("layer_bg", 10);
+        let l = state.active_composition().unwrap().get_layer("layer_bg").unwrap().clone();
+        assert_eq!(l.in_point.frames(), 30);
+        assert_eq!(l.out_point.frames(), 125);
+        assert_eq!(l.out_point.frames() - l.in_point.frames(), dur_before);
+
+        // Slip layer backward 15 frames
+        let _ = state.slip_layer("layer_bg", -15);
+        let l = state.active_composition().unwrap().get_layer("layer_bg").unwrap().clone();
+        assert_eq!(l.in_point.frames(), 15);
+        assert_eq!(l.out_point.frames(), 110);
+
+        // AE Shortcuts: [ and ] to trim selected layer to playhead
+        state.seek(1.0); // frame 30
+        let _ = state.trim_selected_layer_in_to_playhead();
+        let l = state.active_composition().unwrap().get_layer("layer_bg").unwrap().clone();
+        assert_eq!(l.in_point.frames(), 30);
+
+        state.seek(3.0); // frame 90
+        let _ = state.trim_selected_layer_out_to_playhead();
+        let l = state.active_composition().unwrap().get_layer("layer_bg").unwrap().clone();
+        assert_eq!(l.out_point.frames(), 90);
+
+        // Reset layer duration to full composition
+        let _ = state.reset_layer_duration_to_comp("layer_bg");
+        let l = state.active_composition().unwrap().get_layer("layer_bg").unwrap().clone();
+        assert_eq!(l.in_point.frames(), 0);
+        assert_eq!(l.out_point.frames(), 150);
+    }
+
+    #[gpui_kit::test]
+    fn test_timeline_continuous_ruler_scrubbing_state(cx: &mut TestAppContext) {
+        use crate::panels::TimelinePanel;
+        use crate::state::EditorState;
+
+        cx.update(gpui_kit::init);
+        let state = cx.new(|_| EditorState::new());
+        let timeline_panel = cx.new(|cx| TimelinePanel::new(state.clone(), cx));
+
+        // Initial scrubbing state should be false
+        timeline_panel.read_with(cx, |p, _| {
+            assert!(!p.is_scrubbing_ruler);
+        });
+
+        // Set scrubbing state to true
+        timeline_panel.update(cx, |p, _| {
+            p.is_scrubbing_ruler = true;
+        });
+        timeline_panel.read_with(cx, |p, _| {
+            assert!(p.is_scrubbing_ruler);
+        });
+
+        // Reset scrubbing state to false
+        timeline_panel.update(cx, |p, _| {
+            p.is_scrubbing_ruler = false;
+        });
+        timeline_panel.read_with(cx, |p, _| {
+            assert!(!p.is_scrubbing_ruler);
+        });
+    }
+
+    #[test]
+    fn test_adjustment_layer_creation_evaluation_and_rendering() {
+        use crate::state::EditorState;
+        use project::{EffectType, LayerSource};
+
+        let mut state = EditorState::new();
+        let adj_id = state
+            .add_adjustment_layer(Some("Global Grade"))
+            .expect("created adjustment layer");
+
+        let comp = state.active_composition().unwrap();
+        let adj_layer = comp.get_layer(&adj_id).unwrap();
+        assert_eq!(adj_layer.name, "Global Grade");
+        assert!(matches!(adj_layer.source, LayerSource::Adjustment));
+
+        // Add an effect to the adjustment layer
+        state.select_layer(Some(adj_id.clone()));
+        let _ = state.add_effect_to_selected_layer(EffectType::invert(100.0));
+
+        // Evaluate frame
+        let eval = state.evaluate_current_frame().expect("evaluation succeeds");
+        let rendered_adj = eval.evaluated_layers.iter().find(|l| l.id == adj_id).expect("found rendered adjustment layer");
+        assert!(rendered_adj.is_adjustment());
+        assert_eq!(rendered_adj.effects.len(), 1);
+
+        // After Effects semantics: a new adjustment layer lands on top and its
+        // effects apply to every layer beneath it.
+        let below_ids: Vec<String> = {
+            let comp = state.active_composition().unwrap();
+            assert_eq!(comp.layers.first().unwrap().id, adj_id);
+            comp.layers.iter().skip(1).map(|l| l.id.clone()).collect()
+        };
+        // Badge starts at frame 15, so move the playhead where all layers are active.
+        state.seek_frame(30);
+        let eval = state.evaluate_current_frame().expect("evaluation succeeds");
+        for layer in below_ids {
+            let fx = eval.adjustment_effects_applying_to(&layer);
+            assert_eq!(fx.len(), 1, "layer {layer} should inherit the adjustment FX");
+            assert!(fx[0].enabled);
+        }
+        // Nothing applies to the adjustment layer itself.
+        assert!(eval.adjustment_effects_applying_to(&adj_id).is_empty());
+    }
+
+    #[test]
+    fn test_diamond_keyframe_works_with_stopwatch_off() {
+        use crate::state::EditorState;
+        use project::TimeCode;
+
+        let mut state = EditorState::new();
+        // Background solid rotation has no keyframes in the starter project.
+        let layer_id = "layer_bg".to_string();
+        state.select_layer(Some(layer_id.clone()));
+        state.seek_frame(30);
+
+        // Stopwatch off: no animation yet.
+        let comp = state.active_composition().unwrap();
+        assert!(!comp.get_layer(&layer_id).unwrap().transform.rotation.is_animated());
+
+        // Clicking the diamond (timeline or properties) records the first
+        // keyframe and enables animation — no stopwatch pre-toggle needed.
+        state.toggle_layer_keyframe_at_current_time(&layer_id, "transform.rotation");
+
+        let comp = state.active_composition().unwrap();
+        let rot = &comp.get_layer(&layer_id).unwrap().transform.rotation;
+        assert!(rot.is_animated());
+        assert!(rot.has_keyframe_at(&TimeCode::from_frames(30, 30.0)));
+
+        // Clicking the diamond again at the same playhead removes it.
+        state.toggle_layer_keyframe_at_current_time(&layer_id, "transform.rotation");
+        let comp = state.active_composition().unwrap();
+        let rot = &comp.get_layer(&layer_id).unwrap().transform.rotation;
+        assert!(!rot.has_keyframe_at(&TimeCode::from_frames(30, 30.0)));
+    }
+
+    #[test]
+    fn test_new_layers_land_on_top_and_demo_bg_is_behind() {
+        use crate::state::EditorState;
+        use project::Color;
+
+        let mut state = EditorState::new();
+
+        // Starter comp: opaque background sits at the bottom of the stack.
+        let comp = state.active_composition().unwrap();
+        assert_eq!(comp.layers.last().unwrap().id, "layer_bg");
+
+        // New solids go on top (After Effects convention), visible immediately.
+        let top_id = state
+            .add_solid_layer("Topper", Color::WHITE, 100, 100)
+            .expect("added solid");
+        let comp = state.active_composition().unwrap();
+        assert_eq!(comp.layers.first().unwrap().id, top_id);
+
+        // New text layers resolve to an installed system font, never a
+        // hardcoded family that may be missing on this machine.
+        let text_id = state.add_text_layer("Hi", None).expect("added text");
+        assert!(!crate::state::default_font_family().is_empty());
+        let resolved = crate::state::resolve_font_family("Definitely Not A Real Font 123");
+        assert_eq!(resolved, crate::state::default_font_family());
+        let comp = state.active_composition().unwrap();
+        assert_eq!(comp.layers.first().unwrap().id, text_id);
+    }
+
+    #[test]
+    fn test_text_properties_font_presets_and_color() {
+        use crate::state::EditorState;
+        use project::{Color, LayerSource};
+
+        let mut state = EditorState::new();
+        let text_id = state
+            .add_text_layer("Hello GPUI", None)
+            .expect("created text layer");
+
+        let comp = state.active_composition().unwrap();
+        let l = comp.get_layer(&text_id).unwrap();
+        assert!(matches!(&l.source, LayerSource::Text { text, .. } if text.value == "Hello GPUI"));
+
+        // Mutate font family, size, color, and content
+        let _ = state.set_layer_font_family(&text_id, "Courier New");
+        let _ = state.set_layer_font_size(&text_id, 72.0);
+        let _ = state.set_layer_text_color(&text_id, Color::rgba(0.2, 0.4, 0.8, 1.0));
+        let _ = state.set_layer_text(&text_id, "After Effects in Rust");
+
+        let comp = state.active_composition().unwrap();
+        let l = comp.get_layer(&text_id).unwrap();
+        if let LayerSource::Text { text, font_family, font_size, fill_color, .. } = &l.source {
+            assert_eq!(text.value, "After Effects in Rust");
+            assert_eq!(font_family, "Courier New");
+            assert_eq!(font_size.value, 72.0);
+            assert_eq!(fill_color.value, Color::rgba(0.2, 0.4, 0.8, 1.0));
+        } else {
+            panic!("Expected text layer source");
+        }
+    }
+
+    #[test]
+    fn test_effect_color_pickers_and_presets() {
+        use crate::state::EditorState;
+        use project::{Color, EffectType};
+
+        let mut state = EditorState::new();
+        let comp = state.active_composition().unwrap().clone();
+        let layer_id = comp.layers.first().unwrap().id.clone();
+        state.select_layer(Some(layer_id.clone()));
+
+        // Add Chroma Key, Tint, and Drop Shadow effects
+        let _ = state.add_effect_to_selected_layer(EffectType::chroma_key(Color::GREEN, 0.15, 0.05));
+        let _ = state.add_effect_to_selected_layer(EffectType::tint(Color::BLACK, Color::WHITE, 100.0));
+        let _ = state.add_effect_to_selected_layer(EffectType::drop_shadow(10.0, 135.0, 5.0, 75.0, Color::BLACK));
+
+        let comp = state.active_composition().unwrap();
+        let l = comp.get_layer(&layer_id).unwrap();
+        let chroma_id = l.effects.iter().find(|e| matches!(e.effect_type, EffectType::ChromaKey { .. })).unwrap().id.clone();
+        let tint_id = l.effects.iter().find(|e| matches!(e.effect_type, EffectType::Tint { .. })).unwrap().id.clone();
+        let shadow_id = l.effects.iter().find(|e| matches!(e.effect_type, EffectType::DropShadow { .. })).unwrap().id.clone();
+
+        // Update chroma color
+        let custom_green = Color::rgba(0.1, 0.95, 0.2, 1.0);
+        let _ = state.set_chroma_key_color(&chroma_id, custom_green);
+
+        // Update tint colors
+        let navy = Color::rgba(0.05, 0.1, 0.3, 1.0);
+        let gold = Color::rgba(1.0, 0.85, 0.2, 1.0);
+        let _ = state.set_tint_colors(&tint_id, Some(navy), Some(gold));
+
+        // Update drop shadow color
+        let dark_purple = Color::rgba(0.2, 0.05, 0.25, 0.9);
+        let _ = state.set_drop_shadow_color(&shadow_id, dark_purple);
+
+        // Verify mutations
+        let comp = state.active_composition().unwrap();
+        let l = comp.get_layer(&layer_id).unwrap();
+        for eff in &l.effects {
+            match &eff.effect_type {
+                EffectType::ChromaKey { key_color, .. } => assert_eq!(*key_color, custom_green),
+                EffectType::Tint { map_black, map_white, .. } => {
+                    assert_eq!(*map_black, navy);
+                    assert_eq!(*map_white, gold);
+                }
+                EffectType::DropShadow { color, .. } => assert_eq!(*color, dark_purple),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn test_properties_panel_keyframe_jump_and_toggle() {
+        use crate::state::EditorState;
+
+        let mut state = EditorState::new();
+        let layer_id = "layer_bg";
+
+        // Enable animation for position at frame 0 (creates initial keyframe at frame 0)
+        state.seek(0.0);
+        state.toggle_layer_property_animation(layer_id, "transform.position");
+
+        state.seek(1.0); // frame 30
+        state.toggle_layer_keyframe_at_current_time(layer_id, "transform.position");
+
+        state.seek(2.0); // frame 60
+        state.toggle_layer_keyframe_at_current_time(layer_id, "transform.position");
+
+        // Verify navigation
+        state.seek(0.5); // between frame 0 and frame 30
+        state.seek_previous_keyframe(layer_id, "transform.position");
+        assert_eq!(state.clock.current_frame(), 0);
+
+        state.seek_next_keyframe(layer_id, "transform.position");
+        assert_eq!(state.clock.current_frame(), 30);
+
+        state.seek_next_keyframe(layer_id, "transform.position");
+        assert_eq!(state.clock.current_frame(), 60);
+
+        state.seek_previous_keyframe(layer_id, "transform.position");
+        assert_eq!(state.clock.current_frame(), 30);
     }
 }

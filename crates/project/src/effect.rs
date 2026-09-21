@@ -39,6 +39,19 @@ pub enum EffectType {
         param3: Property<f32>,
         param4: Property<f32>,
     },
+    DisplacementMap {
+        max_horizontal: Property<f32>,
+        max_vertical: Property<f32>,
+    },
+    ChromaKey {
+        key_color: Color,
+        tolerance: Property<f32>,
+        feather: Property<f32>,
+    },
+    NoiseGenerator {
+        amount: Property<f32>,
+        monochrome: bool,
+    },
 }
 
 impl EffectType {
@@ -51,6 +64,9 @@ impl EffectType {
             Self::Invert { .. } => "Invert",
             Self::DropShadow { .. } => "Drop Shadow",
             Self::GlslShader { .. } => "Custom GLSL Shader",
+            Self::DisplacementMap { .. } => "Displacement Map",
+            Self::ChromaKey { .. } => "Chroma Key",
+            Self::NoiseGenerator { .. } => "Noise Generator",
         }
     }
 
@@ -110,6 +126,31 @@ impl EffectType {
             param2: Property::new("Param 2 (Intensity)", p2),
             param3: Property::new("Param 3 (Scale/Freq)", p3),
             param4: Property::new("Param 4 (Tint/Phase)", p4),
+        }
+    }
+
+    /// Construct a Displacement Map effect type.
+    pub fn displacement(max_horizontal: f32, max_vertical: f32) -> Self {
+        Self::DisplacementMap {
+            max_horizontal: Property::new("Max Horizontal", max_horizontal.clamp(-500.0, 500.0)),
+            max_vertical: Property::new("Max Vertical", max_vertical.clamp(-500.0, 500.0)),
+        }
+    }
+
+    /// Construct a Chroma Key effect type.
+    pub fn chroma_key(key_color: Color, tolerance: f32, feather: f32) -> Self {
+        Self::ChromaKey {
+            key_color,
+            tolerance: Property::new("Tolerance", tolerance.clamp(0.0, 100.0)),
+            feather: Property::new("Feather", feather.clamp(0.0, 100.0)),
+        }
+    }
+
+    /// Construct a Noise Generator effect type.
+    pub fn noise_generator(amount: f32, monochrome: bool) -> Self {
+        Self::NoiseGenerator {
+            amount: Property::new("Amount", amount.clamp(0.0, 100.0)),
+            monochrome,
         }
     }
 }
@@ -182,6 +223,21 @@ impl Effect {
             "Custom GLSL Shader",
             EffectType::glsl_shader(code, 1.0, 50.0, 1.0, 100.0),
         )
+    }
+
+    /// Factory for creating a Displacement Map effect.
+    pub fn displacement(id: impl Into<String>, max_horizontal: f32, max_vertical: f32) -> Self {
+        Self::new(id, "Displacement Map", EffectType::displacement(max_horizontal, max_vertical))
+    }
+
+    /// Factory for creating a Chroma Key effect.
+    pub fn chroma_key(id: impl Into<String>, key_color: Color, tolerance: f32, feather: f32) -> Self {
+        Self::new(id, "Chroma Key", EffectType::chroma_key(key_color, tolerance, feather))
+    }
+
+    /// Factory for creating a Noise Generator effect.
+    pub fn noise_generator(id: impl Into<String>, amount: f32, monochrome: bool) -> Self {
+        Self::new(id, "Noise Generator", EffectType::noise_generator(amount, monochrome))
     }
 
     /// Return the standard default GLSL fragment shader code template.
@@ -307,6 +363,30 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     return true;
                 }
             }
+            EffectType::DisplacementMap { max_horizontal, max_vertical } => {
+                if param_name.eq_ignore_ascii_case("max_horizontal") || param_name.eq_ignore_ascii_case("horizontal") {
+                    max_horizontal.set_value((max_horizontal.value + delta).clamp(-500.0, 500.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("max_vertical") || param_name.eq_ignore_ascii_case("vertical") {
+                    max_vertical.set_value((max_vertical.value + delta).clamp(-500.0, 500.0));
+                    return true;
+                }
+            }
+            EffectType::ChromaKey { tolerance, feather, .. } => {
+                if param_name.eq_ignore_ascii_case("tolerance") {
+                    tolerance.set_value((tolerance.value + delta).clamp(0.0, 100.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("feather") {
+                    feather.set_value((feather.value + delta).clamp(0.0, 100.0));
+                    return true;
+                }
+            }
+            EffectType::NoiseGenerator { amount, .. } => {
+                if param_name.eq_ignore_ascii_case("amount") {
+                    amount.set_value((amount.value + delta).clamp(0.0, 100.0));
+                    return true;
+                }
+            }
         }
         false
     }
@@ -385,6 +465,31 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     None
                 }
             }
+            EffectType::DisplacementMap { max_horizontal, max_vertical } => {
+                if param_name.eq_ignore_ascii_case("max_horizontal") || param_name.eq_ignore_ascii_case("horizontal") {
+                    Some(max_horizontal)
+                } else if param_name.eq_ignore_ascii_case("max_vertical") || param_name.eq_ignore_ascii_case("vertical") {
+                    Some(max_vertical)
+                } else {
+                    None
+                }
+            }
+            EffectType::ChromaKey { tolerance, feather, .. } => {
+                if param_name.eq_ignore_ascii_case("tolerance") {
+                    Some(tolerance)
+                } else if param_name.eq_ignore_ascii_case("feather") {
+                    Some(feather)
+                } else {
+                    None
+                }
+            }
+            EffectType::NoiseGenerator { amount, .. } => {
+                if param_name.eq_ignore_ascii_case("amount") {
+                    Some(amount)
+                } else {
+                    None
+                }
+            }
         }
     }
 
@@ -458,6 +563,31 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     Some(param3)
                 } else if param_name.eq_ignore_ascii_case("param4") || param_name.eq_ignore_ascii_case("p4") {
                     Some(param4)
+                } else {
+                    None
+                }
+            }
+            EffectType::DisplacementMap { max_horizontal, max_vertical } => {
+                if param_name.eq_ignore_ascii_case("max_horizontal") || param_name.eq_ignore_ascii_case("horizontal") {
+                    Some(max_horizontal)
+                } else if param_name.eq_ignore_ascii_case("max_vertical") || param_name.eq_ignore_ascii_case("vertical") {
+                    Some(max_vertical)
+                } else {
+                    None
+                }
+            }
+            EffectType::ChromaKey { tolerance, feather, .. } => {
+                if param_name.eq_ignore_ascii_case("tolerance") {
+                    Some(tolerance)
+                } else if param_name.eq_ignore_ascii_case("feather") {
+                    Some(feather)
+                } else {
+                    None
+                }
+            }
+            EffectType::NoiseGenerator { amount, .. } => {
+                if param_name.eq_ignore_ascii_case("amount") {
+                    Some(amount)
                 } else {
                     None
                 }

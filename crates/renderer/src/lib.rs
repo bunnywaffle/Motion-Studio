@@ -1,9 +1,11 @@
 pub mod blit;
+pub mod blur;
 pub mod cache;
 pub mod device;
 pub mod shader;
 
 pub use blit::{BlitPipeline, BlitUniforms};
+pub use blur::{gaussian_blur_rgba, gaussian_kernel_1d, BLUR_WGSL};
 pub use cache::{CachedTexture, TextureCache};
 pub use device::{DoubleBufferedTarget, GpuContext, GpuError, RenderTarget};
 pub use shader::{CustomShaderPipeline, CustomShaderUniforms};
