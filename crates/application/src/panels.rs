@@ -1,14 +1,16 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::base::{h_flex, v_flex, StyledExt, TestSupportExt};
 use gpui_kit::component::dock::{BasePanel, Panel, PanelEvent};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::*;
 
 use std::collections::HashSet;
+use std::collections::HashMap;
 
 use crate::state::{EditorState, EditorTool};
+use project::shader::{presets as shader_presets, ShaderParamValue};
 use project::{BlendMode, Color, EffectType, LayerSource, ShapeType, TimeCode, TrackMatteMode, Vec2};
 
 fn icon_box(icon: IconName) -> Div {
@@ -843,7 +845,7 @@ impl Render for ProjectPanel {
                         .id("project_assets")
                         .test_support()
                         .flex_1()
-                        .overflow_hidden()
+                        .overflow_y_scroll()
                         .px_2()
                         .py_1()
                         .gap_1()
@@ -1136,6 +1138,8 @@ pub struct CompositionViewerPanel {
     pub context_menu: Option<ViewerContextMenuTarget>,
     pub is_dragging_canvas: bool,
     pub last_canvas_mouse: Option<(f32, f32)>,
+    /// Remembered rectangle/ellipse variant for the grouped Shape tool.
+    pub shape_variant: EditorTool,
 }
 
 impl CompositionViewerPanel {
@@ -1150,6 +1154,7 @@ impl CompositionViewerPanel {
             context_menu: None,
             is_dragging_canvas: false,
             last_canvas_mouse: None,
+            shape_variant: EditorTool::ShapeRect,
         }
     }
 
@@ -1671,10 +1676,19 @@ impl Render for CompositionViewerPanel {
                 .child(icon_box(icon))
         };
 
-        let s_text = self.state.clone();
-        let s_rect = self.state.clone();
-        let s_ellipse = self.state.clone();
-        let s_pen = self.state.clone();
+        let s_add = self.state.clone();
+        let panel_entity = cx.entity().clone();
+        // Grouped Shape tool: shows the active variant (rectangle/ellipse).
+        // Click selects it; clicking again toggles the variant (same as `Q`).
+        let shown_shape = match active_tool {
+            EditorTool::ShapeRect | EditorTool::ShapeEllipse => active_tool,
+            _ => self.shape_variant,
+        };
+        let (shape_icon, shape_label) = match shown_shape {
+            EditorTool::ShapeEllipse => (IconName::Circle, "ellipse"),
+            _ => (IconName::Square, "rect"),
+        };
+        let shape_is_active = matches!(active_tool, EditorTool::ShapeRect | EditorTool::ShapeEllipse);
 
         let side_toolbar = v_flex()
             .w(px(36.))
@@ -1690,12 +1704,46 @@ impl Render for CompositionViewerPanel {
             .child(tool_btn(EditorTool::Rotate, IconName::RotateCw, "rotate", cx))
             .child(tool_btn(EditorTool::Pen, IconName::Pen, "pen", cx))
             .child(tool_btn(EditorTool::Text, IconName::Type, "text", cx))
-            .child(tool_btn(EditorTool::ShapeRect, IconName::Square, "rect", cx))
-            .child(tool_btn(EditorTool::ShapeEllipse, IconName::Circle, "ellipse", cx))
+            .child({
+                let p_shape = panel_entity.clone();
+                div()
+                    .id(SharedString::from(format!("side_tool_btn_{shape_label}")))
+                    .test_support()
+                    .cursor_pointer()
+                    .w(px(28.))
+                    .h(px(28.))
+                    .rounded_sm()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(if shape_is_active { cx.theme().primary } else { cx.theme().muted })
+                    .text_color(if shape_is_active { cx.theme().primary_foreground } else { cx.theme().foreground })
+                    .hover(|s| if !shape_is_active { s.bg(cx.theme().accent) } else { s })
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        p_shape.update(cx, |this, cx| {
+                            // Clicking the grouped tool selects it; clicking
+                            // again toggles rectangle/ellipse (same as `Q`).
+                            let next = match this.state.read(cx).active_tool {
+                                EditorTool::ShapeRect => EditorTool::ShapeEllipse,
+                                EditorTool::ShapeEllipse => EditorTool::ShapeRect,
+                                _ => this.shape_variant,
+                            };
+                            this.shape_variant = next;
+                            this.state.update(cx, |s, cx| {
+                                s.set_tool(next);
+                                cx.notify();
+                            });
+                            cx.notify();
+                        });
+                    })
+                    .child(icon_box(shape_icon))
+            })
             .child(div().w(px(20.)).h(px(1.)).bg(cx.theme().border).my_1())
+            // Single contextual action: creates a layer of the active tool
+            // type at the viewport center (click the canvas to place freely).
             .child(
                 div()
-                    .id("quick_add_text_button")
+                    .id("quick_add_center_button")
                     .test_support()
                     .cursor_pointer()
                     .w(px(28.))
@@ -1707,75 +1755,33 @@ impl Render for CompositionViewerPanel {
                     .bg(cx.theme().muted)
                     .hover(|s| s.bg(cx.theme().accent))
                     .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                        s_text.update(cx, |s, cx| {
-                            let _ = s.add_text_layer("New Text", None);
+                        s_add.update(cx, |s, cx| {
+                            match s.active_tool {
+                                EditorTool::Text => {
+                                    let _ = s.add_text_layer("New Text", None);
+                                }
+                                EditorTool::ShapeRect => {
+                                    let _ = s.add_rectangle_shape_layer(400.0, 300.0, None);
+                                }
+                                EditorTool::ShapeEllipse => {
+                                    let _ = s.add_ellipse_shape_layer(150.0, 150.0, None);
+                                }
+                                EditorTool::Pen => {
+                                    let _ = s.add_pen_point(project::Vec2::ZERO);
+                                }
+                                _ => {
+                                    let _ = s.add_solid_layer(
+                                        "New Solid",
+                                        project::Color::from_rgba_u8(59, 130, 246, 255),
+                                        400,
+                                        400,
+                                    );
+                                }
+                            }
                             cx.notify();
                         });
                     })
-                    .child(icon_box(IconName::Type))
-            )
-            .child(
-                div()
-                    .id("quick_add_rect_button")
-                    .test_support()
-                    .cursor_pointer()
-                    .w(px(28.))
-                    .h(px(28.))
-                    .rounded_sm()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(cx.theme().muted)
-                    .hover(|s| s.bg(cx.theme().accent))
-                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                        s_rect.update(cx, |s, cx| {
-                            let _ = s.add_rectangle_shape_layer(400.0, 300.0, None);
-                            cx.notify();
-                        });
-                    })
-                    .child(icon_box(IconName::Square))
-            )
-            .child(
-                div()
-                    .id("quick_add_ellipse_button")
-                    .test_support()
-                    .cursor_pointer()
-                    .w(px(28.))
-                    .h(px(28.))
-                    .rounded_sm()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(cx.theme().muted)
-                    .hover(|s| s.bg(cx.theme().accent))
-                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                        s_ellipse.update(cx, |s, cx| {
-                            let _ = s.add_ellipse_shape_layer(150.0, 150.0, None);
-                            cx.notify();
-                        });
-                    })
-                    .child(icon_box(IconName::Circle))
-            )
-            .child(
-                div()
-                    .id("quick_add_path_button")
-                    .test_support()
-                    .cursor_pointer()
-                    .w(px(28.))
-                    .h(px(28.))
-                    .rounded_sm()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(cx.theme().muted)
-                    .hover(|s| s.bg(cx.theme().accent))
-                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                        s_pen.update(cx, |s, cx| {
-                            let _ = s.add_pen_point(project::Vec2::ZERO);
-                            cx.notify();
-                        });
-                    })
-                    .child(icon_box(IconName::Pen))
+                    .child(icon_box(IconName::Plus))
             );
 
         div()
@@ -2161,11 +2167,20 @@ pub struct PropertiesPanel {
     _subscription: Subscription,
     pub scrub_prop: Option<String>,
     pub scrub_last_x: Option<f32>,
+    /// True once the current scrub drag has moved (distinguishes scrub-drag
+    /// from click-to-type on a value field).
+    pub scrub_moved: bool,
     /// Collapsible section states (true = expanded, false = collapsed)
     pub source_expanded: bool,
     pub transform_expanded: bool,
     pub switches_expanded: bool,
     pub effects_expanded: bool,
+    /// Effect ID with the Shader Lab source editor open (`None` = closed).
+    pub shader_editor_open: Option<String>,
+    /// Live Shader Lab source editor (single open editor; re-created when
+    /// the opened effect or its source hash changes so Apply refreshes it).
+    pub shader_editor: Option<Entity<TextareaState>>,
+    pub shader_editor_key: Option<(String, u64)>,
 }
 
 struct TextInspectorInputs {
@@ -2191,10 +2206,14 @@ impl PropertiesPanel {
             _subscription,
             scrub_prop: None,
             scrub_last_x: None,
+            scrub_moved: false,
             source_expanded: true,
             transform_expanded: true,
             switches_expanded: false,
             effects_expanded: true,
+            shader_editor_open: None,
+            shader_editor: None,
+            shader_editor_key: None,
         }
     }
 
@@ -2212,6 +2231,7 @@ impl PropertiesPanel {
                 "pos_y" => s.nudge_position(0.0, dx * 1.0),
                 "scale_x" => s.nudge_scale(dx * 0.5, 0.0),
                 "scale_y" => s.nudge_scale(0.0, dx * 0.5),
+                "scale_u" => s.nudge_scale(dx * 0.5, 0.0),
                 "rotation" => s.nudge_rotation(dx * 0.5),
                 "opacity" => s.nudge_opacity(dx * 0.5),
                 "solid_w" => {
@@ -2259,7 +2279,23 @@ impl PropertiesPanel {
                     }
                 }
                 other => {
-                    if let Some(rest) = other.strip_prefix("fx:") {
+                    if let Some(rest) = other.strip_prefix("slc:") {
+                        // Shader Lab vector/color component: slc:<eff>:<name>:<idx>
+                        let parts: Vec<&str> = rest.split(':').collect();
+                        if parts.len() >= 3 {
+                            if let (Some(eff), Some(name), Ok(idx)) =
+                                (parts.first(), parts.get(1), parts.get(2).unwrap_or(&"0").parse::<usize>())
+                            {
+                                let _ = s.nudge_shaderlab_component(eff, name, idx, dx * 0.25);
+                            }
+                        }
+                    } else if let Some(rest) = other.strip_prefix("sl:") {
+                        // Shader Lab scalar: sl:<eff>:<name>
+                        let parts: Vec<&str> = rest.split(':').collect();
+                        if parts.len() >= 2 {
+                            let _ = s.nudge_shaderlab_param(parts[0], parts[1], dx);
+                        }
+                    } else if let Some(rest) = other.strip_prefix("fx:") {
                         let parts: Vec<&str> = rest.split(':').collect();
                         if parts.len() >= 2 {
                             let eff_id = parts[0];
@@ -2281,6 +2317,71 @@ impl PropertiesPanel {
     pub fn state(&self) -> &Entity<EditorState> {
         &self.state
     }
+
+    /// Open keyboard entry for a scrub value (After Effects-style click-type).
+    /// Creates a prefilled single-line editor, subscribes for commit (typing,
+    /// Enter) and dismiss (focus loss), and focuses it. Edit-session state
+    /// lives on `EditorState` (freely readable during render).
+    pub fn begin_value_edit(&mut self, prop: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.end_value_edit(cx);
+        let initial = self
+            .state
+            .read(cx)
+            .scrub_current_value(prop)
+            .map(|v| {
+                if (v - v.round()).abs() < 1e-4 {
+                    format!("{}", v.round() as i64)
+                } else {
+                    format!("{v:.2}")
+                }
+            })
+            .unwrap_or_default();
+        // Prefill inside the entity constructor, where the context type is
+        // already `Context<InputState>` as `set_value` requires.
+        let editor = cx.new(|cx| {
+            let mut st = InputState::new(window, cx);
+            st.set_value(initial, window, cx);
+            st
+        });
+        let st = self.state.clone();
+        let sub = cx.subscribe(&editor, move |_: &mut Self, input: Entity<InputState>, event: &InputEvent, cx| {
+            match event {
+                InputEvent::Change => {
+                    let text = input.read(cx).value().trim().to_string();
+                    st.update(cx, |s, cx| {
+                        if s.commit_typed_value(&text) {
+                            cx.notify();
+                        }
+                    });
+                }
+                InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                    st.update(cx, |s, cx| {
+                        if s.end_value_edit_state() {
+                            cx.notify();
+                        }
+                    });
+                }
+                _ => {}
+            }
+        });
+        let handle = editor.read(cx).focus_handle(cx);
+        self.state.update(cx, |s, _| {
+            s.value_edit_key = Some(prop.to_string());
+            s.value_editor = Some(editor);
+            s.value_editor_sub = Some(sub);
+        });
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    /// Close keyboard entry without further changes.
+    pub fn end_value_edit(&mut self, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| {
+            if s.end_value_edit_state() {
+                cx.notify();
+            }
+        });
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2288,13 +2389,13 @@ fn scrub_field<FMinus, FPlus>(
     id: impl Into<ElementId>,
     prop_key: String,
     label: String,
-    minus_id: Option<ElementId>,
-    plus_id: Option<ElementId>,
+    _minus_id: Option<ElementId>,
+    _plus_id: Option<ElementId>,
     state: &Entity<EditorState>,
     panel_entity: &Entity<PropertiesPanel>,
     cx: &App,
-    on_minus: FMinus,
-    on_plus: FPlus,
+    _on_minus: FMinus,
+    _on_plus: FPlus,
 ) -> Div
 where
     FMinus: Fn(&mut App) + 'static,
@@ -2303,79 +2404,97 @@ where
     let panel_down = panel_entity.clone();
     let state_scroll = state.clone();
     let prop_for_wheel = prop_key.clone();
+    let prop_for_edit = prop_key.clone();
 
-    let btn_minus: AnyElement = if let Some(mid) = minus_id {
-        step_button_with_id(mid, "-", cx, on_minus).into_any_element()
-    } else {
-        step_button("-", cx, on_minus).into_any_element()
-    };
-
-    let btn_plus: AnyElement = if let Some(pid) = plus_id {
-        step_button_with_id(pid, "+", cx, on_plus).into_any_element()
-    } else {
-        step_button("+", cx, on_plus).into_any_element()
+    // After Effects-style keyboard entry: when this field is the open edit
+    // target, render the live single-line editor instead of the value label.
+    // (Drag-scrub and mouse-wheel still work on the label.)
+    let edit_id = id.into();
+    // Edit-session state lives on EditorState so render can read it freely
+    // (reading the panel itself here would re-borrow it mid-render).
+    let edit_state = state.read(cx);
+    let editor_opt = edit_state.value_editor.clone();
+    let is_editing = edit_state.value_edit_key.as_deref() == Some(prop_key.as_str());
+    let value_child: AnyElement = match (is_editing, editor_opt) {
+        (true, Some(editor)) => Input::new(&editor)
+            .id(edit_id.clone())
+            .w_full()
+            .into_any_element(),
+        _ => div()
+            .id(edit_id)
+            .test_support()
+            .px_2()
+            .py_0p5()
+            .bg(cx.theme().muted)
+            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+            .border_1()
+            .border_color(cx.theme().border)
+            .rounded_sm()
+            .cursor_col_resize()
+            .text_xs()
+            .font_medium()
+            .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+                let curr_x = event.position.x / px(1.0);
+                let p = prop_for_edit.clone();
+                panel_down.update(cx, |this, _| {
+                    this.scrub_prop = Some(p);
+                    this.scrub_last_x = Some(curr_x);
+                    this.scrub_moved = false;
+                });
+            })
+            .on_scroll_wheel(move |event, _window, cx| {
+                let dy = match event.delta {
+                    ScrollDelta::Pixels(p) => p.y / px(1.0),
+                    ScrollDelta::Lines(l) => l.y * 5.0,
+                };
+                if dy != 0.0 {
+                    let step = if dy > 0.0 { 1.0 } else { -1.0 };
+                    let pk = prop_for_wheel.clone();
+                    state_scroll.update(cx, |s, cx| {
+                        match pk.as_str() {
+                            "anchor_x" => s.nudge_anchor(step, 0.0),
+                            "anchor_y" => s.nudge_anchor(0.0, step),
+                            "pos_x" => s.nudge_position(step, 0.0),
+                            "pos_y" => s.nudge_position(0.0, step),
+                            "scale_x" => s.nudge_scale(step * 0.5, 0.0),
+                            "scale_y" => s.nudge_scale(0.0, step * 0.5),
+                            "scale_u" => s.nudge_scale(step * 0.5, 0.0),
+                            "rotation" => s.nudge_rotation(step * 0.5),
+                            "opacity" => s.nudge_opacity(step * 0.5),
+                            other => {
+                                if let Some(rest) = other.strip_prefix("slc:") {
+                                    let parts: Vec<&str> = rest.split(':').collect();
+                                    if parts.len() >= 3 {
+                                        if let Ok(idx) = parts[2].parse::<usize>() {
+                                            let _ = s.nudge_shaderlab_component(parts[0], parts[1], idx, step * 0.25);
+                                        }
+                                    }
+                                } else if let Some(rest) = other.strip_prefix("sl:") {
+                                    let parts: Vec<&str> = rest.split(':').collect();
+                                    if parts.len() >= 2 {
+                                        let _ = s.nudge_shaderlab_param(parts[0], parts[1], step);
+                                    }
+                                } else if let Some(rest) = other.strip_prefix("fx:") {
+                                    let parts: Vec<&str> = rest.split(':').collect();
+                                    if parts.len() >= 2 {
+                                        let _ = s.nudge_effect_param(parts[0], parts[1], step * 2.0);
+                                    }
+                                }
+                            }
+                        }
+                        cx.notify();
+                    });
+                }
+            })
+            .child(label)
+            .into_any_element(),
     };
 
     h_flex()
         .gap_1()
         .items_center()
-        .child(btn_minus)
-        .child(
-            div()
-                .id(id)
-                .test_support()
-                .px_2()
-                .py_0p5()
-                .bg(cx.theme().muted)
-                .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-                .border_1()
-                .border_color(cx.theme().border)
-                .rounded_sm()
-                .cursor_col_resize()
-                .text_xs()
-                .font_medium()
-                .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
-                    let curr_x = event.position.x / px(1.0);
-                    let p = prop_key.clone();
-                    panel_down.update(cx, |this, _| {
-                        this.scrub_prop = Some(p);
-                        this.scrub_last_x = Some(curr_x);
-                    });
-                })
-                .on_scroll_wheel(move |event, _window, cx| {
-                    let dy = match event.delta {
-                        ScrollDelta::Pixels(p) => p.y / px(1.0),
-                        ScrollDelta::Lines(l) => l.y * 5.0,
-                    };
-                    if dy != 0.0 {
-                        let step = if dy > 0.0 { 1.0 } else { -1.0 };
-                        let pk = prop_for_wheel.clone();
-                        state_scroll.update(cx, |s, cx| {
-                            match pk.as_str() {
-                                "anchor_x" => s.nudge_anchor(step, 0.0),
-                                "anchor_y" => s.nudge_anchor(0.0, step),
-                                "pos_x" => s.nudge_position(step, 0.0),
-                                "pos_y" => s.nudge_position(0.0, step),
-                                "scale_x" => s.nudge_scale(step * 0.5, 0.0),
-                                "scale_y" => s.nudge_scale(0.0, step * 0.5),
-                                "rotation" => s.nudge_rotation(step * 0.5),
-                                "opacity" => s.nudge_opacity(step * 0.5),
-                                other => {
-                                    if let Some(rest) = other.strip_prefix("fx:") {
-                                        let parts: Vec<&str> = rest.split(':').collect();
-                                        if parts.len() >= 2 {
-                                            let _ = s.nudge_effect_param(parts[0], parts[1], step * 2.0);
-                                        }
-                                    }
-                                }
-                            }
-                            cx.notify();
-                        });
-                    }
-                })
-                .child(label),
-        )
-        .child(btn_plus)
+        .flex_1()
+        .child(value_child)
 }
 
 /// Keyframe controls widget for the Properties Panel inspector:
@@ -2736,6 +2855,8 @@ fn render_applied_effects(
     tint_black_color_picker: &Entity<ColorPickerState>,
     tint_white_color_picker: &Entity<ColorPickerState>,
     shadow_color_picker: &Entity<ColorPickerState>,
+    shader_editor_open: Option<String>,
+    shader_editor: Option<Entity<TextareaState>>,
     cx: &App,
 ) -> AnyElement {
     if layer.effects.is_empty() {
@@ -3476,15 +3597,456 @@ fn render_applied_effects(
                                 .child(presets_bar)
                                 .child(
                                     div()
+                                        .id("glsl_code_preview")
+                                        .test_support()
                                         .p_1p5()
                                         .rounded_sm()
                                         .bg(cx.theme().muted)
                                         .text_xs()
                                         .text_color(cx.theme().muted_foreground)
-                                        .overflow_hidden()
+                                        .overflow_y_scroll()
+                                        .max_h(px(160.))
                                         .child(code_preview),
                                 ),
                         );
+                }
+                EffectType::ShaderLab { source: _, params, values, compile_error } => {
+                    // Resolved live values (overrides win over defaults).
+                    let resolved: HashMap<&str, &ShaderParamValue> = params
+                        .iter()
+                        .map(|p| (p.name.as_str(), values.get(&p.name).unwrap_or(&p.default)))
+                        .collect();
+
+                    // Status: last-good source always runs; errors show here.
+                    let status_row: AnyElement = match compile_error {
+                        Some(err) => v_flex()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_semibold()
+                                    .text_color(rgb(0xef4444))
+                                    .child("● Apply failed — previous shader still active"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(0xef4444))
+                                    .child(err.clone()),
+                            )
+                            .into_any_element(),
+                        None => div()
+                            .text_xs()
+                            .text_color(rgb(0x22c55e))
+                            .child(format!(
+                                "● Ready — {} param{} · GPU validated",
+                                params.len(),
+                                if params.len() == 1 { "" } else { "s" }
+                            ))
+                            .into_any_element(),
+                    };
+                    effect_box = effect_box.child(status_row);
+
+                    // Auto-generated parameter UI (adding/removing a uniform
+                    // in the source changes this list after Apply).
+                    let mut last_group: Option<&str> = None;
+                    for param in params {
+                        if param.group.as_deref() != last_group {
+                            last_group = param.group.as_deref();
+                            if let Some(g) = last_group {
+                                effect_box = effect_box.child(
+                                    div()
+                                        .mt_1()
+                                        .text_xs()
+                                        .font_semibold()
+                                        .text_color(cx.theme().foreground)
+                                        .child(g.to_string()),
+                                );
+                            }
+                        }
+                        let pname = param.name.clone();
+                        let plabel = param.label.clone();
+                        let eff_key = eff_id.clone();
+                        match &param.param_type {
+                            project::shader::ShaderParamType::Float
+                            | project::shader::ShaderParamType::Angle
+                            | project::shader::ShaderParamType::Int => {
+                                let cur = match resolved.get(pname.as_str()) {
+                                    Some(ShaderParamValue::Int(v)) => format!("{v}"),
+                                    Some(v) => v.display(),
+                                    None => String::new(),
+                                };
+                                let unit = if matches!(param.param_type, project::shader::ShaderParamType::Angle) {
+                                    "°"
+                                } else {
+                                    ""
+                                };
+                                effect_box = effect_box.child(
+                                    h_flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .text_xs()
+                                        .child(
+                                            div()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(format!("{plabel}{unit}")),
+                                        )
+                                        .child(scrub_field(
+                                            SharedString::from(format!("shader_param_{eff_key}_{pname}")),
+                                            format!("sl:{eff_key}:{pname}"),
+                                            cur,
+                                            None,
+                                            None,
+                                            state,
+                                            panel_entity,
+                                            cx,
+                                            move |_| {},
+                                            move |_| {},
+                                        )),
+                                );
+                            }
+                            project::shader::ShaderParamType::Bool => {
+                                let on = matches!(
+                                    resolved.get(pname.as_str()),
+                                    Some(ShaderParamValue::Bool(true))
+                                );
+                                let s_t = state.clone();
+                                let eid = eff_key.clone();
+                                let pn = pname.clone();
+                                effect_box = effect_box.child(
+                                    h_flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .text_xs()
+                                        .child(
+                                            div()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(plabel),
+                                        )
+                                        .child(
+                                            div()
+                                                .cursor_pointer()
+                                                .px_2()
+                                                .py_0p5()
+                                                .rounded_sm()
+                                                .bg(if on { cx.theme().primary } else { cx.theme().muted })
+                                                .text_color(if on {
+                                                    cx.theme().primary_foreground
+                                                } else {
+                                                    cx.theme().foreground
+                                                })
+                                                .hover(|s| s.opacity(0.85))
+                                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                    s_t.update(cx, |s, cx| {
+                                                        let _ = s.set_shaderlab_param(&eid, &pn, if on { 0.0 } else { 1.0 });
+                                                        cx.notify();
+                                                    });
+                                                })
+                                                .child(if on { "On" } else { "Off" }),
+                                        ),
+                                );
+                            }
+                            project::shader::ShaderParamType::Enum { options } => {
+                                let idx = match resolved.get(pname.as_str()) {
+                                    Some(ShaderParamValue::Int(v)) => (*v).clamp(0, options.len().saturating_sub(1) as i32) as usize,
+                                    _ => 0,
+                                };
+                                let cur_label = options.get(idx).cloned().unwrap_or_else(|| format!("{idx}"));
+                                let s_c = state.clone();
+                                let eid = eff_key.clone();
+                                let pn = pname.clone();
+                                let n_opts = options.len().max(1) as f32;
+                                effect_box = effect_box.child(
+                                    h_flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .text_xs()
+                                        .child(
+                                            div()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(plabel),
+                                        )
+                                        .child(
+                                            div()
+                                                .cursor_pointer()
+                                                .px_2()
+                                                .py_0p5()
+                                                .rounded_sm()
+                                                .bg(cx.theme().muted)
+                                                .text_color(cx.theme().foreground)
+                                                .hover(|s| s.bg(cx.theme().accent))
+                                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                    s_c.update(cx, |s, cx| {
+                                                        let next = (idx as f32 + 1.0) % n_opts;
+                                                        let _ = s.set_shaderlab_param(&eid, &pn, next);
+                                                        cx.notify();
+                                                    });
+                                                })
+                                                .child(format!("◂ {cur_label} ▸")),
+                                        ),
+                                );
+                            }
+                            project::shader::ShaderParamType::Vec2
+                            | project::shader::ShaderParamType::Vec3
+                            | project::shader::ShaderParamType::Vec4
+                            | project::shader::ShaderParamType::Color => {
+                                let (count, tags): (usize, &[&str]) = match param.param_type {
+                                    project::shader::ShaderParamType::Vec2 => (2, &["X", "Y"]),
+                                    project::shader::ShaderParamType::Vec3 => (3, &["X", "Y", "Z"]),
+                                    project::shader::ShaderParamType::Vec4 => (4, &["X", "Y", "Z", "W"]),
+                                    _ => (4, &["R", "G", "B", "A"]),
+                                };
+                                effect_box = effect_box.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(plabel),
+                                );
+                                for i in 0..count {
+                                    let comp_val = match resolved.get(pname.as_str()) {
+                                        Some(ShaderParamValue::Vec2(a)) => a.get(i).copied().unwrap_or(0.0),
+                                        Some(ShaderParamValue::Vec3(a)) => a.get(i).copied().unwrap_or(0.0),
+                                        Some(ShaderParamValue::Vec4(a)) => a.get(i).copied().unwrap_or(0.0),
+                                        Some(ShaderParamValue::Color(c)) => {
+                                            [c.r, c.g, c.b, c.a].get(i).copied().unwrap_or(0.0)
+                                        }
+                                        Some(ShaderParamValue::Float(v)) => *v,
+                                        _ => 0.0,
+                                    };
+                                    effect_box = effect_box.child(
+                                        h_flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .text_xs()
+                                            .child(
+                                                div()
+                                                    .w(px(52.))
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child(format!("  {}", tags[i])),
+                                            )
+                                            .child(scrub_field(
+                                                SharedString::from(format!(
+                                                    "shader_param_{eff_key}_{pname}_{i}"
+                                                )),
+                                                format!("slc:{eff_key}:{pname}:{i}"),
+                                                format!("{comp_val:.3}"),
+                                                None,
+                                                None,
+                                                state,
+                                                panel_entity,
+                                                cx,
+                                                move |_| {},
+                                                move |_| {},
+                                            )),
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    // Edit Shader toggle.
+                    let p_ed = panel_entity.clone();
+                    let eid_ed = eff_id.clone();
+                    let editor_open = shader_editor_open.as_deref() == Some(eff_id.as_str());
+                    effect_box = effect_box.child(
+                        div()
+                            .id(SharedString::from(format!("shader_edit_toggle_{eff_id}")))
+                            .test_support()
+                            .cursor_pointer()
+                            .mt_1()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .font_medium()
+                            .bg(if editor_open { cx.theme().primary } else { cx.theme().muted })
+                            .text_color(if editor_open {
+                                cx.theme().primary_foreground
+                            } else {
+                                cx.theme().foreground
+                            })
+                            .hover(|s| s.opacity(0.9))
+                            .text_center()
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                p_ed.update(cx, |this, cx| {
+                                    if this.shader_editor_open.as_deref() == Some(eid_ed.as_str()) {
+                                        this.shader_editor_open = None;
+                                    } else {
+                                        this.shader_editor_open = Some(eid_ed.clone());
+                                    }
+                                    cx.notify();
+                                });
+                            })
+                            .child(if editor_open { "Close Shader Editor" } else { "Edit Shader" }),
+                    );
+
+                    if editor_open {
+                        if let Some(ed) = shader_editor.as_ref() {
+                            let s_apply = state.clone();
+                            let eid_apply = eff_id.clone();
+                            let ed_apply = ed.clone();
+                            let s_export = state.clone();
+                            let eid_export = eff_id.clone();
+                            let s_import = state.clone();
+                            let eid_import = eff_id.clone();
+                            effect_box = effect_box
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!("shader_editor_box_{eff_id}")))
+                                        .test_support()
+                                        .mt_1()
+                                        .border_1()
+                                        .border_color(cx.theme().border)
+                                        .rounded_sm()
+                                        .child(
+                                            Textarea::new(ed)
+                                                .h(px(220.))
+                                                .bordered(true),
+                                        ),
+                                )
+                                .child(
+                                    h_flex()
+                                        .mt_1()
+                                        .gap_1p5()
+                                        .items_center()
+                                        .child(
+                                            div()
+                                                .id(SharedString::from(format!("shader_apply_{eff_id}")))
+                                                .test_support()
+                                                .cursor_pointer()
+                                                .px_2()
+                                                .py_1()
+                                                .rounded_sm()
+                                                .text_xs()
+                                                .font_semibold()
+                                                .bg(cx.theme().primary)
+                                                .text_color(cx.theme().primary_foreground)
+                                                .hover(|s| s.opacity(0.9))
+                                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                    let src = ed_apply.read(cx).value().to_string();
+                                                    s_apply.update(cx, |s, cx| {
+                                                        let _ = s.apply_shader_source(&eid_apply, &src);
+                                                        cx.notify();
+                                                    });
+                                                })
+                                                .child("Apply"),
+                                        )
+                                        .child(
+                                            div()
+                                                .cursor_pointer()
+                                                .px_2()
+                                                .py_1()
+                                                .rounded_sm()
+                                                .text_xs()
+                                                .bg(cx.theme().muted)
+                                                .text_color(cx.theme().foreground)
+                                                .hover(|s| s.bg(cx.theme().accent))
+                                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                    let s_exp = s_export.clone();
+                                                    let eid_exp = eid_export.clone();
+                                                    let src_now = s_exp.read(cx)
+                                                        .selected_layer()
+                                                        .and_then(|l| l.get_effect(&eid_exp))
+                                                        .and_then(|e| e.shader_source().map(str::to_string))
+                                                        .unwrap_or_default();
+                                                    cx.spawn(|cx: &mut AsyncApp| {
+                                                        let cx = cx.clone();
+                                                        async move {
+                                                            let (tx, rx) = std::sync::mpsc::channel();
+                                                            let _ = std::thread::Builder::new()
+                                                                .name("shader-export-worker".to_string())
+                                                                .stack_size(8 * 1024 * 1024)
+                                                                .spawn(move || {
+                                                                    let file = rfd::FileDialog::new()
+                                                                        .add_filter("GLSL Shader", &["glsl"])
+                                                                        .set_file_name("effect.glsl")
+                                                                        .save_file();
+                                                                    let _ = tx.send(file);
+                                                                });
+                                                            if let Ok(Some(path)) = rx.recv() {
+                                                                let _ = std::fs::write(&path, &src_now);
+                                                                let _ = cx;
+                                                            }
+                                                        }
+                                                    }).detach();
+                                                })
+                                                .child("Export"),
+                                        )
+                                        .child(
+                                            div()
+                                                .cursor_pointer()
+                                                .px_2()
+                                                .py_1()
+                                                .rounded_sm()
+                                                .text_xs()
+                                                .bg(cx.theme().muted)
+                                                .text_color(cx.theme().foreground)
+                                                .hover(|s| s.bg(cx.theme().accent))
+                                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                    let s_imp = s_import.clone();
+                                                    let eid_imp = eid_import.clone();
+                                                    cx.spawn(|cx: &mut AsyncApp| {
+                                                        let cx = cx.clone();
+                                                        async move {
+                                                            let (tx, rx) = std::sync::mpsc::channel();
+                                                            let _ = std::thread::Builder::new()
+                                                                .name("shader-import-worker".to_string())
+                                                                .stack_size(8 * 1024 * 1024)
+                                                                .spawn(move || {
+                                                                    let file = rfd::FileDialog::new()
+                                                                        .add_filter("GLSL Shader", &["glsl", "txt"])
+                                                                        .pick_file();
+                                                                    let _ = tx.send(file);
+                                                                });
+                                                            if let Ok(Some(path)) = rx.recv() {
+                                                                if let Ok(src) = std::fs::read_to_string(&path) {
+                                                                    cx.update(|cx| {
+                                                                        s_imp.update(cx, |s, cx| {
+                                                                            let _ = s.apply_shader_source(&eid_imp, &src);
+                                                                            cx.notify();
+                                                                        });
+                                                                    });
+                                                                }
+                                                            }
+                                                        }
+                                                    }).detach();
+                                                })
+                                                .child("Import"),
+                                        ),
+                                );
+                            // Preset snippets (validate on the way in).
+                            let mut preset_row = h_flex().mt_1().gap_1p5().items_center().flex_wrap();
+                            for (pname, psrc) in [
+                                ("Grade", shader_presets::GRADE),
+                                ("Vignette", shader_presets::VIGNETTE),
+                                ("Scanlines", shader_presets::SCANLINES),
+                                ("Duotone", shader_presets::DUOTONE),
+                            ] {
+                                let s_pre = state.clone();
+                                let eid_pre = eff_id.clone();
+                                let psrc = psrc.to_string();
+                                preset_row = preset_row.child(
+                                    div()
+                                        .cursor_pointer()
+                                        .px_1p5()
+                                        .py_0p5()
+                                        .rounded_sm()
+                                        .bg(cx.theme().muted)
+                                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                        .text_xs()
+                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                            let c = psrc.clone();
+                                            s_pre.update(cx, |s, cx| {
+                                                let _ = s.apply_shader_source(&eid_pre, &c);
+                                                cx.notify();
+                                            });
+                                        })
+                                        .child(pname),
+                                );
+                            }
+                            effect_box = effect_box.child(preset_row);
+                        }
+                    }
                 }
                 EffectType::DisplacementMap { max_horizontal, max_vertical } => {
                     let mh = max_horizontal.value;
@@ -3931,6 +4493,35 @@ impl Render for PropertiesPanel {
             )
         };
 
+        // Sync the single Shader Lab source editor slot. The key embeds the
+        // opened effect id + source hash so Apply/presets/imports refresh the
+        // draft while typing never loses it.
+        {
+            let (open_id, open_src) = {
+                let st = self.state.read(cx);
+                let open = self.shader_editor_open.clone();
+                let src = open.as_ref().and_then(|id| {
+                    st.selected_layer()
+                        .and_then(|l| l.get_effect(id))
+                        .and_then(|e| e.shader_source().map(str::to_string))
+                });
+                (open, src)
+            };
+            let want_key: Option<(String, u64)> = open_id
+                .zip(open_src.clone())
+                .map(|(id, src)| (id, renderer::shader_lab::hash_source(&src)));
+            if self.shader_editor_key != want_key {
+                self.shader_editor_key = want_key;
+                self.shader_editor = open_src.map(|src| {
+                    cx.new(|cx| {
+                        let mut st = TextareaState::new(window, cx);
+                        st.set_value(src, window, cx);
+                        st
+                    })
+                });
+            }
+        }
+
         if let Some((_lid, ref src)) = layer_info {
             match src {
                 LayerSource::Text { text, font_family, font_size, fill_color } => {
@@ -4118,6 +4709,7 @@ impl Render for PropertiesPanel {
                     if this.scrub_prop.is_some() {
                         this.scrub_prop = None;
                         this.scrub_last_x = None;
+                        this.scrub_moved = false;
                     }
                     return;
                 }
@@ -4127,16 +4719,25 @@ impl Render for PropertiesPanel {
                     if dx.abs() >= 1.0 {
                         this.apply_scrub_delta(&prop, dx, cx);
                         this.scrub_last_x = Some(curr_x);
+                        this.scrub_moved = true;
                     }
                 }
             }))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| {
-                this.scrub_prop = None;
-                this.scrub_last_x = None;
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _event, window, cx| {
+                // Click (no drag movement) on a value field opens keyboard
+                // entry After Effects-style; a real drag just ends the scrub.
+                if let Some(prop) = this.scrub_prop.take() {
+                    this.scrub_last_x = None;
+                    let was_drag = std::mem::replace(&mut this.scrub_moved, false);
+                    if !was_drag {
+                        this.begin_value_edit(&prop, window, cx);
+                    }
+                }
             }))
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, _| {
                 this.scrub_prop = None;
                 this.scrub_last_x = None;
+                this.scrub_moved = false;
             }))
             // Header
             .child(
@@ -4163,7 +4764,7 @@ impl Render for PropertiesPanel {
                     .id("properties_inspector")
                     .test_support()
                     .flex_1()
-                    .overflow_hidden()
+                    .overflow_y_scroll()
                     .p_3()
                     .gap_3()
                     .children(if let Some(layer) = selected_layer {
@@ -4207,6 +4808,8 @@ impl Render for PropertiesPanel {
                             &tint_black_color_picker.read(cx).state,
                             &tint_white_color_picker.read(cx).state,
                             &shadow_color_picker.read(cx).state,
+                            self.shader_editor_open.clone(),
+                            self.shader_editor.clone(),
                             cx,
                         );
 
@@ -4221,7 +4824,6 @@ impl Render for PropertiesPanel {
                                 let lid_c = layer.id.clone();
                                 let s_swatch = self.state.clone();
                                 let s_rgb = self.state.clone();
-                                let s_dim = self.state.clone();
 
                                 let hex_code = format!("#{:02X}{:02X}{:02X}", (c.r * 255.0) as u8, (c.g * 255.0) as u8, (c.b * 255.0) as u8);
 
@@ -4272,11 +4874,6 @@ impl Render for PropertiesPanel {
                                 let lid_g2 = lid_c.clone();
                                 let lid_b1 = lid_c.clone();
                                 let lid_b2 = lid_c.clone();
-
-                                let s_wm = s_dim.clone();
-                                let s_wp = s_dim.clone();
-                                let s_hm = s_dim.clone();
-                                let s_hp = s_dim.clone();
 
                                 props_items.push(
                                     v_flex()
@@ -4355,10 +4952,30 @@ impl Render for PropertiesPanel {
                                                     h_flex()
                                                         .gap_1()
                                                         .items_center()
-                                                        .child(step_button_with_id("solid_w_minus", "-100 W", cx, move |cx| s_wm.update(cx, |s, cx| { if let Some(l) = s.selected_layer_mut() { if let LayerSource::Solid { width, .. } = &mut l.source { *width = width.saturating_sub(100).max(10); } } cx.notify(); })))
-                                                        .child(step_button_with_id("solid_w_plus", "+100 W", cx, move |cx| s_wp.update(cx, |s, cx| { if let Some(l) = s.selected_layer_mut() { if let LayerSource::Solid { width, .. } = &mut l.source { *width = (*width + 100).min(7680); } } cx.notify(); })))
-                                                        .child(step_button_with_id("solid_h_minus", "-100 H", cx, move |cx| s_hm.update(cx, |s, cx| { if let Some(l) = s.selected_layer_mut() { if let LayerSource::Solid { height, .. } = &mut l.source { *height = height.saturating_sub(100).max(10); } } cx.notify(); })))
-                                                        .child(step_button_with_id("solid_h_plus", "+100 H", cx, move |cx| s_hp.update(cx, |s, cx| { if let Some(l) = s.selected_layer_mut() { if let LayerSource::Solid { height, .. } = &mut l.source { *height = (*height + 100).min(4320); } } cx.notify(); }))),
+                                                        .child(scrub_field(
+                                                            "solid_dim_w",
+                                                            "solid_w".to_string(),
+                                                            format!("{w} px"),
+                                                            None,
+                                                            None,
+                                                            &self.state,
+                                                            &panel_entity,
+                                                            cx,
+                                                            move |_| {},
+                                                            move |_| {},
+                                                        ))
+                                                        .child(scrub_field(
+                                                            "solid_dim_h",
+                                                            "solid_h".to_string(),
+                                                            format!("{h} px"),
+                                                            None,
+                                                            None,
+                                                            &self.state,
+                                                            &panel_entity,
+                                                            cx,
+                                                            move |_| {},
+                                                            move |_| {},
+                                                        )),
                                                 ),
                                         )
                                         .into_any_element(),
@@ -4948,7 +5565,7 @@ impl Render for PropertiesPanel {
                                             )),
                                     ),
                             )
-                            // Scale (X, Y)
+                            // Scale: uniform single value by default, X/Y when unlinked
                             .child(
                                 h_flex()
                                     .items_center()
@@ -4968,30 +5585,69 @@ impl Render for PropertiesPanel {
                                         h_flex()
                                             .gap_1()
                                             .items_center()
-                                            .child(scrub_field(
-                                                "prop_scale_x",
-                                                "scale_x".to_string(),
-                                                format!("{:.1} %", sc.x),
-                                                None,
-                                                None,
-                                                &self.state,
-                                                &panel_entity,
-                                                cx,
-                                                move |cx| s_scale_mx.update(cx, |s, cx| { s.nudge_scale(-10.0, 0.0); cx.notify(); }),
-                                                move |cx| s_scale_px.update(cx, |s, cx| { s.nudge_scale(10.0, 0.0); cx.notify(); }),
-                                            ))
-                                            .child(scrub_field(
-                                                "prop_scale_y",
-                                                "scale_y".to_string(),
-                                                format!("{:.1} %", sc.y),
-                                                None,
-                                                None,
-                                                &self.state,
-                                                &panel_entity,
-                                                cx,
-                                                move |cx| s_scale_my.update(cx, |s, cx| { s.nudge_scale(0.0, -10.0); cx.notify(); }),
-                                                move |cx| s_scale_py.update(cx, |s, cx| { s.nudge_scale(0.0, 10.0); cx.notify(); }),
-                                            )),
+                                            .child({
+                                                let s_link = self.state.clone();
+                                                let lid_link = layer.id.clone();
+                                                let linked = layer.transform.scale_uniform;
+                                                div()
+                                                    .id(SharedString::from(format!("scale_link_{}", layer.id)))
+                                                    .test_support()
+                                                    .cursor_pointer()
+                                                    .p_0p5()
+                                                    .rounded_sm()
+                                                    .text_color(if linked { cx.theme().primary } else { cx.theme().muted_foreground })
+                                                    .hover(|s| s.bg(cx.theme().muted))
+                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                        s_link.update(cx, |s, cx| {
+                                                            s.toggle_layer_scale_link(&lid_link);
+                                                            cx.notify();
+                                                        });
+                                                    })
+                                                    .child(icon_box(if linked { IconName::Link } else { IconName::Unlink }))
+                                            })
+                                            .child(if layer.transform.scale_uniform {
+                                                scrub_field(
+                                                    "prop_scale_u",
+                                                    "scale_u".to_string(),
+                                                    format!("{:.1} %", sc.x),
+                                                    None,
+                                                    None,
+                                                    &self.state,
+                                                    &panel_entity,
+                                                    cx,
+                                                    move |cx| s_scale_mx.update(cx, |s, cx| { s.nudge_scale(-10.0, 0.0); cx.notify(); }),
+                                                    move |cx| s_scale_px.update(cx, |s, cx| { s.nudge_scale(10.0, 0.0); cx.notify(); }),
+                                                ).into_any_element()
+                                            } else {
+                                                h_flex()
+                                                    .gap_1()
+                                                    .items_center()
+                                                    .child(scrub_field(
+                                                        "prop_scale_x",
+                                                        "scale_x".to_string(),
+                                                        format!("{:.1} %", sc.x),
+                                                        None,
+                                                        None,
+                                                        &self.state,
+                                                        &panel_entity,
+                                                        cx,
+                                                        move |cx| s_scale_mx.update(cx, |s, cx| { s.nudge_scale(-10.0, 0.0); cx.notify(); }),
+                                                        move |cx| s_scale_px.update(cx, |s, cx| { s.nudge_scale(10.0, 0.0); cx.notify(); }),
+                                                    ))
+                                                    .child(scrub_field(
+                                                        "prop_scale_y",
+                                                        "scale_y".to_string(),
+                                                        format!("{:.1} %", sc.y),
+                                                        None,
+                                                        None,
+                                                        &self.state,
+                                                        &panel_entity,
+                                                        cx,
+                                                        move |cx| s_scale_my.update(cx, |s, cx| { s.nudge_scale(0.0, -10.0); cx.notify(); }),
+                                                        move |cx| s_scale_py.update(cx, |s, cx| { s.nudge_scale(0.0, 10.0); cx.notify(); }),
+                                                    ))
+                                                    .into_any_element()
+                                            }),
                                     ),
                             )
                             // Rotation
@@ -5315,7 +5971,7 @@ impl Render for EffectsPanel {
                     .id("effects_categories")
                     .test_support()
                     .flex_1()
-                    .overflow_hidden()
+                    .overflow_y_scroll()
                     .p_2()
                     .gap_1()
                     // Category 1: Blur & Sharpen
@@ -5344,6 +6000,7 @@ impl Render for EffectsPanel {
                     .child(effect_item_row("linear_wipe", "Linear Wipe", EffectType::invert(50.0), &self.state, cx))
                     // Category 6: Custom Shaders
                     .child(category_header("▼ Custom Shaders (GLSL/WGSL)", IconName::Code, cx))
+                    .child(effect_item_row("shader_lab", "Shader Lab", EffectType::shader_lab(shader_presets::GRADE), &self.state, cx))
                     .child(effect_item_row("custom_glsl", "Custom GLSL Shader", EffectType::glsl_shader(project::Effect::default_glsl_code(), 1.0, 50.0, 1.0, 100.0), &self.state, cx)),
             )
             // Footer
@@ -6792,6 +7449,9 @@ impl Render for TimelinePanel {
                                         EffectType::NoiseGenerator { amount, .. } => {
                                             param_entries.push(("amount", "Amount", amount.evaluate_at(&current_tc), 5.0));
                                         }
+                                        // Shader Lab parameters are edited in the Properties
+                                        // panel (dynamic uniforms have no static keyframe paths).
+                                        EffectType::ShaderLab { .. } => {}
                                     }
 
                                     for (p_slug, p_label, p_val, p_step) in param_entries {
@@ -7310,7 +7970,7 @@ impl Render for TimelinePanel {
                     .id("timeline")
                     .test_support()
                     .flex_1()
-                    .overflow_hidden()
+                    .overflow_y_scroll()
                     .children(timeline_rows)
                     .on_mouse_down(MouseButton::Right, move |_event, _window, cx| {
                         p_tl_ctx.update(cx, |this, cx| {

@@ -1,6 +1,8 @@
 use crate::color::Color;
 use crate::property::Property;
+use crate::shader::{parse_shader_params, ShaderParam, ShaderParamValue};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 const fn default_true() -> bool {
     true
@@ -39,6 +41,17 @@ pub enum EffectType {
         param3: Property<f32>,
         param4: Property<f32>,
     },
+    /// Runtime user-shader effect (Shader Lab): GLSL-style source with
+    /// auto-detected `uniform` parameters. `source` is always the last
+    /// successfully compiled text; a failed Apply keeps it while reporting
+    /// the error in `compile_error`. `values` holds user overrides;
+    /// anything missing falls back to the parsed default.
+    ShaderLab {
+        source: String,
+        params: Vec<ShaderParam>,
+        values: HashMap<String, ShaderParamValue>,
+        compile_error: Option<String>,
+    },
     DisplacementMap {
         max_horizontal: Property<f32>,
         max_vertical: Property<f32>,
@@ -64,6 +77,7 @@ impl EffectType {
             Self::Invert { .. } => "Invert",
             Self::DropShadow { .. } => "Drop Shadow",
             Self::GlslShader { .. } => "Custom GLSL Shader",
+            Self::ShaderLab { .. } => "Shader Lab",
             Self::DisplacementMap { .. } => "Displacement Map",
             Self::ChromaKey { .. } => "Chroma Key",
             Self::NoiseGenerator { .. } => "Noise Generator",
@@ -143,6 +157,18 @@ impl EffectType {
             key_color,
             tolerance: Property::new("Tolerance", tolerance.clamp(0.0, 100.0)),
             feather: Property::new("Feather", feather.clamp(0.0, 100.0)),
+        }
+    }
+
+    /// Construct a Shader Lab runtime-shader effect type.
+    pub fn shader_lab(source: impl Into<String>) -> Self {
+        let source = source.into();
+        let params = parse_shader_params(&source);
+        Self::ShaderLab {
+            source,
+            params,
+            values: HashMap::new(),
+            compile_error: None,
         }
     }
 
@@ -240,6 +266,11 @@ impl Effect {
         Self::new(id, "Noise Generator", EffectType::noise_generator(amount, monochrome))
     }
 
+    /// Factory for creating a Shader Lab runtime-shader effect.
+    pub fn shader_lab(id: impl Into<String>, source: impl Into<String>) -> Self {
+        Self::new(id, "Shader Lab", EffectType::shader_lab(source))
+    }
+
     /// Return the standard default GLSL fragment shader code template.
     pub const fn default_glsl_code() -> &'static str {
         r#"// Custom GLSL Fragment Shader
@@ -271,6 +302,146 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
             Some(code.as_str())
         } else {
             None
+        }
+    }
+
+    /// Replace the Shader Lab source after a successful compile: re-parses
+    /// parameters (adding/removing UI automatically) and prunes overrides
+    /// for removed uniforms. Returns the fresh parameter list.
+    pub fn set_shader_source(&mut self, new_source: impl Into<String>) -> Option<Vec<ShaderParam>> {
+        if let EffectType::ShaderLab { source, params, values, compile_error } = &mut self.effect_type {
+            *source = new_source.into();
+            *params = parse_shader_params(source);
+            values.retain(|k, _| params.iter().any(|p| &p.name == k));
+            *compile_error = None;
+            Some(params.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Record a failed Apply: the last-good `source` keeps running while the
+    /// error is shown in the effect panel.
+    pub fn set_shader_error(&mut self, error: Option<String>) -> bool {
+        if let EffectType::ShaderLab { compile_error, .. } = &mut self.effect_type {
+            *compile_error = error;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Override a Shader Lab parameter value. Returns false for unknown names
+    /// or non-ShaderLab effects.
+    pub fn set_shader_value(&mut self, name: &str, value: ShaderParamValue) -> bool {
+        if let EffectType::ShaderLab { params, values, .. } = &mut self.effect_type {
+            if params.iter().any(|p| p.name == name) {
+                values.insert(name.to_string(), value);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Nudge a scalar Shader Lab parameter by `delta` (uses its step or 0.05).
+    pub fn nudge_shader_value(&mut self, name: &str, delta: f32) -> bool {
+        if let EffectType::ShaderLab { params, values, .. } = &mut self.effect_type {
+            let param = match params.iter().find(|p| p.name == name) {
+                Some(p) => p.clone(),
+                None => return false,
+            };
+            let cur = values
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| param.default.clone());
+            let step = param.step.unwrap_or(0.05);
+            let next = match cur {
+                ShaderParamValue::Float(v) => param.coerce_float(v + delta * step),
+                ShaderParamValue::Int(v) => param.coerce_float(v as f32 + delta * step.max(1.0)),
+                ShaderParamValue::Bool(v) => {
+                    if delta.abs() > 0.0 {
+                        ShaderParamValue::Bool(!v)
+                    } else {
+                        ShaderParamValue::Bool(v)
+                    }
+                }
+                ShaderParamValue::Vec2(v) => {
+                    ShaderParamValue::Vec2([param.coerce_float(v[0] + delta * step).as_floats()[0]; 2])
+                }
+                ShaderParamValue::Vec3(v) => {
+                    let c = param.coerce_float(v[0] + delta * step).as_floats()[0];
+                    ShaderParamValue::Vec3([c, c, c])
+                }
+                ShaderParamValue::Vec4(v) => {
+                    let c = param.coerce_float(v[0] + delta * step).as_floats()[0];
+                    ShaderParamValue::Vec4([c, c, c, v[3]])
+                }
+                ShaderParamValue::Color(c) => {
+                    let d = delta * step;
+                    ShaderParamValue::Color(Color::rgba(
+                        (c.r + d).clamp(0.0, 1.0),
+                        (c.g + d).clamp(0.0, 1.0),
+                        (c.b + d).clamp(0.0, 1.0),
+                        c.a,
+                    ))
+                }
+            };
+            values.insert(name.to_string(), next);
+            return true;
+        }
+        false
+    }
+
+    /// Current Shader Lab source (last-good), if this is a Shader Lab effect.
+    pub fn shader_source(&self) -> Option<&str> {
+        if let EffectType::ShaderLab { source, .. } = &self.effect_type {
+            Some(source.as_str())
+        } else {
+            None
+        }
+    }
+
+    /// Parsed Shader Lab parameters, if this is a Shader Lab effect.
+    pub fn shader_params(&self) -> Option<&[ShaderParam]> {
+        if let EffectType::ShaderLab { params, .. } = &self.effect_type {
+            Some(params.as_slice())
+        } else {
+            None
+        }
+    }
+
+    /// Shader Lab value overrides, if this is a Shader Lab effect.
+    pub fn shader_values(&self) -> Option<&HashMap<String, ShaderParamValue>> {
+        if let EffectType::ShaderLab { values, .. } = &self.effect_type {
+            Some(values)
+        } else {
+            None
+        }
+    }
+
+    /// Last Shader Lab compile error, if any.
+    pub fn shader_error(&self) -> Option<&str> {
+        if let EffectType::ShaderLab { compile_error, .. } = &self.effect_type {
+            compile_error.as_deref()
+        } else {
+            None
+        }
+    }
+
+    /// Defaults merged with overrides, in declaration order.
+    pub fn resolved_shader_values(&self) -> Vec<(String, ShaderParamValue)> {
+        if let EffectType::ShaderLab { params, values, .. } = &self.effect_type {
+            params
+                .iter()
+                .map(|p| {
+                    (
+                        p.name.clone(),
+                        values.get(&p.name).cloned().unwrap_or_else(|| p.default.clone()),
+                    )
+                })
+                .collect()
+        } else {
+            Vec::new()
         }
     }
 
@@ -387,6 +558,8 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     return true;
                 }
             }
+            // Shader Lab values are dynamic (see nudge_shader_value).
+            EffectType::ShaderLab { .. } => {}
         }
         false
     }
@@ -490,6 +663,8 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     None
                 }
             }
+            // Shader Lab values are dynamic, not `Property<f32>` tracks.
+            EffectType::ShaderLab { .. } => None,
         }
     }
 
@@ -592,6 +767,8 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     None
                 }
             }
+            // Shader Lab values are dynamic, not `Property<f32>` tracks.
+            EffectType::ShaderLab { .. } => None,
         }
     }
 }

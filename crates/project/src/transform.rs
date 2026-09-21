@@ -11,6 +11,14 @@ pub struct Transform {
     pub position: Property<Vec2>,
     pub scale: Property<Vec2>,
     pub rotation: Property<f32>,
+    /// When true (the default), scale edits apply uniformly to X and Y as a
+    /// single value, After Effects-style. When false, X and Y edit separately.
+    #[serde(default = "default_scale_uniform")]
+    pub scale_uniform: bool,
+}
+
+const fn default_scale_uniform() -> bool {
+    true
 }
 
 impl Transform {
@@ -22,6 +30,7 @@ impl Transform {
             position: Property::with_default("Position", position, Vec2::ZERO),
             scale: Property::with_default("Scale", scale, Vec2::SCALE_100),
             rotation: Property::with_default("Rotation", rotation, 0.0),
+            scale_uniform: true,
         }
     }
 
@@ -57,6 +66,16 @@ impl Transform {
             || self.rotation.is_animated()
     }
 
+    /// Set uniform-scale mode. When turning uniform mode on with differing
+    /// X/Y values, Y snaps to X so the single value is unambiguous.
+    pub fn set_scale_uniform(&mut self, uniform: bool) {
+        if uniform && !self.scale_uniform {
+            let v = self.scale.value;
+            self.scale.set_value(Vec2::new(v.x, v.x));
+        }
+        self.scale_uniform = uniform;
+    }
+
     /// Evaluate all transform components at a given TimeCode.
     /// Returns `(anchor_point, position, scale, rotation)`.
     pub fn evaluate_at(&self, time: &TimeCode) -> (Vec2, Vec2, Vec2, f32) {
@@ -87,6 +106,7 @@ impl Default for Transform {
             position: Property::new("Position", Vec2::ZERO),
             scale: Property::new("Scale", Vec2::SCALE_100),
             rotation: Property::new("Rotation", 0.0),
+            scale_uniform: true,
         }
     }
 }

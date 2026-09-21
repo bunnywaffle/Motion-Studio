@@ -137,172 +137,6 @@ impl AppView {
 fn render_toolbar(state: &Entity<EditorState>, cx: &App) -> impl IntoElement {
     let s_read = state.read(cx);
     let active_tool = s_read.active_tool;
-    let _sel_layer_name = s_read.selected_layer().map(|l| l.name.clone()).unwrap_or_else(|| "None".to_string());
-
-    let _tool_btn = |tool: state::EditorTool, icon: gpui_kit::assets::IconName, label: &'static str, cx: &App| {
-        let is_active = active_tool == tool;
-        let s_click = state.clone();
-        div()
-            .id(SharedString::from(format!("tool_{label}")))
-            .test_support()
-            .cursor_pointer()
-            .px_2()
-            .py_1()
-            .rounded_sm()
-            .flex()
-            .items_center()
-            .gap_1()
-            .text_xs()
-            .font_medium()
-            .bg(if is_active {
-                cx.theme().primary
-            } else {
-                cx.theme().muted
-            })
-            .text_color(if is_active {
-                cx.theme().primary_foreground
-            } else {
-                cx.theme().foreground
-            })
-            .hover(|s| {
-                if !is_active {
-                    s.bg(cx.theme().accent)
-                } else {
-                    s
-                }
-            })
-            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                s_click.update(cx, |s, cx| {
-                    s.set_tool(tool);
-                    cx.notify();
-                });
-            })
-            .w(px(30.))
-            .h(px(28.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(div().w(px(16.)).h(px(16.)).flex().items_center().justify_center().child(icon))
-    };
-
-    // Tool Options live in the viewport side rail (CompositionViewerPanel);
-    // the top bar only shows which tool is active.
-    let _options_bar = match active_tool {
-        state::EditorTool::Text => {
-            let s_text = state.clone();
-            h_flex()
-                .gap_1p5()
-                .items_center()
-                .child(
-                    div()
-                        .id("quick_add_text_button")
-                        .test_support()
-                        .cursor_pointer()
-                        .px_2()
-                        .py_1()
-                        .rounded_sm()
-                        .bg(cx.theme().primary)
-                        .text_color(cx.theme().primary_foreground)
-                        .hover(|s| s.opacity(0.9))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                            s_text.update(cx, |s, cx| {
-                                let _ = s.add_text_layer("New Text", None);
-                                cx.notify();
-                            });
-                        })
-                        .child(h_flex().gap_1().items_center().child(gpui_kit::assets::IconName::Plus).child(gpui_kit::assets::IconName::Type)),
-                )
-        }
-        state::EditorTool::ShapeRect => {
-            let s_rect = state.clone();
-            h_flex()
-                .gap_1p5()
-                .items_center()
-                .child(
-                    div()
-                        .id("quick_add_rect_button")
-                        .test_support()
-                        .cursor_pointer()
-                        .px_2()
-                        .py_1()
-                        .rounded_sm()
-                        .bg(cx.theme().primary)
-                        .text_color(cx.theme().primary_foreground)
-                        .hover(|s| s.opacity(0.9))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                            s_rect.update(cx, |s, cx| {
-                                let _ = s.add_rectangle_shape_layer(400.0, 300.0, None);
-                                cx.notify();
-                            });
-                        })
-                        .child(h_flex().gap_1().items_center().child(gpui_kit::assets::IconName::Plus).child(gpui_kit::assets::IconName::Square)),
-                )
-        }
-        state::EditorTool::ShapeEllipse => {
-            let s_el = state.clone();
-            h_flex()
-                .gap_1p5()
-                .items_center()
-                .child(
-                    div()
-                        .id("quick_add_ellipse_button")
-                        .test_support()
-                        .cursor_pointer()
-                        .px_2()
-                        .py_1()
-                        .rounded_sm()
-                        .bg(cx.theme().primary)
-                        .text_color(cx.theme().primary_foreground)
-                        .hover(|s| s.opacity(0.9))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                            s_el.update(cx, |s, cx| {
-                                let _ = s.add_ellipse_shape_layer(150.0, 150.0, None);
-                                cx.notify();
-                            });
-                        })
-                        .child(h_flex().gap_1().items_center().child(gpui_kit::assets::IconName::Plus).child(gpui_kit::assets::IconName::Circle)),
-                )
-        }
-        state::EditorTool::Pen => {
-            let s_pen = state.clone();
-            h_flex()
-                .gap_1p5()
-                .items_center()
-                .child(
-                    div()
-                        .id("quick_add_path_button")
-                        .test_support()
-                        .cursor_pointer()
-                        .px_2()
-                        .py_1()
-                        .rounded_sm()
-                        .bg(cx.theme().primary)
-                        .text_color(cx.theme().primary_foreground)
-                        .hover(|s| s.opacity(0.9))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                            s_pen.update(cx, |s, cx| {
-                                let _ = s.add_pen_point(project::Vec2::ZERO);
-                                cx.notify();
-                            });
-                        })
-                        .child(h_flex().gap_1().items_center().child(gpui_kit::assets::IconName::Plus).child(gpui_kit::assets::IconName::Pen)),
-                )
-        }
-        _ => h_flex(),
-    };
-
     let s_full = state.clone();
     let is_full_width = s_read.timeline_full_width;
     let full_width_btn = div()
@@ -1650,9 +1484,8 @@ mod tests {
 
             assert!(window.find(SharedString::from(format!("effect_toggle_{eff_id}"))).visible());
             assert!(window.find(SharedString::from(format!("effect_delete_{eff_id}"))).visible());
+            // Value field scrubs (drag/wheel) and types (click): no +/- buttons.
             assert!(window.find(SharedString::from(format!("param_radius_{eff_id}"))).visible());
-            assert!(window.find(SharedString::from(format!("param_radius_plus_{eff_id}"))).visible());
-            assert!(window.find(SharedString::from(format!("param_radius_minus_{eff_id}"))).visible());
 
             // 4. Test live parameter nudging
             state_entity.update(cx, |s, cx| {
@@ -1663,6 +1496,21 @@ mod tests {
             let layer_after_nudge = state_entity.read(cx).selected_layer().unwrap().clone();
             if let project::EffectType::GaussianBlur { radius } = &layer_after_nudge.effects[0].effect_type {
                 assert_eq!(radius.value, 15.0);
+            } else {
+                panic!("Expected GaussianBlur");
+            }
+
+            // 4b. Test keyboard entry via the scrub-value path
+            let key = format!("fx:{eff_id}:radius:100");
+            assert!(state_entity.read(cx).scrub_current_value(&key).is_some());
+            state_entity.update(cx, |s, cx| {
+                assert!(s.set_scrub_value(&key, 42.0));
+                cx.notify();
+            });
+            window.render_frame(cx);
+            let layer_after_type = state_entity.read(cx).selected_layer().unwrap().clone();
+            if let project::EffectType::GaussianBlur { radius } = &layer_after_type.effects[0].effect_type {
+                assert!((radius.value - 42.0).abs() < 1e-4);
             } else {
                 panic!("Expected GaussianBlur");
             }
@@ -2597,5 +2445,134 @@ mod tests {
 
         state.seek_previous_keyframe(layer_id, "transform.position");
         assert_eq!(state.clock.current_frame(), 30);
+    }
+
+    #[test]
+    fn test_shader_lab_params_apply_and_fallback() {
+        use crate::state::EditorState;
+        use project::EffectType;
+
+        let mut state = EditorState::new();
+        state.select_layer(Some("layer_accent".to_string()));
+        let fx = state
+            .add_effect_to_selected_layer(EffectType::shader_lab(project::shader::presets::GRADE))
+            .expect("add shader lab");
+
+        // Parameters auto-detected from uniforms.
+        let before_params = {
+            let comp = state.active_composition().unwrap();
+            let eff = comp.get_layer("layer_accent").unwrap().get_effect(&fx).unwrap();
+            assert_eq!(eff.shader_params().unwrap().len(), 3);
+            assert!(eff.shader_error().is_none());
+            eff.shader_source().unwrap().to_string()
+        };
+
+        // Live value edits.
+        state.set_shaderlab_param(&fx, "brightness", 0.5).expect("set");
+        state.nudge_shaderlab_param(&fx, "brightness", 1.0).expect("nudge");
+        {
+            let comp = state.active_composition().unwrap();
+            let eff = comp.get_layer("layer_accent").unwrap().get_effect(&fx).unwrap();
+            let resolved: std::collections::HashMap<_, _> =
+                eff.resolved_shader_values().into_iter().collect();
+            match &resolved["brightness"] {
+                project::ShaderParamValue::Float(v) => assert!((v - 0.51).abs() < 1e-4),
+                other => panic!("expected float, got {other:?}"),
+            }
+        }
+
+        // Scrub-key path reaches the same parameter.
+        let key = format!("sl:{fx}:brightness");
+        assert!(state.set_scrub_value(&key, 0.25));
+        assert!((state.scrub_current_value(&key).unwrap() - 0.25).abs() < 1e-4);
+
+        // Broken source: error recorded, last-good source keeps running.
+        assert!(state.apply_shader_source(&fx, "this is not a shader {{{").is_err());
+        {
+            let comp = state.active_composition().unwrap();
+            let eff = comp.get_layer("layer_accent").unwrap().get_effect(&fx).unwrap();
+            assert_eq!(eff.shader_source().unwrap(), before_params);
+            assert!(eff.shader_error().is_some());
+        }
+
+        // Good source swaps in, clears the error, regenerates params.
+        state
+            .apply_shader_source(&fx, project::shader::presets::DUOTONE)
+            .expect("duotone applies");
+        let comp = state.active_composition().unwrap();
+        let eff = comp.get_layer("layer_accent").unwrap().get_effect(&fx).unwrap();
+        assert!(eff.shader_error().is_none());
+        assert!(eff.shader_source().unwrap().contains("Duotone"));
+        assert!(eff.shader_params().unwrap().iter().any(|p| p.name == "mixAmount"));
+
+        // Evaluation carries the shader hash + resolved values to the GPU path.
+        let eval = state.evaluate_current_frame().expect("evaluate");
+        let layer = eval.get_layer("layer_accent").unwrap();
+        let ee = layer.effects.iter().find(|e| e.id == fx).expect("evaluated fx");
+        match &ee.effect_type {
+            compositor::EvaluatedEffectType::ShaderLab { source_hash, values } => {
+                assert_ne!(*source_hash, 0);
+                assert!(values.contains_key("mixAmount"));
+            }
+            other => panic!("expected ShaderLab, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_scale_link_uniform_default_and_toggle() {
+        use crate::state::EditorState;
+
+        let mut state = EditorState::new();
+        state.select_layer(Some("layer_accent".to_string()));
+
+        // Uniform by default: one value drives both axes.
+        assert!(state.active_composition().unwrap().get_layer("layer_accent").unwrap().transform.scale_uniform);
+        state.nudge_scale(10.0, 0.0);
+        let sc = state.active_composition().unwrap().get_layer("layer_accent").unwrap().transform.scale.value;
+        assert!((sc.x - 110.0).abs() < 1e-4 && (sc.y - 110.0).abs() < 1e-4);
+
+        // Toggle to manual: axes move independently.
+        state.toggle_selected_scale_link();
+        assert!(!state.active_composition().unwrap().get_layer("layer_accent").unwrap().transform.scale_uniform);
+        state.nudge_scale(10.0, 0.0);
+        let sc = state.active_composition().unwrap().get_layer("layer_accent").unwrap().transform.scale.value;
+        assert!((sc.x - 120.0).abs() < 1e-4 && (sc.y - 110.0).abs() < 1e-4);
+
+        // Back to uniform snaps Y to X.
+        state.toggle_selected_scale_link();
+        let t = state.active_composition().unwrap().get_layer("layer_accent").unwrap().transform.clone();
+        assert!(t.scale_uniform);
+        assert!((t.scale.value.x - t.scale.value.y).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_scrub_keyboard_entry_paths() {
+        use crate::state::EditorState;
+
+        let mut state = EditorState::new();
+        state.select_layer(Some("layer_accent".to_string()));
+
+        // Absolute sets through the scrub-key universe.
+        assert!(state.set_scrub_value("pos_x", 123.0));
+        assert!(state.set_scrub_value("rotation", 30.0));
+        assert!(state.set_scrub_value("opacity", 80.0));
+        let comp = state.active_composition().unwrap();
+        let layer = comp.get_layer("layer_accent").unwrap();
+        assert!((layer.transform.position.value.x - 123.0).abs() < 1e-4);
+        assert!((layer.transform.rotation.value - 30.0).abs() < 1e-4);
+        assert!((layer.opacity.value - 80.0).abs() < 1e-4);
+
+        // Reads mirror writes.
+        assert!((state.scrub_current_value("pos_x").unwrap() - 123.0).abs() < 1e-4);
+        assert!(state.scrub_current_value("nope").is_none());
+        assert!(!state.set_scrub_value("nope", 1.0));
+
+        // Typed commit tolerates unit suffixes and rejects garbage.
+        state.value_edit_key = Some("opacity".to_string());
+        assert!(state.commit_typed_value("75 %"));
+        assert!((state.active_composition().unwrap().get_layer("layer_accent").unwrap().opacity.value - 75.0).abs() < 1e-4);
+        assert!(!state.commit_typed_value("abc"));
+        assert!(state.end_value_edit_state());
+        assert!(!state.end_value_edit_state());
     }
 }

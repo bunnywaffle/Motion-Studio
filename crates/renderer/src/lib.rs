@@ -3,9 +3,14 @@ pub mod blur;
 pub mod cache;
 pub mod device;
 pub mod shader;
+pub mod shader_lab;
 
 pub use blit::{BlitPipeline, BlitUniforms};
 pub use blur::{gaussian_blur_rgba, gaussian_kernel_1d, BLUR_WGSL};
+pub use shader_lab::{
+    build_uniform_buffer, compile_source, hash_source, CachedShader, ShaderLabCache,
+    ShaderLabPipeline, UniformField, RUNTIME_UNIFORMS,
+};
 pub use cache::{CachedTexture, TextureCache};
 pub use device::{DoubleBufferedTarget, GpuContext, GpuError, RenderTarget};
 pub use shader::{CustomShaderPipeline, CustomShaderUniforms};

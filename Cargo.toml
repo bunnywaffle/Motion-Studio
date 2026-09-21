@@ -27,6 +27,7 @@ serde_json = "1.0"
 rfd = "0.15"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 wgpu = "24.0"
+naga = "24.0"
 pollster = "0.4"
 bytemuck = { version = "1.21", features = ["derive"] }
 thiserror = "2.0"

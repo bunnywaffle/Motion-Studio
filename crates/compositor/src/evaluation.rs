@@ -7,7 +7,7 @@ use project::{
     TrackMatteMode, Vec2,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// The evaluated state and frame context of an inner composition nested inside a layer.
 #[derive(Debug, Clone, PartialEq)]
@@ -200,6 +200,14 @@ pub enum EvaluatedEffectType {
         amount: f32,
         monochrome: bool,
     },
+    /// Runtime user-shader effect. Spatial (runs on the GPU over the whole
+    /// tile), so [`Self::process_color`] is the identity; the renderer
+    /// compiles `source` (see `renderer::shader_lab`) and uploads `values`
+    /// as uniforms. `source_hash` keys the pipeline cache.
+    ShaderLab {
+        source_hash: u64,
+        values: HashMap<String, project::ShaderParamValue>,
+    },
 }
 
 impl EvaluatedEffectType {
@@ -214,6 +222,7 @@ impl EvaluatedEffectType {
             Self::DisplacementMap { .. } => "Displacement Map",
             Self::ChromaKey { .. } => "Chroma Key",
             Self::NoiseGenerator { .. } => "Noise Generator",
+            Self::ShaderLab { .. } => "Shader Lab",
         }
     }
 
@@ -221,7 +230,7 @@ impl EvaluatedEffectType {
     /// Such effects are the identity in [`Self::process_color`] and must be
     /// resolved by the rasterizer / preview renderer instead.
     pub const fn is_spatial(&self) -> bool {
-        matches!(self, Self::GaussianBlur { .. })
+        matches!(self, Self::GaussianBlur { .. } | Self::ShaderLab { .. })
     }
 
     /// Blur radius in pixels when this is a Gaussian blur, otherwise `None`.
@@ -341,6 +350,9 @@ impl EvaluatedEffectType {
                     )
                 }
             }
+            // Shader Lab runs on the GPU over whole tiles (see
+            // `renderer::shader_lab`); a lone color sample is unchanged.
+            Self::ShaderLab { .. } => c,
         }
     }
 }
@@ -1165,6 +1177,26 @@ impl LayerStackEvaluator {
                             amount: amount.evaluate_at(time),
                             monochrome: *monochrome,
                         },
+                        EffectType::ShaderLab { source, params, values, .. } => {
+                            use std::collections::hash_map::DefaultHasher;
+                            use std::hash::{Hash, Hasher};
+                            let mut hasher = DefaultHasher::new();
+                            source.hash(&mut hasher);
+                            let source_hash = hasher.finish();
+                            let resolved: HashMap<String, project::ShaderParamValue> = params
+                                .iter()
+                                .map(|p| {
+                                    (
+                                        p.name.clone(),
+                                        values.get(&p.name).cloned().unwrap_or_else(|| p.default.clone()),
+                                    )
+                                })
+                                .collect();
+                            EvaluatedEffectType::ShaderLab {
+                                source_hash,
+                                values: resolved,
+                            }
+                        }
                     };
                     evaluated_effects.push(EvaluatedEffect {
                         id: eff.id.clone(),

@@ -1,4 +1,6 @@
 use compositor::{EvaluatedStack, LayerStackEvaluator, SceneGraph};
+use gpui_kit::component::input::InputState;
+use gpui_kit::{Entity, Subscription};
 use project::{
     Asset, BlendMode, Color, Composition, Effect, EffectType, Keyframe, KeyframeTangent, Layer,
     LayerSource, PlaybackClock, Project, Property, ShapeType, TimeCode, TrackMatteMode, Vec2,
@@ -105,6 +107,11 @@ pub struct EditorState {
     pub is_playing: bool,
     pub active_tool: EditorTool,
     pub timeline_full_width: bool,
+    /// Scrub key currently open for After Effects-style keyboard entry.
+    pub value_edit_key: Option<String>,
+    /// Live single-line editor for `value_edit_key` (created on demand).
+    pub value_editor: Option<Entity<InputState>>,
+    pub value_editor_sub: Option<Subscription>,
     evaluator: LayerStackEvaluator,
 }
 
@@ -220,13 +227,287 @@ impl EditorState {
             is_playing: false,
             active_tool: EditorTool::Move,
             timeline_full_width: false,
+            value_edit_key: None,
+            value_editor: None,
+            value_editor_sub: None,
             evaluator: LayerStackEvaluator::new(),
+        }
+    }
+
+    /// Nudge one component of a vector/color Shader Lab parameter.
+    pub fn nudge_shaderlab_component(
+        &mut self,
+        effect_id: &str,
+        param_name: &str,
+        index: usize,
+        delta: f32,
+    ) -> Result<(), String> {
+        let selected_id = self
+            .selected_layer_id
+            .clone()
+            .ok_or_else(|| "No layer selected".to_string())?;
+        let comp = self
+            .active_composition()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer(&selected_id)
+            .ok_or_else(|| format!("Layer {selected_id} not found"))?;
+        let effect = layer
+            .get_effect(effect_id)
+            .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
+        let params = effect.shader_params().ok_or_else(|| "Not a Shader Lab effect".to_string())?.to_vec();
+        let param = params
+            .iter()
+            .find(|p| p.name == param_name)
+            .ok_or_else(|| format!("Shader parameter {param_name} not found"))?;
+        let step = param.step.unwrap_or(0.05);
+        let cur = effect
+            .resolved_shader_values()
+            .into_iter()
+            .find(|(n, _)| n == param_name)
+            .map(|(_, v)| v);
+        let bump = |x: f32| x + delta * step;
+        let next = match cur {
+            Some(project::ShaderParamValue::Vec2(a)) => {
+                let mut b = a;
+                if index < 2 { b[index] = bump(b[index]); }
+                project::ShaderParamValue::Vec2(b)
+            }
+            Some(project::ShaderParamValue::Vec3(a)) => {
+                let mut b = a;
+                if index < 3 { b[index] = bump(b[index]); }
+                project::ShaderParamValue::Vec3(b)
+            }
+            Some(project::ShaderParamValue::Vec4(a)) => {
+                let mut b = a;
+                if index < 4 { b[index] = bump(b[index]); }
+                project::ShaderParamValue::Vec4(b)
+            }
+            Some(project::ShaderParamValue::Color(c)) => {
+                let mut b = [c.r, c.g, c.b, c.a];
+                if index < 4 { b[index] = (bump(b[index])).clamp(0.0, 1.0); }
+                project::ShaderParamValue::Color(Color::rgba(b[0], b[1], b[2], b[3]))
+            }
+            Some(project::ShaderParamValue::Float(v)) => param.coerce_float(bump(v)),
+            Some(project::ShaderParamValue::Int(v)) => param.coerce_float(v as f32 + delta),
+            _ => param.coerce_float(delta),
+        };
+        let comp_mut = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer_mut = comp_mut
+            .get_layer_mut(&selected_id)
+            .ok_or_else(|| format!("Layer {selected_id} not found"))?;
+        let effect_mut = layer_mut
+            .get_effect_mut(effect_id)
+            .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
+        if effect_mut.set_shader_value(param_name, next) {
+            Ok(())
+        } else {
+            Err(format!("Shader parameter {param_name} not found"))
         }
     }
 
     /// Toggle whether the timeline spans the full width of the application.
     pub fn toggle_timeline_full_width(&mut self) {
         self.timeline_full_width = !self.timeline_full_width;
+    }
+
+    /// Nudge a Shader Lab parameter on the selected layer's effect.
+    pub fn nudge_shaderlab_param(
+        &mut self,
+        effect_id: &str,
+        param_name: &str,
+        delta: f32,
+    ) -> Result<(), String> {
+        let selected_id = self
+            .selected_layer_id
+            .clone()
+            .ok_or_else(|| "No layer selected".to_string())?;
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(&selected_id)
+            .ok_or_else(|| format!("Layer {selected_id} not found"))?;
+        let effect = layer
+            .get_effect_mut(effect_id)
+            .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
+        if effect.nudge_shader_value(param_name, delta) {
+            Ok(())
+        } else {
+            Err(format!("Shader parameter {param_name} not found"))
+        }
+    }
+
+    /// Set a Shader Lab parameter from a raw float (typed entry / scrub-set).
+    /// Vector and color types fill from the single value via `coerce_float`;
+    /// per-component keys use `set_shaderlab_component`.
+    pub fn set_shaderlab_param(
+        &mut self,
+        effect_id: &str,
+        param_name: &str,
+        v: f32,
+    ) -> Result<(), String> {
+        let selected_id = self
+            .selected_layer_id
+            .clone()
+            .ok_or_else(|| "No layer selected".to_string())?;
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(&selected_id)
+            .ok_or_else(|| format!("Layer {selected_id} not found"))?;
+        let effect = layer
+            .get_effect_mut(effect_id)
+            .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
+        let params = effect.shader_params().ok_or_else(|| "Not a Shader Lab effect".to_string())?.to_vec();
+        let param = params
+            .iter()
+            .find(|p| p.name == param_name)
+            .ok_or_else(|| format!("Shader parameter {param_name} not found"))?;
+        let value = param.coerce_float(v);
+        if effect.set_shader_value(param_name, value) {
+            Ok(())
+        } else {
+            Err(format!("Shader parameter {param_name} not found"))
+        }
+    }
+
+    /// Set one component of a vector/color Shader Lab parameter.
+    pub fn set_shaderlab_component(
+        &mut self,
+        effect_id: &str,
+        param_name: &str,
+        index: usize,
+        v: f32,
+    ) -> Result<(), String> {
+        let selected_id = self
+            .selected_layer_id
+            .clone()
+            .ok_or_else(|| "No layer selected".to_string())?;
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(&selected_id)
+            .ok_or_else(|| format!("Layer {selected_id} not found"))?;
+        let effect = layer
+            .get_effect_mut(effect_id)
+            .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
+        let resolved = effect.resolved_shader_values();
+        let current = resolved
+            .iter()
+            .find(|(n, _)| n == param_name)
+            .map(|(_, v)| v.clone());
+        let params = effect.shader_params().ok_or_else(|| "Not a Shader Lab effect".to_string())?.to_vec();
+        let param = params
+            .iter()
+            .find(|p| p.name == param_name)
+            .ok_or_else(|| format!("Shader parameter {param_name} not found"))?;
+        let lo = param.min.unwrap_or(f32::NEG_INFINITY);
+        let hi = param.max.unwrap_or(f32::INFINITY);
+        let v = v.clamp(lo, hi);
+        let next = match current {
+            Some(project::ShaderParamValue::Vec2(mut a)) => {
+                if index < 2 { a[index] = v; }
+                project::ShaderParamValue::Vec2(a)
+            }
+            Some(project::ShaderParamValue::Vec3(mut a)) => {
+                if index < 3 { a[index] = v; }
+                project::ShaderParamValue::Vec3(a)
+            }
+            Some(project::ShaderParamValue::Vec4(mut a)) => {
+                if index < 4 { a[index] = v; }
+                project::ShaderParamValue::Vec4(a)
+            }
+            Some(project::ShaderParamValue::Color(c)) => {
+                let mut a = [c.r, c.g, c.b, c.a];
+                if index < 4 { a[index] = v.clamp(0.0, 1.0); }
+                project::ShaderParamValue::Color(Color::rgba(a[0], a[1], a[2], a[3]))
+            }
+            _ => param.coerce_float(v),
+        };
+        if effect.set_shader_value(param_name, next) {
+            Ok(())
+        } else {
+            Err(format!("Shader parameter {param_name} not found"))
+        }
+    }
+
+    /// Validate and apply new Shader Lab source on the selected layer.
+    /// Success swaps in the source (UI regenerates); failure keeps the
+    /// last-good source running and records the error for the panel.
+    pub fn apply_shader_source(
+        &mut self,
+        effect_id: &str,
+        source: &str,
+    ) -> Result<(), String> {
+        let selected_id = self
+            .selected_layer_id
+            .clone()
+            .ok_or_else(|| "No layer selected".to_string())?;
+        match renderer::shader_lab::compile_source(source) {
+            Err(msg) => {
+                let comp = self
+                    .active_composition_mut()
+                    .ok_or_else(|| "No active composition".to_string())?;
+                let layer = comp
+                    .get_layer_mut(&selected_id)
+                    .ok_or_else(|| format!("Layer {selected_id} not found"))?;
+                let effect = layer
+                    .get_effect_mut(effect_id)
+                    .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
+                effect.set_shader_error(Some(msg.clone()));
+                Err(msg)
+            }
+            Ok(_) => {
+                let comp = self
+                    .active_composition_mut()
+                    .ok_or_else(|| "No active composition".to_string())?;
+                let layer = comp
+                    .get_layer_mut(&selected_id)
+                    .ok_or_else(|| format!("Layer {selected_id} not found"))?;
+                let effect = layer
+                    .get_effect_mut(effect_id)
+                    .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
+                effect.set_shader_source(source);
+                Ok(())
+            }
+        }
+    }
+
+    /// Apply typed text from the value editor to the open scrub key.
+    /// Accepts plain numbers with an optional unit suffix ("px", "%", "deg").
+    /// Returns true when a value was applied.
+    pub fn commit_typed_value(&mut self, text: &str) -> bool {
+        let Some(prop) = self.value_edit_key.clone() else {
+            return false;
+        };
+        let numeric: String = text
+            .trim()
+            .chars()
+            .take_while(|c| {
+                c.is_ascii_digit() || *c == '.' || *c == '-' || *c == '+' || *c == 'e' || *c == 'E'
+            })
+            .collect();
+        match numeric.parse::<f32>() {
+            Ok(v) => self.set_scrub_value(&prop, v),
+            Err(_) => false,
+        }
+    }
+
+    /// Close keyboard entry, dropping the editor. Returns true when open.
+    pub fn end_value_edit_state(&mut self) -> bool {
+        if self.value_edit_key.is_some() || self.value_editor.is_some() {
+            self.value_edit_key = None;
+            self.value_editor = None;
+            self.value_editor_sub = None;
+            true
+        } else {
+            false
+        }
     }
 
     /// Return reference to the active composition.
@@ -1084,7 +1365,6 @@ impl EditorState {
 
     /// Nudge scale on the specified layer.
     pub fn nudge_layer_scale(&mut self, layer_id: &str, dx: f32, dy: f32) {
-        let delta = Vec2::new(dx, dy);
         let current_tc = self.clock.timecode();
         let comp = match self.active_composition_mut() {
             Some(c) => c,
@@ -1096,10 +1376,413 @@ impl EditorState {
             } else {
                 layer.transform.scale.value
             };
+            // Uniform mode (default): both axes move together as one value.
+            let delta = if layer.transform.scale_uniform {
+                Vec2::new(dx + dy, dx + dy)
+            } else {
+                Vec2::new(dx, dy)
+            };
             let new_val = current + delta;
             layer.transform.scale.set_value(new_val);
             if layer.transform.scale.is_animated() {
                 layer.transform.scale.add_keyframe(Keyframe::new(current_tc, new_val));
+            }
+        }
+    }
+
+    /// Toggle uniform vs. separate-dimensions scale editing on a layer.
+    pub fn toggle_layer_scale_link(&mut self, layer_id: &str) {
+        let current_tc = self.clock.timecode();
+        if let Some(comp) = self.active_composition_mut() {
+            if let Some(layer) = comp.get_layer_mut(layer_id) {
+                let next = !layer.transform.scale_uniform;
+                layer.transform.set_scale_uniform(next);
+                if layer.transform.scale.is_animated() {
+                    let v = layer.transform.scale.evaluate_at(&current_tc);
+                    let snapped = if next { Vec2::new(v.x, v.x) } else { v };
+                    layer.transform.scale.set_value(snapped);
+                    layer.transform.scale.add_keyframe(Keyframe::new(current_tc, snapped));
+                }
+            }
+        }
+    }
+
+    /// Toggle uniform scale editing on the selected layer.
+    pub fn toggle_selected_scale_link(&mut self) {
+        if let Some(id) = self.selected_layer_id.clone() {
+            self.toggle_layer_scale_link(&id);
+        }
+    }
+
+    /// Read the current raw numeric value behind a scrub key (for keyboard
+    /// entry prefill). Mirrors [`Self::set_scrub_value`]; `None` for unknown
+    /// keys or missing selection.
+    pub fn scrub_current_value(&self, key: &str) -> Option<f32> {
+        let current_tc = self.clock.timecode();
+        let comp = self.active_composition()?;
+        let lid = self.selected_layer_id.as_deref()?;
+        let layer = comp.get_layer(lid)?;
+        let eval_or = |p: &Property<f32>| {
+            if p.is_animated() {
+                p.evaluate_at(&current_tc)
+            } else {
+                p.value
+            }
+        };
+        let eval_or_vec = |p: &Property<Vec2>| {
+            if p.is_animated() {
+                p.evaluate_at(&current_tc)
+            } else {
+                p.value
+            }
+        };
+        match key {
+            "pos_x" => Some(eval_or_vec(&layer.transform.position).x),
+            "pos_y" => Some(eval_or_vec(&layer.transform.position).y),
+            "anchor_x" => Some(eval_or_vec(&layer.transform.anchor_point).x),
+            "anchor_y" => Some(eval_or_vec(&layer.transform.anchor_point).y),
+            "scale_x" | "scale_u" => Some(eval_or_vec(&layer.transform.scale).x),
+            "scale_y" => Some(eval_or_vec(&layer.transform.scale).y),
+            "rotation" => Some(eval_or(&layer.transform.rotation)),
+            "opacity" => Some(eval_or(&layer.opacity)),
+            "font_size" => match &layer.source {
+                LayerSource::Text { font_size, .. } => Some(eval_or(font_size)),
+                _ => None,
+            },
+            "solid_w" => match &layer.source {
+                LayerSource::Solid { width, .. } => Some(*width as f32),
+                _ => None,
+            },
+            "solid_h" => match &layer.source {
+                LayerSource::Solid { height, .. } => Some(*height as f32),
+                _ => None,
+            },
+            "rect_w" => match &layer.source {
+                LayerSource::Shape { shape_type: ShapeType::Rectangle { width, .. } } => {
+                    Some(width.value)
+                }
+                _ => None,
+            },
+            "rect_h" => match &layer.source {
+                LayerSource::Shape { shape_type: ShapeType::Rectangle { height, .. } } => {
+                    Some(height.value)
+                }
+                _ => None,
+            },
+            "rect_cr" => match &layer.source {
+                LayerSource::Shape { shape_type: ShapeType::Rectangle { corner_radius, .. } } => {
+                    Some(corner_radius.value)
+                }
+                _ => None,
+            },
+            "ellipse_rx" => match &layer.source {
+                LayerSource::Shape { shape_type: ShapeType::Ellipse { radius_x, .. } } => {
+                    Some(radius_x.value)
+                }
+                _ => None,
+            },
+            "ellipse_ry" => match &layer.source {
+                LayerSource::Shape { shape_type: ShapeType::Ellipse { radius_y, .. } } => {
+                    Some(radius_y.value)
+                }
+                _ => None,
+            },
+            _ => {
+                // Shader Lab scalar (sl:) and component (slc:) keys.
+                let (rest, is_component) = match (key.strip_prefix("slc:"), key.strip_prefix("sl:")) {
+                    (Some(r), _) => (r, true),
+                    (_, Some(r)) => (r, false),
+                    _ => {
+                        let rest = key.strip_prefix("fx:")?;
+                        let parts: Vec<&str> = rest.split(':').collect();
+                        if parts.len() < 2 {
+                            return None;
+                        }
+                        let prop = layer.get_effect(parts[0])?.get_param_property(parts[1])?;
+                        return Some(if prop.is_animated() {
+                            prop.evaluate_at(&current_tc)
+                        } else {
+                            prop.value
+                        });
+                    }
+                };
+                let parts: Vec<&str> = rest.split(':').collect();
+                if parts.len() < 2 {
+                    return None;
+                }
+                let effect = layer.get_effect(parts[0])?;
+                let resolved = effect.resolved_shader_values();
+                let value = resolved.iter().find(|(n, _)| n == parts[1])?.1.clone();
+                let idx = if is_component {
+                    parts.get(2)?.parse::<usize>().ok()?
+                } else {
+                    0
+                };
+                Some(match value {
+                    project::ShaderParamValue::Float(v) => v,
+                    project::ShaderParamValue::Int(v) => v as f32,
+                    project::ShaderParamValue::Bool(v) => if v { 1.0 } else { 0.0 },
+                    project::ShaderParamValue::Vec2(a) => a.get(idx).copied().unwrap_or(0.0),
+                    project::ShaderParamValue::Vec3(a) => a.get(idx).copied().unwrap_or(0.0),
+                    project::ShaderParamValue::Vec4(a) => a.get(idx).copied().unwrap_or(0.0),
+                    project::ShaderParamValue::Color(c) => [c.r, c.g, c.b, c.a].get(idx).copied().unwrap_or(0.0),
+                })
+            }
+        }
+    }
+
+    /// Set a scrubbed property to an absolute value (keyboard entry).
+    /// Returns false for unknown keys. Mirrors the drag/wheel key universe
+    /// (`anchor_x`, `pos_*`, `scale_*`, `rotation`, `opacity`, `solid_*`,
+    /// `font_size`, `rect_*`, `ellipse_*`, `fx:<effect>:<param>`).
+    pub fn set_scrub_value(&mut self, key: &str, v: f32) -> bool {
+        if !v.is_finite() {
+            return false;
+        }
+        let current_tc = self.clock.timecode();
+        match key {
+            "pos_x" | "pos_y" | "anchor_x" | "anchor_y" => {
+                let (cx0, cy0) = {
+                    let comp = match self.active_composition() {
+                        Some(c) => c,
+                        None => return false,
+                    };
+                    let layer = match comp.get_layer(self.selected_layer_id.as_deref().unwrap_or("")) {
+                        Some(l) => l,
+                        None => return false,
+                    };
+                    let p = if key.starts_with("pos_") {
+                        if layer.transform.position.is_animated() {
+                            layer.transform.position.evaluate_at(&current_tc)
+                        } else {
+                            layer.transform.position.value
+                        }
+                    } else if layer.transform.anchor_point.is_animated() {
+                        layer.transform.anchor_point.evaluate_at(&current_tc)
+                    } else {
+                        layer.transform.anchor_point.value
+                    };
+                    (p.x, p.y)
+                };
+                match key {
+                    "pos_x" => self.nudge_position(v - cx0, 0.0),
+                    "pos_y" => self.nudge_position(0.0, v - cy0),
+                    "anchor_x" => self.nudge_anchor(v - cx0, 0.0),
+                    _ => self.nudge_anchor(0.0, v - cy0),
+                }
+                true
+            }
+            "scale_x" | "scale_y" | "scale_u" => {
+                let (linked, cx0, cy0) = {
+                    let comp = match self.active_composition() {
+                        Some(c) => c,
+                        None => return false,
+                    };
+                    let layer = match comp.get_layer(self.selected_layer_id.as_deref().unwrap_or("")) {
+                        Some(l) => l,
+                        None => return false,
+                    };
+                    let s = if layer.transform.scale.is_animated() {
+                        layer.transform.scale.evaluate_at(&current_tc)
+                    } else {
+                        layer.transform.scale.value
+                    };
+                    (layer.transform.scale_uniform, s.x, s.y)
+                };
+                if linked || key == "scale_u" {
+                    // Uniform: a single value drives both axes.
+                    self.nudge_scale(v - cx0, 0.0);
+                } else if key == "scale_x" {
+                    self.nudge_scale(v - cx0, 0.0);
+                } else {
+                    self.nudge_scale(0.0, v - cy0);
+                }
+                true
+            }
+            "rotation" => {
+                let cur = {
+                    let comp = match self.active_composition() {
+                        Some(c) => c,
+                        None => return false,
+                    };
+                    let layer = match comp.get_layer(self.selected_layer_id.as_deref().unwrap_or("")) {
+                        Some(l) => l,
+                        None => return false,
+                    };
+                    if layer.transform.rotation.is_animated() {
+                        layer.transform.rotation.evaluate_at(&current_tc)
+                    } else {
+                        layer.transform.rotation.value
+                    }
+                };
+                self.nudge_rotation(v - cur);
+                true
+            }
+            "opacity" => {
+                let cur = {
+                    let comp = match self.active_composition() {
+                        Some(c) => c,
+                        None => return false,
+                    };
+                    let layer = match comp.get_layer(self.selected_layer_id.as_deref().unwrap_or("")) {
+                        Some(l) => l,
+                        None => return false,
+                    };
+                    if layer.opacity.is_animated() {
+                        layer.opacity.evaluate_at(&current_tc)
+                    } else {
+                        layer.opacity.value
+                    }
+                };
+                self.nudge_opacity(v - cur);
+                true
+            }
+            "font_size" => {
+                if let Some(id) = self.selected_layer_id.clone() {
+                    self.set_layer_font_size(&id, v).is_ok()
+                } else {
+                    false
+                }
+            }
+            "solid_w" | "solid_h" => {
+                let (id, w, h) = {
+                    let comp = match self.active_composition() {
+                        Some(c) => c,
+                        None => return false,
+                    };
+                    let lid = match self.selected_layer_id.clone() {
+                        Some(l) => l,
+                        None => return false,
+                    };
+                    let layer = match comp.get_layer(&lid) {
+                        Some(l) => l,
+                        None => return false,
+                    };
+                    match &layer.source {
+                        LayerSource::Solid { width, height, .. } => (lid, *width, *height),
+                        _ => return false,
+                    }
+                };
+                let (nw, nh) = if key == "solid_w" {
+                    (v.max(1.0) as u32, h)
+                } else {
+                    (w, v.max(1.0) as u32)
+                };
+                self.set_layer_solid_dimensions(&id, nw, nh).is_ok()
+            }
+            "rect_w" | "rect_h" | "rect_cr" => {
+                if let Some(id) = self.selected_layer_id.clone() {
+                    let (w, h, cr) = {
+                        let comp = match self.active_composition() {
+                            Some(c) => c,
+                            None => return false,
+                        };
+                        let layer = match comp.get_layer(&id) {
+                            Some(l) => l,
+                            None => return false,
+                        };
+                        match &layer.source {
+                            LayerSource::Shape {
+                                shape_type: ShapeType::Rectangle { width, height, corner_radius },
+                            } => (width.value, height.value, corner_radius.value),
+                            _ => return false,
+                        }
+                    };
+                    match key {
+                        "rect_w" => self.set_layer_rect_dimensions(&id, v.max(1.0), h, cr).is_ok(),
+                        "rect_h" => self.set_layer_rect_dimensions(&id, w, v.max(1.0), cr).is_ok(),
+                        _ => self.set_layer_rect_dimensions(&id, w, h, v.max(0.0)).is_ok(),
+                    }
+                } else {
+                    false
+                }
+            }
+            "ellipse_rx" | "ellipse_ry" => {
+                if let Some(id) = self.selected_layer_id.clone() {
+                    let (rx, ry) = {
+                        let comp = match self.active_composition() {
+                            Some(c) => c,
+                            None => return false,
+                        };
+                        let layer = match comp.get_layer(&id) {
+                            Some(l) => l,
+                            None => return false,
+                        };
+                        match &layer.source {
+                            LayerSource::Shape {
+                                shape_type: ShapeType::Ellipse { radius_x, radius_y },
+                            } => (radius_x.value, radius_y.value),
+                            _ => return false,
+                        }
+                    };
+                    let (nrx, nry) = if key == "ellipse_rx" {
+                        (v.max(1.0), ry)
+                    } else {
+                        (rx, v.max(1.0))
+                    };
+                    self.set_layer_ellipse_radii(&id, nrx, nry).is_ok()
+                } else {
+                    false
+                }
+            }
+            _ => {
+                if let Some(rest) = key.strip_prefix("slc:") {
+                    // slc:<effect>:<param>:<index>
+                    let parts: Vec<&str> = rest.split(':').collect();
+                    if parts.len() >= 3 {
+                        if let Ok(idx) = parts[2].parse::<usize>() {
+                            return self
+                                .set_shaderlab_component(parts[0], parts[1], idx, v)
+                                .is_ok();
+                        }
+                    }
+                    return false;
+                }
+                if let Some(rest) = key.strip_prefix("sl:") {
+                    // sl:<effect>:<param>
+                    let parts: Vec<&str> = rest.split(':').collect();
+                    if parts.len() >= 2 {
+                        return self.set_shaderlab_param(parts[0], parts[1], v).is_ok();
+                    }
+                    return false;
+                }
+                if let Some(rest) = key.strip_prefix("fx:") {
+                    let parts: Vec<&str> = rest.split(':').collect();
+                    if parts.len() >= 2 {
+                        let (lid, cur) = {
+                            let comp = match self.active_composition() {
+                                Some(c) => c,
+                                None => return false,
+                            };
+                            let lid = match self.selected_layer_id.clone() {
+                                Some(l) => l,
+                                None => return false,
+                            };
+                            let layer = match comp.get_layer(&lid) {
+                                Some(l) => l,
+                                None => return false,
+                            };
+                            let fx = match layer.get_effect(parts[0]) {
+                                Some(f) => f,
+                                None => return false,
+                            };
+                            let prop = match fx.get_param_property(parts[1]) {
+                                Some(p) => p,
+                                None => return false,
+                            };
+                            let cur = if prop.is_animated() {
+                                prop.evaluate_at(&current_tc)
+                            } else {
+                                prop.value
+                            };
+                            (lid, cur)
+                        };
+                        return self
+                            .nudge_layer_effect_param(&lid, parts[0], parts[1], v - cur)
+                            .is_ok();
+                    }
+                }
+                false
             }
         }
     }
@@ -1710,7 +2393,12 @@ impl EditorState {
 
         let target_pos = pos.unwrap_or(Vec2::ZERO);
         layer.transform.position.set_value(target_pos);
-        layer.transform.anchor_point.set_value(Vec2::new(0.0, 0.0));
+        // Center the text block on the spawn point: anchor at half of the
+        // estimated block size so position (0, 0) lands it in the viewport
+        // center like every other new layer (mirrors the viewer estimate).
+        let est_w = (text.chars().count().max(1) as f32 * 48.0 * 0.6 + 40.0).max(100.0);
+        let est_h: f32 = (48.0f32 * 1.4 + 20.0).max(40.0);
+        layer.transform.anchor_point.set_value(Vec2::new(est_w / 2.0, est_h / 2.0));
 
         let comp_mut = self
             .active_composition_mut()

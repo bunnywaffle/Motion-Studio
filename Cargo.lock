@@ -5785,6 +5785,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "compositor",
+ "naga 24.0.0",
  "pollster 0.4.0",
  "project",
  "thiserror 2.0.20",

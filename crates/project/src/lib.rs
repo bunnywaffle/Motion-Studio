@@ -12,6 +12,7 @@ pub mod marker;
 pub mod matte;
 pub mod project;
 pub mod property;
+pub mod shader;
 pub mod timecode;
 pub mod transform;
 pub mod vec2;
@@ -36,6 +37,9 @@ pub use marker::Marker;
 pub use matte::TrackMatteMode;
 pub use project::{Project, ProjectSettings, CURRENT_FORMAT_VERSION};
 pub use property::Property;
+pub use shader::{
+    parse_shader_meta, parse_shader_params, ShaderParam, ShaderParamType, ShaderParamValue,
+};
 pub use timecode::{drop_frame_smpte_to_frame, frame_to_drop_frame_smpte, TimeCode};
 pub use transform::Transform;
 pub use vec2::Vec2;

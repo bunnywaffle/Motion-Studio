@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 wgpu.workspace = true
+naga.workspace = true
 pollster.workspace = true
 bytemuck.workspace = true
 thiserror.workspace = true
