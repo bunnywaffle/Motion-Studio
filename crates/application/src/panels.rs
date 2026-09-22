@@ -8,6 +8,7 @@ use gpui_kit::*;
 use std::collections::HashSet;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::state::{EditorState, EditorTool};
 use project::shader::{presets as shader_presets, ShaderParamValue};
@@ -53,24 +54,6 @@ where
         .child(label)
 }
 
-/// Escape user text for inline SVG (`<`, `>`, `&`, quotes).
-fn svg_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
-/// `#RRGGBB` from linear 0.0–1.0 channels.
-fn svg_hex(r: f32, g: f32, b: f32) -> String {
-    format!(
-        "#{:02X}{:02X}{:02X}",
-        (r.clamp(0.0, 1.0) * 255.0) as u8,
-        (g.clamp(0.0, 1.0) * 255.0) as u8,
-        (b.clamp(0.0, 1.0) * 255.0) as u8
-    )
-}
-
 /// Viewport gizmo handle dot, centered on canvas-space `(x, y)`.
 /// Note: no `.test_support()` wrapper here — it would hide the concrete
 /// `Stateful<Div>` type that callers extend with children and handlers.
@@ -105,6 +88,25 @@ fn gizmo_to_comp(
         (mx - fox) / fit - cw / 2.0,
         (my - foy) / fit - ch / 2.0,
     )
+}
+
+/// Frame origin with a centering fallback for pre-measure frames: the
+/// wrap centers content, so origin = wrap origin + (wrap - canvas) / 2.
+fn frame_origin_or_center(
+    measured: Option<(f32, f32)>,
+    viewport_px: Option<(f32, f32)>,
+    viewport_origin: Option<(f32, f32)>,
+    canvas_px: Option<(f32, f32)>,
+) -> Option<(f32, f32)> {
+    if measured.is_some() {
+        return measured;
+    }
+    match (viewport_px, viewport_origin, canvas_px) {
+        (Some((vw, vh)), Some((ox, oy)), Some((cw, ch))) => {
+            Some((ox + (vw - cw) / 2.0, oy + (vh - ch) / 2.0))
+        }
+        _ => None,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1467,6 +1469,12 @@ pub struct CompositionViewerPanel {
     pub frame_origin: Option<(f32, f32)>,
     /// Active transform-gizmo drag (rotate / scale / anchor handles).
     pub gizmo_drag: Option<ViewerGizmoDrag>,
+    /// Per-layer CPU raster cache (layer id -> last raster).
+    pub raster_cache: HashMap<String, crate::raster::RasterEntry>,
+    /// Decoded image asset cache (asset id -> RGBA).
+    pub asset_cache: HashMap<String, Arc<image::RgbaImage>>,
+    /// Last fitted canvas size, for cursor mapping before measure.
+    pub canvas_px: Option<(f32, f32)>,
 }
 
 /// Viewport transform-gizmo drag state (After Effects-style direct
@@ -1512,6 +1520,9 @@ impl CompositionViewerPanel {
             viewport_origin: None,
             frame_origin: None,
             gizmo_drag: None,
+            raster_cache: HashMap::new(),
+            asset_cache: HashMap::new(),
+            canvas_px: None,
         }
     }
 
@@ -1578,60 +1589,63 @@ impl Render for CompositionViewerPanel {
         // Uniform canvas scale (comp px -> canvas px).
         let scale_x = fit;
         let scale_y = fit;
+        self.canvas_px = Some((canvas_w, canvas_h));
+        let frame_org = frame_origin_or_center(
+            self.frame_origin,
+            self.viewport_px,
+            self.viewport_origin,
+            self.canvas_px,
+        );
 
         // Render evaluated layers in painter's composite order
-        let rendered_layers: Vec<AnyElement> = match eval_stack.as_ref() {
+        let (rendered_layers, gizmo_els): (Vec<AnyElement>, Vec<AnyElement>) = match eval_stack.as_ref() {
             Some(stack) => {
                 let mut elements = Vec::new();
+                // Transform-gizmo overlays live in canvas space (NOT inside
+                // layer shells, whose local origin would misplace them).
+                let mut gizmo_els: Vec<AnyElement> = Vec::new();
                 let mut full_frame_backdrop = Color::rgba(
                     bg_color.r, bg_color.g, bg_color.b, bg_color.a,
                 );
                 let mut rendered_regions: Vec<(f32, f32, f32, f32, Color)> = Vec::new();
 
                 for layer in stack.render_layers() {
-                    let is_text = matches!(&layer.source, LayerSource::Text { .. });
                     let is_adjustment = matches!(&layer.source, LayerSource::Adjustment);
 
-                    let (base_w, base_h, col, image_path) = match &layer.source {
-                        LayerSource::Solid {
-                            width,
-                            height,
-                            color,
-                        } => (*width as f32, *height as f32, *color, None),
+                    // Base content dims mirror the rasterizer estimate so
+                    // pivots, bounds, and pixels stay consistent.
+                    let (base_w, base_h) = match &layer.source {
+                        LayerSource::Solid { width, height, .. } => {
+                            (*width as f32, *height as f32)
+                        }
                         LayerSource::Image { asset_id } => {
-                            let (w, h, p) = if let Some(asset) = state.project.get_asset(asset_id) {
+                            if let Some(asset) = state.project.get_asset(asset_id) {
                                 let (dim_w, dim_h) = image::image_dimensions(&asset.path)
                                     .unwrap_or((1920, 1080));
-                                (dim_w as f32, dim_h as f32, Some(asset.path.clone()))
+                                (dim_w as f32, dim_h as f32)
                             } else {
-                                (400.0, 300.0, None)
-                            };
-                            (w, h, Color::WHITE, p)
+                                (400.0, 300.0)
+                            }
                         }
-                        LayerSource::Video { asset_id, .. } => {
-                            let p = state.project.get_asset(asset_id).map(|a| a.path.clone());
-                            (1920.0, 1080.0, Color::WHITE, p)
-                        }
-                        LayerSource::Text { font_size, fill_color, text, .. } => {
+                        LayerSource::Video { .. } => (1920.0, 1080.0),
+                        LayerSource::Text { font_size, text, .. } => {
                             let len = text.value.chars().count().max(1) as f32;
                             let fs = font_size.value;
                             let estimated_w = (len * fs * 0.6 + 40.0).max(100.0);
                             let estimated_h = (fs * 1.4 + 20.0).max(40.0);
-                            (estimated_w, estimated_h, fill_color.value, None)
+                            (estimated_w, estimated_h)
                         }
                         LayerSource::Shape { shape_type } => match shape_type {
-                            ShapeType::Rectangle { width, height, fill, .. } => {
-                                (width.value, height.value, *fill, None)
+                            ShapeType::Rectangle { width, height, .. } => {
+                                (width.value, height.value)
                             }
-                            ShapeType::Ellipse { radius_x, radius_y, fill, .. } => {
-                                (radius_x.value * 2.0, radius_y.value * 2.0, *fill, None)
+                            ShapeType::Ellipse { radius_x, radius_y, .. } => {
+                                (radius_x.value * 2.0, radius_y.value * 2.0)
                             }
-                            ShapeType::Path { fill, .. } => (400.0, 300.0, *fill, None),
+                            ShapeType::Path { .. } => (400.0, 300.0),
                         },
-                        LayerSource::Adjustment => {
-                            (comp_w, comp_h, Color::TRANSPARENT, None)
-                        }
-                        _ => (400.0, 300.0, Color::WHITE, None),
+                        LayerSource::Adjustment => (comp_w, comp_h),
+                        _ => (400.0, 300.0),
                     };
 
                     let bbox = layer.world_bounds(base_w, base_h);
@@ -1640,34 +1654,6 @@ impl Render for CompositionViewerPanel {
                     let l_w = ((bbox.max.x - bbox.min.x) * scale_x).max(2.0);
                     let l_h = ((bbox.max.y - bbox.min.y) * scale_y).max(2.0);
                     let is_selected = state.selected_layer_id.as_deref() == Some(&layer.id);
-
-                    // Rotation state (degrees, evaluated): gpui Divs cannot be
-                    // transformed, so rotated vector layers (solid / shape /
-                    // text) render their content as an inline SVG with a real
-                    // rotation transform. Raster layers (image / video) keep
-                    // their div rendering and get an angle badge instead.
-                    let rot_deg = if layer.transform.rotation.is_finite() {
-                        layer.transform.rotation
-                    } else {
-                        0.0
-                    };
-                    let scv = layer.transform.scale;
-                    let uw = (base_w * (scv.x / 100.0) * scale_x).max(2.0);
-                    let uh = (base_h * (scv.y / 100.0) * scale_y).max(2.0);
-                    let is_rotated = rot_deg.abs() >= 0.05;
-                    let use_rotated_svg = is_rotated
-                        && matches!(
-                            &layer.source,
-                            LayerSource::Solid { .. }
-                                | LayerSource::Shape { .. }
-                                | LayerSource::Text { .. }
-                        );
-                    // Pivot-correct center: the layer-local center mapped
-                    // through the full world matrix (stays right for
-                    // off-center anchor points), converted to canvas px.
-                    let wc = layer.local_to_world_point(Vec2::new(base_w / 2.0, base_h / 2.0));
-                    let ccx = (wc.x + comp_w / 2.0) * scale_x;
-                    let ccy = (wc.y + comp_h / 2.0) * scale_y;
 
                     // Sample backdrop for this layer from the composition background
                     // and all intersecting underlying layers rendered so far.
@@ -1678,238 +1664,96 @@ impl Render for CompositionViewerPanel {
                         }
                     }
 
-                    // Process visual effects. After Effects adjustment semantics:
-                    // every active adjustment layer stacked *above* this layer
-                    // folds its effects into the composite below it, so apply
-                    // those here (spatial blur accumulates into `blur_rad`).
-                    let mut processed_col = if is_adjustment {
-                        layer.processed_color(sampled_backdrop)
-                    } else {
-                        layer.processed_color(col)
-                    };
-                    let mut adjustment_blur = 0.0f32;
-                    if !is_adjustment {
-                        for adj_fx in stack.adjustment_effects_applying_to(&layer.id) {
-                            if let Some(r) = adj_fx.effect_type.blur_radius() {
-                                adjustment_blur += r;
-                            } else {
-                                processed_col = adj_fx.process_color(processed_col);
-                            }
+                    // CPU raster viewport: each layer becomes an AABB-sized
+                    // true-color pixmap (rotation, spatial effects, and text
+                    // all resolve per-pixel), shown through `gpui::img`.
+                    // Adjustment layers render nothing themselves; their
+                    // effects fold into the layers beneath via the shared
+                    // adjustment stack inside the rasterizer.
+                    let comp_fps = comp_opt.map(|c| c.frame_rate as f32).unwrap_or(30.0);
+                    let time_s = current_frame as f32 / comp_fps.max(1.0);
+                    let duration_s = comp_opt.map(|c| c.duration_seconds() as f32).unwrap_or(0.0);
+                    let playing_now = state.is_playing;
+                    // Raster output size = AABB box, capped for speed (the
+                    // img child stretches to the shell on cap).
+                    let rw = (l_w.ceil().max(1.0) as u32).min(1024);
+                    let rh = (l_h.ceil().max(1.0) as u32).min(1024);
+                    // Decode image assets once into the shared cache.
+                    if let LayerSource::Image { asset_id } = &layer.source {
+                        if let Some(asset) = state.project.get_asset(asset_id) {
+                            let path = asset.path.clone();
+                            crate::raster::decoded_asset(&mut self.asset_cache, asset_id, &path);
                         }
                     }
-
-                    let eff_opacity = layer.effective_opacity.clamp(0.0, 1.0);
-                    let source_color = Color::rgba(
-                        processed_col.r,
-                        processed_col.g,
-                        processed_col.b,
-                        processed_col.a * eff_opacity,
-                    );
-
-                    // Determine canvas rendering color avoiding double-blend:
-                    // For Normal mode: straight alpha rendering with GPU rasterizer.
-                    // For non-Normal modes (Multiply, Screen, Add, Overlay, etc.):
-                    // composite source_color mathematically over sampled_backdrop.
-                    let (canvas_bg, recorded_color) = if is_text {
-                        (
-                            Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 },
-                            BlendMode::Normal.composite(sampled_backdrop, source_color),
+                    let cache_key = {
+                        // Static layers hit the cache across frames (their
+                        // evaluated state already captures motion); only
+                        // Shader Lab layers key on the frame since the `time`
+                        // uniform advances beneath identical values.
+                        let time_varying = layer.effects.iter().any(|e| {
+                            e.enabled
+                                && matches!(
+                                    &e.effect_type,
+                                    compositor::EvaluatedEffectType::ShaderLab { .. }
+                                )
+                        });
+                        crate::raster::layer_cache_key(
+                            layer,
+                            if time_varying { current_frame } else { 0 },
+                            rw,
+                            rh,
+                            playing_now,
+                            0,
                         )
-                    } else if is_adjustment {
-                        let blended = layer.blend_mode.composite(sampled_backdrop, processed_col);
-                        (
-                            Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 },
-                            blended,
-                        )
-                    } else if layer.blend_mode == BlendMode::Normal {
-                        (
-                            Rgba { r: processed_col.r, g: processed_col.g, b: processed_col.b, a: source_color.a },
-                            BlendMode::Normal.composite(sampled_backdrop, source_color),
-                        )
+                    };
+                    let entry = match self.raster_cache.get(&layer.id) {
+                        Some(e) if e.key == cache_key && e.w == rw && e.h == rh => e.clone(),
+                        _ => {
+                            let (buf, avg, empty) = crate::raster::rasterize_layer(
+                                layer,
+                                base_w,
+                                base_h,
+                                rw,
+                                rh,
+                                comp_w,
+                                comp_h,
+                                sampled_backdrop,
+                                time_s,
+                                current_frame,
+                                playing_now,
+                                duration_s,
+                                &self.asset_cache,
+                            );
+                            let png = std::sync::Arc::new(crate::raster::png_encode(
+                                rw,
+                                rh,
+                                &buf.to_rgba8(),
+                            ));
+                            let e = crate::raster::RasterEntry {
+                                key: cache_key,
+                                png,
+                                w: rw,
+                                h: rh,
+                                avg,
+                                empty,
+                            };
+                            self.raster_cache.insert(layer.id.clone(), e.clone());
+                            // Bound memory: long playbacks evict (recompute).
+                            if self.raster_cache.len() > 96 {
+                                self.raster_cache.clear();
+                                self.raster_cache.insert(layer.id.clone(), e.clone());
+                            }
+                            e
+                        }
+                    };
+                    let recorded_color = if entry.empty {
+                        sampled_backdrop
                     } else {
-                        let blended = layer.blend_mode.composite(sampled_backdrop, source_color);
-                        (
-                            Rgba { r: blended.r, g: blended.g, b: blended.b, a: (blended.a * eff_opacity).clamp(0.0, 1.0) },
-                            blended,
-                        )
+                        entry.avg
                     };
 
                     rendered_regions.push((bbox.min.x, bbox.min.y, bbox.max.x, bbox.max.y, recorded_color));
 
-                    // Vector-effect inputs for the inline SVG preview: the
-                    // first enabled checker / gradient / outline /
-                    // perspective / bloom on the layer. Raster layers and
-                    // paths keep div rendering with an angle badge.
-                    let mut fx_checker: Option<(f32, Color, Color)> = None;
-                    let mut fx_gradient: Option<(Color, Color, f32)> = None;
-                    let mut fx_outline: Option<(f32, Color)> = None;
-                    let mut fx_persp: Option<(f32, f32)> = None;
-                    let mut fx_bloom: Option<(f32, f32)> = None;
-                    for eff in &layer.effects {
-                        if !eff.enabled {
-                            continue;
-                        }
-                        match &eff.effect_type {
-                            compositor::EvaluatedEffectType::Checkerboard { size, color_a, color_b } => {
-                                if fx_checker.is_none() {
-                                    fx_checker = Some((*size, *color_a, *color_b));
-                                }
-                            }
-                            compositor::EvaluatedEffectType::GradientRamp { color_a, color_b, angle } => {
-                                if fx_gradient.is_none() {
-                                    fx_gradient = Some((*color_a, *color_b, *angle));
-                                }
-                            }
-                            compositor::EvaluatedEffectType::TextOutline { width, color } => {
-                                if fx_outline.is_none() {
-                                    fx_outline = Some((*width, *color));
-                                }
-                            }
-                            compositor::EvaluatedEffectType::Perspective { skew_x, skew_y } => {
-                                if fx_persp.is_none() {
-                                    fx_persp = Some((*skew_x, *skew_y));
-                                }
-                            }
-                            compositor::EvaluatedEffectType::Bloom { intensity, radius } => {
-                                if fx_bloom.is_none() && *intensity >= 0.5 {
-                                    fx_bloom = Some((*intensity, *radius));
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    let use_vector_svg = use_rotated_svg
-                        || fx_checker.is_some()
-                        || fx_gradient.is_some()
-                        || fx_outline.is_some()
-                        || fx_persp.is_some()
-                        || fx_bloom.is_some();
-
-                    // Inline SVG body for rotated / vector-effect layers: gpui
-                    // Divs have no rotation transform, so the unrotated
-                    // canvas-px box is drawn as SVG and rotated about the
-                    // layer center (see the `rotated_svg` child below).
-                    let rotated_svg: Option<String> = if use_vector_svg {
-                        let fill = svg_hex(processed_col.r, processed_col.g, processed_col.b);
-                        let op = source_color.a.clamp(0.0, 1.0);
-                        let mut defs = String::new();
-                        // Base paint: gradient / checker pattern / flat.
-                        let mut paint = format!("fill=\"{fill}\" fill-opacity=\"{op}\"");
-                        if let Some((ca, cb, ang)) = fx_gradient {
-                            let ha = svg_hex(ca.r, ca.g, ca.b);
-                            let hb = svg_hex(cb.r, cb.g, cb.b);
-                            let rad = ang.to_radians();
-                            let (dx, dy) = (rad.cos(), rad.sin());
-                            defs.push_str(&format!(
-                                "<linearGradient id=\"gg\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\"><stop offset=\"0\" stop-color=\"{ha}\" stop-opacity=\"{op}\"/><stop offset=\"1\" stop-color=\"{hb}\" stop-opacity=\"{op}\"/></linearGradient>",
-                                0.5 - dx / 2.0,
-                                0.5 - dy / 2.0,
-                                0.5 + dx / 2.0,
-                                0.5 + dy / 2.0
-                            ));
-                            paint = "fill=\"url(#gg)\"".to_string();
-                        } else if let Some((size, ca, cb)) = fx_checker {
-                            let s = (size * (scv.x / 100.0) * scale_x).clamp(2.0, 256.0);
-                            let h = s / 2.0;
-                            let ha = svg_hex(ca.r, ca.g, ca.b);
-                            let hb = svg_hex(cb.r, cb.g, cb.b);
-                            defs.push_str(&format!(
-                                "<pattern id=\"ck\" width=\"{s}\" height=\"{s}\" patternUnits=\"userSpaceOnUse\"><rect width=\"{s}\" height=\"{s}\" fill=\"{hb}\" fill-opacity=\"{op}\"/><rect width=\"{h}\" height=\"{h}\" fill=\"{ha}\" fill-opacity=\"{op}\"/><rect x=\"{h}\" y=\"{h}\" width=\"{h}\" height=\"{h}\" fill=\"{ha}\" fill-opacity=\"{op}\"/></pattern>"
-                            ));
-                            paint = "fill=\"url(#ck)\"".to_string();
-                        }
-                        // Outline stroke (text effect; harmless on shapes).
-                        let mut stroke = String::new();
-                        if let Some((w, oc)) = fx_outline {
-                            let sw = (w * (scv.x / 100.0) * scale_x).max(0.0);
-                            if sw >= 0.25 {
-                                let oh = svg_hex(oc.r, oc.g, oc.b);
-                                stroke = format!(" stroke=\"{oh}\" stroke-width=\"{sw}\" paint-order=\"stroke\"");
-                            }
-                        }
-                        // Bloom glow filter.
-                        let mut filter_attr = String::new();
-                        if let Some((intensity, radius)) = fx_bloom {
-                            let std = (radius * (scv.x / 100.0) * scale_x).clamp(0.0, 24.0);
-                            if std >= 0.5 {
-                                let _ = intensity;
-                                defs.push_str(&format!(
-                                    "<filter id=\"blm\" x=\"-60%\" y=\"-60%\" width=\"220%\" height=\"220%\"><feGaussianBlur stdDeviation=\"{std}\" result=\"b\"/><feMerge><feMergeNode in=\"b\"/><feMergeNode in=\"SourceGraphic\"/></feMerge></filter>"
-                                ));
-                                filter_attr = " filter=\"url(#blm)\"".to_string();
-                            }
-                        }
-                        let body = match &layer.source {
-                            LayerSource::Solid { .. } => {
-                                format!(
-                                    "<rect x=\"0\" y=\"0\" width=\"{uw}\" height=\"{uh}\" {paint}{stroke}/>"
-                                )
-                            }
-                            LayerSource::Shape { shape_type } => match shape_type {
-                                ShapeType::Rectangle { corner_radius, .. } => {
-                                    let rx = (corner_radius.value * (scv.x / 100.0) * scale_x).max(0.0);
-                                    format!(
-                                        "<rect x=\"0\" y=\"0\" width=\"{uw}\" height=\"{uh}\" rx=\"{rx}\" {paint}{stroke}/>"
-                                    )
-                                }
-                                ShapeType::Ellipse { .. } => {
-                                    format!(
-                                        "<ellipse cx=\"{}\" cy=\"{}\" rx=\"{}\" ry=\"{}\" {paint}{stroke}/>",
-                                        uw / 2.0,
-                                        uh / 2.0,
-                                        uw / 2.0,
-                                        uh / 2.0
-                                    )
-                                }
-                                ShapeType::Path { .. } => String::new(),
-                            },
-                            LayerSource::Text { text, font_family, font_size, .. } => {
-                                let ff = svg_escape(&crate::state::resolve_font_family(font_family));
-                                let fs = (font_size.value * (scv.y / 100.0) * scale_y).max(8.0);
-                                let t = svg_escape(&text.value);
-                                format!(
-                                    "<text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"'{ff}'\" font-size=\"{fs}\" {paint}{stroke}>{t}</text>"
-                                )
-                            }
-                            _ => String::new(),
-                        };
-                        if body.is_empty() {
-                            None
-                        } else {
-                            // Perspective skew wraps the content group.
-                            let content = if let Some((sx, sy)) = fx_persp {
-                                if sx.abs() >= 0.05 || sy.abs() >= 0.05 {
-                                    format!(
-                                        "<g transform=\"translate({} {}) skewX({sx}) skewY({sy}) translate({} {})\"{filter_attr}>{body}</g>",
-                                        uw / 2.0,
-                                        uh / 2.0,
-                                        -uw / 2.0,
-                                        -uh / 2.0
-                                    )
-                                } else if filter_attr.is_empty() {
-                                    body
-                                } else {
-                                    format!("<g{filter_attr}>{body}</g>")
-                                }
-                            } else if filter_attr.is_empty() {
-                                body
-                            } else {
-                                format!("<g{filter_attr}>{body}</g>")
-                            };
-                            Some(format!(
-                                "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{uw}\" height=\"{uh}\" viewBox=\"0 0 {uw} {uh}\" overflow=\"visible\"><defs>{defs}</defs>{content}</svg>"
-                            ))
-                        }
-                    } else {
-                        None
-                    };
-                    // The SVG child draws the pixels; the host div stays
-                    // transparent so nothing double-draws underneath.
-                    let layer_bg = if rotated_svg.is_some() {
-                        Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }
-                    } else {
-                        canvas_bg
-                    };
 
                     let covers_canvas = bbox.min.x <= -comp_w / 2.0
                         && bbox.min.y <= -comp_h / 2.0
@@ -1919,112 +1763,16 @@ impl Render for CompositionViewerPanel {
                         full_frame_backdrop = recorded_color;
                     }
 
-                    // Render Drop Shadow if present
-                    for eff in &layer.effects {
-                        if eff.enabled {
-                            if let compositor::EvaluatedEffectType::DropShadow { distance, angle, opacity, color, .. } = &eff.effect_type {
-                                let rad = angle.to_radians();
-                                let sx = l_x + distance * rad.cos() * scale_x;
-                                let sy = l_y + distance * rad.sin() * scale_y;
-                                let op = (opacity / 100.0).clamp(0.0, 1.0) * eff_opacity;
-                                elements.push(
-                                    div()
-                                        .absolute()
-                                        .left(px(sx))
-                                        .top(px(sy))
-                                        .w(px(l_w))
-                                        .h(px(l_h))
-                                        .bg(Rgba {
-                                            r: color.r,
-                                            g: color.g,
-                                            b: color.b,
-                                            a: color.a * op * 0.75,
-                                        })
-                                        .rounded_sm()
-                                        .into_any_element(),
-                                );
-                                break;
-                            }
-                        }
-                    }
-
-                    // Render Gaussian Blur diffusion when present (own effects plus
-                    // any adjustment-layer blur folded in above). This is a
-                    // multi-tap preview approximation — true per-pixel diffusion
-                    // runs in `renderer::blur` (CPU) / `BLUR_WGSL` (GPU).
-                    // Adjustment layers draw no pixels themselves (outline only).
-                    let mut blur_rad = adjustment_blur;
-                    for eff in &layer.effects {
-                        if eff.enabled {
-                            if let compositor::EvaluatedEffectType::GaussianBlur { radius } = &eff.effect_type {
-                                blur_rad += *radius;
-                            }
-                        }
-                    }
-                    if blur_rad > 0.0 && !is_adjustment {
-                        // Compass taps soften edges like a real blur kernel.
-                        let tap_dist = (blur_rad * 0.35).clamp(1.5, 14.0);
-                        let tap_alpha = (processed_col.a * eff_opacity * 0.10).clamp(0.01, 0.25);
-                        let taps = [
-                            (-tap_dist, 0.0),
-                            (tap_dist, 0.0),
-                            (0.0, -tap_dist),
-                            (0.0, tap_dist),
-                            (-tap_dist, -tap_dist),
-                            (tap_dist, -tap_dist),
-                            (-tap_dist, tap_dist),
-                            (tap_dist, tap_dist),
-                        ];
-                        for (ox, oy) in taps {
-                            elements.push(
-                                div()
-                                    .absolute()
-                                    .left(px(l_x + ox))
-                                    .top(px(l_y + oy))
-                                    .w(px(l_w))
-                                    .h(px(l_h))
-                                    .bg(Rgba {
-                                        r: processed_col.r,
-                                        g: processed_col.g,
-                                        b: processed_col.b,
-                                        a: tap_alpha,
-                                    })
-                                    .into_any_element(),
-                            );
-                        }
-                        let steps = 4;
-                        let max_expand = (blur_rad * 0.4).clamp(4.0, 28.0);
-                        for i in 1..=steps {
-                            let factor = i as f32 / steps as f32;
-                            let exp = max_expand * factor;
-                            let weight = (-2.0 * factor * factor).exp();
-                            let step_alpha = (processed_col.a * eff_opacity * 0.12 * weight).clamp(0.01, 0.4);
-                            elements.push(
-                                div()
-                                    .absolute()
-                                    .left(px(l_x - exp))
-                                    .top(px(l_y - exp))
-                                    .w(px(l_w + exp * 2.0))
-                                    .h(px(l_h + exp * 2.0))
-                                    .rounded_lg()
-                                    .bg(Rgba {
-                                        r: processed_col.r,
-                                        g: processed_col.g,
-                                        b: processed_col.b,
-                                        a: step_alpha,
-                                    })
-                                    .into_any_element(),
-                            );
-                        }
-                    }
 
                     let p_drag_layer = cx.entity().clone();
                     let sel_state = self.state.clone();
                     let lid = layer.id.clone();
-                    let is_video = matches!(&layer.source, LayerSource::Video { .. });
 
                     let p_menu = cx.entity().clone();
                     let lid_menu = layer.id.clone();
+                    // Transparent hit shell: the CPU raster draws the pixels
+                    // (child img); the shell keeps AABB position, selection,
+                    // and mouse interaction.
                     let mut layer_el = div()
                         .id(ElementId::Name(format!("canvas_layer_{}", layer.id).into()))
                         .test_support()
@@ -2033,8 +1781,6 @@ impl Render for CompositionViewerPanel {
                         .top(px(l_y))
                         .w(px(l_w))
                         .h(px(l_h))
-                        .bg(layer_bg)
-                        .overflow_hidden()
                         .cursor_pointer()
                         .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
                             let curr_x = event.position.x / px(1.0);
@@ -2056,194 +1802,24 @@ impl Render for CompositionViewerPanel {
                             });
                         });
 
-                    if is_video {
+                    // Raster pixels (CPU compositor output for this layer).
+                    if !entry.empty {
+                        let img_bytes = entry.png.clone();
                         layer_el = layer_el.child(
-                            div()
-                                .size_full()
-                                .bg(rgb(0x0f172a))
-                                .flex()
-                                .flex_col()
-                                .items_center()
-                                .justify_center()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .w(px(24.))
-                                        .h(px(24.))
-                                        .rounded_full()
-                                        .bg(cx.theme().primary)
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .text_color(cx.theme().primary_foreground)
-                                        .child(icon_box(IconName::Film)),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .font_semibold()
-                                        .text_color(rgb(0xffffff))
-                                        .child(layer.name.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(0x94a3b8))
-                                        .child("1920x1080 • Video Footage"),
-                                ),
+                            gpui::img(std::sync::Arc::new(gpui::Image::from_bytes(
+                                gpui::ImageFormat::Png,
+                                (*img_bytes).clone(),
+                            )))
+                            .w(px(l_w))
+                            .h(px(l_h)),
                         );
-                    } else if let Some(ref img_path) = image_path {
-                        layer_el = layer_el.child(
-                            gpui::img(img_path.clone())
-                                .size_full()
-                                .opacity(eff_opacity),
-                        );
+                    }
 
-                        // Image effect overlays
-                        for eff in &layer.effects {
-                            if eff.enabled {
-                                match &eff.effect_type {
-                                    compositor::EvaluatedEffectType::Tint { map_white, amount, .. } => {
-                                        let alpha = (*amount / 100.0).clamp(0.0, 0.75);
-                                        layer_el = layer_el.child(
-                                            div()
-                                                .absolute()
-                                                .top_0()
-                                                .left_0()
-                                                .size_full()
-                                                .bg(Rgba { r: map_white.r, g: map_white.g, b: map_white.b, a: alpha }),
-                                        );
-                                    }
-                                    compositor::EvaluatedEffectType::Invert { amount } => {
-                                        let alpha = (*amount / 100.0).clamp(0.0, 0.6);
-                                        layer_el = layer_el.child(
-                                            div()
-                                                .absolute()
-                                                .top_0()
-                                                .left_0()
-                                                .size_full()
-                                                .bg(Rgba { r: 1.0, g: 1.0, b: 1.0, a: alpha }),
-                                        );
-                                    }
-                                    compositor::EvaluatedEffectType::GlslShader { param1, param2, .. } => {
-                                        let pulse = ((current_frame as f32 * param1 * 0.1).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
-                                        let alpha = (*param2 / 100.0 * 0.4 * pulse).clamp(0.0, 0.7);
-                                        layer_el = layer_el.child(
-                                            div()
-                                                .absolute()
-                                                .top_0()
-                                                .left_0()
-                                                .size_full()
-                                                .bg(Rgba { r: 0.2 + 0.6 * pulse, g: 0.3, b: 0.9, a: alpha }),
-                                        );
-                                    }
-                                    compositor::EvaluatedEffectType::Exposure { exposure } => {
-                                        let ev = exposure.clamp(-10.0, 10.0);
-                                        if ev.abs() >= 0.05 {
-                                            // Brighten with white, darken with black,
-                                            // proportional to the stop delta.
-                                            let (cr, cg, cb, alpha) = if ev > 0.0 {
-                                                (1.0, 1.0, 1.0, (1.0 - 2.0_f32.powf(-ev)) * 0.55)
-                                            } else {
-                                                (0.0, 0.0, 0.0, (1.0 - 2.0_f32.powf(ev)) * 0.6)
-                                            };
-                                            layer_el = layer_el.child(
-                                                div()
-                                                    .absolute()
-                                                    .top_0()
-                                                    .left_0()
-                                                    .size_full()
-                                                    .bg(Rgba { r: cr, g: cg, b: cb, a: alpha.clamp(0.0, 0.7) }),
-                                            );
-                                        }
-                                    }
-                                    compositor::EvaluatedEffectType::Bloom { intensity, .. } => {
-                                        let alpha = (*intensity / 100.0 * 0.3).clamp(0.0, 0.5);
-                                        if alpha >= 0.01 {
-                                            layer_el = layer_el.child(
-                                                div()
-                                                    .absolute()
-                                                    .top_0()
-                                                    .left_0()
-                                                    .size_full()
-                                                    .bg(Rgba { r: 1.0, g: 1.0, b: 1.0, a: alpha }),
-                                            );
-                                        }
-                                    }
-                                    compositor::EvaluatedEffectType::ShaderLab { values, prog, .. } => {
-                                        // Live CPU probe on mid-grey: grade
-                                        // direction shows as a translucent
-                                        // delta wash (full grading shows on
-                                        // solids/shapes/text via process).
-                                        if let Some(p) = prog {
-                                            let fps = comp_opt.map(|c| c.frame_rate as f32).unwrap_or(30.0);
-                                            let env = project::shader_interp::PreviewEnv {
-                                                values: values.clone(),
-                                                time: current_frame as f32 / fps.max(1.0),
-                                                frame: current_frame as f32,
-                                                duration: comp_opt.map(|c| c.duration_seconds() as f32).unwrap_or(0.0),
-                                                resolution: (comp_w, comp_h),
-                                            };
-                                            let probe = Color::rgba(0.5, 0.5, 0.5, 1.0);
-                                            if let Ok([r, g, b, _]) = project::shader_interp::eval_prog(p, &env, (0.5, 0.5), probe) {
-                                                let dr = (r - 0.5) * 0.5;
-                                                let dg = (g - 0.5) * 0.5;
-                                                let db = (b - 0.5) * 0.5;
-                                                if dr.abs() + dg.abs() + db.abs() > 0.02 {
-                                                    layer_el = layer_el.child(
-                                                        div()
-                                                            .absolute()
-                                                            .top_0()
-                                                            .left_0()
-                                                            .size_full()
-                                                            .bg(Rgba {
-                                                                r: (0.5 + dr).clamp(0.0, 1.0),
-                                                                g: (0.5 + dg).clamp(0.0, 1.0),
-                                                                b: (0.5 + db).clamp(0.0, 1.0),
-                                                                a: 0.35,
-                                                            }),
-                                                    );
-                                                }
-                                            }
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                    } else if let LayerSource::Text { text, font_family, font_size, .. } = &layer.source {
-                        // Rotated text renders through the SVG child below
-                        // (real rotation transform); unrotated keeps the fast
-                        // div path.
-                        if rotated_svg.is_none() {
-                            let text_val = text.value.clone();
-                            let fs_scaled = (font_size.value * scale_y).max(8.0);
-                            // Resolve against installed system fonts so text never
-                            // breaks on machines missing the stored family.
-                            let ff = crate::state::resolve_font_family(font_family);
-                            let text_color = Rgba {
-                                r: processed_col.r,
-                                g: processed_col.g,
-                                b: processed_col.b,
-                                a: source_color.a,
-                            };
-                            layer_el = layer_el
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(
-                                    div()
-                                        .text_size(px(fs_scaled))
-                                        .text_color(text_color)
-                                        .font_family(SharedString::from(ff))
-                                        .child(text_val),
-                                );
-                        }
-                    } else if is_adjustment {
+                    if is_adjustment {
                         // After Effects behavior: an adjustment layer draws no
-                        // pixels of its own — its effects were already folded
-                        // into every layer beneath it above. Render only the
-                        // dashed extent outline plus a status label.
+                        // pixels of its own — its effects post-process the
+                        // composite beneath it (see the rasterizer). Render
+                        // only the dashed extent outline plus a status label.
                         let adj_fx_count = layer.effects.iter().filter(|e| e.enabled).count();
                         let adj_label = if adj_fx_count == 0 {
                             format!("Adj: {} (no FX — affects below)", layer.name)
@@ -2292,48 +1868,6 @@ impl Render for CompositionViewerPanel {
                         );
                     }
 
-                    // Rotated vector content: the SVG box (unrotated size) is
-                    // centered on the pivot-correct layer center and rotated
-                    // about its own center — a real rotation transform, so
-                    // scrubbing Rotation visibly spins solids, shapes, text.
-                    if let Some(svg_str) = rotated_svg {
-                        let svg_left = ccx - uw / 2.0 - l_x;
-                        let svg_top = ccy - uh / 2.0 - l_y;
-                        layer_el = layer_el.child(
-                            div()
-                                .absolute()
-                                .left(px(svg_left))
-                                .top(px(svg_top))
-                                .w(px(uw))
-                                .h(px(uh))
-                                .child(
-                                    gpui::svg()
-                                        .data(svg_str.as_bytes())
-                                        .size_full()
-                                        .with_transformation(
-                                            gpui::Transformation::rotate(gpui::radians(
-                                                rot_deg.to_radians(),
-                                            )),
-                                        ),
-                                ),
-                        );
-                    } else if is_rotated {
-                        // Raster / path layers cannot rotate div content:
-                        // surface the live angle so rotation is verifiable.
-                        layer_el = layer_el.child(
-                            div()
-                                .absolute()
-                                .top(px(2.))
-                                .right(px(2.))
-                                .px_1()
-                                .rounded_sm()
-                                .bg(Rgba { r: 0.1, g: 0.1, b: 0.1, a: 0.75 })
-                                .text_xs()
-                                .text_color(rgb(0x93c5fd))
-                                .child(format!("{rot_deg:.1}°")),
-                        );
-                    }
-
                     if is_selected {
                         layer_el = layer_el
                             .border_2()
@@ -2354,7 +1888,7 @@ impl Render for CompositionViewerPanel {
                         let giz_fit = scale_x;
                         let giz_cw = comp_w;
                         let giz_ch = comp_h;
-                        let giz_frame = self.frame_origin;
+                        let giz_frame = frame_org;
                         let link_uniform = state
                             .active_composition()
                             .and_then(|c| c.get_layer(&layer.id))
@@ -2406,7 +1940,7 @@ impl Render for CompositionViewerPanel {
                             let uni = link_uniform;
                             let (h_frame, h_fit, h_cw, h_ch) =
                                 (giz_frame, giz_fit, giz_cw, giz_ch);
-                            layer_el = layer_el.child(
+                            gizmo_els.push(
                                 gizmo_dot(
                                     format!("gizmo_scale_{tag}_{}", giz_lid),
                                     pos.0,
@@ -2441,8 +1975,7 @@ impl Render for CompositionViewerPanel {
                                             });
                                         }
                                     }
-                                }),
-                            );
+                                }).into_any_element());
                         }
                         let edges = [
                             ("n", mid(c00, c10), false, true),
@@ -2458,7 +1991,7 @@ impl Render for CompositionViewerPanel {
                             let uni = link_uniform;
                             let (h_frame, h_fit, h_cw, h_ch) =
                                 (giz_frame, giz_fit, giz_cw, giz_ch);
-                            layer_el = layer_el.child(
+                            gizmo_els.push(
                                 gizmo_dot(
                                     format!("gizmo_scale_{tag}_{}", giz_lid),
                                     pos.0,
@@ -2493,8 +2026,7 @@ impl Render for CompositionViewerPanel {
                                             });
                                         }
                                     }
-                                }),
-                            );
+                                }).into_any_element());
                         }
 
                         // --- Rotate handle above the top edge.
@@ -2519,7 +2051,7 @@ impl Render for CompositionViewerPanel {
                             let snap_h = snap_layer.clone();
                             let (h_frame, h_fit, h_cw, h_ch) =
                                 (giz_frame, giz_fit, giz_cw, giz_ch);
-                            layer_el = layer_el.child(
+                            gizmo_els.push(
                                 gizmo_dot(
                                     format!("gizmo_rotate_{}", giz_lid),
                                     rp.0,
@@ -2551,8 +2083,7 @@ impl Render for CompositionViewerPanel {
                                             cx.notify();
                                         });
                                     }
-                                }),
-                            );
+                                }).into_any_element());
                         }
 
                         // --- Pivot diamond (amber): drag to move the anchor.
@@ -2563,7 +2094,7 @@ impl Render for CompositionViewerPanel {
                             let snap_h = snap_layer.clone();
                             let (h_frame, h_fit, h_cw, h_ch) =
                                 (giz_frame, giz_fit, giz_cw, giz_ch);
-                            layer_el = layer_el.child(
+                            gizmo_els.push(
                                 gizmo_dot(
                                     format!("gizmo_anchor_{}", giz_lid),
                                     anchor_c.0,
@@ -2591,16 +2122,15 @@ impl Render for CompositionViewerPanel {
                                             });
                                         }
                                     }
-                                }),
-                            );
+                                }).into_any_element());
                         }
                     }
 
                     elements.push(layer_el.into_any_element());
                 }
-                elements
+                (elements, gizmo_els)
             }
-            None => Vec::new(),
+            None => (Vec::new(), Vec::new()),
         };
         let active_tool = state.active_tool;
         let s_side = self.state.clone();
@@ -2759,7 +2289,13 @@ impl Render for CompositionViewerPanel {
                 // Transform-gizmo drags win over canvas drags.
                 if let Some(drag) = this.gizmo_drag.clone() {
                     // Window px -> composition px via the measured frame.
-                    let (fox, foy) = this.frame_origin.unwrap_or((0.0, 0.0));
+                    let frame_org = frame_origin_or_center(
+                        this.frame_origin,
+                        this.viewport_px,
+                        this.viewport_origin,
+                        this.canvas_px,
+                    );
+                    let (fox, foy) = frame_org.unwrap_or((0.0, 0.0));
                     // Re-derive the uniform fit from the live composition so
                     // stale renders never skew a drag.
                     let (cw, ch, vfit) = {
@@ -3026,7 +2562,7 @@ impl Render for CompositionViewerPanel {
                                         let fit_pick = fit;
                                         let comp_pw = comp_w;
                                         let comp_ph = comp_h;
-                                        let frame_org = self.frame_origin;
+                                        let frame_org = frame_org;
                                         move |event, _window, cx| {
                                             // Gizmo handles set their own drag first (they
                                             // bubble through here); never start a canvas op.
@@ -3079,7 +2615,8 @@ impl Render for CompositionViewerPanel {
                                             }
                                         }
                                     })
-                                    .children(rendered_layers);
+                                    .children(rendered_layers)
+                                    .children(gizmo_els);
 
                                 let p_canvas_rclick = cx.entity().clone();
                                 canvas_frame = canvas_frame.on_mouse_down(MouseButton::Right, move |event, _window, cx| {
@@ -6140,7 +5677,7 @@ impl Render for PropertiesPanel {
 
         if let Some((_lid, ref src)) = layer_info {
             match src {
-                LayerSource::Text { text, font_family, font_size, fill_color } => {
+                LayerSource::Text { text, font_family, font_size, fill_color, .. } => {
                     let text_in = text_inputs.read(cx).text.clone();
                     let font_in = text_inputs.read(cx).font_family.clone();
                     let size_in = text_inputs.read(cx).font_size.clone();
@@ -6580,16 +6117,27 @@ impl Render for PropertiesPanel {
                                                 .into_any_element(),
                                 );
                             }
-                            LayerSource::Text { text, font_family, font_size, fill_color } => {
+                            LayerSource::Text { text, font_family, font_size, fill_color, weight, italic, tracking, leading, align, all_caps, stroke_width, stroke_color, baseline_shift, box_width } => {
                                 let lid_t = layer.id.clone();
                                 let s_text = self.state.clone();
                                 let s_fs = self.state.clone();
                                 let s_col = self.state.clone();
+                                let s_typo = self.state.clone();
 
                                 let cur_text = text.value.clone();
                                 let cur_fs = font_size.value;
                                 let cur_fam = font_family.clone();
                                 let cur_col = fill_color.value;
+                                let cur_weight = *weight;
+                                let cur_italic = *italic;
+                                let cur_tracking = tracking.value;
+                                let cur_leading = leading.value;
+                                let cur_align = *align;
+                                let cur_caps = *all_caps;
+                                let cur_stroke_w = stroke_width.value;
+                                let cur_stroke = *stroke_color;
+                                let cur_baseline = baseline_shift.value;
+                                let cur_box = box_width.value;
 
                                 let inputs = text_inputs.read(cx);
 
@@ -6772,6 +6320,302 @@ impl Render for PropertiesPanel {
                                                 .child(fs_buttons),
                                         )
                                         .child(font_browser)
+                                        .child({
+                                            // Typography: weight, style, alignment,
+                                            // spacing, stroke, and box layout.
+                                            let s_ty = s_typo.clone();
+                                            let lid_ty = lid_t.clone();
+                                            let mut weight_row = h_flex().gap_1().items_center().flex_wrap();
+                                            for w in [400u16, 500, 700, 900] {
+                                                let s_w = s_ty.clone();
+                                                let lid_w = lid_ty.clone();
+                                                let sel = cur_weight == w;
+                                                let label = match w {
+                                                    400 => "Regular",
+                                                    500 => "Medium",
+                                                    700 => "Bold",
+                                                    _ => "Black",
+                                                };
+                                                weight_row = weight_row.child(
+                                                    div()
+                                                        .id(SharedString::from(format!("text_weight_{w}")))
+                                                        .test_support()
+                                                        .cursor_pointer()
+                                                        .px_1p5()
+                                                        .py_0p5()
+                                                        .rounded_sm()
+                                                        .bg(if sel { cx.theme().primary } else { cx.theme().muted })
+                                                        .text_color(if sel { cx.theme().primary_foreground } else { cx.theme().foreground })
+                                                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                                        .text_xs()
+                                                        .child(label)
+                                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                            s_w.update(cx, |s, cx| {
+                                                                let _ = s.set_layer_font_weight(&lid_w, w);
+                                                                cx.notify();
+                                                            });
+                                                        }),
+                                                );
+                                            }
+                                            let s_it = s_ty.clone();
+                                            let lid_it = lid_ty.clone();
+                                            let s_cp = s_ty.clone();
+                                            let lid_cp = lid_ty.clone();
+                                            let style_row = h_flex()
+                                                .gap_1()
+                                                .items_center()
+                                                .flex_wrap()
+                                                .child(
+                                                    div()
+                                                        .id("text_italic_toggle")
+                                                        .test_support()
+                                                        .cursor_pointer()
+                                                        .px_1p5()
+                                                        .py_0p5()
+                                                        .rounded_sm()
+                                                        .bg(if cur_italic { cx.theme().primary } else { cx.theme().muted })
+                                                        .text_color(if cur_italic { cx.theme().primary_foreground } else { cx.theme().foreground })
+                                                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                                        .text_xs()
+                                                        .child("Italic")
+                                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                            s_it.update(cx, |s, cx| {
+                                                                let _ = s.toggle_layer_italic(&lid_it);
+                                                                cx.notify();
+                                                            });
+                                                        }),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id("text_caps_toggle")
+                                                        .test_support()
+                                                        .cursor_pointer()
+                                                        .px_1p5()
+                                                        .py_0p5()
+                                                        .rounded_sm()
+                                                        .bg(if cur_caps { cx.theme().primary } else { cx.theme().muted })
+                                                        .text_color(if cur_caps { cx.theme().primary_foreground } else { cx.theme().foreground })
+                                                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                                        .text_xs()
+                                                        .child("ALL CAPS")
+                                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                            s_cp.update(cx, |s, cx| {
+                                                                let _ = s.toggle_layer_caps(&lid_cp);
+                                                                cx.notify();
+                                                            });
+                                                        }),
+                                                );
+                                            let mut align_row = h_flex().gap_1().items_center().flex_wrap();
+                                            for (a, label) in [
+                                                (project::TextAlign::Left, "Left"),
+                                                (project::TextAlign::Center, "Center"),
+                                                (project::TextAlign::Right, "Right"),
+                                            ] {
+                                                let s_a = s_ty.clone();
+                                                let lid_a = lid_ty.clone();
+                                                let sel = cur_align == a;
+                                                align_row = align_row.child(
+                                                    div()
+                                                        .id(SharedString::from(format!("text_align_{label}")))
+                                                        .test_support()
+                                                        .cursor_pointer()
+                                                        .px_1p5()
+                                                        .py_0p5()
+                                                        .rounded_sm()
+                                                        .bg(if sel { cx.theme().primary } else { cx.theme().muted })
+                                                        .text_color(if sel { cx.theme().primary_foreground } else { cx.theme().foreground })
+                                                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                                        .text_xs()
+                                                        .child(label)
+                                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                            s_a.update(cx, |s, cx| {
+                                                                let _ = s.set_layer_text_align(&lid_a, a);
+                                                                cx.notify();
+                                                            });
+                                                        }),
+                                                );
+                                            }
+                                            let mut track_row = h_flex().gap_1().items_center().flex_wrap();
+                                            for tv in [-2.0f32, 0.0, 2.0, 5.0, 10.0] {
+                                                let s_t = s_ty.clone();
+                                                let lid_t2 = lid_ty.clone();
+                                                let sel = (cur_tracking - tv).abs() < 0.05;
+                                                track_row = track_row.child(
+                                                    div()
+                                                        .id(SharedString::from(format!("text_tracking_{tv:.0}")))
+                                                        .test_support()
+                                                        .cursor_pointer()
+                                                        .px_1()
+                                                        .py_0p5()
+                                                        .rounded_sm()
+                                                        .bg(if sel { cx.theme().primary } else { cx.theme().muted })
+                                                        .text_color(if sel { cx.theme().primary_foreground } else { cx.theme().foreground })
+                                                        .text_xs()
+                                                        .child(format!("{tv:.0}"))
+                                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                            s_t.update(cx, |s, cx| {
+                                                                let _ = s.set_layer_text_scalar(&lid_t2, "tracking", tv);
+                                                                cx.notify();
+                                                            });
+                                                        }),
+                                                );
+                                            }
+                                            let mut lead_row = h_flex().gap_1().items_center().flex_wrap();
+                                            for (lv, label) in [(0.0f32, "Auto"), (1.0, "1.0x"), (1.2, "1.2x"), (1.5, "1.5x"), (2.0, "2.0x")] {
+                                                let s_l = s_ty.clone();
+                                                let lid_l = lid_ty.clone();
+                                                let target = if lv <= 0.0 { 0.0 } else { lv * cur_fs };
+                                                let sel = if lv <= 0.0 {
+                                                    cur_leading <= 0.0
+                                                } else {
+                                                    (cur_leading - target).abs() < 1.0
+                                                };
+                                                lead_row = lead_row.child(
+                                                    div()
+                                                        .id(SharedString::from(format!("text_leading_{label}")))
+                                                        .test_support()
+                                                        .cursor_pointer()
+                                                        .px_1()
+                                                        .py_0p5()
+                                                        .rounded_sm()
+                                                        .bg(if sel { cx.theme().primary } else { cx.theme().muted })
+                                                        .text_color(if sel { cx.theme().primary_foreground } else { cx.theme().foreground })
+                                                        .text_xs()
+                                                        .child(label)
+                                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                            s_l.update(cx, |s, cx| {
+                                                                let _ = s.set_layer_text_scalar(&lid_l, "leading", target);
+                                                                cx.notify();
+                                                            });
+                                                        }),
+                                                );
+                                            }
+                                            let mut stroke_row = h_flex().gap_1().items_center().flex_wrap();
+                                            for sw in [0.0f32, 1.0, 2.0, 3.0, 5.0] {
+                                                let s_s = s_ty.clone();
+                                                let lid_s = lid_ty.clone();
+                                                let sel = (cur_stroke_w - sw).abs() < 0.05;
+                                                stroke_row = stroke_row.child(
+                                                    div()
+                                                        .id(SharedString::from(format!("text_stroke_{sw:.0}")))
+                                                        .test_support()
+                                                        .cursor_pointer()
+                                                        .px_1()
+                                                        .py_0p5()
+                                                        .rounded_sm()
+                                                        .bg(if sel { cx.theme().primary } else { cx.theme().muted })
+                                                        .text_color(if sel { cx.theme().primary_foreground } else { cx.theme().foreground })
+                                                        .text_xs()
+                                                        .child(if sw <= 0.0 { "Off".to_string() } else { format!("{sw:.0}px") })
+                                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                            s_s.update(cx, |s, cx| {
+                                                                let _ = s.set_layer_text_scalar(&lid_s, "stroke_width", sw);
+                                                                cx.notify();
+                                                            });
+                                                        }),
+                                                );
+                                            }
+                                            let mut stroke_cols = h_flex().gap_1().items_center().flex_wrap();
+                                            for (hex_str, col_val) in [
+                                                ("#000000", Color::BLACK),
+                                                ("#FFFFFF", Color::WHITE),
+                                                ("#EF4444", Color::from_hex("#EF4444").unwrap()),
+                                                ("#3B82F6", Color::from_hex("#3B82F6").unwrap()),
+                                                ("#F59E0B", Color::from_hex("#F59E0B").unwrap()),
+                                            ] {
+                                                let s_sc = s_ty.clone();
+                                                let lid_sc = lid_ty.clone();
+                                                let sel = (cur_stroke.r - col_val.r).abs() < 0.01
+                                                    && (cur_stroke.g - col_val.g).abs() < 0.01
+                                                    && (cur_stroke.b - col_val.b).abs() < 0.01;
+                                                stroke_cols = stroke_cols.child(
+                                                    div()
+                                                        .id(SharedString::from(format!("text_stroke_color_{hex_str}")))
+                                                        .test_support()
+                                                        .cursor_pointer()
+                                                        .w(px(14.))
+                                                        .h(px(14.))
+                                                        .rounded_sm()
+                                                        .bg(Rgba { r: col_val.r, g: col_val.g, b: col_val.b, a: 1.0 })
+                                                        .border_1()
+                                                        .border_color(if sel { cx.theme().primary } else { cx.theme().border })
+                                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                            s_sc.update(cx, |s, cx| {
+                                                                let _ = s.set_layer_stroke_color(&lid_sc, col_val);
+                                                                cx.notify();
+                                                            });
+                                                        }),
+                                                );
+                                            }
+                                            let mut base_row = h_flex().gap_1().items_center().flex_wrap();
+                                            for bv in [-20.0f32, -5.0, 0.0, 5.0, 20.0] {
+                                                let s_b = s_ty.clone();
+                                                let lid_b = lid_ty.clone();
+                                                let sel = (cur_baseline - bv).abs() < 0.5;
+                                                base_row = base_row.child(
+                                                    div()
+                                                        .id(SharedString::from(format!("text_baseline_{bv:.0}")))
+                                                        .test_support()
+                                                        .cursor_pointer()
+                                                        .px_1()
+                                                        .py_0p5()
+                                                        .rounded_sm()
+                                                        .bg(if sel { cx.theme().primary } else { cx.theme().muted })
+                                                        .text_color(if sel { cx.theme().primary_foreground } else { cx.theme().foreground })
+                                                        .text_xs()
+                                                        .child(format!("{bv:+.0}"))
+                                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                            s_b.update(cx, |s, cx| {
+                                                                let _ = s.set_layer_text_scalar(&lid_b, "baseline_shift", bv);
+                                                                cx.notify();
+                                                            });
+                                                        }),
+                                                );
+                                            }
+                                            let mut box_row = h_flex().gap_1().items_center().flex_wrap();                                            for (bv, label) in [(0.0f32, "Point"), (240.0, "240"), (480.0, "480"), (720.0, "720")] {
+                                                let s_b = s_ty.clone();
+                                                let lid_b = lid_ty.clone();
+                                                let sel = (cur_box - bv).abs() < 1.0;
+                                                box_row = box_row.child(
+                                                    div()
+                                                        .id(SharedString::from(format!("text_box_{label}")))
+                                                        .test_support()
+                                                        .cursor_pointer()
+                                                        .px_1()
+                                                        .py_0p5()
+                                                        .rounded_sm()
+                                                        .bg(if sel { cx.theme().primary } else { cx.theme().muted })
+                                                        .text_color(if sel { cx.theme().primary_foreground } else { cx.theme().foreground })
+                                                        .text_xs()
+                                                        .child(label)
+                                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                            s_b.update(cx, |s, cx| {
+                                                                let _ = s.set_layer_text_scalar(&lid_b, "box_width", bv);
+                                                                cx.notify();
+                                                            });
+                                                        }),
+                                                );
+                                            }
+                                            v_flex()
+                                                .gap_1p5()
+                                                .child(div().text_xs().font_semibold().text_color(cx.theme().foreground).child("Typography"))
+                                                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Weight"))
+                                                .child(weight_row)
+                                                .child(style_row)
+                                                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Alignment"))
+                                                .child(align_row)
+                                                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Tracking (px)"))
+                                                .child(track_row)
+                                                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Leading"))
+                                                .child(lead_row)
+                                                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Stroke"))
+                                                .child(stroke_row)
+                                                .child(stroke_cols)
+                                                .child(div().text_xs().text_color(cx.theme().muted_foreground).child(format!("Box width (wrap): {}", if cur_box <= 0.0 { "point text".to_string() } else { format!("{:.0}px", cur_box) })))
+                                                .child(box_row)
+                                                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Baseline shift (px)"))
+                                                .child(base_row)
+                                        })
                                         .child(
                                             h_flex()
                                                 .items_center()

@@ -3328,6 +3328,107 @@ impl EditorState {
         }
     }
 
+    /// Set font weight (100..900) on a Text layer.
+    pub fn set_layer_font_weight(&mut self, layer_id: &str, weight: u16) -> Result<(), String> {
+        let comp = self.active_composition_mut().ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp.get_layer_mut(layer_id).ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        match &mut layer.source {
+            LayerSource::Text { weight: w, .. } => {
+                *w = weight.clamp(100, 900);
+                Ok(())
+            }
+            _ => Err(format!("Layer {layer_id} is not a Text layer")),
+        }
+    }
+
+    /// Toggle faux italic on a Text layer.
+    pub fn toggle_layer_italic(&mut self, layer_id: &str) -> Result<(), String> {
+        let comp = self.active_composition_mut().ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp.get_layer_mut(layer_id).ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        match &mut layer.source {
+            LayerSource::Text { italic, .. } => {
+                *italic = !*italic;
+                Ok(())
+            }
+            _ => Err(format!("Layer {layer_id} is not a Text layer")),
+        }
+    }
+
+    /// Toggle all-caps on a Text layer.
+    pub fn toggle_layer_caps(&mut self, layer_id: &str) -> Result<(), String> {
+        let comp = self.active_composition_mut().ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp.get_layer_mut(layer_id).ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        match &mut layer.source {
+            LayerSource::Text { all_caps, .. } => {
+                *all_caps = !*all_caps;
+                Ok(())
+            }
+            _ => Err(format!("Layer {layer_id} is not a Text layer")),
+        }
+    }
+
+    /// Set paragraph alignment on a Text layer.
+    pub fn set_layer_text_align(&mut self, layer_id: &str, align: project::TextAlign) -> Result<(), String> {
+        let comp = self.active_composition_mut().ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp.get_layer_mut(layer_id).ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        match &mut layer.source {
+            LayerSource::Text { align: a, .. } => {
+                *a = align;
+                Ok(())
+            }
+            _ => Err(format!("Layer {layer_id} is not a Text layer")),
+        }
+    }
+
+    /// Set a scalar text property (tracking / leading / stroke_width /
+    /// baseline_shift / box_width) on a Text layer. Keyframe-aware.
+    pub fn set_layer_text_scalar(&mut self, layer_id: &str, field: &str, v: f32) -> Result<(), String> {
+        if !v.is_finite() {
+            return Err("Non-finite value".to_string());
+        }
+        let current_tc = self.clock.timecode();
+        let comp = self.active_composition_mut().ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp.get_layer_mut(layer_id).ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        match &mut layer.source {
+            LayerSource::Text { tracking, leading, stroke_width, baseline_shift, box_width, .. } => {
+                let prop = match field {
+                    "tracking" => tracking,
+                    "leading" => leading,
+                    "stroke_width" => stroke_width,
+                    "baseline_shift" => baseline_shift,
+                    "box_width" => box_width,
+                    _ => return Err(format!("Unknown text field {field}")),
+                };
+                let value = match field {
+                    "tracking" => v.clamp(-50.0, 200.0),
+                    "leading" => v.max(0.0),
+                    "stroke_width" => v.clamp(0.0, 50.0),
+                    "baseline_shift" => v.clamp(-500.0, 500.0),
+                    _ => v.max(0.0),
+                };
+                prop.set_value(value);
+                if prop.is_animated() {
+                    prop.add_keyframe(Keyframe::new(current_tc, value));
+                }
+                Ok(())
+            }
+            _ => Err(format!("Layer {layer_id} is not a Text layer")),
+        }
+    }
+
+    /// Set stroke color on a Text layer.
+    pub fn set_layer_stroke_color(&mut self, layer_id: &str, color: Color) -> Result<(), String> {
+        let comp = self.active_composition_mut().ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp.get_layer_mut(layer_id).ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        match &mut layer.source {
+            LayerSource::Text { stroke_color, .. } => {
+                *stroke_color = color;
+                Ok(())
+            }
+            _ => Err(format!("Layer {layer_id} is not a Text layer")),
+        }
+    }
+
     /// Set dimensions and corner radius on a Rectangle shape layer.
     pub fn set_layer_rect_dimensions(
         &mut self,

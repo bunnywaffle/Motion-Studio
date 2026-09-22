@@ -33,7 +33,7 @@ pub use keyframe::{
     evaluate_cubic_bezier, evaluate_keyframe_track, interpolate_keyframes, Extrapolation,
     Interpolate, Keyframe, KeyframeInterpolation, KeyframeTangent,
 };
-pub use layer::{Layer, LayerSource, ShapeType};
+pub use layer::{Layer, LayerSource, ShapeType, TextAlign};
 pub use marker::Marker;
 pub use matte::TrackMatteMode;
 pub use project::{Project, ProjectSettings, CURRENT_FORMAT_VERSION};

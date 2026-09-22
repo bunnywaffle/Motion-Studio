@@ -2,6 +2,7 @@ pub mod blit;
 pub mod blur;
 pub mod cache;
 pub mod device;
+pub mod effect_filters;
 pub mod shader;
 pub mod shader_lab;
 

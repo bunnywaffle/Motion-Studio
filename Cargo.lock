@@ -192,6 +192,7 @@ name = "application"
 version = "0.1.0"
 dependencies = [
  "compositor",
+ "cosmic-text",
  "fontdb",
  "gpui-kit",
  "image",

@@ -22,6 +22,24 @@ fn default_shape_fill() -> Color {
     Color::WHITE
 }
 
+fn default_font_weight() -> u16 {
+    400
+}
+
+fn default_stroke_color() -> Color {
+    Color::BLACK
+}
+
+/// Horizontal paragraph alignment for text layers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
 /// Geometric shape types supported by vector shape layers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "shape", rename_all = "snake_case")]
@@ -67,6 +85,34 @@ pub enum LayerSource {
         font_family: String,
         font_size: Property<f32>,
         fill_color: Property<Color>,
+        /// Font weight 100..900 (400 normal, 700 bold).
+        #[serde(default = "default_font_weight")]
+        weight: u16,
+        /// Faux italic slant when the family lacks an italic face.
+        #[serde(default)]
+        italic: bool,
+        /// Extra inter-character advance in px (tracking).
+        #[serde(default)]
+        tracking: Property<f32>,
+        /// Line height in px (0 = auto 1.2x size).
+        #[serde(default)]
+        leading: Property<f32>,
+        #[serde(default)]
+        align: TextAlign,
+        /// Render uppercase glyphs.
+        #[serde(default)]
+        all_caps: bool,
+        /// Outline width in px (0 = off).
+        #[serde(default)]
+        stroke_width: Property<f32>,
+        #[serde(default = "default_stroke_color")]
+        stroke_color: Color,
+        /// Vertical glyph offset in px.
+        #[serde(default)]
+        baseline_shift: Property<f32>,
+        /// Wrap width in px (0 = point text, no wrap).
+        #[serde(default)]
+        box_width: Property<f32>,
     },
     Shape {
         shape_type: ShapeType,
@@ -270,6 +316,16 @@ impl Layer {
                 font_family: font_family.into(),
                 font_size: Property::new("Font Size", font_size),
                 fill_color: Property::new("Fill Color", fill_color),
+                weight: default_font_weight(),
+                italic: false,
+                tracking: Property::new("Tracking", 0.0),
+                leading: Property::new("Leading", 0.0),
+                align: TextAlign::default(),
+                all_caps: false,
+                stroke_width: Property::new("Stroke Width", 0.0),
+                stroke_color: default_stroke_color(),
+                baseline_shift: Property::new("Baseline Shift", 0.0),
+                box_width: Property::new("Box Width", 0.0),
             },
             in_point,
             out_point,

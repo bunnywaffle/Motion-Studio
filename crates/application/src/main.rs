@@ -1,4 +1,5 @@
 mod panels;
+pub mod raster;
 pub mod state;
 use state::EditorState;
 
