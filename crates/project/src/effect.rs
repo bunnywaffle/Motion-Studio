@@ -61,6 +61,10 @@ pub enum EffectType {
         tolerance: Property<f32>,
         feather: Property<f32>,
     },
+    LumaKey {
+        threshold: Property<f32>,
+        feather: Property<f32>,
+    },
     NoiseGenerator {
         amount: Property<f32>,
         monochrome: bool,
@@ -80,6 +84,7 @@ impl EffectType {
             Self::ShaderLab { .. } => "Shader Lab",
             Self::DisplacementMap { .. } => "Displacement Map",
             Self::ChromaKey { .. } => "Chroma Key",
+            Self::LumaKey { .. } => "Luma Key",
             Self::NoiseGenerator { .. } => "Noise Generator",
         }
     }
@@ -156,6 +161,15 @@ impl EffectType {
         Self::ChromaKey {
             key_color,
             tolerance: Property::new("Tolerance", tolerance.clamp(0.0, 100.0)),
+            feather: Property::new("Feather", feather.clamp(0.0, 100.0)),
+        }
+    }
+
+    /// Construct a Luma Key effect type (keys out dark / bright pixels by
+    /// luminance instead of hue).
+    pub fn luma_key(threshold: f32, feather: f32) -> Self {
+        Self::LumaKey {
+            threshold: Property::new("Threshold", threshold.clamp(0.0, 100.0)),
             feather: Property::new("Feather", feather.clamp(0.0, 100.0)),
         }
     }
@@ -259,6 +273,11 @@ impl Effect {
     /// Factory for creating a Chroma Key effect.
     pub fn chroma_key(id: impl Into<String>, key_color: Color, tolerance: f32, feather: f32) -> Self {
         Self::new(id, "Chroma Key", EffectType::chroma_key(key_color, tolerance, feather))
+    }
+
+    /// Factory for creating a Luma Key effect.
+    pub fn luma_key(id: impl Into<String>, threshold: f32, feather: f32) -> Self {
+        Self::new(id, "Luma Key", EffectType::luma_key(threshold, feather))
     }
 
     /// Factory for creating a Noise Generator effect.
@@ -552,6 +571,15 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     return true;
                 }
             }
+            EffectType::LumaKey { threshold, feather } => {
+                if param_name.eq_ignore_ascii_case("threshold") {
+                    threshold.set_value((threshold.value + delta).clamp(0.0, 100.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("feather") {
+                    feather.set_value((feather.value + delta).clamp(0.0, 100.0));
+                    return true;
+                }
+            }
             EffectType::NoiseGenerator { amount, .. } => {
                 if param_name.eq_ignore_ascii_case("amount") {
                     amount.set_value((amount.value + delta).clamp(0.0, 100.0));
@@ -656,6 +684,15 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     None
                 }
             }
+            EffectType::LumaKey { threshold, feather } => {
+                if param_name.eq_ignore_ascii_case("threshold") {
+                    Some(threshold)
+                } else if param_name.eq_ignore_ascii_case("feather") {
+                    Some(feather)
+                } else {
+                    None
+                }
+            }
             EffectType::NoiseGenerator { amount, .. } => {
                 if param_name.eq_ignore_ascii_case("amount") {
                     Some(amount)
@@ -754,6 +791,15 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
             EffectType::ChromaKey { tolerance, feather, .. } => {
                 if param_name.eq_ignore_ascii_case("tolerance") {
                     Some(tolerance)
+                } else if param_name.eq_ignore_ascii_case("feather") {
+                    Some(feather)
+                } else {
+                    None
+                }
+            }
+            EffectType::LumaKey { threshold, feather } => {
+                if param_name.eq_ignore_ascii_case("threshold") {
+                    Some(threshold)
                 } else if param_name.eq_ignore_ascii_case("feather") {
                     Some(feather)
                 } else {

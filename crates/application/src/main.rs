@@ -1458,11 +1458,28 @@ mod tests {
             });
             window.render_frame(cx);
 
-            // Verify effects items are visible in the DOM
+            // Verify effects items are visible in the DOM. Categories start
+            // collapsed (accordion): headers render, rows appear on expand.
             assert!(window.find("effects_panel").visible());
             assert!(window.find("effects_categories").visible());
+            assert!(window.find("effect_category_blur").visible());
+            assert!(window.find("effect_category_keying").visible());
+            assert!(window.find("effect_category_text").visible());
+            panels.effects.update(cx, |p, cx| {
+                assert!(p.is_collapsed("blur"));
+                assert!(p.is_collapsed("keying"));
+                p.expand_category("blur");
+                p.expand_category("color");
+                p.expand_category("keying");
+                p.expand_category("text");
+                cx.notify();
+            });
+            window.render_frame(cx);
             assert!(window.find("effect_item_gaussian_blur").visible());
             assert!(window.find("effect_item_brightness_contrast").visible());
+            assert!(window.find("effect_item_chroma_key").visible());
+            assert!(window.find("effect_item_luma_key").visible());
+            assert!(window.find("effect_item_text_fill").visible());
 
             // 2. Add effect to selected layer
             let state_entity = app_view.read(cx).state().clone();
@@ -2032,7 +2049,7 @@ mod tests {
             assert!(p.context_menu.is_none());
         });
         timeline_panel.update(cx, |p, _| {
-            p.open_context_menu(ContextMenuTarget::Layer("layer_accent".to_string()));
+            p.open_context_menu(ContextMenuTarget::Layer("layer_accent".to_string()), gpui::point(gpui::px(10.), gpui::px(10.)));
         });
         timeline_panel.read_with(cx, |p, _| {
             assert!(matches!(p.context_menu.as_ref().map(|c| &c.target), Some(ContextMenuTarget::Layer(lid)) if lid == "layer_accent"));
@@ -2574,5 +2591,104 @@ mod tests {
         assert!(!state.commit_typed_value("abc"));
         assert!(state.end_value_edit_state());
         assert!(!state.end_value_edit_state());
+    }
+
+    #[test]
+    fn test_timeline_scrub_values_layer_targeted() {
+        use crate::state::EditorState;
+
+        let mut state = EditorState::new();
+        let lid = "layer_accent";
+
+        // Layer-targeted nudges (drag/wheel path, no +/- buttons).
+        state.nudge_timeline_value(lid, "pos_x", 10.0);
+        state.nudge_timeline_value(lid, "rotation", 45.0);
+        state.nudge_timeline_value(lid, "opacity", -5.0);
+        assert!((state.timeline_current_value(lid, "pos_x").unwrap()
+            - state.active_composition().unwrap().get_layer(lid).unwrap().transform.position.value.x).abs() < 1e-4);
+        assert!((state.timeline_current_value(lid, "rotation").unwrap() - 45.0).abs() < 1e-4);
+
+        // Absolute sets (keyboard entry path).
+        assert!(state.set_timeline_value(lid, "pos_x", 200.0));
+        assert!(state.set_timeline_value(lid, "rotation", 30.0));
+        assert!(state.set_timeline_value(lid, "scale_x", 150.0));
+        assert!((state.timeline_current_value(lid, "pos_x").unwrap() - 200.0).abs() < 1e-4);
+        assert!((state.timeline_current_value(lid, "rotation").unwrap() - 30.0).abs() < 1e-4);
+
+        // Effect params route through the same keys.
+        let fx_id = state.add_effect_to_selected_layer(project::EffectType::gaussian_blur(10.0))
+            .expect("blur added");
+        let key = format!("fx:{fx_id}:radius");
+        state.nudge_timeline_value(lid, &key, 5.0);
+        assert!((state.timeline_current_value(lid, &key).unwrap() - 15.0).abs() < 1e-4);
+        assert!(state.set_timeline_value(lid, &key, 42.0));
+        assert!((state.timeline_current_value(lid, &key).unwrap() - 42.0).abs() < 1e-4);
+
+        // tl: edit keys commit through the shared typed path.
+        state.value_edit_key = Some(format!("tl:{lid}:opacity"));
+        assert!(state.commit_typed_value("60%"));
+        assert!((state.timeline_current_value(lid, "opacity").unwrap() - 60.0).abs() < 1e-4);
+
+        // Unknown layers/keys fail cleanly.
+        assert!(!state.set_timeline_value("missing", "pos_x", 1.0));
+        assert!(state.timeline_current_value("missing", "pos_x").is_none());
+        assert!(!state.set_timeline_value(lid, "bogus", 1.0));
+    }
+
+    #[test]
+    fn test_new_composition_creation() {
+        use crate::state::EditorState;
+        use project::Color;
+
+        let mut state = EditorState::new();
+        let before = state.project.compositions.len();
+        let id = state.add_composition("", 1280, 720, 25.0, 5.0, Color::WHITE)
+            .expect("composition created");
+        assert_eq!(state.project.compositions.len(), before + 1);
+        assert_eq!(state.active_comp_id, id);
+        let comp = state.active_composition().unwrap();
+        assert_eq!(comp.width, 1280);
+        assert_eq!(comp.height, 720);
+        assert!((comp.frame_rate - 25.0).abs() < 1e-9);
+        assert_eq!(comp.background_color, Color::WHITE);
+        assert!(comp.name.starts_with("Composition"));
+        // New comp starts empty with no selection.
+        assert!(state.selected_layer_id.is_none());
+
+        // Transparent background round-trips.
+        let id2 = state.add_composition("Vertical", 1080, 1920, 30.0, 10.0, Color::TRANSPARENT)
+            .expect("second composition");
+        assert_eq!(state.active_composition().unwrap().name, "Vertical");
+        assert_eq!(state.active_composition().unwrap().background_color, Color::TRANSPARENT);
+        assert_ne!(id, id2);
+    }
+
+    #[test]
+    fn test_luma_key_effect_round_trip() {
+        use crate::state::EditorState;
+        use project::{Color, EffectType};
+
+        // Model: constructor clamps, params addressable, nudge works.
+        let mut fx = project::Effect::luma_key("fx_luma", 20.0, 10.0);
+        assert_eq!(fx.type_name(), "Luma Key");
+        assert!(matches!(fx.effect_type, EffectType::LumaKey { .. }));
+        assert!(fx.get_param_property("threshold").is_some());
+        assert!(fx.get_param_property("feather").is_some());
+        assert!(fx.get_param_property("nope").is_none());
+        assert!(fx.nudge_param("threshold", 5.0));
+        assert!((fx.get_param_property("threshold").unwrap().value - 25.0).abs() < 1e-4);
+
+        // Evaluation: dark pixels key out, bright pixels survive.
+        let eval = compositor::EvaluatedEffectType::LumaKey { threshold: 50.0, feather: 5.0 };
+        let dark = eval.process_color(Color::rgba(0.1, 0.1, 0.1, 1.0));
+        assert!(dark.a < 0.01);
+        let bright = eval.process_color(Color::rgba(0.9, 0.9, 0.9, 1.0));
+        assert!((bright.a - 1.0).abs() < 1e-4);
+
+        // End to end on a layer.
+        let mut state = EditorState::new();
+        let _ = state.add_effect_to_selected_layer(EffectType::luma_key(20.0, 10.0));
+        let layer = state.selected_layer().unwrap();
+        assert!(layer.effects.iter().any(|e| matches!(e.effect_type, EffectType::LumaKey { .. })));
     }
 }

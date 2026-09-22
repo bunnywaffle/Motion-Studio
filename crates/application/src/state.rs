@@ -493,7 +493,17 @@ impl EditorState {
             })
             .collect();
         match numeric.parse::<f32>() {
-            Ok(v) => self.set_scrub_value(&prop, v),
+            Ok(v) => {
+                // Timeline rows use `tl:<layer_id>:<key>` edit keys (layer ids
+                // never contain ':', so the first segment is the layer).
+                if let Some(rest) = prop.strip_prefix("tl:") {
+                    if let Some((lid, key)) = rest.split_once(':') {
+                        return self.set_timeline_value(lid, key, v);
+                    }
+                    return false;
+                }
+                self.set_scrub_value(&prop, v)
+            }
             Err(_) => false,
         }
     }
@@ -628,6 +638,47 @@ impl EditorState {
     }
 
     /// Add a new colored solid layer into the active composition.
+    /// Create a new composition with user-chosen settings (After Effects-style
+    /// "New Composition" dialog) and make it active. The name is auto-derived
+    /// (`Composition N`) when `name` is empty.
+    pub fn add_composition(
+        &mut self,
+        name: &str,
+        width: u32,
+        height: u32,
+        frame_rate: f64,
+        duration_secs: f64,
+        background: Color,
+    ) -> Result<String, String> {
+        let mut counter = self.project.compositions.len() + 1;
+        let mut id = format!("comp_{counter}");
+        while self.project.get_composition(&id).is_some() {
+            counter += 1;
+            id = format!("comp_{counter}");
+        }
+        let fps = if frame_rate > 0.0 { frame_rate } else { 30.0 };
+        let comp_name = if name.trim().is_empty() {
+            format!("Composition {counter}")
+        } else {
+            name.trim().to_string()
+        };
+        let mut comp = Composition::new(
+            &id,
+            comp_name,
+            width.max(1),
+            height.max(1),
+            fps,
+            TimeCode::from_seconds(duration_secs.max(1.0), fps),
+        );
+        comp.background_color = background;
+        self.project
+            .add_composition(comp)
+            .map_err(|e| format!("Failed to add composition: {e:?}"))?;
+        self.active_comp_id = id.clone();
+        self.selected_layer_id = None;
+        Ok(id)
+    }
+
     pub fn add_solid_layer(
         &mut self,
         name: &str,
@@ -1847,6 +1898,162 @@ impl EditorState {
     pub fn nudge_opacity(&mut self, dop: f32) {
         if let Some(id) = self.selected_layer_id.clone() {
             self.nudge_layer_opacity(&id, dop);
+        }
+    }
+
+    /// Nudge a timeline value row for an arbitrary layer (After Effects-style
+    /// timeline scrubbing — no +/- buttons). `key` is one of `anchor_x`,
+    /// `anchor_y`, `pos_x`, `pos_y`, `scale_x`, `scale_y`, `rotation`,
+    /// `opacity`, or `fx:<effect_id>:<param>`.
+    pub fn nudge_timeline_value(&mut self, layer_id: &str, key: &str, delta: f32) {
+        if !delta.is_finite() || delta == 0.0 {
+            return;
+        }
+        match key {
+            "anchor_x" => self.nudge_layer_anchor(layer_id, delta, 0.0),
+            "anchor_y" => self.nudge_layer_anchor(layer_id, 0.0, delta),
+            "pos_x" => self.nudge_layer_position(layer_id, delta, 0.0),
+            "pos_y" => self.nudge_layer_position(layer_id, 0.0, delta),
+            "scale_x" => self.nudge_layer_scale(layer_id, delta, 0.0),
+            "scale_y" => self.nudge_layer_scale(layer_id, 0.0, delta),
+            "rotation" => self.nudge_layer_rotation(layer_id, delta),
+            "opacity" => self.nudge_layer_opacity(layer_id, delta),
+            _ => {
+                if let Some(rest) = key.strip_prefix("fx:") {
+                    let parts: Vec<&str> = rest.split(':').collect();
+                    if parts.len() >= 2 {
+                        let _ =
+                            self.nudge_layer_effect_param(layer_id, parts[0], parts[1], delta);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Current value behind a timeline row (prefills keyboard entry).
+    /// Accepts the same key universe as [`Self::nudge_timeline_value`].
+    pub fn timeline_current_value(&self, layer_id: &str, key: &str) -> Option<f32> {
+        let current_tc = self.clock.timecode();
+        let comp = self.active_composition()?;
+        let layer = comp.get_layer(layer_id)?;
+        let eval_vec = |p: &Property<Vec2>| {
+            if p.is_animated() {
+                p.evaluate_at(&current_tc)
+            } else {
+                p.value
+            }
+        };
+        let eval_num = |p: &Property<f32>| {
+            if p.is_animated() {
+                p.evaluate_at(&current_tc)
+            } else {
+                p.value
+            }
+        };
+        match key {
+            "anchor_x" => Some(eval_vec(&layer.transform.anchor_point).x),
+            "anchor_y" => Some(eval_vec(&layer.transform.anchor_point).y),
+            "pos_x" => Some(eval_vec(&layer.transform.position).x),
+            "pos_y" => Some(eval_vec(&layer.transform.position).y),
+            "scale_x" => Some(eval_vec(&layer.transform.scale).x),
+            "scale_y" => Some(eval_vec(&layer.transform.scale).y),
+            "rotation" => Some(eval_num(&layer.transform.rotation)),
+            "opacity" => Some(eval_num(&layer.opacity)),
+            _ => {
+                let rest = key.strip_prefix("fx:")?;
+                let parts: Vec<&str> = rest.split(':').collect();
+                if parts.len() < 2 {
+                    return None;
+                }
+                let prop = layer.get_effect(parts[0])?.get_param_property(parts[1])?;
+                Some(eval_num(prop))
+            }
+        }
+    }
+
+    /// Set a timeline row to an absolute value (typed entry). Returns false
+    /// for unknown keys or missing layers/effects.
+    pub fn set_timeline_value(&mut self, layer_id: &str, key: &str, v: f32) -> bool {
+        if !v.is_finite() {
+            return false;
+        }
+        let lid = layer_id.to_string();
+        match key {
+            "anchor_x" | "anchor_y" | "pos_x" | "pos_y" => {
+                let (cx0, cy0) = match self.timeline_current_value(&lid, key) {
+                    Some(cur) => {
+                        let other = match key {
+                            "anchor_x" => self
+                                .timeline_current_value(&lid, "anchor_y")
+                                .unwrap_or(0.0),
+                            "anchor_y" => self
+                                .timeline_current_value(&lid, "anchor_x")
+                                .unwrap_or(0.0),
+                            "pos_x" => {
+                                self.timeline_current_value(&lid, "pos_y").unwrap_or(0.0)
+                            }
+                            _ => self.timeline_current_value(&lid, "pos_x").unwrap_or(0.0),
+                        };
+                        if key.ends_with("_x") {
+                            (cur, other)
+                        } else {
+                            (other, cur)
+                        }
+                    }
+                    None => return false,
+                };
+                match key {
+                    "anchor_x" => self.nudge_layer_anchor(&lid, v - cx0, 0.0),
+                    "anchor_y" => self.nudge_layer_anchor(&lid, 0.0, v - cy0),
+                    "pos_x" => self.nudge_layer_position(&lid, v - cx0, 0.0),
+                    _ => self.nudge_layer_position(&lid, 0.0, v - cy0),
+                }
+                true
+            }
+            "scale_x" | "scale_y" => {
+                let cur = match self.timeline_current_value(&lid, key) {
+                    Some(c) => c,
+                    None => return false,
+                };
+                if key == "scale_x" {
+                    self.nudge_layer_scale(&lid, v - cur, 0.0);
+                } else {
+                    self.nudge_layer_scale(&lid, 0.0, v - cur);
+                }
+                true
+            }
+            "rotation" => {
+                let cur = match self.timeline_current_value(&lid, key) {
+                    Some(c) => c,
+                    None => return false,
+                };
+                self.nudge_layer_rotation(&lid, v - cur);
+                true
+            }
+            "opacity" => {
+                let cur = match self.timeline_current_value(&lid, key) {
+                    Some(c) => c,
+                    None => return false,
+                };
+                self.nudge_layer_opacity(&lid, v - cur);
+                true
+            }
+            _ => {
+                let rest = match key.strip_prefix("fx:") {
+                    Some(r) => r,
+                    None => return false,
+                };
+                let parts: Vec<&str> = rest.split(':').collect();
+                if parts.len() < 2 {
+                    return false;
+                }
+                let cur = match self.timeline_current_value(&lid, key) {
+                    Some(c) => c,
+                    None => return false,
+                };
+                self.nudge_layer_effect_param(&lid, parts[0], parts[1], v - cur)
+                    .is_ok()
+            }
         }
     }
 

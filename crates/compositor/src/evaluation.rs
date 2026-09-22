@@ -196,6 +196,10 @@ pub enum EvaluatedEffectType {
         tolerance: f32,
         feather: f32,
     },
+    LumaKey {
+        threshold: f32,
+        feather: f32,
+    },
     NoiseGenerator {
         amount: f32,
         monochrome: bool,
@@ -221,6 +225,7 @@ impl EvaluatedEffectType {
             Self::GlslShader { .. } => "Custom GLSL Shader",
             Self::DisplacementMap { .. } => "Displacement Map",
             Self::ChromaKey { .. } => "Chroma Key",
+            Self::LumaKey { .. } => "Luma Key",
             Self::NoiseGenerator { .. } => "Noise Generator",
             Self::ShaderLab { .. } => "Shader Lab",
         }
@@ -321,6 +326,21 @@ impl EvaluatedEffectType {
                         0.0
                     } else {
                         ((dist - (tol_threshold - f_threshold).max(0.0)) / f_threshold).clamp(0.0, 1.0)
+                    };
+                    Color::rgba(c.r, c.g, c.b, c.a * alpha_mult)
+                } else {
+                    c
+                }
+            }
+            Self::LumaKey { threshold, feather } => {
+                let lum = 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
+                let cut = (*threshold / 100.0).clamp(0.0, 1.0);
+                let f = (*feather / 100.0).max(0.001);
+                if lum < cut {
+                    let alpha_mult = if lum < (cut - f).max(0.0) {
+                        0.0
+                    } else {
+                        ((lum - (cut - f).max(0.0)) / f).clamp(0.0, 1.0)
                     };
                     Color::rgba(c.r, c.g, c.b, c.a * alpha_mult)
                 } else {
@@ -1170,6 +1190,12 @@ impl LayerStackEvaluator {
                             tolerance: tolerance.evaluate_at(time),
                             feather: feather.evaluate_at(time),
                         },
+                        EffectType::LumaKey { threshold, feather } => {
+                            EvaluatedEffectType::LumaKey {
+                                threshold: threshold.evaluate_at(time),
+                                feather: feather.evaluate_at(time),
+                            }
+                        }
                         EffectType::NoiseGenerator {
                             amount,
                             monochrome,
