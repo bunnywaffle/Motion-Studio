@@ -1459,6 +1459,13 @@ pub struct CompositionViewerPanel {
     pub menu_pos: Option<Point<Pixels>>,
     pub is_dragging_canvas: bool,
     pub last_canvas_mouse: Option<(f32, f32)>,
+    /// True when the current left-press began on a layer body (set by the
+    /// layer shell, read by the canvas frame): only then may the Move /
+    /// Rotate tools start a canvas drag. Prevents empty-space clicks from
+    /// nudging the selection.
+    pub down_on_layer: bool,
+    /// Window-space position of an empty-canvas press (click = deselect).
+    pub empty_down: Option<(f32, f32)>,
     /// Remembered rectangle/ellipse variant for the grouped Shape tool.
     pub shape_variant: EditorTool,
     /// Measured canvas-wrap size in window px (responsive fit).
@@ -1515,6 +1522,8 @@ impl CompositionViewerPanel {
             menu_pos: None,
             is_dragging_canvas: false,
             last_canvas_mouse: None,
+            down_on_layer: false,
+            empty_down: None,
             shape_variant: EditorTool::ShapeRect,
             viewport_px: None,
             viewport_origin: None,
@@ -1673,7 +1682,9 @@ impl Render for CompositionViewerPanel {
                     let comp_fps = comp_opt.map(|c| c.frame_rate as f32).unwrap_or(30.0);
                     let time_s = current_frame as f32 / comp_fps.max(1.0);
                     let duration_s = comp_opt.map(|c| c.duration_seconds() as f32).unwrap_or(0.0);
-                    let playing_now = state.is_playing;
+                    // Gestures preview fast (probe wash); release restores
+                    // full per-pixel quality via the cache key below.
+                    let playing_now = state.is_playing || state.preview_fast;
                     // Raster output size = AABB box, capped for speed (the
                     // img child stretches to the shell on cap).
                     let rw = (l_w.ceil().max(1.0) as u32).min(1024);
@@ -1685,27 +1696,13 @@ impl Render for CompositionViewerPanel {
                             crate::raster::decoded_asset(&mut self.asset_cache, asset_id, &path);
                         }
                     }
-                    let cache_key = {
-                        // Static layers hit the cache across frames (their
-                        // evaluated state already captures motion); only
-                        // Shader Lab layers key on the frame since the `time`
-                        // uniform advances beneath identical values.
-                        let time_varying = layer.effects.iter().any(|e| {
-                            e.enabled
-                                && matches!(
-                                    &e.effect_type,
-                                    compositor::EvaluatedEffectType::ShaderLab { .. }
-                                )
-                        });
-                        crate::raster::layer_cache_key(
-                            layer,
-                            if time_varying { current_frame } else { 0 },
-                            rw,
-                            rh,
-                            playing_now,
-                            0,
-                        )
-                    };
+                    let cache_key = crate::raster::layer_cache_key(
+                        layer,
+                        current_frame,
+                        rw,
+                        rh,
+                        playing_now,
+                    );
                     let entry = match self.raster_cache.get(&layer.id) {
                         Some(e) if e.key == cache_key && e.w == rw && e.h == rh => e.clone(),
                         _ => {
@@ -1782,12 +1779,14 @@ impl Render for CompositionViewerPanel {
                         .w(px(l_w))
                         .h(px(l_h))
                         .cursor_pointer()
-                        .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
-                            let curr_x = event.position.x / px(1.0);
-                            let curr_y = event.position.y / px(1.0);
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            // Mark press-on-layer FIRST (bubbles to the
+                            // canvas frame, which gates drag start on it).
+                            // Drag state itself starts there so empty-space
+                            // presses never move the selection.
                             p_drag_layer.update(cx, |this, _cx| {
-                                this.is_dragging_canvas = true;
-                                this.last_canvas_mouse = Some((curr_x, curr_y));
+                                this.down_on_layer = true;
+                                this.empty_down = None;
                             });
                             sel_state.update(cx, |s, cx| {
                                 s.select_layer(Some(lid.clone()));
@@ -1954,6 +1953,7 @@ impl Render for CompositionViewerPanel {
                                     let (mx, my) = (event.position.x / px(1.0), event.position.y / px(1.0));
                                     s_h.update(cx, |s, cx| {
                                         s.select_layer(Some(lid_h.clone()));
+                                        s.preview_fast = true;
                                         cx.notify();
                                     });
                                     let (cmx, cmy) = gizmo_to_comp(mx, my, h_frame, h_fit, h_cw, h_ch);
@@ -2005,6 +2005,7 @@ impl Render for CompositionViewerPanel {
                                     let (mx, my) = (event.position.x / px(1.0), event.position.y / px(1.0));
                                     s_h.update(cx, |s, cx| {
                                         s.select_layer(Some(lid_h.clone()));
+                                        s.preview_fast = true;
                                         cx.notify();
                                     });
                                     let (cmx, cmy) = gizmo_to_comp(mx, my, h_frame, h_fit, h_cw, h_ch);
@@ -2066,6 +2067,7 @@ impl Render for CompositionViewerPanel {
                                     let (mx, my) = (event.position.x / px(1.0), event.position.y / px(1.0));
                                     s_h.update(cx, |s, cx| {
                                         s.select_layer(Some(lid_h.clone()));
+                                        s.preview_fast = true;
                                         cx.notify();
                                     });
                                     let (cmx, cmy) = gizmo_to_comp(mx, my, h_frame, h_fit, h_cw, h_ch);
@@ -2108,6 +2110,7 @@ impl Render for CompositionViewerPanel {
                                     let (mx, my) = (event.position.x / px(1.0), event.position.y / px(1.0));
                                     s_h.update(cx, |s, cx| {
                                         s.select_layer(Some(lid_h.clone()));
+                                        s.preview_fast = true;
                                         cx.notify();
                                     });
                                     let (cmx, cmy) = gizmo_to_comp(mx, my, h_frame, h_fit, h_cw, h_ch);
@@ -2416,15 +2419,41 @@ impl Render for CompositionViewerPanel {
                     }
                 }
             }))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| {
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
                 this.is_dragging_canvas = false;
                 this.last_canvas_mouse = None;
                 this.gizmo_drag = None;
+                this.down_on_layer = false;
+                // Empty-canvas click with the Move tool deselects (the Move
+                // tool never drags from empty space).
+                if this.empty_down.take().is_some() {
+                    let s = this.state.clone();
+                    s.update(cx, |s, cx| {
+                        if s.active_tool == EditorTool::Move {
+                            s.select_layer(None);
+                        }
+                        s.preview_fast = false;
+                        cx.notify();
+                    });
+                } else {
+                    let s = this.state.clone();
+                    s.update(cx, |s, cx| {
+                        s.preview_fast = false;
+                        cx.notify();
+                    });
+                }
             }))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, _| {
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| {
                 this.is_dragging_canvas = false;
                 this.last_canvas_mouse = None;
                 this.gizmo_drag = None;
+                this.down_on_layer = false;
+                this.empty_down = None;
+                let s = this.state.clone();
+                s.update(cx, |s, cx| {
+                    s.preview_fast = false;
+                    cx.notify();
+                });
             }))
             // Viewport header / controls
             .child(
@@ -2567,13 +2596,37 @@ impl Render for CompositionViewerPanel {
                                             // Gizmo handles set their own drag first (they
                                             // bubble through here); never start a canvas op.
                                             if p_drag.read(cx).gizmo_drag.is_some() {
+                                                p_drag.update(cx, |this, cx| {
+                                                    this.down_on_layer = false;
+                                                    this.empty_down = None;
+                                                    cx.notify();
+                                                });
                                                 return;
                                             }
                                             let curr_x = event.position.x / px(1.0);
                                             let curr_y = event.position.y / px(1.0);
-                                            p_drag.update(cx, |this, _cx| {
-                                                this.is_dragging_canvas = true;
-                                                this.last_canvas_mouse = Some((curr_x, curr_y));
+                                            // Move/Rotate drags start ONLY on a layer body
+                                            // (flagged by the shell handler above). Empty
+                                            // presses just record for click-deselect.
+                                            let on_layer = p_drag.read(cx).down_on_layer;
+                                            p_drag.update(cx, |this, cx| {
+                                                this.down_on_layer = false;
+                                                if on_layer {
+                                                    this.is_dragging_canvas = true;
+                                                    this.last_canvas_mouse = Some((curr_x, curr_y));
+                                                    this.empty_down = None;
+                                                } else {
+                                                    this.is_dragging_canvas = false;
+                                                    this.last_canvas_mouse = None;
+                                                    this.empty_down = Some((curr_x, curr_y));
+                                                }
+                                                cx.notify();
+                                            });
+                                            s_tool.update(cx, |s, cx| {
+                                                if on_layer {
+                                                    s.preview_fast = true;
+                                                }
+                                                cx.notify();
                                             });
                                             let active_tool = s_tool.read(cx).active_tool;
                                             let (fox, foy) = frame_org.unwrap_or((curr_x - canvas_w / 2.0, curr_y - canvas_h / 2.0));
@@ -3058,6 +3111,7 @@ where
 {
     let panel_down = panel_entity.clone();
     let state_scroll = state.clone();
+    let state_fast = state.clone();
     let prop_for_wheel = prop_key.clone();
     let prop_for_edit = prop_key.clone();
 
@@ -3095,6 +3149,11 @@ where
                     this.scrub_prop = Some(p);
                     this.scrub_last_x = Some(curr_x);
                     this.scrub_moved = false;
+                });
+                // Scrubbing previews fast; release restores quality.
+                state_fast.update(cx, |s, cx| {
+                    s.preview_fast = true;
+                    cx.notify();
                 });
             })
             .on_scroll_wheel(move |event, _window, cx| {
@@ -5886,11 +5945,21 @@ impl Render for PropertiesPanel {
                         this.begin_value_edit(&prop, window, cx);
                     }
                 }
+                let s = this.state.clone();
+                s.update(cx, |s, cx| {
+                    s.preview_fast = false;
+                    cx.notify();
+                });
             }))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, _| {
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| {
                 this.scrub_prop = None;
                 this.scrub_last_x = None;
                 this.scrub_moved = false;
+                let s = this.state.clone();
+                s.update(cx, |s, cx| {
+                    s.preview_fast = false;
+                    cx.notify();
+                });
             }))
             // Header
             .child(
@@ -7931,6 +8000,7 @@ fn timeline_scrub(
         _ => {
             let panel_down = panel_entity.clone();
             let state_wheel = state.clone();
+            let state_fast = state.clone();
             let lid_down = layer_id.clone();
             let key_down = value_key.clone();
             let lid_wheel = layer_id.clone();
@@ -7960,6 +8030,11 @@ fn timeline_scrub(
                         this.scrub_last_x = Some(curr_x);
                         this.scrub_moved = false;
                         this.scrub_factor = drag_factor;
+                    });
+                    // Scrubbing previews fast; release restores quality.
+                    state_fast.update(cx, |s, cx| {
+                        s.preview_fast = true;
+                        cx.notify();
                     });
                 })
                 .on_scroll_wheel(move |event, _window, cx| {
@@ -9296,6 +9371,8 @@ impl Render for TimelinePanel {
 
         let p_root_up = panel_entity.clone();
         let p_root_up_out = panel_entity.clone();
+        let s_root_up = self.state.clone();
+        let s_root_up_out = self.state.clone();
         let p_root_move = panel_entity.clone();
         let s_root_move = self.state.clone();
 
@@ -9420,6 +9497,10 @@ impl Render for TimelinePanel {
                     this.scrub_moved = false;
                     cx.notify();
                 });
+                s_root_up.update(cx, |s, cx| {
+                    s.preview_fast = false;
+                    cx.notify();
+                });
                 if let Some((lid, key)) = edit {
                     p_root_up.update(cx, |this, cx| {
                         this.begin_timeline_value_edit(&lid, &key, window, cx);
@@ -9434,6 +9515,10 @@ impl Render for TimelinePanel {
                     this.scrub_key = None;
                     this.scrub_last_x = None;
                     this.scrub_moved = false;
+                    cx.notify();
+                });
+                s_root_up_out.update(cx, |s, cx| {
+                    s.preview_fast = false;
                     cx.notify();
                 });
             })
@@ -9702,6 +9787,7 @@ impl Render for TimelinePanel {
                     )
                     .child({
                         let p_ruler_down = panel_entity.clone();
+                        let s_ruler_down = self.state.clone();
                         let mut ruler_track = div()
                             .id("ruler_track")
                             .test_support()
@@ -9710,8 +9796,13 @@ impl Render for TimelinePanel {
                             .h_full()
                             .cursor_col_resize()
                             .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                p_ruler_down.update(cx, |this, _cx| {
+                                p_ruler_down.update(cx, |this, cx| {
                                     this.is_scrubbing_ruler = true;
+                                    cx.notify();
+                                });
+                                s_ruler_down.update(cx, |s, cx| {
+                                    s.preview_fast = true;
+                                    cx.notify();
                                 });
                             });
 
@@ -9731,10 +9822,12 @@ impl Render for TimelinePanel {
                                     .left(relative(scrub_pct as f32))
                                     .w(relative(1.0 / 200.0))
                                     .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                        p_slice_down.update(cx, |this, _cx| {
+                                        p_slice_down.update(cx, |this, cx| {
                                             this.is_scrubbing_ruler = true;
+                                            cx.notify();
                                         });
                                         s_scrub.update(cx, |s, cx| {
+                                            s.preview_fast = true;
                                             s.seek(target_time);
                                             cx.notify();
                                         });

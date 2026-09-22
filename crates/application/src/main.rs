@@ -2719,8 +2719,7 @@ mod tests {
     }
 
     #[test]
-    fn test_new_effects_round_trip() {
-        use crate::state::EditorState;
+    fn test_new_effects_round_trip() {        use crate::state::EditorState;
         use project::{Color, EffectType};
 
         // Every new effect constructs, names, nudges, and exposes params.
@@ -2851,5 +2850,24 @@ mod tests {
             panic!("expected rect");
         }
         assert!(state.set_layer_shape_fill(&sid, project::Color::BLACK).is_ok());
+    }
+
+    #[test]
+    fn test_preview_fast_gesture_flag() {
+        use crate::state::EditorState;
+
+        let mut state = EditorState::new();
+        // Idle: full quality.
+        assert!(!state.preview_fast);
+        // Gestures opt into fast preview; releases restore quality.
+        state.preview_fast = true;
+        assert!(state.preview_fast);
+        // Ending value edit always drops the flag (even with no editor).
+        assert!(!state.end_value_edit_state());
+        assert!(!state.preview_fast);
+        state.preview_fast = true;
+        state.value_edit_key = Some("opacity".to_string());
+        assert!(state.end_value_edit_state());
+        assert!(!state.preview_fast);
     }
 }

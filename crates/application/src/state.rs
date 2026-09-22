@@ -121,6 +121,11 @@ pub struct EditorState {
     pub tool_solid_color: Color,
     /// Degrees per click for the Rotate tool.
     pub tool_rotate_step: f32,
+    /// True while a drag/scrub gesture is active anywhere. The viewport
+    /// rasterizer uses it to pick the cheap Shader Lab probe wash instead
+    /// of the full per-pixel interpreter, so scrubbing stays fluid and
+    /// full quality lands on release.
+    pub preview_fast: bool,
 }
 
 impl EditorState {
@@ -244,6 +249,7 @@ impl EditorState {
             tool_shape_fill: Color::WHITE,
             tool_solid_color: Color::from_rgba_u8(59, 130, 246, 255),
             tool_rotate_step: 15.0,
+            preview_fast: false,
         }
     }
 
@@ -522,7 +528,9 @@ impl EditorState {
     }
 
     /// Close keyboard entry, dropping the editor. Returns true when open.
+    /// Also ends fast-preview: the next render recomputes full quality.
     pub fn end_value_edit_state(&mut self) -> bool {
+        self.preview_fast = false;
         if self.value_edit_key.is_some() || self.value_editor.is_some() {
             self.value_edit_key = None;
             self.value_editor = None;
