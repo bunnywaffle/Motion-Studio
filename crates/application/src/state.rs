@@ -113,6 +113,14 @@ pub struct EditorState {
     pub value_editor: Option<Entity<InputState>>,
     pub value_editor_sub: Option<Subscription>,
     evaluator: LayerStackEvaluator,
+    /// Toolbar tool defaults (edited in Properties > Tool Settings, used by
+    /// new layers so tools behave consistently across the app).
+    pub tool_font_size: f32,
+    pub tool_text_color: Color,
+    pub tool_shape_fill: Color,
+    pub tool_solid_color: Color,
+    /// Degrees per click for the Rotate tool.
+    pub tool_rotate_step: f32,
 }
 
 impl EditorState {
@@ -231,6 +239,11 @@ impl EditorState {
             value_editor: None,
             value_editor_sub: None,
             evaluator: LayerStackEvaluator::new(),
+            tool_font_size: 48.0,
+            tool_text_color: Color::WHITE,
+            tool_shape_fill: Color::WHITE,
+            tool_solid_color: Color::from_rgba_u8(59, 130, 246, 255),
+            tool_rotate_step: 15.0,
         }
     }
 
@@ -1734,7 +1747,7 @@ impl EditorState {
                         };
                         match &layer.source {
                             LayerSource::Shape {
-                                shape_type: ShapeType::Rectangle { width, height, corner_radius },
+                                shape_type: ShapeType::Rectangle { width, height, corner_radius, .. },
                             } => (width.value, height.value, corner_radius.value),
                             _ => return false,
                         }
@@ -1761,7 +1774,7 @@ impl EditorState {
                         };
                         match &layer.source {
                             LayerSource::Shape {
-                                shape_type: ShapeType::Ellipse { radius_x, radius_y },
+                                shape_type: ShapeType::Ellipse { radius_x, radius_y, .. },
                             } => (radius_x.value, radius_y.value),
                             _ => return false,
                         }
@@ -1842,6 +1855,231 @@ impl EditorState {
     pub fn nudge_scale(&mut self, dx: f32, dy: f32) {
         if let Some(id) = self.selected_layer_id.clone() {
             self.nudge_layer_scale(&id, dx, dy);
+        }
+    }
+
+    /// Set absolute rotation on a layer (viewport gizmo). Keyframe-aware.
+    pub fn set_layer_rotation(&mut self, layer_id: &str, deg: f32) {
+        if !deg.is_finite() {
+            return;
+        }
+        let current_tc = self.clock.timecode();
+        if let Some(comp) = self.active_composition_mut() {
+            if let Some(layer) = comp.get_layer_mut(layer_id) {
+                layer.transform.rotation.set_value(deg);
+                if layer.transform.rotation.is_animated() {
+                    layer.transform.rotation.add_keyframe(Keyframe::new(current_tc, deg));
+                }
+            }
+        }
+    }
+
+    /// Set absolute scale on a layer in percent (viewport gizmo).
+    /// Keyframe-aware; bypasses the uniform link (the gizmo drives axes).
+    pub fn set_layer_scale(&mut self, layer_id: &str, x: f32, y: f32) {
+        if !x.is_finite() || !y.is_finite() {
+            return;
+        }
+        let current_tc = self.clock.timecode();
+        if let Some(comp) = self.active_composition_mut() {
+            if let Some(layer) = comp.get_layer_mut(layer_id) {
+                let v = Vec2::new(x.max(1.0), y.max(1.0));
+                layer.transform.scale.set_value(v);
+                if layer.transform.scale.is_animated() {
+                    layer.transform.scale.add_keyframe(Keyframe::new(current_tc, v));
+                }
+            }
+        }
+    }
+
+    /// Set absolute position on a layer in composition px (viewport gizmo).
+    pub fn set_layer_position(&mut self, layer_id: &str, pos: Vec2) {
+        if !pos.x.is_finite() || !pos.y.is_finite() {
+            return;
+        }
+        let current_tc = self.clock.timecode();
+        if let Some(comp) = self.active_composition_mut() {
+            if let Some(layer) = comp.get_layer_mut(layer_id) {
+                layer.transform.position.set_value(pos);
+                if layer.transform.position.is_animated() {
+                    layer.transform.position.add_keyframe(Keyframe::new(current_tc, pos));
+                }
+            }
+        }
+    }
+
+    /// Set absolute anchor on a layer in layer-local px (viewport gizmo).
+    pub fn set_layer_anchor(&mut self, layer_id: &str, anchor: Vec2) {
+        if !anchor.x.is_finite() || !anchor.y.is_finite() {
+            return;
+        }
+        let current_tc = self.clock.timecode();
+        if let Some(comp) = self.active_composition_mut() {
+            if let Some(layer) = comp.get_layer_mut(layer_id) {
+                layer.transform.anchor_point.set_value(anchor);
+                if layer.transform.anchor_point.is_animated() {
+                    layer.transform.anchor_point.add_keyframe(Keyframe::new(current_tc, anchor));
+                }
+            }
+        }
+    }
+
+    /// Pan-Behind-style anchor move: shifts the pivot by a layer-local delta
+    /// while counter-moving position so rendered pixels stay put.
+    pub fn move_layer_anchor(&mut self, layer_id: &str, d_local: Vec2) {
+        if !d_local.x.is_finite() || !d_local.y.is_finite() {
+            return;
+        }
+        // World-space shift of the pivot under the current rotation/scale.
+        let (anchor, world_shift) = {
+            let comp = match self.active_composition() {
+                Some(c) => c,
+                None => return,
+            };
+            let layer = match comp.get_layer(layer_id) {
+                Some(l) => l,
+                None => return,
+            };
+            let current_tc = self.clock.timecode();
+            let rot = layer.transform.rotation.evaluate_at(&current_tc).to_radians();
+            let sc = layer.transform.scale.evaluate_at(&current_tc);
+            let (sx, sy) = (sc.x / 100.0, sc.y / 100.0);
+            let (cos, sin) = (rot.cos(), rot.sin());
+            // R * S * d (layer-local delta into world px).
+            let wx = (d_local.x * sx) * cos - (d_local.y * sy) * sin;
+            let wy = (d_local.x * sx) * sin + (d_local.y * sy) * cos;
+            let anchor = if layer.transform.anchor_point.is_animated() {
+                layer.transform.anchor_point.evaluate_at(&current_tc)
+            } else {
+                layer.transform.anchor_point.value
+            };
+            let pos = if layer.transform.position.is_animated() {
+                layer.transform.position.evaluate_at(&current_tc)
+            } else {
+                layer.transform.position.value
+            };
+            (anchor, (pos, Vec2::new(wx, wy)))
+        };
+        let (pos, shift) = world_shift;
+        self.set_layer_anchor(layer_id, anchor + d_local);
+        self.set_layer_position(layer_id, pos + shift);
+    }
+
+    /// Reset a layer pivot to its content center, keeping pixels in place.
+    /// Every new layer already spawns centered; this repairs drifted pivots.
+    pub fn reset_layer_anchor_center(&mut self, layer_id: &str) {
+        let (bw, bh) = match self.content_size(layer_id) {
+            Some(s) => s,
+            None => return,
+        };
+        let current = {
+            let comp = match self.active_composition() {
+                Some(c) => c,
+                None => return,
+            };
+            let layer = match comp.get_layer(layer_id) {
+                Some(l) => l,
+                None => return,
+            };
+            let current_tc = self.clock.timecode();
+            if layer.transform.anchor_point.is_animated() {
+                layer.transform.anchor_point.evaluate_at(&current_tc)
+            } else {
+                layer.transform.anchor_point.value
+            }
+        };
+        let target = Vec2::new(bw / 2.0, bh / 2.0);
+        self.move_layer_anchor(layer_id, target - current);
+    }
+
+    /// Untransformed content size (layer-local px) behind a layer, mirroring
+    /// the viewer estimate so pivots land on the true content center.
+    pub fn content_size(&self, layer_id: &str) -> Option<(f32, f32)> {
+        let comp = self.active_composition()?;
+        let layer = comp.get_layer(layer_id)?;
+        Some(match &layer.source {
+            LayerSource::Solid { width, height, .. } => (*width as f32, *height as f32),
+            LayerSource::Image { asset_id } => {
+                if let Some(asset) = self.project.get_asset(asset_id) {
+                    let (w, h) = image::image_dimensions(&asset.path).unwrap_or((1920, 1080));
+                    (w as f32, h as f32)
+                } else {
+                    (400.0, 300.0)
+                }
+            }
+            LayerSource::Video { .. } => (1920.0, 1080.0),
+            LayerSource::Text { text, font_size, .. } => {
+                let len = text.value.chars().count().max(1) as f32;
+                let fs = font_size.value;
+                ((len * fs * 0.6 + 40.0).max(100.0), (fs * 1.4 + 20.0).max(40.0))
+            }
+            LayerSource::Shape { shape_type } => match shape_type {
+                ShapeType::Rectangle { width, height, .. } => (width.value, height.value),
+                ShapeType::Ellipse { radius_x, radius_y, .. } => {
+                    (radius_x.value * 2.0, radius_y.value * 2.0)
+                }
+                // Path bounds come from the evaluated world box; fall back
+                // to the composition center region size here.
+                ShapeType::Path { .. } => {
+                    let c = self.active_composition()?;
+                    (c.width as f32 / 4.0, c.height as f32 / 4.0)
+                }
+            },
+            LayerSource::Adjustment => {
+                let c = self.active_composition()?;
+                (c.width as f32, c.height as f32)
+            }
+            _ => (400.0, 300.0),
+        })
+    }
+
+    /// Set a shape layer fill color.
+    pub fn set_layer_shape_fill(&mut self, layer_id: &str, color: Color) -> Result<(), String> {
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        match &mut layer.source {
+            LayerSource::Shape {
+                shape_type: ShapeType::Rectangle { fill, .. },
+            }
+            | LayerSource::Shape {
+                shape_type: ShapeType::Ellipse { fill, .. },
+            }
+            | LayerSource::Shape {
+                shape_type: ShapeType::Path { fill, .. },
+            } => {
+                *fill = color;
+                Ok(())
+            }
+            _ => Err("Not a shape layer".to_string()),
+        }
+    }
+
+    /// Set a color field on an effect (`color_a` / `color_b` / `color`).
+    /// Used by checker, gradient, and outline swatches.
+    pub fn set_effect_color(
+        &mut self,
+        layer_id: &str,
+        effect_id: &str,
+        field: &str,
+        color: Color,
+    ) -> Result<(), String> {
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let effect = layer
+            .get_effect_mut(effect_id)
+            .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
+        if effect.set_color_value(field, color) {
+            Ok(())
+        } else {
+            Err(format!("Color field {field} not found on effect {effect_id}"))
         }
     }
 
@@ -2587,13 +2825,15 @@ impl EditorState {
 
         let in_pt = TimeCode::zero(frame_rate);
         let out_pt = duration;
+        let font_size = self.tool_font_size.max(1.0);
+        let fill_color = self.tool_text_color;
         let mut layer = Layer::text(
             &layer_id,
             if text.is_empty() { "Text Layer" } else { text },
             text,
             Self::default_font_family(),
-            48.0,
-            Color::WHITE,
+            font_size,
+            fill_color,
             in_pt,
             out_pt,
         );
@@ -2603,8 +2843,8 @@ impl EditorState {
         // Center the text block on the spawn point: anchor at half of the
         // estimated block size so position (0, 0) lands it in the viewport
         // center like every other new layer (mirrors the viewer estimate).
-        let est_w = (text.chars().count().max(1) as f32 * 48.0 * 0.6 + 40.0).max(100.0);
-        let est_h: f32 = (48.0f32 * 1.4 + 20.0).max(40.0);
+        let est_w = (text.chars().count().max(1) as f32 * font_size * 0.6 + 40.0).max(100.0);
+        let est_h: f32 = (font_size * 1.4 + 20.0).max(40.0);
         layer.transform.anchor_point.set_value(Vec2::new(est_w / 2.0, est_h / 2.0));
 
         let comp_mut = self
@@ -2647,6 +2887,7 @@ impl EditorState {
 
         let in_pt = TimeCode::zero(frame_rate);
         let out_pt = duration;
+        let fill = self.tool_shape_fill;
         let mut layer = Layer::shape(
             &layer_id,
             "Rectangle Shape",
@@ -2654,6 +2895,7 @@ impl EditorState {
                 width: Property::new("Width", width),
                 height: Property::new("Height", height),
                 corner_radius: Property::new("Corner Radius", 0.0),
+                fill,
             },
             in_pt,
             out_pt,
@@ -2703,12 +2945,14 @@ impl EditorState {
 
         let in_pt = TimeCode::zero(frame_rate);
         let out_pt = duration;
+        let fill = self.tool_shape_fill;
         let mut layer = Layer::shape(
             &layer_id,
             "Ellipse Shape",
             ShapeType::Ellipse {
                 radius_x: Property::new("Radius X", radius_x),
                 radius_y: Property::new("Radius Y", radius_y),
+                fill,
             },
             in_pt,
             out_pt,
@@ -2737,7 +2981,7 @@ impl EditorState {
         if let Some(id) = sel_id {
             if let Some(comp) = self.active_composition_mut() {
                 if let Some(layer) = comp.get_layer_mut(&id) {
-                    if let LayerSource::Shape { shape_type: ShapeType::Path { path_data } } = &mut layer.source {
+                    if let LayerSource::Shape { shape_type: ShapeType::Path { path_data, .. } } = &mut layer.source {
                         path_data.push_str(&format!(" L {:.1} {:.1}", point.x, point.y));
                         return Ok(id);
                     }
@@ -2768,11 +3012,13 @@ impl EditorState {
 
         let in_pt = TimeCode::zero(frame_rate);
         let out_pt = duration;
+        let fill = self.tool_shape_fill;
         let layer = Layer::shape(
             &layer_id,
             "Pen Path",
             ShapeType::Path {
                 path_data: format!("M {:.1} {:.1}", point.x, point.y),
+                fill,
             },
             in_pt,
             out_pt,
@@ -3099,7 +3345,7 @@ impl EditorState {
 
         match &mut layer.source {
             LayerSource::Shape {
-                shape_type: ShapeType::Rectangle { width: w, height: h, corner_radius: cr },
+                shape_type: ShapeType::Rectangle { width: w, height: h, corner_radius: cr, .. },
             } => {
                 w.set_value(width.max(1.0));
                 h.set_value(height.max(1.0));
@@ -3127,7 +3373,7 @@ impl EditorState {
 
         match &mut layer.source {
             LayerSource::Shape {
-                shape_type: ShapeType::Rectangle { width: w, height: h, corner_radius: cr },
+                shape_type: ShapeType::Rectangle { width: w, height: h, corner_radius: cr, .. },
             } => {
                 let cur_w = w.value;
                 let cur_h = h.value;
@@ -3157,7 +3403,7 @@ impl EditorState {
 
         match &mut layer.source {
             LayerSource::Shape {
-                shape_type: ShapeType::Ellipse { radius_x: rx, radius_y: ry },
+                shape_type: ShapeType::Ellipse { radius_x: rx, radius_y: ry, .. },
             } => {
                 rx.set_value(radius_x.max(1.0));
                 ry.set_value(radius_y.max(1.0));
@@ -3183,7 +3429,7 @@ impl EditorState {
 
         match &mut layer.source {
             LayerSource::Shape {
-                shape_type: ShapeType::Ellipse { radius_x: rx, radius_y: ry },
+                shape_type: ShapeType::Ellipse { radius_x: rx, radius_y: ry, .. },
             } => {
                 let cur_rx = rx.value;
                 let cur_ry = ry.value;

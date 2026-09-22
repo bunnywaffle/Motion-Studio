@@ -6,6 +6,7 @@ use project::{
     BlendMode, Color, Composition, EffectType, LayerSource, LoopMode, Project, TimeCode,
     TrackMatteMode, Vec2,
 };
+use project::shader_interp::{self, PreviewEnv};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -205,12 +206,56 @@ pub enum EvaluatedEffectType {
         monochrome: bool,
     },
     /// Runtime user-shader effect. Spatial (runs on the GPU over the whole
-    /// tile), so [`Self::process_color`] is the identity; the renderer
-    /// compiles `source` (see `renderer::shader_lab`) and uploads `values`
-    /// as uniforms. `source_hash` keys the pipeline cache.
+    /// tile), so [`Self::process_color`] probes the CPU interpreter at the
+    /// layer center for viewport feedback; the renderer compiles `source`
+    /// (see `renderer::shader_lab`) and uploads `values` as uniforms.
+    /// `source_hash` keys the pipeline cache. `prog` is the pre-parsed
+    /// preview program (skipped by serde; re-parsed on load).
     ShaderLab {
         source_hash: u64,
         values: HashMap<String, project::ShaderParamValue>,
+        #[serde(skip)]
+        prog: Option<project::shader_interp::ParsedProg>,
+    },
+    Checkerboard {
+        size: f32,
+        color_a: Color,
+        color_b: Color,
+    },
+    GradientRamp {
+        color_a: Color,
+        color_b: Color,
+        angle: f32,
+    },
+    Perspective {
+        skew_x: f32,
+        skew_y: f32,
+    },
+    TextOutline {
+        width: f32,
+        color: Color,
+    },
+    TextBevel {
+        strength: f32,
+        softness: f32,
+    },
+    Bloom {
+        intensity: f32,
+        radius: f32,
+    },
+    Tiler {
+        tiles_x: f32,
+        tiles_y: f32,
+    },
+    Warp {
+        amount: f32,
+        scale: f32,
+    },
+    Exposure {
+        exposure: f32,
+    },
+    Vibrance {
+        vibrance: f32,
     },
 }
 
@@ -228,14 +273,37 @@ impl EvaluatedEffectType {
             Self::LumaKey { .. } => "Luma Key",
             Self::NoiseGenerator { .. } => "Noise Generator",
             Self::ShaderLab { .. } => "Shader Lab",
+            Self::Checkerboard { .. } => "Checkerboard",
+            Self::GradientRamp { .. } => "Gradient Ramp",
+            Self::Perspective { .. } => "Perspective",
+            Self::TextOutline { .. } => "Text Outline",
+            Self::TextBevel { .. } => "Text Bevel",
+            Self::Bloom { .. } => "Bloom",
+            Self::Tiler { .. } => "Tiler",
+            Self::Warp { .. } => "Warp",
+            Self::Exposure { .. } => "Exposure",
+            Self::Vibrance { .. } => "Vibrance",
         }
     }
 
-    /// True for effects that need neighboring pixels (currently Gaussian blur).
-    /// Such effects are the identity in [`Self::process_color`] and must be
-    /// resolved by the rasterizer / preview renderer instead.
+    /// True for effects that need neighboring pixels or pixel position
+    /// (currently Gaussian blur, Shader Lab probes, and geometric /
+    /// generator effects). Such effects are the identity in
+    /// [`Self::process_color`] and must be resolved by the rasterizer /
+    /// preview renderer instead.
     pub const fn is_spatial(&self) -> bool {
-        matches!(self, Self::GaussianBlur { .. } | Self::ShaderLab { .. })
+        matches!(
+            self,
+            Self::GaussianBlur { .. }
+                | Self::ShaderLab { .. }
+                | Self::Checkerboard { .. }
+                | Self::GradientRamp { .. }
+                | Self::Perspective { .. }
+                | Self::TextOutline { .. }
+                | Self::TextBevel { .. }
+                | Self::Tiler { .. }
+                | Self::Warp { .. }
+        )
     }
 
     /// Blur radius in pixels when this is a Gaussian blur, otherwise `None`.
@@ -351,8 +419,7 @@ impl EvaluatedEffectType {
                 let n_amount = (*amount / 100.0).clamp(0.0, 1.0);
                 if *monochrome {
                     let hash = ((c.r * 12.9898 + c.g * 78.233 + c.b * 45.164).sin() * 43758.5453).fract();
-                    let noise = (hash - 0.5) * n_amount;
-                    Color::rgba(
+                    let noise = (hash - 0.5) * n_amount;                    Color::rgba(
                         (c.r + noise).clamp(0.0, 1.0),
                         (c.g + noise).clamp(0.0, 1.0),
                         (c.b + noise).clamp(0.0, 1.0),
@@ -371,8 +438,70 @@ impl EvaluatedEffectType {
                 }
             }
             // Shader Lab runs on the GPU over whole tiles (see
-            // `renderer::shader_lab`); a lone color sample is unchanged.
-            Self::ShaderLab { .. } => c,
+            // `renderer::shader_lab`); the viewport probes the CPU
+            // interpreter at the layer center so grades show live.
+            // Animated `time` freezes at 0 in the probe.
+            Self::ShaderLab { values, prog, .. } => match prog {
+                Some(p) => {
+                    let env = PreviewEnv {
+                        values: values.clone(),
+                        ..Default::default()
+                    };
+                    match shader_interp::eval_prog(p, &env, (0.5, 0.5), c) {
+                        Ok([r, g, b, a]) => Color::rgba(
+                            r.clamp(0.0, 1.0),
+                            g.clamp(0.0, 1.0),
+                            b.clamp(0.0, 1.0),
+                            (a * c.a).clamp(0.0, 1.0),
+                        ),
+                        Err(_) => c,
+                    }
+                }
+                None => c,
+            },
+            // Geometric / generator effects need pixel position or text
+            // geometry: identity here, resolved by rasterizers and the
+            // viewport SVG preview.
+            Self::Checkerboard { .. }
+            | Self::GradientRamp { .. }
+            | Self::Perspective { .. }
+            | Self::TextOutline { .. }
+            | Self::TextBevel { .. }
+            | Self::Tiler { .. }
+            | Self::Warp { .. } => c,
+            Self::Bloom { intensity, .. } => {
+                let k = (*intensity / 100.0).clamp(0.0, 1.0);
+                Color::rgba(
+                    (c.r + c.r * c.r * k).clamp(0.0, 1.0),
+                    (c.g + c.g * c.g * k).clamp(0.0, 1.0),
+                    (c.b + c.b * c.b * k).clamp(0.0, 1.0),
+                    c.a,
+                )
+            }
+            Self::Exposure { exposure } => {
+                let gain = 2.0_f32.powf(exposure.clamp(-10.0, 10.0));
+                Color::rgba(
+                    (c.r * gain).clamp(0.0, 1.0),
+                    (c.g * gain).clamp(0.0, 1.0),
+                    (c.b * gain).clamp(0.0, 1.0),
+                    c.a,
+                )
+            }
+            Self::Vibrance { vibrance } => {
+                let v = (*vibrance / 100.0).clamp(-1.0, 1.0);
+                let lum = 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
+                let mx = c.r.max(c.g).max(c.b);
+                let mn = c.r.min(c.g).min(c.b);
+                let sat = (mx - mn).clamp(0.0, 1.0);
+                // Muted colors move most; negative values wash out.
+                let boost = 1.0 + v * (1.0 - sat);
+                Color::rgba(
+                    (lum + (c.r - lum) * boost).clamp(0.0, 1.0),
+                    (lum + (c.g - lum) * boost).clamp(0.0, 1.0),
+                    (lum + (c.b - lum) * boost).clamp(0.0, 1.0),
+                    c.a,
+                )
+            }
         }
     }
 }
@@ -1218,9 +1347,74 @@ impl LayerStackEvaluator {
                                     )
                                 })
                                 .collect();
+                            // Pre-parse for the viewport CPU probe; sources
+                            // using unsupported constructs preview as
+                            // identity (GPU export still validates).
+                            let prog = shader_interp::parse_program(source).ok();
                             EvaluatedEffectType::ShaderLab {
                                 source_hash,
                                 values: resolved,
+                                prog,
+                            }
+                        }
+                        EffectType::Checkerboard { size, color_a, color_b } => {
+                            EvaluatedEffectType::Checkerboard {
+                                size: size.evaluate_at(time),
+                                color_a: *color_a,
+                                color_b: *color_b,
+                            }
+                        }
+                        EffectType::GradientRamp { color_a, color_b, angle } => {
+                            EvaluatedEffectType::GradientRamp {
+                                color_a: *color_a,
+                                color_b: *color_b,
+                                angle: angle.evaluate_at(time),
+                            }
+                        }
+                        EffectType::Perspective { skew_x, skew_y } => {
+                            EvaluatedEffectType::Perspective {
+                                skew_x: skew_x.evaluate_at(time),
+                                skew_y: skew_y.evaluate_at(time),
+                            }
+                        }
+                        EffectType::TextOutline { width, color } => {
+                            EvaluatedEffectType::TextOutline {
+                                width: width.evaluate_at(time),
+                                color: *color,
+                            }
+                        }
+                        EffectType::TextBevel { strength, softness } => {
+                            EvaluatedEffectType::TextBevel {
+                                strength: strength.evaluate_at(time),
+                                softness: softness.evaluate_at(time),
+                            }
+                        }
+                        EffectType::Bloom { intensity, radius } => {
+                            EvaluatedEffectType::Bloom {
+                                intensity: intensity.evaluate_at(time),
+                                radius: radius.evaluate_at(time),
+                            }
+                        }
+                        EffectType::Tiler { tiles_x, tiles_y } => {
+                            EvaluatedEffectType::Tiler {
+                                tiles_x: tiles_x.evaluate_at(time),
+                                tiles_y: tiles_y.evaluate_at(time),
+                            }
+                        }
+                        EffectType::Warp { amount, scale } => {
+                            EvaluatedEffectType::Warp {
+                                amount: amount.evaluate_at(time),
+                                scale: scale.evaluate_at(time),
+                            }
+                        }
+                        EffectType::Exposure { exposure } => {
+                            EvaluatedEffectType::Exposure {
+                                exposure: exposure.evaluate_at(time),
+                            }
+                        }
+                        EffectType::Vibrance { vibrance } => {
+                            EvaluatedEffectType::Vibrance {
+                                vibrance: vibrance.evaluate_at(time),
                             }
                         }
                     };

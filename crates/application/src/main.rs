@@ -26,6 +26,8 @@ pub struct AppView {
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
     _playback_task: Option<Task<()>>,
+    /// Last window size the dock layout was fitted to (responsive docks).
+    docks_sized_for: Option<(i32, i32)>,
 }
 
 impl AppView {
@@ -110,6 +112,7 @@ impl AppView {
             focus_handle,
             _subscriptions: Vec::new(),
             _playback_task: Some(playback_task),
+            docks_sized_for: None,
         }
     }
 
@@ -206,6 +209,25 @@ impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state_key = self.state.clone();
         let toolbar = render_toolbar(&self.state, cx);
+
+        // Responsive docks: refit fixed dock rails when the window size
+        // changes so panels never push UI beyond the screen. User dock
+        // resizes are preserved (only window changes re-fit).
+        let vw = (window.bounds().size.width / px(1.0)).round() as i32;
+        let vh = (window.bounds().size.height / px(1.0)).round() as i32;
+        if self.docks_sized_for != Some((vw, vh)) {
+            self.docks_sized_for = Some((vw, vh));
+            let vw_f = vw as f32;
+            let vh_f = vh as f32;
+            let left = px(vw_f * 0.22).max(px(200.)).min(px(320.));
+            let right = px(vw_f * 0.23).max(px(220.)).min(px(340.));
+            let bottom = px(vh_f * 0.32).max(px(180.)).min(px(320.));
+            self.dock_area.update(cx, |dock, cx| {
+                dock.set_dock_size(DockPlacement::Left, left, &mut *window, cx);
+                dock.set_dock_size(DockPlacement::Right, right, &mut *window, cx);
+                dock.set_dock_size(DockPlacement::Bottom, bottom, &mut *window, cx);
+            });
+        }
 
         let is_full = self.state.read(cx).timeline_full_width;
         let dock_open = self.dock_area.read(cx).is_dock_open(DockPlacement::Bottom);
@@ -417,10 +439,14 @@ mod tests {
                 assert!(!dock.is_empty(DockPlacement::Right, cx));
                 assert!(!dock.is_empty(DockPlacement::Bottom, cx));
 
-                // Verify configured initial dock sizes
-                assert_eq!(dock.dock_size(DockPlacement::Left), Some(px(280.)));
-                assert_eq!(dock.dock_size(DockPlacement::Right), Some(px(300.)));
-                assert_eq!(dock.dock_size(DockPlacement::Bottom), Some(px(260.)));
+                // Verify configured dock sizes (responsive: fitted to the
+                // window within sane rails, not fixed px).
+                let left = dock.dock_size(DockPlacement::Left).expect("left size");
+                let right = dock.dock_size(DockPlacement::Right).expect("right size");
+                let bottom = dock.dock_size(DockPlacement::Bottom).expect("bottom size");
+                assert!((200.0..=320.0).contains(&(left / px(1.0))), "left {left:?}");
+                assert!((220.0..=340.0).contains(&(right / px(1.0))), "right {right:?}");
+                assert!((180.0..=320.0).contains(&(bottom / px(1.0))), "bottom {bottom:?}");
             });
         });
     }
@@ -1924,7 +1950,7 @@ mod tests {
         {
             let comp = state.active_composition().unwrap();
             let ellipse_layer = comp.get_layer(&ellipse_id).unwrap();
-            assert!(matches!(&ellipse_layer.source, LayerSource::Shape { shape_type: ShapeType::Ellipse { radius_x, radius_y } } if radius_x.value == 120.0 && radius_y.value == 120.0));
+            assert!(matches!(&ellipse_layer.source, LayerSource::Shape { shape_type: ShapeType::Ellipse { radius_x, radius_y, .. } } if radius_x.value == 120.0 && radius_y.value == 120.0));
         }
 
         // Add Pen point -> new path layer
@@ -1933,7 +1959,7 @@ mod tests {
         {
             let comp = state.active_composition().unwrap();
             let path_layer = comp.get_layer(&path_id).unwrap();
-            assert!(matches!(&path_layer.source, LayerSource::Shape { shape_type: ShapeType::Path { path_data } } if path_data.contains("M 50.0 75.0")));
+            assert!(matches!(&path_layer.source, LayerSource::Shape { shape_type: ShapeType::Path { path_data, .. } } if path_data.contains("M 50.0 75.0")));
         }
 
         // Append next vertex to path layer
@@ -1943,7 +1969,7 @@ mod tests {
         {
             let comp = state.active_composition().unwrap();
             let path_layer = comp.get_layer(&path_id).unwrap();
-            assert!(matches!(&path_layer.source, LayerSource::Shape { shape_type: ShapeType::Path { path_data } } if path_data.contains("L 150.0 200.0")));
+            assert!(matches!(&path_layer.source, LayerSource::Shape { shape_type: ShapeType::Path { path_data, .. } } if path_data.contains("L 150.0 200.0")));
         }
     }
 
@@ -2130,7 +2156,7 @@ mod tests {
         let _ = state.set_layer_rect_dimensions(&shape_id, 250.0, 150.0, 12.0);
         let layer_shape = state.active_composition().unwrap().get_layer(&shape_id).unwrap().clone();
         if let LayerSource::Shape {
-            shape_type: ShapeType::Rectangle { width, height, corner_radius },
+            shape_type: ShapeType::Rectangle { width, height, corner_radius, .. },
         } = layer_shape.source {
             assert!((width.value - 250.0).abs() < 0.01);
             assert!((height.value - 150.0).abs() < 0.01);
@@ -2142,7 +2168,7 @@ mod tests {
         let _ = state.nudge_layer_rect_dimensions(&shape_id, 20.0, -10.0, 2.0);
         let layer_shape = state.active_composition().unwrap().get_layer(&shape_id).unwrap().clone();
         if let LayerSource::Shape {
-            shape_type: ShapeType::Rectangle { width, height, corner_radius },
+            shape_type: ShapeType::Rectangle { width, height, corner_radius, .. },
         } = layer_shape.source {
             assert!((width.value - 270.0).abs() < 0.01);
             assert!((height.value - 140.0).abs() < 0.01);
@@ -2527,7 +2553,7 @@ mod tests {
         let layer = eval.get_layer("layer_accent").unwrap();
         let ee = layer.effects.iter().find(|e| e.id == fx).expect("evaluated fx");
         match &ee.effect_type {
-            compositor::EvaluatedEffectType::ShaderLab { source_hash, values } => {
+            compositor::EvaluatedEffectType::ShaderLab { source_hash, values, .. } => {
                 assert_ne!(*source_hash, 0);
                 assert!(values.contains_key("mixAmount"));
             }
@@ -2664,8 +2690,7 @@ mod tests {
     }
 
     #[test]
-    fn test_luma_key_effect_round_trip() {
-        use crate::state::EditorState;
+    fn test_luma_key_effect_round_trip() {        use crate::state::EditorState;
         use project::{Color, EffectType};
 
         // Model: constructor clamps, params addressable, nudge works.
@@ -2690,5 +2715,140 @@ mod tests {
         let _ = state.add_effect_to_selected_layer(EffectType::luma_key(20.0, 10.0));
         let layer = state.selected_layer().unwrap();
         assert!(layer.effects.iter().any(|e| matches!(e.effect_type, EffectType::LumaKey { .. })));
+    }
+
+    #[test]
+    fn test_new_effects_round_trip() {
+        use crate::state::EditorState;
+        use project::{Color, EffectType};
+
+        // Every new effect constructs, names, nudges, and exposes params.
+        let mut fx = project::Effect::checkerboard("c", 32.0, Color::BLACK, Color::WHITE);
+        assert_eq!(fx.type_name(), "Checkerboard");
+        assert!(fx.nudge_param("size", 8.0));
+        assert!(fx.set_color_value("color_a", Color::WHITE));
+        assert!(!fx.set_color_value("bogus", Color::WHITE));
+
+        let mut fx = project::Effect::gradient_ramp("g", Color::BLACK, Color::WHITE, 90.0);
+        assert_eq!(fx.type_name(), "Gradient Ramp");
+        assert!(fx.nudge_param("angle", 10.0));
+        assert!(fx.get_param_property("angle").is_some());
+
+        for (mut e, name, param, delta, expect) in [
+            (project::Effect::perspective("p", 0.0, 0.0), "Perspective", "skew_x", 5.0, 5.0),
+            (project::Effect::text_outline("o", 3.0, Color::BLACK), "Text Outline", "width", 2.0, 5.0),
+            (project::Effect::text_bevel("b", 60.0, 30.0), "Text Bevel", "strength", 10.0, 70.0),
+            (project::Effect::bloom("bl", 40.0, 10.0), "Bloom", "intensity", 10.0, 50.0),
+            (project::Effect::tiler("t", 2.0, 2.0), "Tiler", "tiles_x", 2.0, 4.0),
+            (project::Effect::warp("w", 30.0, 1.0), "Warp", "amount", 10.0, 40.0),
+            (project::Effect::exposure("e", 0.0), "Exposure", "exposure", 1.0, 1.0),
+            (project::Effect::vibrance("v", 30.0), "Vibrance", "vibrance", -10.0, 20.0),
+        ] {
+            assert_eq!(e.type_name(), name);
+            assert!(e.nudge_param(param, delta), "{name}");
+            assert!((e.get_param_property(param).unwrap().value - expect).abs() < 1e-4, "{name}");
+        }
+        let _ = EffectType::noise_generator(10.0, false);
+
+        // Per-pixel math: exposure doubles, vibrance lifts muted color,
+        // bloom lifts highlights, spatial ones stay identity.
+        let mid = Color::rgba(0.25, 0.25, 0.25, 1.0);
+        let ev = compositor::EvaluatedEffectType::Exposure { exposure: 1.0 };
+        let out = ev.process_color(mid);
+        assert!((out.r - 0.5).abs() < 1e-4);
+        let vib = compositor::EvaluatedEffectType::Vibrance { vibrance: 100.0 };
+        let muted = Color::rgba(0.5, 0.4, 0.4, 1.0);
+        let boosted = vib.process_color(muted);
+        assert!((boosted.r - muted.r).abs() > 0.01);
+        let gray = Color::rgba(0.5, 0.5, 0.5, 1.0);
+        assert!((vib.process_color(gray).r - 0.5).abs() < 1e-4);
+        let bl = compositor::EvaluatedEffectType::Bloom { intensity: 100.0, radius: 5.0 };
+        let bright = Color::rgba(0.8, 0.8, 0.8, 1.0);
+        assert!(bl.process_color(bright).r > 0.85);
+        let chk = compositor::EvaluatedEffectType::Checkerboard {
+            size: 32.0, color_a: Color::BLACK, color_b: Color::WHITE,
+        };
+        assert!(chk.is_spatial());
+        assert_eq!(chk.process_color(mid), mid);
+
+        // End to end: browser rows apply onto the selected layer.
+        let mut state = EditorState::new();
+        for et in [
+            EffectType::checkerboard(32.0, Color::BLACK, Color::WHITE),
+            EffectType::gradient_ramp(Color::BLACK, Color::WHITE, 90.0),
+            EffectType::perspective(5.0, -5.0),
+            EffectType::text_outline(3.0, Color::BLACK),
+            EffectType::text_bevel(60.0, 30.0),
+            EffectType::bloom(40.0, 10.0),
+            EffectType::tiler(2.0, 2.0),
+            EffectType::warp(30.0, 1.0),
+            EffectType::exposure(1.0),
+            EffectType::vibrance(30.0),
+        ] {
+            let name = et.type_name();
+            state.add_effect_to_selected_layer(et).expect(name);
+        }
+        assert_eq!(state.selected_layer().unwrap().effects.len(), 10);
+    }
+
+    #[test]
+    fn test_gizmo_setters_and_center_pivot() {
+        use crate::state::EditorState;
+        use project::Vec2;
+
+        let mut state = EditorState::new();
+        let lid = "layer_accent".to_string();
+
+        // Absolute setters (gizmo drag endpoints).
+        state.set_layer_rotation(&lid, 45.0);
+        state.set_layer_scale(&lid, 150.0, 120.0);
+        state.set_layer_position(&lid, Vec2::new(100.0, -50.0));
+        {
+            let l = state.active_composition().unwrap().get_layer(&lid).unwrap();
+            assert!((l.transform.rotation.value - 45.0).abs() < 1e-4);
+            assert!((l.transform.scale.value.x - 150.0).abs() < 1e-4);
+            assert!((l.transform.position.value.x - 100.0).abs() < 1e-4);
+        }
+
+        // Pan-behind anchor move keeps rendered pixels in place: a fixed
+        // content point maps to the same world position after the move.
+        let before = state.evaluate_current_frame().unwrap();
+        let lay = before.get_layer(&lid).unwrap();
+        let probe = Vec2::new(0.0, 0.0);
+        let w0 = lay.local_to_world_point(probe);
+        state.move_layer_anchor(&lid, Vec2::new(20.0, 10.0));
+        let after = state.evaluate_current_frame().unwrap();
+        let lay2 = after.get_layer(&lid).unwrap();
+        let w1 = lay2.local_to_world_point(probe);
+        assert!((w1.x - w0.x).abs() < 1e-3);
+        assert!((w1.y - w0.y).abs() < 1e-3);
+
+        // Center pivot lands on the content center.
+        state.reset_layer_anchor_center(&lid);
+        let l = state.active_composition().unwrap().get_layer(&lid).unwrap();
+        // Accent solid is 300x300 -> pivot (150, 150).
+        assert!((l.transform.anchor_point.value.x - 150.0).abs() < 1e-4);
+        assert!((l.transform.anchor_point.value.y - 150.0).abs() < 1e-4);
+
+        // Tool defaults drive new layers.
+        state.tool_font_size = 72.0;
+        state.tool_text_color = project::Color::from_hex("#EF4444").unwrap();
+        state.tool_shape_fill = project::Color::from_hex("#10B981").unwrap();
+        let tid = state.add_text_layer("Hi", None).unwrap();
+        let tl = state.active_composition().unwrap().get_layer(&tid).unwrap();
+        if let project::LayerSource::Text { font_size, fill_color, .. } = &tl.source {
+            assert!((font_size.value - 72.0).abs() < 1e-4);
+            assert_eq!(fill_color.value, project::Color::from_hex("#EF4444").unwrap());
+        } else {
+            panic!("expected text");
+        }
+        let sid = state.add_rectangle_shape_layer(100.0, 100.0, None).unwrap();
+        let sl = state.active_composition().unwrap().get_layer(&sid).unwrap();
+        if let project::LayerSource::Shape { shape_type: project::ShapeType::Rectangle { fill, .. } } = &sl.source {
+            assert_eq!(*fill, project::Color::from_hex("#10B981").unwrap());
+        } else {
+            panic!("expected rect");
+        }
+        assert!(state.set_layer_shape_fill(&sid, project::Color::BLACK).is_ok());
     }
 }

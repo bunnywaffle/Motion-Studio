@@ -1,13 +1,13 @@
 use gpui_kit::assets::IconName;
-use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
-use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
-use gpui_kit::base::{h_flex, v_flex, Positioner, StyledExt, TestSupportExt};
+use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::base::{h_flex, v_flex, ElementExt as _, Positioner, StyledExt, TestSupportExt};
 use gpui_kit::component::dock::{BasePanel, Panel, PanelEvent};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::*;
 
 use std::collections::HashSet;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::state::{EditorState, EditorTool};
 use project::shader::{presets as shader_presets, ShaderParamValue};
@@ -68,6 +68,42 @@ fn svg_hex(r: f32, g: f32, b: f32) -> String {
         (r.clamp(0.0, 1.0) * 255.0) as u8,
         (g.clamp(0.0, 1.0) * 255.0) as u8,
         (b.clamp(0.0, 1.0) * 255.0) as u8
+    )
+}
+
+/// Viewport gizmo handle dot, centered on canvas-space `(x, y)`.
+/// Note: no `.test_support()` wrapper here — it would hide the concrete
+/// `Stateful<Div>` type that callers extend with children and handlers.
+fn gizmo_dot(id: String, x: f32, y: f32, size: f32, fill: Rgba, border: Rgba, round: bool) -> Stateful<Div> {
+    let mut d = div()
+        .id(SharedString::from(id))
+        .absolute()
+        .left(px(x - size / 2.0))
+        .top(px(y - size / 2.0))
+        .w(px(size))
+        .h(px(size))
+        .bg(fill)
+        .border_1()
+        .border_color(border)
+        .cursor_pointer();
+    d = if round { d.rounded_full() } else { d.rounded_sm() };
+    d
+}
+
+/// Window px -> composition px for gizmo drag starts (measured frame
+/// origin + uniform fit; no hardcoded factors, no missing offsets).
+fn gizmo_to_comp(
+    mx: f32,
+    my: f32,
+    frame: Option<(f32, f32)>,
+    fit: f32,
+    cw: f32,
+    ch: f32,
+) -> (f32, f32) {
+    let (fox, foy) = frame.unwrap_or((0.0, 0.0));
+    (
+        (mx - fox) / fit - cw / 2.0,
+        (my - foy) / fit - ch / 2.0,
     )
 }
 
@@ -1423,6 +1459,39 @@ pub struct CompositionViewerPanel {
     pub last_canvas_mouse: Option<(f32, f32)>,
     /// Remembered rectangle/ellipse variant for the grouped Shape tool.
     pub shape_variant: EditorTool,
+    /// Measured canvas-wrap size in window px (responsive fit).
+    pub viewport_px: Option<(f32, f32)>,
+    /// Measured canvas-wrap origin in window px (for cursor mapping).
+    pub viewport_origin: Option<(f32, f32)>,
+    /// Measured canvas-frame origin in window px (exact picking origin).
+    pub frame_origin: Option<(f32, f32)>,
+    /// Active transform-gizmo drag (rotate / scale / anchor handles).
+    pub gizmo_drag: Option<ViewerGizmoDrag>,
+}
+
+/// Viewport transform-gizmo drag state (After Effects-style direct
+/// manipulation: move the body, drag corners/edges to scale, the top
+/// handle to rotate about the pivot, the diamond to move the pivot).
+#[derive(Clone, Debug)]
+pub enum ViewerGizmoDrag {
+    Rotate {
+        layer_id: String,
+        start_rot: f32,
+        start_angle: f32,
+    },
+    Scale {
+        layer_id: String,
+        uniform: bool,
+        use_x: bool,
+        use_y: bool,
+        start_scale: Vec2,
+        start_local: Vec2,
+        anchor_local: Vec2,
+    },
+    Anchor {
+        layer_id: String,
+        start_local: Vec2,
+    },
 }
 
 impl CompositionViewerPanel {
@@ -1439,6 +1508,10 @@ impl CompositionViewerPanel {
             is_dragging_canvas: false,
             last_canvas_mouse: None,
             shape_variant: EditorTool::ShapeRect,
+            viewport_px: None,
+            viewport_origin: None,
+            frame_origin: None,
+            gizmo_drag: None,
         }
     }
 
@@ -1490,13 +1563,21 @@ impl Render for CompositionViewerPanel {
             .map(|c| Rgba { r: c.background_color.r, g: c.background_color.g, b: c.background_color.b, a: c.background_color.a })
             .unwrap_or(Rgba { r: 0.07, g: 0.07, b: 0.08, a: 1.0 });
 
-        // Canvas viewport dimensions
-        let canvas_w = 512.0f32;
-        let canvas_h = 288.0f32;
+        // Responsive canvas: fit the composition into the measured wrap
+        // box with a uniform scale (aspect preserved — no stretch on
+        // portrait/square comps), with letterboxing. Falls back to the
+        // classic 512x288 fit before the first measurement lands.
         let comp_w = comp_opt.map(|c| c.width as f32).unwrap_or(1920.0);
         let comp_h = comp_opt.map(|c| c.height as f32).unwrap_or(1080.0);
-        let scale_x = canvas_w / comp_w;
-        let scale_y = canvas_h / comp_h;
+        let (avail_w, avail_h) = self.viewport_px.unwrap_or((512.0, 288.0));
+        let fit = ((avail_w - 32.0) / comp_w)
+            .min((avail_h - 32.0) / comp_h)
+            .clamp(0.05, 4.0);
+        let canvas_w = (comp_w * fit).max(2.0);
+        let canvas_h = (comp_h * fit).max(2.0);
+        // Uniform canvas scale (comp px -> canvas px).
+        let scale_x = fit;
+        let scale_y = fit;
 
         // Render evaluated layers in painter's composite order
         let rendered_layers: Vec<AnyElement> = match eval_stack.as_ref() {
@@ -1538,6 +1619,15 @@ impl Render for CompositionViewerPanel {
                             let estimated_h = (fs * 1.4 + 20.0).max(40.0);
                             (estimated_w, estimated_h, fill_color.value, None)
                         }
+                        LayerSource::Shape { shape_type } => match shape_type {
+                            ShapeType::Rectangle { width, height, fill, .. } => {
+                                (width.value, height.value, *fill, None)
+                            }
+                            ShapeType::Ellipse { radius_x, radius_y, fill, .. } => {
+                                (radius_x.value * 2.0, radius_y.value * 2.0, *fill, None)
+                            }
+                            ShapeType::Path { fill, .. } => (400.0, 300.0, *fill, None),
+                        },
                         LayerSource::Adjustment => {
                             (comp_w, comp_h, Color::TRANSPARENT, None)
                         }
@@ -1646,30 +1736,125 @@ impl Render for CompositionViewerPanel {
 
                     rendered_regions.push((bbox.min.x, bbox.min.y, bbox.max.x, bbox.max.y, recorded_color));
 
-                    // Inline SVG body for rotated vector layers: gpui Divs
-                    // have no rotation transform, so the unrotated canvas-px
-                    // box is drawn as SVG and rotated about the layer center
-                    // (see the `rotated_svg` child below). Raster layers and
+                    // Vector-effect inputs for the inline SVG preview: the
+                    // first enabled checker / gradient / outline /
+                    // perspective / bloom on the layer. Raster layers and
                     // paths keep div rendering with an angle badge.
-                    let rotated_svg: Option<String> = if use_rotated_svg {
+                    let mut fx_checker: Option<(f32, Color, Color)> = None;
+                    let mut fx_gradient: Option<(Color, Color, f32)> = None;
+                    let mut fx_outline: Option<(f32, Color)> = None;
+                    let mut fx_persp: Option<(f32, f32)> = None;
+                    let mut fx_bloom: Option<(f32, f32)> = None;
+                    for eff in &layer.effects {
+                        if !eff.enabled {
+                            continue;
+                        }
+                        match &eff.effect_type {
+                            compositor::EvaluatedEffectType::Checkerboard { size, color_a, color_b } => {
+                                if fx_checker.is_none() {
+                                    fx_checker = Some((*size, *color_a, *color_b));
+                                }
+                            }
+                            compositor::EvaluatedEffectType::GradientRamp { color_a, color_b, angle } => {
+                                if fx_gradient.is_none() {
+                                    fx_gradient = Some((*color_a, *color_b, *angle));
+                                }
+                            }
+                            compositor::EvaluatedEffectType::TextOutline { width, color } => {
+                                if fx_outline.is_none() {
+                                    fx_outline = Some((*width, *color));
+                                }
+                            }
+                            compositor::EvaluatedEffectType::Perspective { skew_x, skew_y } => {
+                                if fx_persp.is_none() {
+                                    fx_persp = Some((*skew_x, *skew_y));
+                                }
+                            }
+                            compositor::EvaluatedEffectType::Bloom { intensity, radius } => {
+                                if fx_bloom.is_none() && *intensity >= 0.5 {
+                                    fx_bloom = Some((*intensity, *radius));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    let use_vector_svg = use_rotated_svg
+                        || fx_checker.is_some()
+                        || fx_gradient.is_some()
+                        || fx_outline.is_some()
+                        || fx_persp.is_some()
+                        || fx_bloom.is_some();
+
+                    // Inline SVG body for rotated / vector-effect layers: gpui
+                    // Divs have no rotation transform, so the unrotated
+                    // canvas-px box is drawn as SVG and rotated about the
+                    // layer center (see the `rotated_svg` child below).
+                    let rotated_svg: Option<String> = if use_vector_svg {
                         let fill = svg_hex(processed_col.r, processed_col.g, processed_col.b);
                         let op = source_color.a.clamp(0.0, 1.0);
+                        let mut defs = String::new();
+                        // Base paint: gradient / checker pattern / flat.
+                        let mut paint = format!("fill=\"{fill}\" fill-opacity=\"{op}\"");
+                        if let Some((ca, cb, ang)) = fx_gradient {
+                            let ha = svg_hex(ca.r, ca.g, ca.b);
+                            let hb = svg_hex(cb.r, cb.g, cb.b);
+                            let rad = ang.to_radians();
+                            let (dx, dy) = (rad.cos(), rad.sin());
+                            defs.push_str(&format!(
+                                "<linearGradient id=\"gg\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\"><stop offset=\"0\" stop-color=\"{ha}\" stop-opacity=\"{op}\"/><stop offset=\"1\" stop-color=\"{hb}\" stop-opacity=\"{op}\"/></linearGradient>",
+                                0.5 - dx / 2.0,
+                                0.5 - dy / 2.0,
+                                0.5 + dx / 2.0,
+                                0.5 + dy / 2.0
+                            ));
+                            paint = "fill=\"url(#gg)\"".to_string();
+                        } else if let Some((size, ca, cb)) = fx_checker {
+                            let s = (size * (scv.x / 100.0) * scale_x).clamp(2.0, 256.0);
+                            let h = s / 2.0;
+                            let ha = svg_hex(ca.r, ca.g, ca.b);
+                            let hb = svg_hex(cb.r, cb.g, cb.b);
+                            defs.push_str(&format!(
+                                "<pattern id=\"ck\" width=\"{s}\" height=\"{s}\" patternUnits=\"userSpaceOnUse\"><rect width=\"{s}\" height=\"{s}\" fill=\"{hb}\" fill-opacity=\"{op}\"/><rect width=\"{h}\" height=\"{h}\" fill=\"{ha}\" fill-opacity=\"{op}\"/><rect x=\"{h}\" y=\"{h}\" width=\"{h}\" height=\"{h}\" fill=\"{ha}\" fill-opacity=\"{op}\"/></pattern>"
+                            ));
+                            paint = "fill=\"url(#ck)\"".to_string();
+                        }
+                        // Outline stroke (text effect; harmless on shapes).
+                        let mut stroke = String::new();
+                        if let Some((w, oc)) = fx_outline {
+                            let sw = (w * (scv.x / 100.0) * scale_x).max(0.0);
+                            if sw >= 0.25 {
+                                let oh = svg_hex(oc.r, oc.g, oc.b);
+                                stroke = format!(" stroke=\"{oh}\" stroke-width=\"{sw}\" paint-order=\"stroke\"");
+                            }
+                        }
+                        // Bloom glow filter.
+                        let mut filter_attr = String::new();
+                        if let Some((intensity, radius)) = fx_bloom {
+                            let std = (radius * (scv.x / 100.0) * scale_x).clamp(0.0, 24.0);
+                            if std >= 0.5 {
+                                let _ = intensity;
+                                defs.push_str(&format!(
+                                    "<filter id=\"blm\" x=\"-60%\" y=\"-60%\" width=\"220%\" height=\"220%\"><feGaussianBlur stdDeviation=\"{std}\" result=\"b\"/><feMerge><feMergeNode in=\"b\"/><feMergeNode in=\"SourceGraphic\"/></feMerge></filter>"
+                                ));
+                                filter_attr = " filter=\"url(#blm)\"".to_string();
+                            }
+                        }
                         let body = match &layer.source {
                             LayerSource::Solid { .. } => {
                                 format!(
-                                    "<rect x=\"0\" y=\"0\" width=\"{uw}\" height=\"{uh}\" fill=\"{fill}\" fill-opacity=\"{op}\"/>"
+                                    "<rect x=\"0\" y=\"0\" width=\"{uw}\" height=\"{uh}\" {paint}{stroke}/>"
                                 )
                             }
                             LayerSource::Shape { shape_type } => match shape_type {
                                 ShapeType::Rectangle { corner_radius, .. } => {
                                     let rx = (corner_radius.value * (scv.x / 100.0) * scale_x).max(0.0);
                                     format!(
-                                        "<rect x=\"0\" y=\"0\" width=\"{uw}\" height=\"{uh}\" rx=\"{rx}\" fill=\"{fill}\" fill-opacity=\"{op}\"/>"
+                                        "<rect x=\"0\" y=\"0\" width=\"{uw}\" height=\"{uh}\" rx=\"{rx}\" {paint}{stroke}/>"
                                     )
                                 }
                                 ShapeType::Ellipse { .. } => {
                                     format!(
-                                        "<ellipse cx=\"{}\" cy=\"{}\" rx=\"{}\" ry=\"{}\" fill=\"{fill}\" fill-opacity=\"{op}\"/>",
+                                        "<ellipse cx=\"{}\" cy=\"{}\" rx=\"{}\" ry=\"{}\" {paint}{stroke}/>",
                                         uw / 2.0,
                                         uh / 2.0,
                                         uw / 2.0,
@@ -1683,7 +1868,7 @@ impl Render for CompositionViewerPanel {
                                 let fs = (font_size.value * (scv.y / 100.0) * scale_y).max(8.0);
                                 let t = svg_escape(&text.value);
                                 format!(
-                                    "<text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"'{ff}'\" font-size=\"{fs}\" fill=\"{fill}\" fill-opacity=\"{op}\">{t}</text>"
+                                    "<text x=\"50%\" y=\"50%\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"'{ff}'\" font-size=\"{fs}\" {paint}{stroke}>{t}</text>"
                                 )
                             }
                             _ => String::new(),
@@ -1691,8 +1876,28 @@ impl Render for CompositionViewerPanel {
                         if body.is_empty() {
                             None
                         } else {
+                            // Perspective skew wraps the content group.
+                            let content = if let Some((sx, sy)) = fx_persp {
+                                if sx.abs() >= 0.05 || sy.abs() >= 0.05 {
+                                    format!(
+                                        "<g transform=\"translate({} {}) skewX({sx}) skewY({sy}) translate({} {})\"{filter_attr}>{body}</g>",
+                                        uw / 2.0,
+                                        uh / 2.0,
+                                        -uw / 2.0,
+                                        -uh / 2.0
+                                    )
+                                } else if filter_attr.is_empty() {
+                                    body
+                                } else {
+                                    format!("<g{filter_attr}>{body}</g>")
+                                }
+                            } else if filter_attr.is_empty() {
+                                body
+                            } else {
+                                format!("<g{filter_attr}>{body}</g>")
+                            };
                             Some(format!(
-                                "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{uw}\" height=\"{uh}\" viewBox=\"0 0 {uw} {uh}\" overflow=\"visible\">{body}</svg>"
+                                "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{uw}\" height=\"{uh}\" viewBox=\"0 0 {uw} {uh}\" overflow=\"visible\"><defs>{defs}</defs>{content}</svg>"
                             ))
                         }
                     } else {
@@ -1932,6 +2137,76 @@ impl Render for CompositionViewerPanel {
                                                 .bg(Rgba { r: 0.2 + 0.6 * pulse, g: 0.3, b: 0.9, a: alpha }),
                                         );
                                     }
+                                    compositor::EvaluatedEffectType::Exposure { exposure } => {
+                                        let ev = exposure.clamp(-10.0, 10.0);
+                                        if ev.abs() >= 0.05 {
+                                            // Brighten with white, darken with black,
+                                            // proportional to the stop delta.
+                                            let (cr, cg, cb, alpha) = if ev > 0.0 {
+                                                (1.0, 1.0, 1.0, (1.0 - 2.0_f32.powf(-ev)) * 0.55)
+                                            } else {
+                                                (0.0, 0.0, 0.0, (1.0 - 2.0_f32.powf(ev)) * 0.6)
+                                            };
+                                            layer_el = layer_el.child(
+                                                div()
+                                                    .absolute()
+                                                    .top_0()
+                                                    .left_0()
+                                                    .size_full()
+                                                    .bg(Rgba { r: cr, g: cg, b: cb, a: alpha.clamp(0.0, 0.7) }),
+                                            );
+                                        }
+                                    }
+                                    compositor::EvaluatedEffectType::Bloom { intensity, .. } => {
+                                        let alpha = (*intensity / 100.0 * 0.3).clamp(0.0, 0.5);
+                                        if alpha >= 0.01 {
+                                            layer_el = layer_el.child(
+                                                div()
+                                                    .absolute()
+                                                    .top_0()
+                                                    .left_0()
+                                                    .size_full()
+                                                    .bg(Rgba { r: 1.0, g: 1.0, b: 1.0, a: alpha }),
+                                            );
+                                        }
+                                    }
+                                    compositor::EvaluatedEffectType::ShaderLab { values, prog, .. } => {
+                                        // Live CPU probe on mid-grey: grade
+                                        // direction shows as a translucent
+                                        // delta wash (full grading shows on
+                                        // solids/shapes/text via process).
+                                        if let Some(p) = prog {
+                                            let fps = comp_opt.map(|c| c.frame_rate as f32).unwrap_or(30.0);
+                                            let env = project::shader_interp::PreviewEnv {
+                                                values: values.clone(),
+                                                time: current_frame as f32 / fps.max(1.0),
+                                                frame: current_frame as f32,
+                                                duration: comp_opt.map(|c| c.duration_seconds() as f32).unwrap_or(0.0),
+                                                resolution: (comp_w, comp_h),
+                                            };
+                                            let probe = Color::rgba(0.5, 0.5, 0.5, 1.0);
+                                            if let Ok([r, g, b, _]) = project::shader_interp::eval_prog(p, &env, (0.5, 0.5), probe) {
+                                                let dr = (r - 0.5) * 0.5;
+                                                let dg = (g - 0.5) * 0.5;
+                                                let db = (b - 0.5) * 0.5;
+                                                if dr.abs() + dg.abs() + db.abs() > 0.02 {
+                                                    layer_el = layer_el.child(
+                                                        div()
+                                                            .absolute()
+                                                            .top_0()
+                                                            .left_0()
+                                                            .size_full()
+                                                            .bg(Rgba {
+                                                                r: (0.5 + dr).clamp(0.0, 1.0),
+                                                                g: (0.5 + dg).clamp(0.0, 1.0),
+                                                                b: (0.5 + db).clamp(0.0, 1.0),
+                                                                a: 0.35,
+                                                            }),
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
                                     _ => {}
                                 }
                             }
@@ -2065,6 +2340,262 @@ impl Render for CompositionViewerPanel {
                             .border_color(rgb(0x3b82f6)); // accent selection border
                     }
 
+                    // Transform gizmo for the selected layer (After Effects
+                    // style): corner/edge scale handles, a rotate handle
+                    // above the top edge (rotates about the pivot), and an
+                    // amber pivot diamond (drag to move the anchor point
+                    // without moving pixels). All math runs in composition
+                    // px through the evaluated world matrix, so rotation,
+                    // parenting, and off-center anchors stay exact.
+                    if is_selected && !is_adjustment && layer.is_visible {
+                        let giz_panel = cx.entity().clone();
+                        let giz_state = self.state.clone();
+                        let giz_lid = layer.id.clone();
+                        let giz_fit = scale_x;
+                        let giz_cw = comp_w;
+                        let giz_ch = comp_h;
+                        let giz_frame = self.frame_origin;
+                        let link_uniform = state
+                            .active_composition()
+                            .and_then(|c| c.get_layer(&layer.id))
+                            .map(|l| l.transform.scale_uniform)
+                            .unwrap_or(true);
+                        let w2c = |p: Vec2| {
+                            let w = layer.local_to_world_point(p);
+                            (
+                                (w.x + giz_cw / 2.0) * giz_fit,
+                                (w.y + giz_ch / 2.0) * giz_fit,
+                            )
+                        };
+                        // Window px -> composition px for drag starts.
+                        let mid = |a: (f32, f32), b: (f32, f32)| ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0);
+                        let c00 = w2c(Vec2::new(0.0, 0.0));
+                        let c10 = w2c(Vec2::new(base_w, 0.0));
+                        let c11 = w2c(Vec2::new(base_w, base_h));
+                        let c01 = w2c(Vec2::new(0.0, base_h));
+                        let anchor_l = layer.transform.anchor_point;
+                        let anchor_c = w2c(anchor_l);
+                        let accent = rgb(0x3b82f6);
+                        let white = Rgba { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+
+                        // Window px -> composition px for drag starts (fresh
+                        // copies per handle: every mouse handler owns its own).
+                        // Snapshot the evaluated layer for drag-start math.
+                        // Rc-shared: every handle captures it without moves.
+                        let snap_layer: Rc<
+                            dyn Fn(&mut App) -> Option<compositor::EvaluatedLayer>,
+                        > = Rc::new({
+                            let giz_state = giz_state.clone();
+                            let giz_lid = giz_lid.clone();
+                            move |cx: &mut App| {
+                                giz_state
+                                    .read(cx)
+                                    .evaluate_current_frame()
+                                    .ok()
+                                    .and_then(|stack| stack.get_layer(&giz_lid).cloned())
+                            }
+                        });
+
+                        // --- Scale handles: 4 corners (both axes) + 4 edges.
+                        let corners = [("nw", c00), ("ne", c10), ("se", c11), ("sw", c01)];
+                        for (tag, pos) in corners {
+                            let p_h = giz_panel.clone();
+                            let s_h = giz_state.clone();
+                            let lid_h = giz_lid.clone();
+                            let snap_h = snap_layer.clone();
+                            let uni = link_uniform;
+                            let (h_frame, h_fit, h_cw, h_ch) =
+                                (giz_frame, giz_fit, giz_cw, giz_ch);
+                            layer_el = layer_el.child(
+                                gizmo_dot(
+                                    format!("gizmo_scale_{tag}_{}", giz_lid),
+                                    pos.0,
+                                    pos.1,
+                                    12.0,
+                                    white,
+                                    accent,
+                                    false,
+                                )
+                                .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+                                    let (mx, my) = (event.position.x / px(1.0), event.position.y / px(1.0));
+                                    s_h.update(cx, |s, cx| {
+                                        s.select_layer(Some(lid_h.clone()));
+                                        cx.notify();
+                                    });
+                                    let (cmx, cmy) = gizmo_to_comp(mx, my, h_frame, h_fit, h_cw, h_ch);
+                                    if let Some(lay) = snap_h(cx) {
+                                        if let Some(loc) = lay.world_to_local_point(Vec2::new(cmx, cmy)) {
+                                            let a = lay.transform.anchor_point;
+                                            let sc = lay.transform.scale;
+                                            p_h.update(cx, |this, cx| {
+                                                this.gizmo_drag = Some(ViewerGizmoDrag::Scale {
+                                                    layer_id: lid_h.clone(),
+                                                    uniform: uni,
+                                                    use_x: true,
+                                                    use_y: true,
+                                                    start_scale: sc,
+                                                    start_local: loc,
+                                                    anchor_local: a,
+                                                });
+                                                cx.notify();
+                                            });
+                                        }
+                                    }
+                                }),
+                            );
+                        }
+                        let edges = [
+                            ("n", mid(c00, c10), false, true),
+                            ("s", mid(c11, c01), false, true),
+                            ("w", mid(c00, c01), true, false),
+                            ("e", mid(c10, c11), true, false),
+                        ];
+                        for (tag, pos, ux, uy) in edges {
+                            let p_h = giz_panel.clone();
+                            let s_h = giz_state.clone();
+                            let lid_h = giz_lid.clone();
+                            let snap_h = snap_layer.clone();
+                            let uni = link_uniform;
+                            let (h_frame, h_fit, h_cw, h_ch) =
+                                (giz_frame, giz_fit, giz_cw, giz_ch);
+                            layer_el = layer_el.child(
+                                gizmo_dot(
+                                    format!("gizmo_scale_{tag}_{}", giz_lid),
+                                    pos.0,
+                                    pos.1,
+                                    10.0,
+                                    white,
+                                    accent,
+                                    true,
+                                )
+                                .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+                                    let (mx, my) = (event.position.x / px(1.0), event.position.y / px(1.0));
+                                    s_h.update(cx, |s, cx| {
+                                        s.select_layer(Some(lid_h.clone()));
+                                        cx.notify();
+                                    });
+                                    let (cmx, cmy) = gizmo_to_comp(mx, my, h_frame, h_fit, h_cw, h_ch);
+                                    if let Some(lay) = snap_h(cx) {
+                                        if let Some(loc) = lay.world_to_local_point(Vec2::new(cmx, cmy)) {
+                                            let a = lay.transform.anchor_point;
+                                            let sc = lay.transform.scale;
+                                            p_h.update(cx, |this, cx| {
+                                                this.gizmo_drag = Some(ViewerGizmoDrag::Scale {
+                                                    layer_id: lid_h.clone(),
+                                                    uniform: uni && !(ux ^ uy),
+                                                    use_x: ux,
+                                                    use_y: uy,
+                                                    start_scale: sc,
+                                                    start_local: loc,
+                                                    anchor_local: a,
+                                                });
+                                                cx.notify();
+                                            });
+                                        }
+                                    }
+                                }),
+                            );
+                        }
+
+                        // --- Rotate handle above the top edge.
+                        {
+                            let top_mid = mid(c00, c10);
+                            let center = mid(c00, c11);
+                            let mut tx = c10.0 - c00.0;
+                            let mut ty = c10.1 - c00.1;
+                            let len = (tx * tx + ty * ty).sqrt().max(1.0);
+                            tx /= len;
+                            ty /= len;
+                            let mut nx = -ty;
+                            let mut ny = tx;
+                            if nx * (top_mid.0 - center.0) + ny * (top_mid.1 - center.1) < 0.0 {
+                                nx = -nx;
+                                ny = -ny;
+                            }
+                            let rp = (top_mid.0 + nx * 26.0, top_mid.1 + ny * 26.0);
+                            let p_h = giz_panel.clone();
+                            let s_h = giz_state.clone();
+                            let lid_h = giz_lid.clone();
+                            let snap_h = snap_layer.clone();
+                            let (h_frame, h_fit, h_cw, h_ch) =
+                                (giz_frame, giz_fit, giz_cw, giz_ch);
+                            layer_el = layer_el.child(
+                                gizmo_dot(
+                                    format!("gizmo_rotate_{}", giz_lid),
+                                    rp.0,
+                                    rp.1,
+                                    14.0,
+                                    accent,
+                                    white,
+                                    true,
+                                )
+                                .child(icon_box(IconName::RotateCw))
+                                .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+                                    let (mx, my) = (event.position.x / px(1.0), event.position.y / px(1.0));
+                                    s_h.update(cx, |s, cx| {
+                                        s.select_layer(Some(lid_h.clone()));
+                                        cx.notify();
+                                    });
+                                    let (cmx, cmy) = gizmo_to_comp(mx, my, h_frame, h_fit, h_cw, h_ch);
+                                    if let Some(lay) = snap_h(cx) {
+                                        let a = lay.transform.anchor_point;
+                                        let aw = lay.local_to_world_point(a);
+                                        let ang = (cmy - aw.y).atan2(cmx - aw.x);
+                                        let rot = lay.transform.rotation;
+                                        p_h.update(cx, |this, cx| {
+                                            this.gizmo_drag = Some(ViewerGizmoDrag::Rotate {
+                                                layer_id: lid_h.clone(),
+                                                start_rot: rot,
+                                                start_angle: ang,
+                                            });
+                                            cx.notify();
+                                        });
+                                    }
+                                }),
+                            );
+                        }
+
+                        // --- Pivot diamond (amber): drag to move the anchor.
+                        {
+                            let p_h = giz_panel.clone();
+                            let s_h = giz_state.clone();
+                            let lid_h = giz_lid.clone();
+                            let snap_h = snap_layer.clone();
+                            let (h_frame, h_fit, h_cw, h_ch) =
+                                (giz_frame, giz_fit, giz_cw, giz_ch);
+                            layer_el = layer_el.child(
+                                gizmo_dot(
+                                    format!("gizmo_anchor_{}", giz_lid),
+                                    anchor_c.0,
+                                    anchor_c.1,
+                                    12.0,
+                                    Rgba { r: 0.96, g: 0.62, b: 0.04, a: 1.0 },
+                                    white,
+                                    true,
+                                )
+                                .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+                                    let (mx, my) = (event.position.x / px(1.0), event.position.y / px(1.0));
+                                    s_h.update(cx, |s, cx| {
+                                        s.select_layer(Some(lid_h.clone()));
+                                        cx.notify();
+                                    });
+                                    let (cmx, cmy) = gizmo_to_comp(mx, my, h_frame, h_fit, h_cw, h_ch);
+                                    if let Some(lay) = snap_h(cx) {
+                                        if let Some(loc) = lay.world_to_local_point(Vec2::new(cmx, cmy)) {
+                                            p_h.update(cx, |this, cx| {
+                                                this.gizmo_drag = Some(ViewerGizmoDrag::Anchor {
+                                                    layer_id: lid_h.clone(),
+                                                    start_local: loc,
+                                                });
+                                                cx.notify();
+                                            });
+                                        }
+                                    }
+                                }),
+                            );
+                        }
+                    }
+
                     elements.push(layer_el.into_any_element());
                 }
                 elements
@@ -2194,7 +2725,7 @@ impl Render for CompositionViewerPanel {
                                 _ => {
                                     let _ = s.add_solid_layer(
                                         "New Solid",
-                                        project::Color::from_rgba_u8(59, 130, 246, 255),
+                                        s.tool_solid_color,
                                         400,
                                         400,
                                     );
@@ -2223,18 +2754,119 @@ impl Render for CompositionViewerPanel {
                     }
                     return;
                 }
+                let curr_x = event.position.x / px(1.0);
+                let curr_y = event.position.y / px(1.0);
+                // Transform-gizmo drags win over canvas drags.
+                if let Some(drag) = this.gizmo_drag.clone() {
+                    // Window px -> composition px via the measured frame.
+                    let (fox, foy) = this.frame_origin.unwrap_or((0.0, 0.0));
+                    // Re-derive the uniform fit from the live composition so
+                    // stale renders never skew a drag.
+                    let (cw, ch, vfit) = {
+                        let s = this.state.read(cx);
+                        match s.active_composition() {
+                            Some(c) => (c.width as f32, c.height as f32, 1.0),
+                            None => (1920.0, 1080.0, 1.0),
+                        }
+                    };
+                    let fit_here = this
+                        .viewport_px
+                        .map(|(vw, vh)| {
+                            ((vw - 32.0) / cw).min((vh - 32.0) / ch).clamp(0.05, 4.0)
+                        })
+                        .unwrap_or(vfit);
+                    let cmx = (curr_x - fox) / fit_here - cw / 2.0;
+                    let cmy = (curr_y - foy) / fit_here - ch / 2.0;
+                    let st = this.state.clone();
+                    match drag {
+                        ViewerGizmoDrag::Rotate { layer_id, start_rot, start_angle } => {
+                            let anchor_world = st.read(cx).evaluate_current_frame().ok()
+                                .and_then(|stack| stack.get_layer(&layer_id).cloned())
+                                .map(|lay| {
+                                    let a = lay.transform.anchor_point;
+                                    lay.local_to_world_point(a)
+                                });
+                            if let Some(aw) = anchor_world {
+                                let ang = (cmy - aw.y).atan2(cmx - aw.x);
+                                let delta_deg = (ang - start_angle).to_degrees();
+                                st.update(cx, |s, cx| {
+                                    s.set_layer_rotation(&layer_id, start_rot + delta_deg);
+                                    cx.notify();
+                                });
+                            }
+                        }
+                        ViewerGizmoDrag::Scale { layer_id, uniform, use_x, use_y, start_scale, start_local, anchor_local } => {
+                            let local = st.read(cx).evaluate_current_frame().ok()
+                                .and_then(|stack| stack.get_layer(&layer_id).cloned())
+                                .and_then(|lay| lay.world_to_local_point(Vec2::new(cmx, cmy)));
+                            if let Some(loc) = local {
+                                let denom_x = (start_local.x - anchor_local.x).abs().max(1.0);
+                                let denom_y = (start_local.y - anchor_local.y).abs().max(1.0);
+                                let mut rx = (loc.x - anchor_local.x) / denom_x;
+                                let mut ry = (loc.y - anchor_local.y) / denom_y;
+                                // Dragging across the pivot flips sign; keep
+                                // magnitude motion smooth by sign of start side.
+                                if (start_local.x - anchor_local.x) < 0.0 {
+                                    rx = -rx;
+                                }
+                                if (start_local.y - anchor_local.y) < 0.0 {
+                                    ry = -ry;
+                                }
+                                let (mut nx, mut ny) = (start_scale.x * rx.max(0.01), start_scale.y * ry.max(0.01));
+                                if uniform {
+                                    let r = ((rx.max(0.01) + ry.max(0.01)) / 2.0).max(0.01);
+                                    nx = start_scale.x * r;
+                                    ny = start_scale.y * r;
+                                }
+                                if !use_x {
+                                    nx = start_scale.x;
+                                }
+                                if !use_y {
+                                    ny = start_scale.y;
+                                }
+                                st.update(cx, |s, cx| {
+                                    s.set_layer_scale(&layer_id, nx, ny);
+                                    cx.notify();
+                                });
+                            }
+                        }
+                        ViewerGizmoDrag::Anchor { layer_id, start_local } => {
+                            let local = st.read(cx).evaluate_current_frame().ok()
+                                .and_then(|stack| stack.get_layer(&layer_id).cloned())
+                                .and_then(|lay| lay.world_to_local_point(Vec2::new(cmx, cmy)));
+                            if let Some(loc) = local {
+                                let d = Vec2::new(loc.x - start_local.x, loc.y - start_local.y);
+                                st.update(cx, |s, cx| {
+                                    s.move_layer_anchor(&layer_id, d);
+                                    cx.notify();
+                                });
+                            }
+                        }
+                    }
+                    return;
+                }
                 if let (true, Some((last_x, last_y))) = (this.is_dragging_canvas, this.last_canvas_mouse) {
-                    let curr_x = event.position.x / px(1.0);
-                    let curr_y = event.position.y / px(1.0);
                     let dx = curr_x - last_x;
                     let dy = curr_y - last_y;
                     let active_tool = this.state.read(cx).active_tool;
+                    // Composition-aware factors (uniform fit scale): layers
+                    // track the cursor 1:1 at any comp size or zoom.
+                    let (cw2, ch2) = this
+                        .state
+                        .read(cx)
+                        .active_composition()
+                        .map(|c| (c.width as f32, c.height as f32))
+                        .unwrap_or((1920.0, 1080.0));
+                    let fit_here = this
+                        .viewport_px
+                        .map(|(vw, vh)| {
+                            ((vw - 32.0) / cw2).min((vh - 32.0) / ch2).clamp(0.05, 4.0)
+                        })
+                        .unwrap_or(1.0);
                     if active_tool == EditorTool::Move {
-                        let scale_factor_x = 1920.0 / 512.0;
-                        let scale_factor_y = 1080.0 / 288.0;
                         let s = this.state.clone();
                         s.update(cx, |s, cx| {
-                            s.nudge_position(dx * scale_factor_x, dy * scale_factor_y);
+                            s.nudge_position(dx / fit_here, dy / fit_here);
                             cx.notify();
                         });
                         this.last_canvas_mouse = Some((curr_x, curr_y));
@@ -2251,10 +2883,12 @@ impl Render for CompositionViewerPanel {
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| {
                 this.is_dragging_canvas = false;
                 this.last_canvas_mouse = None;
+                this.gizmo_drag = None;
             }))
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, _| {
                 this.is_dragging_canvas = false;
                 this.last_canvas_mouse = None;
+                this.gizmo_drag = None;
             }))
             // Viewport header / controls
             .child(
@@ -2331,12 +2965,32 @@ impl Render for CompositionViewerPanel {
                     .child(side_toolbar)
                     .child(
                         v_flex()
+                            .id("canvas_viewport_wrap")
+                            .test_support()
                             .flex_1()
                             .size_full()
                             .items_center()
                             .justify_center()
                             .p_4()
                             .overflow_hidden()
+                            .on_prepaint({
+                                let p_measure = cx.entity().clone();
+                                move |bounds, _window, cx| {
+                                    let w = bounds.size.width / px(1.0);
+                                    let h = bounds.size.height / px(1.0);
+                                    let ox = bounds.origin.x / px(1.0);
+                                    let oy = bounds.origin.y / px(1.0);
+                                    p_measure.update(cx, |this, cx| {
+                                        let changed = this.viewport_px != Some((w, h))
+                                            || this.viewport_origin != Some((ox, oy));
+                                        this.viewport_px = Some((w, h));
+                                        this.viewport_origin = Some((ox, oy));
+                                        if changed {
+                                            cx.notify();
+                                        }
+                                    });
+                                }
+                            })
                             .child({
                                 let mut canvas_frame = div()
                                     .id("canvas_viewport_frame")
@@ -2349,10 +3003,36 @@ impl Render for CompositionViewerPanel {
                                     .rounded_sm()
                                     .relative()
                                     .overflow_hidden()
+                                    .on_prepaint({
+                                        let p_frame = cx.entity().clone();
+                                        move |bounds, _window, cx| {
+                                            let ox = bounds.origin.x / px(1.0);
+                                            let oy = bounds.origin.y / px(1.0);
+                                            p_frame.update(cx, |this, cx| {
+                                                if this.frame_origin != Some((ox, oy)) {
+                                                    this.frame_origin = Some((ox, oy));
+                                                    cx.notify();
+                                                }
+                                            });
+                                        }
+                                    })
                                     .on_mouse_down(MouseButton::Left, {
                                         let p_drag = cx.entity().clone();
                                         let s_tool = self.state.clone();
+                                        // Captured fit + frame origin map window px to comp px
+                                        // exactly (no hardcoded 1920/512 factors, no missing
+                                        // panel offset): click-to-place and drags stay correct
+                                        // for any composition size and any window layout.
+                                        let fit_pick = fit;
+                                        let comp_pw = comp_w;
+                                        let comp_ph = comp_h;
+                                        let frame_org = self.frame_origin;
                                         move |event, _window, cx| {
+                                            // Gizmo handles set their own drag first (they
+                                            // bubble through here); never start a canvas op.
+                                            if p_drag.read(cx).gizmo_drag.is_some() {
+                                                return;
+                                            }
                                             let curr_x = event.position.x / px(1.0);
                                             let curr_y = event.position.y / px(1.0);
                                             p_drag.update(cx, |this, _cx| {
@@ -2360,8 +3040,9 @@ impl Render for CompositionViewerPanel {
                                                 this.last_canvas_mouse = Some((curr_x, curr_y));
                                             });
                                             let active_tool = s_tool.read(cx).active_tool;
-                                            let comp_x = (curr_x - canvas_w / 2.0) * (comp_w / canvas_w);
-                                            let comp_y = (curr_y - canvas_h / 2.0) * (comp_h / canvas_h);
+                                            let (fox, foy) = frame_org.unwrap_or((curr_x - canvas_w / 2.0, curr_y - canvas_h / 2.0));
+                                            let comp_x = (curr_x - fox) / fit_pick - comp_pw / 2.0;
+                                            let comp_y = (curr_y - foy) / fit_pick - comp_ph / 2.0;
                                             match active_tool {
                                                 EditorTool::Text => {
                                                     s_tool.update(cx, |s, cx| {
@@ -2389,7 +3070,8 @@ impl Render for CompositionViewerPanel {
                                                 }
                                                 EditorTool::Rotate => {
                                                     s_tool.update(cx, |s, cx| {
-                                                        s.nudge_rotation(15.0);
+                                                        let step = s.tool_rotate_step;
+                                                        s.nudge_rotation(step);
                                                         cx.notify();
                                                     });
                                                 }
@@ -2472,6 +3154,7 @@ impl Render for CompositionViewerPanel {
                                             let lid_del = lid.clone();
                                             let lid_dup = lid.clone();
                                             let lid_rst = lid.clone();
+                                            let lid_piv = lid.clone();
 
                                             menu_items = menu_items
                                                 .child(
@@ -2489,6 +3172,14 @@ impl Render for CompositionViewerPanel {
                                                     let p = p_close.clone();
                                                     move |cx| {
                                                         s.update(cx, |s, cx| { s.reset_layer_transform(&lid_rst); cx.notify(); });
+                                                        p.update(cx, |this, cx| { this.close_context_menu(); cx.notify(); });
+                                                    }
+                                                }))
+                                                .child(menu_button("Center Pivot", cx, {
+                                                    let s = s_menu.clone();
+                                                    let p = p_close.clone();
+                                                    move |cx| {
+                                                        s.update(cx, |s, cx| { s.reset_layer_anchor_center(&lid_piv); cx.notify(); });
                                                         p.update(cx, |this, cx| { this.close_context_menu(); cx.notify(); });
                                                     }
                                                 }))
@@ -3274,6 +3965,369 @@ fn effect_param_keyframe_controls(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Compact scalar row for effect params: stopwatch + keyframe nav, label,
+/// drag/wheel/type scrub field. Used by the newer effect arms.
+#[allow(clippy::too_many_arguments)]
+fn fx_scrub_row(
+    state: &Entity<EditorState>,
+    panel_entity: &Entity<PropertiesPanel>,
+    layer_id: &str,
+    eff_id: &str,
+    param_name: &'static str,
+    label: &str,
+    display: String,
+    step: f32,
+    cx: &App,
+) -> AnyElement {
+    let s_m = state.clone();
+    let s_p = state.clone();
+    let id_m = eff_id.to_string();
+    let id_p = eff_id.to_string();
+    let animated = state
+        .read(cx)
+        .active_composition()
+        .and_then(|c| c.get_layer(layer_id))
+        .and_then(|l| l.get_effect(eff_id))
+        .and_then(|e| e.get_param_property(param_name))
+        .map(|p| p.is_animated())
+        .unwrap_or(false);
+    h_flex()
+        .items_center()
+        .justify_between()
+        .text_xs()
+        .child(
+            h_flex()
+                .gap_1()
+                .items_center()
+                .child(effect_param_keyframe_controls(state, layer_id, eff_id, param_name, animated, cx))
+                .child(div().text_color(cx.theme().muted_foreground).child(label.to_string())),
+        )
+        .child(scrub_field(
+            SharedString::from(format!("param_{param_name}_{eff_id}")),
+            format!("fx:{eff_id}:{param_name}:100"),
+            display,
+            None,
+            None,
+            state,
+            panel_entity,
+            cx,
+            move |cx| {
+                s_m.update(cx, |s, cx| {
+                    let _ = s.nudge_effect_param(&id_m, param_name, -step);
+                    cx.notify();
+                })
+            },
+            move |cx| {
+                s_p.update(cx, |s, cx| {
+                    let _ = s.nudge_effect_param(&id_p, param_name, step);
+                    cx.notify();
+                })
+            },
+        ))
+        .into_any_element()
+}
+
+/// Compact color-swatch row for effect color fields (`color_a` / `color_b`
+/// / `color`): preset swatches + current hex. Used by checker, gradient,
+/// and outline arms (no extra ColorPicker plumbing).
+fn fx_swatch_row(
+    state: &Entity<EditorState>,
+    layer_id: &str,
+    eff_id: &str,
+    field: &'static str,
+    label: &str,
+    current: Color,
+    cx: &App,
+) -> AnyElement {
+    let mut row = h_flex().gap_1().items_center();
+    for (hex_str, col_val) in [
+        ("#FFFFFF", Color::WHITE),
+        ("#121316", Color::from_hex("#121316").unwrap()),
+        ("#EF4444", Color::from_hex("#EF4444").unwrap()),
+        ("#10B981", Color::from_hex("#10B981").unwrap()),
+        ("#3B82F6", Color::from_hex("#3B82F6").unwrap()),
+        ("#F59E0B", Color::from_hex("#F59E0B").unwrap()),
+        ("#00FF00", Color::from_hex("#00FF00").unwrap()),
+        ("#0000FF", Color::from_hex("#0000FF").unwrap()),
+    ] {
+        let s_p = state.clone();
+        let lid_p = layer_id.to_string();
+        let eid_p = eff_id.to_string();
+        let is_sel = (current.r - col_val.r).abs() < 0.01
+            && (current.g - col_val.g).abs() < 0.01
+            && (current.b - col_val.b).abs() < 0.01;
+        row = row.child(
+            div()
+                .id(SharedString::from(format!("fx_{field}_{hex_str}_{eff_id}")))
+                .test_support()
+                .cursor_pointer()
+                .w(px(14.))
+                .h(px(14.))
+                .rounded_sm()
+                .bg(Rgba { r: col_val.r, g: col_val.g, b: col_val.b, a: 1.0 })
+                .border_1()
+                .border_color(if is_sel { cx.theme().primary } else { cx.theme().border })
+                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    s_p.update(cx, |s, cx| {
+                        let _ = s.set_effect_color(&lid_p, &eid_p, field, col_val);
+                        cx.notify();
+                    });
+                }),
+        );
+    }
+    let cur_hex = format!(
+        "#{:02X}{:02X}{:02X}",
+        (current.r * 255.0) as u8,
+        (current.g * 255.0) as u8,
+        (current.b * 255.0) as u8
+    );
+    h_flex()
+        .items_center()
+        .justify_between()
+        .text_xs()
+        .child(
+            h_flex()
+                .gap_1p5()
+                .items_center()
+                .child(div().text_color(cx.theme().muted_foreground).child(label.to_string()))
+                .child(
+                    div()
+                        .w(px(20.))
+                        .h(px(14.))
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .bg(Rgba { r: current.r, g: current.g, b: current.b, a: 1.0 }),
+                )
+                .child(div().text_color(cx.theme().foreground).child(cur_hex)),
+        )
+        .child(row)
+        .into_any_element()
+}
+
+/// Toolbar tool settings (Properties > Tool Settings): defaults that new
+/// layers are created with, so tools behave consistently across the app.
+/// Pure preset chips/swatches — no steppers anywhere.
+fn render_tool_settings(state: &Entity<EditorState>, cx: &App) -> AnyElement {
+    let (tool, font_size, text_color, shape_fill, solid_color, rotate_step) = {
+        let s = state.read(cx);
+        (
+            s.active_tool,
+            s.tool_font_size,
+            s.tool_text_color,
+            s.tool_shape_fill,
+            s.tool_solid_color,
+            s.tool_rotate_step,
+        )
+    };
+    let (tool_name, tool_icon) = match tool {
+        EditorTool::Move => ("Move", IconName::Move),
+        EditorTool::Hand => ("Hand", IconName::Hand),
+        EditorTool::Rotate => ("Rotate", IconName::RotateCw),
+        EditorTool::Pen => ("Pen", IconName::Pen),
+        EditorTool::Text => ("Text", IconName::Type),
+        EditorTool::ShapeRect => ("Rectangle", IconName::Square),
+        EditorTool::ShapeEllipse => ("Ellipse", IconName::Circle),
+    };
+    // Option chip (selectable value).
+    let chip = |id: String, label: String, selected: bool, cx: &App| {
+        div()
+            .id(SharedString::from(id))
+            .test_support()
+            .cursor_pointer()
+            .px_1p5()
+            .py_0p5()
+            .rounded_sm()
+            .bg(if selected { cx.theme().primary } else { cx.theme().muted })
+            .text_color(if selected {
+                cx.theme().primary_foreground
+            } else {
+                cx.theme().foreground
+            })
+            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+            .text_xs()
+            .child(label)
+    };
+    // Color swatch (current value ring + presets live with the caller).
+    let swatch = |id: String, col: Color, selected: bool, cx: &App| {
+        div()
+            .id(SharedString::from(id))
+            .test_support()
+            .cursor_pointer()
+            .w(px(14.))
+            .h(px(14.))
+            .rounded_sm()
+            .bg(Rgba { r: col.r, g: col.g, b: col.b, a: 1.0 })
+            .border_1()
+            .border_color(if selected { cx.theme().primary } else { cx.theme().border })
+    };
+    let palette: [(&str, Color); 8] = [
+        ("#FFFFFF", Color::WHITE),
+        ("#121316", Color::from_hex("#121316").unwrap()),
+        ("#EF4444", Color::from_hex("#EF4444").unwrap()),
+        ("#10B981", Color::from_hex("#10B981").unwrap()),
+        ("#3B82F6", Color::from_hex("#3B82F6").unwrap()),
+        ("#8B5CF6", Color::from_hex("#8B5CF6").unwrap()),
+        ("#F59E0B", Color::from_hex("#F59E0B").unwrap()),
+        ("#06B6D4", Color::from_hex("#06B6D4").unwrap()),
+    ];
+    let same_color = |a: Color, b: Color| {
+        (a.r - b.r).abs() < 0.01 && (a.g - b.g).abs() < 0.01 && (a.b - b.b).abs() < 0.01
+    };
+
+    let mut body = v_flex().gap_2();
+    match tool {
+        EditorTool::Text => {
+            let mut sizes = h_flex().gap_1().items_center().flex_wrap();
+            for sz in [24.0f32, 36.0, 48.0, 72.0, 96.0] {
+                let s_sz = state.clone();
+                let sel = (font_size - sz).abs() < 0.5;
+                sizes = sizes.child(
+                    chip(format!("tool_font_size_{sz:.0}"), format!("{sz:.0}"), sel, cx)
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            s_sz.update(cx, |s, cx| {
+                                s.tool_font_size = sz;
+                                cx.notify();
+                            });
+                        }),
+                );
+            }
+            let mut cols = h_flex().gap_1().items_center().flex_wrap();
+            for (hex_str, col_val) in palette {
+                let s_c = state.clone();
+                let sel = same_color(text_color, col_val);
+                cols = cols.child(
+                    swatch(format!("tool_text_color_{hex_str}"), col_val, sel, cx)
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            s_c.update(cx, |s, cx| {
+                                s.tool_text_color = col_val;
+                                cx.notify();
+                            });
+                        }),
+                );
+            }
+            body = body
+                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Default size for new text"))
+                .child(sizes)
+                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Default color for new text"))
+                .child(cols)
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Font family follows your system default; pick any installed family in the Text section below."),
+                );
+        }
+        EditorTool::ShapeRect | EditorTool::ShapeEllipse => {
+            let mut cols = h_flex().gap_1().items_center().flex_wrap();
+            for (hex_str, col_val) in palette {
+                let s_c = state.clone();
+                let sel = same_color(shape_fill, col_val);
+                cols = cols.child(
+                    swatch(format!("tool_shape_fill_{hex_str}"), col_val, sel, cx)
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            s_c.update(cx, |s, cx| {
+                                s.tool_shape_fill = col_val;
+                                cx.notify();
+                            });
+                        }),
+                );
+            }
+            body = body
+                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Default fill for new shapes"))
+                .child(cols)
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Click the canvas to place at the cursor, or + in the toolbar for viewport center."),
+                );
+        }
+        EditorTool::Rotate => {
+            let mut steps = h_flex().gap_1().items_center().flex_wrap();
+            for st in [1.0f32, 5.0, 15.0, 45.0] {
+                let s_s = state.clone();
+                let sel = (rotate_step - st).abs() < 1e-4;
+                steps = steps.child(
+                    chip(format!("tool_rotate_step_{st:.0}"), format!("{st:.0}°"), sel, cx)
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            s_s.update(cx, |s, cx| {
+                                s.tool_rotate_step = st;
+                                cx.notify();
+                            });
+                        }),
+                );
+            }
+            body = body
+                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Degrees per canvas click"))
+                .child(steps)
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Drag the blue handle above a selected layer for free rotation about its pivot."),
+                );
+        }
+        EditorTool::Move => {
+            let mut cols = h_flex().gap_1().items_center().flex_wrap();
+            for (hex_str, col_val) in palette {
+                let s_c = state.clone();
+                let sel = same_color(solid_color, col_val);
+                cols = cols.child(
+                    swatch(format!("tool_solid_color_{hex_str}"), col_val, sel, cx)
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            s_c.update(cx, |s, cx| {
+                                s.tool_solid_color = col_val;
+                                cx.notify();
+                            });
+                        }),
+                );
+            }
+            body = body
+                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Default color for quick-add solids"))
+                .child(cols)
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Drag layer bodies to move • corners/edges scale • top handle rotates • amber diamond moves the pivot."),
+                );
+        }
+        _ => {
+            body = body.child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(match tool {
+                        EditorTool::Hand => "Drag the canvas to pan the view.",
+                        EditorTool::Pen => "Click the canvas to drop path points; switch tools to finish.",
+                        _ => "Canvas tool active.",
+                    }),
+            );
+        }
+    }
+
+    v_flex()
+        .id("tool_settings_section")
+        .test_support()
+        .gap_2()
+        .p_2()
+        .rounded_sm()
+        .bg(cx.theme().secondary)
+        .child(
+            h_flex()
+                .gap_1p5()
+                .items_center()
+                .font_semibold()
+                .text_xs()
+                .text_color(cx.theme().foreground)
+                .child(icon_box(tool_icon))
+                .child(format!("Tool Settings ({tool_name})")),
+        )
+        .child(body)
+        .into_any_element()
+}
+
 fn render_applied_effects(
     state: &Entity<EditorState>,
     layer: &project::Layer,
@@ -3285,8 +4339,7 @@ fn render_applied_effects(
     shader_editor_open: Option<String>,
     shader_editor: Option<Entity<TextareaState>>,
     cx: &App,
-) -> AnyElement {
-    if layer.effects.is_empty() {
+) -> AnyElement {    if layer.effects.is_empty() {
         div()
             .id("no_effects_applied")
             .test_support()
@@ -4799,6 +5852,79 @@ fn render_applied_effects(
                                 ),
                         );
                 }
+                EffectType::Checkerboard { size, color_a, color_b } => {
+                    let ca = *color_a;
+                    let cb = *color_b;
+                    effect_box = effect_box
+                        .child(fx_swatch_row(state, &layer.id, &eff_id, "color_a", "Color A", ca, cx))
+                        .child(fx_swatch_row(state, &layer.id, &eff_id, "color_b", "Color B", cb, cx))
+                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "size", "Size", format!("{:.0} px", size.value), 4.0, cx));
+                }
+                EffectType::GradientRamp { color_a, color_b, angle } => {
+                    let ca = *color_a;
+                    let cb = *color_b;
+                    effect_box = effect_box
+                        .child(fx_swatch_row(state, &layer.id, &eff_id, "color_a", "Start", ca, cx))
+                        .child(fx_swatch_row(state, &layer.id, &eff_id, "color_b", "End", cb, cx))
+                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "angle", "Angle", format!("{:.0}°", angle.value), 5.0, cx));
+                }
+                EffectType::Perspective { skew_x, skew_y } => {
+                    effect_box = effect_box
+                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "skew_x", "Skew X", format!("{:.1}°", skew_x.value), 1.0, cx))
+                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "skew_y", "Skew Y", format!("{:.1}°", skew_y.value), 1.0, cx));
+                }
+                EffectType::TextOutline { width, color } => {
+                    let oc = *color;
+                    effect_box = effect_box
+                        .child(fx_swatch_row(state, &layer.id, &eff_id, "color", "Color", oc, cx))
+                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "width", "Width", format!("{:.1} px", width.value), 1.0, cx));
+                }
+                EffectType::TextBevel { strength, softness } => {
+                    effect_box = effect_box
+                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "strength", "Strength", format!("{:.0}%", strength.value), 5.0, cx))
+                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "softness", "Softness", format!("{:.0}%", softness.value), 5.0, cx));
+                }
+                EffectType::Bloom { intensity, radius } => {
+                    effect_box = effect_box
+                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "intensity", "Intensity", format!("{:.0}%", intensity.value), 5.0, cx))
+                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "radius", "Radius", format!("{:.1} px", radius.value), 2.0, cx));
+                }
+                EffectType::Tiler { tiles_x, tiles_y } => {
+                    effect_box = effect_box
+                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "tiles_x", "Tiles X", format!("{:.0}", tiles_x.value), 1.0, cx))
+                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "tiles_y", "Tiles Y", format!("{:.0}", tiles_y.value), 1.0, cx));
+                }
+                EffectType::Warp { amount, scale } => {
+                    effect_box = effect_box
+                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "amount", "Amount", format!("{:.0}%", amount.value), 5.0, cx))
+                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "scale", "Scale", format!("{:.1}", scale.value), 0.2, cx));
+                }
+                EffectType::Exposure { exposure } => {
+                    effect_box = effect_box.child(fx_scrub_row(
+                        state,
+                        panel_entity,
+                        &layer.id,
+                        &eff_id,
+                        "exposure",
+                        "Exposure",
+                        format!("{:+.2} EV", exposure.value),
+                        0.25,
+                        cx,
+                    ));
+                }
+                EffectType::Vibrance { vibrance } => {
+                    effect_box = effect_box.child(fx_scrub_row(
+                        state,
+                        panel_entity,
+                        &layer.id,
+                        &eff_id,
+                        "vibrance",
+                        "Vibrance",
+                        format!("{:+.0}", vibrance.value),
+                        5.0,
+                        cx,
+                    ));
+                }
             }
 
             fx_col = fx_col.child(effect_box);
@@ -5248,13 +6374,15 @@ impl Render for PropertiesPanel {
                     )
                     .child(header_actions),
             )
-            // Inspector fields
+            // Inspector fields (scrolls both ways: narrow docks never clip).
             .child(
                 v_flex()
                     .id("properties_inspector")
                     .test_support()
                     .flex_1()
+                    .min_h_0()
                     .overflow_y_scroll()
+                    .overflow_x_scroll()
                     .p_3()
                     .gap_3()
                     .children(if let Some(layer) = selected_layer {
@@ -5664,10 +6792,46 @@ impl Render for PropertiesPanel {
                             }
                             LayerSource::Shape { shape_type } => {
                                 match shape_type {
-                                    ShapeType::Rectangle { width, height, corner_radius } => {
+                                    ShapeType::Rectangle { width, height, corner_radius, fill } => {
                                         let w = width.value;
                                         let h = height.value;
                                         let cr = corner_radius.value;
+                                        let fill_col = *fill;
+                                        let s_fill = self.state.clone();
+                                        let lid_fill = layer.id.clone();
+                                        let mut fill_row = h_flex().gap_1().items_center();
+                                        for (hex_str, col_val) in [
+                                            ("#FFFFFF", Color::WHITE),
+                                            ("#121316", Color::from_hex("#121316").unwrap()),
+                                            ("#EF4444", Color::from_hex("#EF4444").unwrap()),
+                                            ("#10B981", Color::from_hex("#10B981").unwrap()),
+                                            ("#3B82F6", Color::from_hex("#3B82F6").unwrap()),
+                                            ("#F59E0B", Color::from_hex("#F59E0B").unwrap()),
+                                        ] {
+                                            let s_p = s_fill.clone();
+                                            let lid_p = lid_fill.clone();
+                                            let is_sel = (fill_col.r - col_val.r).abs() < 0.01
+                                                && (fill_col.g - col_val.g).abs() < 0.01
+                                                && (fill_col.b - col_val.b).abs() < 0.01;
+                                            fill_row = fill_row.child(
+                                                div()
+                                                    .id(SharedString::from(format!("shape_fill_{hex_str}")))
+                                                    .test_support()
+                                                    .cursor_pointer()
+                                                    .w(px(14.))
+                                                    .h(px(14.))
+                                                    .rounded_sm()
+                                                    .bg(Rgba { r: col_val.r, g: col_val.g, b: col_val.b, a: 1.0 })
+                                                    .border_1()
+                                                    .border_color(if is_sel { cx.theme().primary } else { cx.theme().border })
+                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                        s_p.update(cx, |s, cx| {
+                                                            let _ = s.set_layer_shape_fill(&lid_p, col_val);
+                                                            cx.notify();
+                                                        });
+                                                    }),
+                                            );
+                                        }
 
                                         props_items.push(
                                             v_flex()
@@ -5686,6 +6850,14 @@ impl Render for PropertiesPanel {
                                                         .text_color(cx.theme().foreground)
                                                         .child(icon_box(IconName::Square))
                                                         .child("Rectangle Geometry"),
+                                                )
+                                                .child(
+                                                    h_flex()
+                                                        .items_center()
+                                                        .justify_between()
+                                                        .text_xs()
+                                                        .child(div().text_color(cx.theme().muted_foreground).child("Fill"))
+                                                        .child(fill_row),
                                                 )
                                                 .child(
                                                     h_flex()
@@ -5747,9 +6919,45 @@ impl Render for PropertiesPanel {
                                                 .into_any_element(),
                                         );
                                     }
-                                    ShapeType::Ellipse { radius_x, radius_y } => {
+                                    ShapeType::Ellipse { radius_x, radius_y, fill } => {
                                         let rx = radius_x.value;
                                         let ry = radius_y.value;
+                                        let fill_col = *fill;
+                                        let s_fill = self.state.clone();
+                                        let lid_fill = layer.id.clone();
+                                        let mut fill_row = h_flex().gap_1().items_center();
+                                        for (hex_str, col_val) in [
+                                            ("#FFFFFF", Color::WHITE),
+                                            ("#121316", Color::from_hex("#121316").unwrap()),
+                                            ("#EF4444", Color::from_hex("#EF4444").unwrap()),
+                                            ("#10B981", Color::from_hex("#10B981").unwrap()),
+                                            ("#3B82F6", Color::from_hex("#3B82F6").unwrap()),
+                                            ("#F59E0B", Color::from_hex("#F59E0B").unwrap()),
+                                        ] {
+                                            let s_p = s_fill.clone();
+                                            let lid_p = lid_fill.clone();
+                                            let is_sel = (fill_col.r - col_val.r).abs() < 0.01
+                                                && (fill_col.g - col_val.g).abs() < 0.01
+                                                && (fill_col.b - col_val.b).abs() < 0.01;
+                                            fill_row = fill_row.child(
+                                                div()
+                                                    .id(SharedString::from(format!("shape_fill_{hex_str}")))
+                                                    .test_support()
+                                                    .cursor_pointer()
+                                                    .w(px(14.))
+                                                    .h(px(14.))
+                                                    .rounded_sm()
+                                                    .bg(Rgba { r: col_val.r, g: col_val.g, b: col_val.b, a: 1.0 })
+                                                    .border_1()
+                                                    .border_color(if is_sel { cx.theme().primary } else { cx.theme().border })
+                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                        s_p.update(cx, |s, cx| {
+                                                            let _ = s.set_layer_shape_fill(&lid_p, col_val);
+                                                            cx.notify();
+                                                        });
+                                                    }),
+                                            );
+                                        }
 
                                         props_items.push(
                                             v_flex()
@@ -5768,6 +6976,14 @@ impl Render for PropertiesPanel {
                                                         .text_color(cx.theme().foreground)
                                                         .child(icon_box(IconName::Circle))
                                                         .child("Ellipse Geometry"),
+                                                )
+                                                .child(
+                                                    h_flex()
+                                                        .items_center()
+                                                        .justify_between()
+                                                        .text_xs()
+                                                        .child(div().text_color(cx.theme().muted_foreground).child("Fill"))
+                                                        .child(fill_row),
                                                 )
                                                 .child(
                                                     h_flex()
@@ -5810,7 +7026,7 @@ impl Render for PropertiesPanel {
                                                 .into_any_element(),
                                         );
                                     }
-                                    ShapeType::Path { path_data } => {
+                                    ShapeType::Path { path_data, .. } => {
                                         props_items.push(
                                             v_flex()
                                                 .id("shape_properties_section")
@@ -6289,6 +7505,11 @@ impl Render for PropertiesPanel {
                         props_items.push(transform_card.into_any_element());
                         props_items.push(switches_card.into_any_element());
                         props_items.push(effects_card.into_any_element());
+                        // Toolbar tool settings live in Properties too:
+                        // defaults for new layers, always reflecting the
+                        // active tool. Kept last so the inspector layout
+                        // above never shifts under existing workflows.
+                        props_items.push(render_tool_settings(&self.state, cx));
 
                         props_items
                     } else {
@@ -6503,6 +7724,8 @@ impl Render for EffectsPanel {
                 .child(effect_item_row("brightness_contrast", "Brightness & Contrast", EffectType::brightness_contrast(15.0, 10.0), &self.state, cx))
                 .child(effect_item_row("tint", "Tint", EffectType::tint(Color::BLACK, Color::WHITE, 100.0), &self.state, cx))
                 .child(effect_item_row("invert", "Invert", EffectType::invert(100.0), &self.state, cx))
+                .child(effect_item_row("exposure", "Exposure", EffectType::exposure(0.0), &self.state, cx))
+                .child(effect_item_row("vibrance", "Vibrance", EffectType::vibrance(30.0), &self.state, cx))
                 .child(effect_item_row("color_balance", "Color Balance (HLS)", EffectType::tint(Color::rgb(0.1, 0.0, 0.0), Color::rgb(1.0, 0.9, 0.8), 50.0), &self.state, cx))
                 .child(effect_item_row("lumetri_color", "Lumetri Color", EffectType::brightness_contrast(5.0, 15.0), &self.state, cx));
         }
@@ -6511,14 +7734,20 @@ impl Render for EffectsPanel {
         if is_open("distort") {
             cats = cats
                 .child(effect_item_row("drop_shadow", "Drop Shadow", EffectType::drop_shadow(8.0, 45.0, 10.0, 75.0, Color::BLACK), &self.state, cx))
-                .child(effect_item_row("transform", "Transform", EffectType::drop_shadow(0.0, 0.0, 0.0, 100.0, Color::BLACK), &self.state, cx));
+                .child(effect_item_row("transform", "Transform", EffectType::drop_shadow(0.0, 0.0, 0.0, 100.0, Color::BLACK), &self.state, cx))
+                .child(effect_item_row("perspective", "Perspective", EffectType::perspective(0.0, 0.0), &self.state, cx))
+                .child(effect_item_row("tiler", "Tiler", EffectType::tiler(2.0, 2.0), &self.state, cx))
+                .child(effect_item_row("warp", "Warp", EffectType::warp(30.0, 1.0), &self.state, cx));
         }
 
         cats = cats.child(category_header("generate", "Generate & Stylize", IconName::Sparkles, is_open("generate"), &panel, cx));
         if is_open("generate") {
             cats = cats
                 .child(effect_item_row("fill", "Fill", EffectType::tint(Color::rgb(0.2, 0.4, 0.8), Color::rgb(0.2, 0.4, 0.8), 100.0), &self.state, cx))
-                .child(effect_item_row("gradient_ramp", "Gradient Ramp", EffectType::tint(Color::BLACK, Color::rgb(0.9, 0.3, 0.1), 75.0), &self.state, cx));
+                .child(effect_item_row("gradient_ramp", "Gradient Ramp", EffectType::gradient_ramp(Color::BLACK, Color::rgb(0.9, 0.3, 0.1), 90.0), &self.state, cx))
+                .child(effect_item_row("checkerboard", "Checkerboard", EffectType::checkerboard(32.0, Color::BLACK, Color::WHITE), &self.state, cx))
+                .child(effect_item_row("noise_generator", "Noise", EffectType::noise_generator(25.0, true), &self.state, cx))
+                .child(effect_item_row("bloom", "Bloom", EffectType::bloom(40.0, 10.0), &self.state, cx));
         }
 
         cats = cats.child(category_header("transition", "Transition", IconName::RotateCw, is_open("transition"), &panel, cx));
@@ -6538,7 +7767,9 @@ impl Render for EffectsPanel {
             cats = cats
                 .child(effect_item_row("text_fill", "Text Fill", EffectType::tint(Color::WHITE, Color::rgb(0.2, 0.5, 1.0), 100.0), &self.state, cx))
                 .child(effect_item_row("text_gradient", "Text Gradient", EffectType::tint(Color::rgb(0.1, 0.1, 0.2), Color::rgb(1.0, 0.8, 0.2), 85.0), &self.state, cx))
-                .child(effect_item_row("text_shadow", "Text Drop Shadow", EffectType::drop_shadow(4.0, 135.0, 6.0, 80.0, Color::BLACK), &self.state, cx));
+                .child(effect_item_row("text_shadow", "Text Drop Shadow", EffectType::drop_shadow(4.0, 135.0, 6.0, 80.0, Color::BLACK), &self.state, cx))
+                .child(effect_item_row("text_outline", "Text Outline", EffectType::text_outline(3.0, Color::BLACK), &self.state, cx))
+                .child(effect_item_row("text_bevel", "Text Bevel", EffectType::text_bevel(60.0, 30.0), &self.state, cx));
         }
 
         cats = cats.child(category_header("custom", "Custom Shaders (GLSL/WGSL)", IconName::Code, is_open("custom"), &panel, cx));
@@ -6594,7 +7825,7 @@ impl Render for EffectsPanel {
                     .gap_1p5()
                     .items_center()
                     .child(icon_box(IconName::Sparkles))
-                    .child("21 real built-in effects available • Click a category to expand • Click to apply"),
+                    .child("31 real built-in effects available • Click a category to expand • Click to apply"),
             )
     }
 }
@@ -8095,6 +9326,41 @@ impl Render for TimelinePanel {
                                         EffectType::NoiseGenerator { amount, .. } => {
                                             param_entries.push(("amount", "Amount", amount.evaluate_at(&current_tc), 5.0));
                                         }
+                                        EffectType::Checkerboard { size, .. } => {
+                                            param_entries.push(("size", "Size", size.evaluate_at(&current_tc), 4.0));
+                                        }
+                                        EffectType::GradientRamp { angle, .. } => {
+                                            param_entries.push(("angle", "Angle", angle.evaluate_at(&current_tc), 5.0));
+                                        }
+                                        EffectType::Perspective { skew_x, skew_y } => {
+                                            param_entries.push(("skew_x", "Skew X", skew_x.evaluate_at(&current_tc), 1.0));
+                                            param_entries.push(("skew_y", "Skew Y", skew_y.evaluate_at(&current_tc), 1.0));
+                                        }
+                                        EffectType::TextOutline { width, .. } => {
+                                            param_entries.push(("width", "Width", width.evaluate_at(&current_tc), 1.0));
+                                        }
+                                        EffectType::TextBevel { strength, softness } => {
+                                            param_entries.push(("strength", "Strength", strength.evaluate_at(&current_tc), 5.0));
+                                            param_entries.push(("softness", "Softness", softness.evaluate_at(&current_tc), 5.0));
+                                        }
+                                        EffectType::Bloom { intensity, radius } => {
+                                            param_entries.push(("intensity", "Intensity", intensity.evaluate_at(&current_tc), 5.0));
+                                            param_entries.push(("radius", "Radius", radius.evaluate_at(&current_tc), 2.0));
+                                        }
+                                        EffectType::Tiler { tiles_x, tiles_y } => {
+                                            param_entries.push(("tiles_x", "Tiles X", tiles_x.evaluate_at(&current_tc), 1.0));
+                                            param_entries.push(("tiles_y", "Tiles Y", tiles_y.evaluate_at(&current_tc), 1.0));
+                                        }
+                                        EffectType::Warp { amount, scale } => {
+                                            param_entries.push(("amount", "Amount", amount.evaluate_at(&current_tc), 5.0));
+                                            param_entries.push(("scale", "Scale", scale.evaluate_at(&current_tc), 0.2));
+                                        }
+                                        EffectType::Exposure { exposure } => {
+                                            param_entries.push(("exposure", "Exposure", exposure.evaluate_at(&current_tc), 0.25));
+                                        }
+                                        EffectType::Vibrance { vibrance } => {
+                                            param_entries.push(("vibrance", "Vibrance", vibrance.evaluate_at(&current_tc), 5.0));
+                                        }
                                         // Shader Lab parameters are edited in the Properties
                                         // panel (dynamic uniforms have no static keyframe paths).
                                         EffectType::ShaderLab { .. } => {}
@@ -8118,6 +9384,18 @@ impl Render for TimelinePanel {
                                             "tolerance" => "effect:tolerance",
                                             "threshold" => "effect:threshold",
                                             "feather" => "effect:feather",
+                                            "size" => "effect:size",
+                                            "angle" => "effect:angle",
+                                            "skew_x" => "effect:skew_x",
+                                            "skew_y" => "effect:skew_y",
+                                            "width" => "effect:width",
+                                            "strength" => "effect:strength",
+                                            "intensity" => "effect:intensity",
+                                            "tiles_x" => "effect:tiles_x",
+                                            "tiles_y" => "effect:tiles_y",
+                                            "scale" => "effect:scale",
+                                            "exposure" => "effect:exposure",
+                                            "vibrance" => "effect:vibrance",
                                             _ => "effect:param",
                                         };
 
@@ -8664,6 +9942,7 @@ impl Render for TimelinePanel {
                     .test_support()
                     .flex_1()
                     .overflow_y_scroll()
+                    .overflow_x_scroll()
                     .children(timeline_rows)
                     .on_mouse_down(MouseButton::Right, move |event, _window, cx| {
                         let pos = event.position;
@@ -8848,6 +10127,30 @@ impl Render for TimelinePanel {
                                 });
                             })
                             .child("Add Keyframe to Transforms at CTI"),
+                    );
+
+                    let s_piv = s_menu.clone();
+                    let p_piv = p_close.clone();
+                    let t_piv = target_lid.clone();
+                    menu_items = menu_items.child(
+                        div()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                s_piv.update(cx, |s, cx| {
+                                    s.reset_layer_anchor_center(&t_piv);
+                                    cx.notify();
+                                });
+                                p_piv.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    cx.notify();
+                                });
+                            })
+                            .child("Center Pivot"),
                     );
 
                     let s_tin = s_menu.clone();

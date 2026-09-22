@@ -69,6 +69,58 @@ pub enum EffectType {
         amount: Property<f32>,
         monochrome: bool,
     },
+    /// Procedural checkerboard generator (spatial: needs pixel position,
+    /// so [`crate::Effect::nudge_param`] handles scalars while rasterizers
+    /// and the viewport SVG preview resolve the pattern).
+    Checkerboard {
+        size: Property<f32>,
+        color_a: Color,
+        color_b: Color,
+    },
+    /// Two-color linear gradient generator (spatial).
+    GradientRamp {
+        color_a: Color,
+        color_b: Color,
+        angle: Property<f32>,
+    },
+    /// Fake-3D skew filter in degrees (spatial).
+    Perspective {
+        skew_x: Property<f32>,
+        skew_y: Property<f32>,
+    },
+    /// Text stroke outline (resolved by text renderers / viewport SVG).
+    TextOutline {
+        width: Property<f32>,
+        color: Color,
+    },
+    /// Text bevel lighting (resolved by text renderers).
+    TextBevel {
+        strength: Property<f32>,
+        softness: Property<f32>,
+    },
+    /// Highlight bloom lift (per-pixel approximation; radius is spatial).
+    Bloom {
+        intensity: Property<f32>,
+        radius: Property<f32>,
+    },
+    /// Mosaic tiler (spatial).
+    Tiler {
+        tiles_x: Property<f32>,
+        tiles_y: Property<f32>,
+    },
+    /// Turbulent warp distortion (spatial).
+    Warp {
+        amount: Property<f32>,
+        scale: Property<f32>,
+    },
+    /// Exposure in EV stops (per-pixel gain).
+    Exposure {
+        exposure: Property<f32>,
+    },
+    /// Vibrance: saturation weighted toward muted colors (per-pixel).
+    Vibrance {
+        vibrance: Property<f32>,
+    },
 }
 
 impl EffectType {
@@ -86,6 +138,16 @@ impl EffectType {
             Self::ChromaKey { .. } => "Chroma Key",
             Self::LumaKey { .. } => "Luma Key",
             Self::NoiseGenerator { .. } => "Noise Generator",
+            Self::Checkerboard { .. } => "Checkerboard",
+            Self::GradientRamp { .. } => "Gradient Ramp",
+            Self::Perspective { .. } => "Perspective",
+            Self::TextOutline { .. } => "Text Outline",
+            Self::TextBevel { .. } => "Text Bevel",
+            Self::Bloom { .. } => "Bloom",
+            Self::Tiler { .. } => "Tiler",
+            Self::Warp { .. } => "Warp",
+            Self::Exposure { .. } => "Exposure",
+            Self::Vibrance { .. } => "Vibrance",
         }
     }
 
@@ -193,6 +255,86 @@ impl EffectType {
             monochrome,
         }
     }
+
+    /// Construct a Checkerboard generator effect type.
+    pub fn checkerboard(size: f32, color_a: Color, color_b: Color) -> Self {
+        Self::Checkerboard {
+            size: Property::new("Size", size.clamp(2.0, 512.0)),
+            color_a,
+            color_b,
+        }
+    }
+
+    /// Construct a Gradient Ramp generator effect type.
+    pub fn gradient_ramp(color_a: Color, color_b: Color, angle: f32) -> Self {
+        Self::GradientRamp {
+            color_a,
+            color_b,
+            angle: Property::new("Angle", angle),
+        }
+    }
+
+    /// Construct a Perspective skew effect type (degrees).
+    pub fn perspective(skew_x: f32, skew_y: f32) -> Self {
+        Self::Perspective {
+            skew_x: Property::new("Skew X", skew_x.clamp(-60.0, 60.0)),
+            skew_y: Property::new("Skew Y", skew_y.clamp(-60.0, 60.0)),
+        }
+    }
+
+    /// Construct a Text Outline effect type.
+    pub fn text_outline(width: f32, color: Color) -> Self {
+        Self::TextOutline {
+            width: Property::new("Width", width.clamp(0.0, 50.0)),
+            color,
+        }
+    }
+
+    /// Construct a Text Bevel effect type.
+    pub fn text_bevel(strength: f32, softness: f32) -> Self {
+        Self::TextBevel {
+            strength: Property::new("Strength", strength.clamp(0.0, 100.0)),
+            softness: Property::new("Softness", softness.clamp(0.0, 100.0)),
+        }
+    }
+
+    /// Construct a Bloom effect type.
+    pub fn bloom(intensity: f32, radius: f32) -> Self {
+        Self::Bloom {
+            intensity: Property::new("Intensity", intensity.clamp(0.0, 100.0)),
+            radius: Property::new("Radius", radius.clamp(0.0, 100.0)),
+        }
+    }
+
+    /// Construct a Tiler effect type.
+    pub fn tiler(tiles_x: f32, tiles_y: f32) -> Self {
+        Self::Tiler {
+            tiles_x: Property::new("Tiles X", tiles_x.clamp(1.0, 32.0)),
+            tiles_y: Property::new("Tiles Y", tiles_y.clamp(1.0, 32.0)),
+        }
+    }
+
+    /// Construct a Warp effect type.
+    pub fn warp(amount: f32, scale: f32) -> Self {
+        Self::Warp {
+            amount: Property::new("Amount", amount.clamp(0.0, 100.0)),
+            scale: Property::new("Scale", scale.clamp(0.1, 10.0)),
+        }
+    }
+
+    /// Construct an Exposure effect type (EV stops).
+    pub fn exposure(exposure: f32) -> Self {
+        Self::Exposure {
+            exposure: Property::new("Exposure", exposure.clamp(-10.0, 10.0)),
+        }
+    }
+
+    /// Construct a Vibrance effect type.
+    pub fn vibrance(vibrance: f32) -> Self {
+        Self::Vibrance {
+            vibrance: Property::new("Vibrance", vibrance.clamp(-100.0, 100.0)),
+        }
+    }
 }
 
 /// A layer effect applied sequentially in the layer's post-processing stack.
@@ -283,6 +425,56 @@ impl Effect {
     /// Factory for creating a Noise Generator effect.
     pub fn noise_generator(id: impl Into<String>, amount: f32, monochrome: bool) -> Self {
         Self::new(id, "Noise Generator", EffectType::noise_generator(amount, monochrome))
+    }
+
+    /// Factory for creating a Checkerboard effect.
+    pub fn checkerboard(id: impl Into<String>, size: f32, color_a: Color, color_b: Color) -> Self {
+        Self::new(id, "Checkerboard", EffectType::checkerboard(size, color_a, color_b))
+    }
+
+    /// Factory for creating a Gradient Ramp effect.
+    pub fn gradient_ramp(id: impl Into<String>, color_a: Color, color_b: Color, angle: f32) -> Self {
+        Self::new(id, "Gradient Ramp", EffectType::gradient_ramp(color_a, color_b, angle))
+    }
+
+    /// Factory for creating a Perspective effect.
+    pub fn perspective(id: impl Into<String>, skew_x: f32, skew_y: f32) -> Self {
+        Self::new(id, "Perspective", EffectType::perspective(skew_x, skew_y))
+    }
+
+    /// Factory for creating a Text Outline effect.
+    pub fn text_outline(id: impl Into<String>, width: f32, color: Color) -> Self {
+        Self::new(id, "Text Outline", EffectType::text_outline(width, color))
+    }
+
+    /// Factory for creating a Text Bevel effect.
+    pub fn text_bevel(id: impl Into<String>, strength: f32, softness: f32) -> Self {
+        Self::new(id, "Text Bevel", EffectType::text_bevel(strength, softness))
+    }
+
+    /// Factory for creating a Bloom effect.
+    pub fn bloom(id: impl Into<String>, intensity: f32, radius: f32) -> Self {
+        Self::new(id, "Bloom", EffectType::bloom(intensity, radius))
+    }
+
+    /// Factory for creating a Tiler effect.
+    pub fn tiler(id: impl Into<String>, tiles_x: f32, tiles_y: f32) -> Self {
+        Self::new(id, "Tiler", EffectType::tiler(tiles_x, tiles_y))
+    }
+
+    /// Factory for creating a Warp effect.
+    pub fn warp(id: impl Into<String>, amount: f32, scale: f32) -> Self {
+        Self::new(id, "Warp", EffectType::warp(amount, scale))
+    }
+
+    /// Factory for creating an Exposure effect.
+    pub fn exposure(id: impl Into<String>, exposure: f32) -> Self {
+        Self::new(id, "Exposure", EffectType::exposure(exposure))
+    }
+
+    /// Factory for creating a Vibrance effect.
+    pub fn vibrance(id: impl Into<String>, vibrance: f32) -> Self {
+        Self::new(id, "Vibrance", EffectType::vibrance(vibrance))
     }
 
     /// Factory for creating a Shader Lab runtime-shader effect.
@@ -409,6 +601,45 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
             return true;
         }
         false
+    }
+
+    /// Set a named color field (`color_a` / `color_b` / `color`) on effects
+    /// that carry swatch colors (Checkerboard, Gradient Ramp, Text Outline).
+    /// Returns false for unknown fields or effects without colors.
+    pub fn set_color_value(&mut self, field: &str, next: Color) -> bool {
+        match &mut self.effect_type {
+            EffectType::Checkerboard { color_a, color_b, .. } => {
+                if field.eq_ignore_ascii_case("color_a") || field.eq_ignore_ascii_case("a") {
+                    *color_a = next;
+                    true
+                } else if field.eq_ignore_ascii_case("color_b") || field.eq_ignore_ascii_case("b") {
+                    *color_b = next;
+                    true
+                } else {
+                    false
+                }
+            }
+            EffectType::GradientRamp { color_a, color_b, .. } => {
+                if field.eq_ignore_ascii_case("color_a") || field.eq_ignore_ascii_case("a") {
+                    *color_a = next;
+                    true
+                } else if field.eq_ignore_ascii_case("color_b") || field.eq_ignore_ascii_case("b") {
+                    *color_b = next;
+                    true
+                } else {
+                    false
+                }
+            }
+            EffectType::TextOutline { color, .. } => {
+                if field.eq_ignore_ascii_case("color") {
+                    *color = next;
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
     }
 
     /// Current Shader Lab source (last-good), if this is a Shader Lab effect.
@@ -586,6 +817,81 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     return true;
                 }
             }
+            EffectType::Checkerboard { size, .. } => {
+                if param_name.eq_ignore_ascii_case("size") {
+                    size.set_value((size.value + delta).clamp(2.0, 512.0));
+                    return true;
+                }
+            }
+            EffectType::GradientRamp { angle, .. } => {
+                if param_name.eq_ignore_ascii_case("angle") {
+                    angle.set_value(angle.value + delta);
+                    return true;
+                }
+            }
+            EffectType::Perspective { skew_x, skew_y } => {
+                if param_name.eq_ignore_ascii_case("skew_x") || param_name.eq_ignore_ascii_case("skewx") {
+                    skew_x.set_value((skew_x.value + delta).clamp(-60.0, 60.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("skew_y") || param_name.eq_ignore_ascii_case("skewy") {
+                    skew_y.set_value((skew_y.value + delta).clamp(-60.0, 60.0));
+                    return true;
+                }
+            }
+            EffectType::TextOutline { width, .. } => {
+                if param_name.eq_ignore_ascii_case("width") {
+                    width.set_value((width.value + delta).clamp(0.0, 50.0));
+                    return true;
+                }
+            }
+            EffectType::TextBevel { strength, softness } => {
+                if param_name.eq_ignore_ascii_case("strength") {
+                    strength.set_value((strength.value + delta).clamp(0.0, 100.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("softness") {
+                    softness.set_value((softness.value + delta).clamp(0.0, 100.0));
+                    return true;
+                }
+            }
+            EffectType::Bloom { intensity, radius } => {
+                if param_name.eq_ignore_ascii_case("intensity") {
+                    intensity.set_value((intensity.value + delta).clamp(0.0, 100.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("radius") {
+                    radius.set_value((radius.value + delta).clamp(0.0, 100.0));
+                    return true;
+                }
+            }
+            EffectType::Tiler { tiles_x, tiles_y } => {
+                if param_name.eq_ignore_ascii_case("tiles_x") || param_name.eq_ignore_ascii_case("x") {
+                    tiles_x.set_value((tiles_x.value + delta).clamp(1.0, 32.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("tiles_y") || param_name.eq_ignore_ascii_case("y") {
+                    tiles_y.set_value((tiles_y.value + delta).clamp(1.0, 32.0));
+                    return true;
+                }
+            }
+            EffectType::Warp { amount, scale } => {
+                if param_name.eq_ignore_ascii_case("amount") {
+                    amount.set_value((amount.value + delta).clamp(0.0, 100.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("scale") {
+                    scale.set_value((scale.value + delta).clamp(0.1, 10.0));
+                    return true;
+                }
+            }
+            EffectType::Exposure { exposure } => {
+                if param_name.eq_ignore_ascii_case("exposure") || param_name.eq_ignore_ascii_case("ev") {
+                    exposure.set_value((exposure.value + delta).clamp(-10.0, 10.0));
+                    return true;
+                }
+            }
+            EffectType::Vibrance { vibrance } => {
+                if param_name.eq_ignore_ascii_case("vibrance") {
+                    vibrance.set_value((vibrance.value + delta).clamp(-100.0, 100.0));
+                    return true;
+                }
+            }
             // Shader Lab values are dynamic (see nudge_shader_value).
             EffectType::ShaderLab { .. } => {}
         }
@@ -700,6 +1006,86 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     None
                 }
             }
+            EffectType::Checkerboard { size, .. } => {
+                if param_name.eq_ignore_ascii_case("size") {
+                    Some(size)
+                } else {
+                    None
+                }
+            }
+            EffectType::GradientRamp { angle, .. } => {
+                if param_name.eq_ignore_ascii_case("angle") {
+                    Some(angle)
+                } else {
+                    None
+                }
+            }
+            EffectType::Perspective { skew_x, skew_y } => {
+                if param_name.eq_ignore_ascii_case("skew_x") || param_name.eq_ignore_ascii_case("skewx") {
+                    Some(skew_x)
+                } else if param_name.eq_ignore_ascii_case("skew_y") || param_name.eq_ignore_ascii_case("skewy") {
+                    Some(skew_y)
+                } else {
+                    None
+                }
+            }
+            EffectType::TextOutline { width, .. } => {
+                if param_name.eq_ignore_ascii_case("width") {
+                    Some(width)
+                } else {
+                    None
+                }
+            }
+            EffectType::TextBevel { strength, softness } => {
+                if param_name.eq_ignore_ascii_case("strength") {
+                    Some(strength)
+                } else if param_name.eq_ignore_ascii_case("softness") {
+                    Some(softness)
+                } else {
+                    None
+                }
+            }
+            EffectType::Bloom { intensity, radius } => {
+                if param_name.eq_ignore_ascii_case("intensity") {
+                    Some(intensity)
+                } else if param_name.eq_ignore_ascii_case("radius") {
+                    Some(radius)
+                } else {
+                    None
+                }
+            }
+            EffectType::Tiler { tiles_x, tiles_y } => {
+                if param_name.eq_ignore_ascii_case("tiles_x") || param_name.eq_ignore_ascii_case("x") {
+                    Some(tiles_x)
+                } else if param_name.eq_ignore_ascii_case("tiles_y") || param_name.eq_ignore_ascii_case("y") {
+                    Some(tiles_y)
+                } else {
+                    None
+                }
+            }
+            EffectType::Warp { amount, scale } => {
+                if param_name.eq_ignore_ascii_case("amount") {
+                    Some(amount)
+                } else if param_name.eq_ignore_ascii_case("scale") {
+                    Some(scale)
+                } else {
+                    None
+                }
+            }
+            EffectType::Exposure { exposure } => {
+                if param_name.eq_ignore_ascii_case("exposure") || param_name.eq_ignore_ascii_case("ev") {
+                    Some(exposure)
+                } else {
+                    None
+                }
+            }
+            EffectType::Vibrance { vibrance } => {
+                if param_name.eq_ignore_ascii_case("vibrance") {
+                    Some(vibrance)
+                } else {
+                    None
+                }
+            }
             // Shader Lab values are dynamic, not `Property<f32>` tracks.
             EffectType::ShaderLab { .. } => None,
         }
@@ -809,6 +1195,86 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
             EffectType::NoiseGenerator { amount, .. } => {
                 if param_name.eq_ignore_ascii_case("amount") {
                     Some(amount)
+                } else {
+                    None
+                }
+            }
+            EffectType::Checkerboard { size, .. } => {
+                if param_name.eq_ignore_ascii_case("size") {
+                    Some(size)
+                } else {
+                    None
+                }
+            }
+            EffectType::GradientRamp { angle, .. } => {
+                if param_name.eq_ignore_ascii_case("angle") {
+                    Some(angle)
+                } else {
+                    None
+                }
+            }
+            EffectType::Perspective { skew_x, skew_y } => {
+                if param_name.eq_ignore_ascii_case("skew_x") || param_name.eq_ignore_ascii_case("skewx") {
+                    Some(skew_x)
+                } else if param_name.eq_ignore_ascii_case("skew_y") || param_name.eq_ignore_ascii_case("skewy") {
+                    Some(skew_y)
+                } else {
+                    None
+                }
+            }
+            EffectType::TextOutline { width, .. } => {
+                if param_name.eq_ignore_ascii_case("width") {
+                    Some(width)
+                } else {
+                    None
+                }
+            }
+            EffectType::TextBevel { strength, softness } => {
+                if param_name.eq_ignore_ascii_case("strength") {
+                    Some(strength)
+                } else if param_name.eq_ignore_ascii_case("softness") {
+                    Some(softness)
+                } else {
+                    None
+                }
+            }
+            EffectType::Bloom { intensity, radius } => {
+                if param_name.eq_ignore_ascii_case("intensity") {
+                    Some(intensity)
+                } else if param_name.eq_ignore_ascii_case("radius") {
+                    Some(radius)
+                } else {
+                    None
+                }
+            }
+            EffectType::Tiler { tiles_x, tiles_y } => {
+                if param_name.eq_ignore_ascii_case("tiles_x") || param_name.eq_ignore_ascii_case("x") {
+                    Some(tiles_x)
+                } else if param_name.eq_ignore_ascii_case("tiles_y") || param_name.eq_ignore_ascii_case("y") {
+                    Some(tiles_y)
+                } else {
+                    None
+                }
+            }
+            EffectType::Warp { amount, scale } => {
+                if param_name.eq_ignore_ascii_case("amount") {
+                    Some(amount)
+                } else if param_name.eq_ignore_ascii_case("scale") {
+                    Some(scale)
+                } else {
+                    None
+                }
+            }
+            EffectType::Exposure { exposure } => {
+                if param_name.eq_ignore_ascii_case("exposure") || param_name.eq_ignore_ascii_case("ev") {
+                    Some(exposure)
+                } else {
+                    None
+                }
+            }
+            EffectType::Vibrance { vibrance } => {
+                if param_name.eq_ignore_ascii_case("vibrance") {
+                    Some(vibrance)
                 } else {
                     None
                 }

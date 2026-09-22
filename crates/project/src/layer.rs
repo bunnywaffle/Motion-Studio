@@ -18,6 +18,10 @@ const fn default_speed_one() -> f64 {
     1.0
 }
 
+fn default_shape_fill() -> Color {
+    Color::WHITE
+}
+
 /// Geometric shape types supported by vector shape layers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "shape", rename_all = "snake_case")]
@@ -26,13 +30,19 @@ pub enum ShapeType {
         width: Property<f32>,
         height: Property<f32>,
         corner_radius: Property<f32>,
+        #[serde(default = "default_shape_fill")]
+        fill: Color,
     },
     Ellipse {
         radius_x: Property<f32>,
         radius_y: Property<f32>,
+        #[serde(default = "default_shape_fill")]
+        fill: Color,
     },
     Path {
         path_data: String,
+        #[serde(default = "default_shape_fill")]
+        fill: Color,
     },
 }
 

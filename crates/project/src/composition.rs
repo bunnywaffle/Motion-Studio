@@ -349,6 +349,7 @@ impl Composition {
                         width,
                         height,
                         corner_radius,
+                        ..
                     } => {
                         for kf in &width.keyframes {
                             times.push(kf.time);
@@ -360,7 +361,7 @@ impl Composition {
                             times.push(kf.time);
                         }
                     }
-                    ShapeType::Ellipse { radius_x, radius_y } => {
+                    ShapeType::Ellipse { radius_x, radius_y, .. } => {
                         for kf in &radius_x.keyframes {
                             times.push(kf.time);
                         }

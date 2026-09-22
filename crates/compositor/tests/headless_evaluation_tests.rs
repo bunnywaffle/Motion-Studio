@@ -43,6 +43,7 @@ fn test_multi_layer_mixed_sources_composite_evaluation() {
             width: Property::new("Width", 500.0),
             height: Property::new("Height", 10.0),
             corner_radius: Property::new("Corner Radius", 5.0),
+            fill: Color::WHITE,
         },
         tc0,
         tc300,
@@ -55,6 +56,7 @@ fn test_multi_layer_mixed_sources_composite_evaluation() {
         ShapeType::Ellipse {
             radius_x: Property::new("Radius X", 80.0),
             radius_y: Property::new("Radius Y", 80.0),
+            fill: Color::WHITE,
         },
         tc0,
         tc300,
@@ -66,6 +68,7 @@ fn test_multi_layer_mixed_sources_composite_evaluation() {
         "Arrow Head",
         ShapeType::Path {
             path_data: "M 0 0 L 40 20 L 0 40 Z".to_string(),
+            fill: Color::WHITE,
         },
         tc0,
         tc300,
@@ -1203,6 +1206,7 @@ fn test_performance_high_throughput_composition_evaluation() {
         ShapeType::Ellipse {
             radius_x: Property::new("RX", 150.0),
             radius_y: Property::new("RY", 150.0),
+            fill: Color::WHITE,
         },
         tc0,
         tc600,
