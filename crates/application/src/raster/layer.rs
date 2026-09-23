@@ -498,7 +498,9 @@ fn shader_value_hash(v: &project::ShaderParamValue, h: &mut DefaultHasher) {
 #[derive(Clone)]
 pub struct RasterEntry {
     pub key: u64,
-    pub png: Arc<Vec<u8>>,
+    /// Straight-alpha BGRA8 bytes sized w*h (feeds `RenderImage` directly —
+    /// no PNG encode/decode round-trip on the display path).
+    pub bgra: Arc<Vec<u8>>,
     pub w: u32,
     pub h: u32,
     pub avg: Color,

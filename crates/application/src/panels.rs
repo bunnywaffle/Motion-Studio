@@ -1479,10 +1479,11 @@ pub struct CompositionViewerPanel {
     pub gizmo_drag: Option<ViewerGizmoDrag>,
     /// Per-layer CPU raster cache (layer id -> last raster).
     pub raster_cache: HashMap<String, crate::raster::RasterEntry>,
-    /// Decoded gpui images by PNG payload identity (Arc pointer). New
-    /// `gpui::Image`s hash their bytes on construction, so rebuilding them
-    /// per render wastes milliseconds on cache hits.
-    pub img_cache: HashMap<usize, std::sync::Arc<gpui::Image>>,
+    /// Decoded gpui render images by (layer id, raster key). Pointer
+    /// keys are unsafe here (freed Arcs reuse addresses and would serve
+    /// stale frames); the content key cannot collide without the raster
+    /// itself colliding.
+    pub img_cache: HashMap<(String, u64), std::sync::Arc<gpui::RenderImage>>,
     /// Decoded image asset cache (asset id -> RGBA).
     pub asset_cache: HashMap<String, Arc<image::RgbaImage>>,
     /// Decoded image dimensions cache (asset id -> w/h). `image_dimensions`
@@ -1493,14 +1494,26 @@ pub struct CompositionViewerPanel {
     pub canvas_px: Option<(f32, f32)>,
     /// Last viewer build time in ms (status bar readout).
     pub last_frame_ms: f32,
+    /// Evaluated layer boxes, topmost-first, for deterministic viewport
+    /// picking (independent of sibling hit-test order).
+    pub pick_boxes: Vec<PickBox>,
+}
+
+/// Evaluated world-space AABB of one layer for viewport picking (comp px).
+#[derive(Clone, Debug)]
+pub struct PickBox {
+    pub id: String,
+    pub min_x: f32,
+    pub min_y: f32,
+    pub max_x: f32,
+    pub max_y: f32,
 }
 
 /// Viewport transform-gizmo drag state (After Effects-style direct
 /// manipulation: move the body, drag corners/edges to scale, the top
 /// handle to rotate about the pivot, the diamond to move the pivot).
 #[derive(Clone, Debug)]
-pub enum ViewerGizmoDrag {
-    Rotate {
+pub enum ViewerGizmoDrag {    Rotate {
         layer_id: String,
         start_rot: f32,
         start_angle: f32,
@@ -1546,6 +1559,7 @@ impl CompositionViewerPanel {
             img_dims: HashMap::new(),
             canvas_px: None,
             last_frame_ms: 0.0,
+            pick_boxes: Vec::new(),
         }
     }
 
@@ -1557,6 +1571,16 @@ impl CompositionViewerPanel {
     pub fn close_context_menu(&mut self) {
         self.context_menu = None;
         self.menu_pos = None;
+    }
+
+    /// Topmost layer id whose evaluated box contains comp-space `(x, y)`.
+    /// `pick_boxes` is stored topmost-first, so the first hit wins —
+    /// deterministic regardless of sibling hit-test order.
+    pub fn pick_top_at(&self, x: f32, y: f32) -> Option<String> {
+        self.pick_boxes
+            .iter()
+            .find(|b| x >= b.min_x && x <= b.max_x && y >= b.min_y && y <= b.max_y)
+            .map(|b| b.id.clone())
     }
 
     pub fn standalone(cx: &mut Context<Self>) -> Self {
@@ -1632,6 +1656,7 @@ impl Render for CompositionViewerPanel {
                     bg_color.r, bg_color.g, bg_color.b, bg_color.a,
                 );
                 let mut rendered_regions: Vec<(f32, f32, f32, f32, Color)> = Vec::new();
+                let mut pick_list: Vec<PickBox> = Vec::new();
 
                 for layer in stack.render_layers() {
                     let is_adjustment = matches!(&layer.source, LayerSource::Adjustment);
@@ -1757,22 +1782,19 @@ impl Render for CompositionViewerPanel {
                                 duration_s,
                                 &self.asset_cache,
                             );
-                            let png = std::sync::Arc::new(crate::raster::png_encode(
-                                rw,
-                                rh,
-                                &buf.to_rgba8(),
-                            ));
+                            let bgra = std::sync::Arc::new(buf.to_bgra8());
                             let e = crate::raster::RasterEntry {
                                 key: cache_key,
-                                png,
+                                bgra,
                                 w: rw,
                                 h: rh,
                                 avg,
                                 empty,
                             };
                             self.raster_cache.insert(layer.id.clone(), e.clone());
-                            // Bound memory: long playbacks evict (recompute).
-                            if self.raster_cache.len() > 96 {
+                            // Bound memory: BGRA payloads are ~4MB at full
+                            // res, so the cap is tighter than the PNG days.
+                            if self.raster_cache.len() > 48 {
                                 self.raster_cache.clear();
                                 self.img_cache.clear();
                                 self.raster_cache.insert(layer.id.clone(), e.clone());
@@ -1787,6 +1809,13 @@ impl Render for CompositionViewerPanel {
                     };
 
                     rendered_regions.push((bbox.min.x, bbox.min.y, bbox.max.x, bbox.max.y, recorded_color));
+                    pick_list.push(PickBox {
+                        id: layer.id.clone(),
+                        min_x: bbox.min.x,
+                        min_y: bbox.min.y,
+                        max_x: bbox.max.x,
+                        max_y: bbox.max.y,
+                    });
 
 
                     let covers_canvas = bbox.min.x <= -comp_w / 2.0
@@ -1839,23 +1868,23 @@ impl Render for CompositionViewerPanel {
                         });
 
                     // Raster pixels (CPU compositor output for this layer).
-                    // The decoded gpui::Image is cached per unique PNG
-                    // payload: rebuilding it every render would re-clone
-                    // megabytes and re-hash them (Image ids are content
-                    // hashes) for zero visual change on cache hits.
+                    // Decoded render images are cached per unique payload
+                    // and built straight from BGRA bytes: no PNG encode,
+                    // no content hashing, no async decode pop-in — the
+                    // synchronous `Render` path presents the same tick.
                     if !entry.empty {
-                        let png_ptr = std::sync::Arc::as_ptr(&entry.png) as usize;
-                        let img = match self.img_cache.get(&png_ptr) {
+                        let img_key = (layer.id.clone(), cache_key);
+                        let img = match self.img_cache.get(&img_key) {
                             Some(im) => im.clone(),
                             None => {
-                                let im = std::sync::Arc::new(gpui::Image::from_bytes(
-                                    gpui::ImageFormat::Png,
-                                    (*entry.png).clone(),
-                                ));
-                                self.img_cache.insert(png_ptr, im.clone());
-                                if self.img_cache.len() > 96 {
+                                let frame = image::Frame::new(
+                                    image::RgbaImage::from_raw(entry.w, entry.h, (*entry.bgra).clone())
+                                        .unwrap_or_else(|| image::RgbaImage::new(entry.w, entry.h)),
+                                );
+                                let im = std::sync::Arc::new(gpui::RenderImage::new(vec![frame]));
+                                self.img_cache.insert(img_key, im.clone());
+                                if self.img_cache.len() > 48 {
                                     self.img_cache.clear();
-                                    self.img_cache.insert(png_ptr, im.clone());
                                 }
                                 im
                             }
@@ -2190,9 +2219,15 @@ impl Render for CompositionViewerPanel {
 
                     elements.push(layer_el.into_any_element());
                 }
+                // render_layers() walks bottom-to-top; picking needs
+                // topmost-first.
+                self.pick_boxes = pick_list.into_iter().rev().collect();
                 (elements, gizmo_els)
             }
-            None => (Vec::new(), Vec::new()),
+            None => {
+                self.pick_boxes = Vec::new();
+                (Vec::new(), Vec::new())
+            }
         };
         let active_tool = state.active_tool;
         let s_side = self.state.clone();
@@ -2673,7 +2708,25 @@ impl Render for CompositionViewerPanel {
                                             // Move/Rotate drags start ONLY on a layer body
                                             // (flagged by the shell handler above). Empty
                                             // presses just record for click-deselect.
-                                            let on_layer = p_drag.read(cx).down_on_layer;
+                                            let mut on_layer = p_drag.read(cx).down_on_layer;
+                                            let active_tool = s_tool.read(cx).active_tool;
+                                            let (fox, foy) = frame_org.unwrap_or((curr_x - canvas_w / 2.0, curr_y - canvas_h / 2.0));
+                                            let comp_x = (curr_x - fox) / fit_pick - comp_pw / 2.0;
+                                            let comp_y = (curr_y - foy) / fit_pick - comp_ph / 2.0;
+                                            // Deterministic topmost pick: sibling
+                                            // hit-test order has sent presses to
+                                            // covered layers (e.g. background)
+                                            // instead of the visible top one.
+                                            // The pick wins for the Move tool.
+                                            if active_tool == EditorTool::Move {
+                                                if let Some(picked) = p_drag.read(cx).pick_top_at(comp_x, comp_y) {
+                                                    on_layer = true;
+                                                    s_tool.update(cx, |s, cx| {
+                                                        s.select_layer(Some(picked));
+                                                        cx.notify();
+                                                    });
+                                                }
+                                            }
                                             p_drag.update(cx, |this, cx| {
                                                 this.down_on_layer = false;
                                                 if on_layer {
@@ -2695,10 +2748,6 @@ impl Render for CompositionViewerPanel {
                                                 }
                                                 cx.notify();
                                             });
-                                            let active_tool = s_tool.read(cx).active_tool;
-                                            let (fox, foy) = frame_org.unwrap_or((curr_x - canvas_w / 2.0, curr_y - canvas_h / 2.0));
-                                            let comp_x = (curr_x - fox) / fit_pick - comp_pw / 2.0;
-                                            let comp_y = (curr_y - foy) / fit_pick - comp_ph / 2.0;
                                             match active_tool {
                                                 EditorTool::Text => {
                                                     s_tool.update(cx, |s, cx| {
@@ -7971,7 +8020,10 @@ fn effect_template_for(plugin_id: &str) -> Option<EffectType> {
     }
     Some(match plugin_id {
         "net.sf.openfx.blur" => EffectType::gaussian_blur(10.0),
+        "net.sf.openfx.sharpen" => EffectType::sharpen(50.0, 2.0),
         "net.sf.openfx.brightness_contrast" => EffectType::brightness_contrast(15.0, 10.0),
+        "net.sf.openfx.levels" => EffectType::levels(0.0, 255.0, 1.0, 0.0, 255.0),
+        "net.sf.openfx.hue_saturation" => EffectType::hue_saturation(0.0, 0.0, 0.0),
         "net.sf.openfx.tint" => EffectType::tint(Color::BLACK, Color::WHITE, 100.0),
         "net.sf.openfx.invert" => EffectType::invert(100.0),
         "net.sf.openfx.exposure" => EffectType::exposure(0.0),
@@ -7988,6 +8040,7 @@ fn effect_template_for(plugin_id: &str) -> Option<EffectType> {
         "net.sf.openfx.tiler" => EffectType::tiler(2.0, 2.0),
         "net.sf.openfx.warp" => EffectType::warp(30.0, 1.0),
         "net.sf.openfx.bloom" => EffectType::bloom(40.0, 10.0),
+        "net.sf.openfx.vignette" => EffectType::vignette(50.0, 50.0),
         "net.sf.openfx.noise" => EffectType::noise_generator(25.0, true),
         "net.sf.openfx.checkerboard" => {
             EffectType::checkerboard(32.0, Color::BLACK, Color::WHITE)

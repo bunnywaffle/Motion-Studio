@@ -92,28 +92,26 @@ impl FloatBuf {
         }
         out
     }
-}
 
-pub fn png_encode(w: u32, h: u32, rgba8: &[u8]) -> Vec<u8> {
-    use image::codecs::png::{CompressionType, FilterType, PngEncoder};
-    use image::ImageEncoder;
-    let mut out = Vec::new();
-    let enc = PngEncoder::new_with_quality(
-        &mut out,
-        CompressionType::Fast,
-        FilterType::Sub,
-    );
-    // Fall back to raw bytes on encode error (never expected).
-    if enc
-        .write_image(rgba8, w.max(1), h.max(1), image::ExtendedColorType::Rgba8)
-        .is_err()
-    {
-        return rgba8.to_vec();
+    /// Straight-alpha BGRA8 bytes for direct `RenderImage` upload (GPUI
+    /// caches BGRA frames; feeding PNGs would re-encode, re-hash, and
+    /// re-decode per layer per tick with async pop-in).
+    pub fn to_bgra8(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.px.len() * 4);
+        for p in &self.px {
+            let (r, g, b) = if p.a <= 1e-6 {
+                (0.0, 0.0, 0.0)
+            } else {
+                (p.r / p.a, p.g / p.a, p.b / p.a)
+            };
+            out.push((b.clamp(0.0, 1.0) * 255.0).round() as u8);
+            out.push((g.clamp(0.0, 1.0) * 255.0).round() as u8);
+            out.push((r.clamp(0.0, 1.0) * 255.0).round() as u8);
+            out.push((p.a.clamp(0.0, 1.0) * 255.0).round() as u8);
+        }
+        out
     }
-    out
 }
-
-// ---------------------------------------------------------------------------
 
 /// Gaussian blur a straight-alpha buffer in place (delegates to the
 /// tested renderer CPU kernel on packed bytes). Radius is capped for

@@ -31,7 +31,7 @@ pub mod stock;
 pub mod text;
 
 pub use affine::{Aff, aff_apply, aff_invert, aff_mul, fold_transform, skew_about};
-pub use buffer::{FloatBuf, blur_buffer, png_encode};
+pub use buffer::{FloatBuf, blur_buffer};
 pub use comp::rasterize_comp;
 pub use effects::{RasterFx, apply_effect_pixels};
 pub use layer::{RasterEntry, decoded_asset, layer_cache_key, rasterize_layer};

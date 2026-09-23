@@ -2999,11 +2999,12 @@ mod tests {
 
             // Verify effects items are visible in the DOM. Categories start
             // collapsed (accordion): headers render, rows appear on expand.
+            // With 12 categories the list scrolls: assert top headers
+            // first, then scroll for the lower ones.
             assert!(window.find("effects_panel").visible());
             assert!(window.find("effects_categories").visible());
             assert!(window.find("effect_category_blur").visible());
             assert!(window.find("effect_category_keying").visible());
-            assert!(window.find("effect_category_text").visible());
             panels.effects.update(cx, |p, cx| {
                 assert!(p.is_collapsed("blur"));
                 assert!(p.is_collapsed("keying"));
@@ -3016,10 +3017,43 @@ mod tests {
             window.render_frame(cx);
             assert!(window.find("effect_item_blur").visible());
             assert!(window.find("effect_item_sharpen").visible());
+            // Lower entries need scrolling (expanded categories make the
+            // list taller than the dock): step down until each is painted.
+            for _ in 0..6 {
+                window.scroll(
+                    "effects_categories",
+                    gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(-400.))),
+                    cx,
+                );
+                window.render_frame(cx);
+                if window
+                    .try_find("effect_item_chroma_key")
+                    .map(|e| e.visible())
+                    .unwrap_or(false)
+                {
+                    break;
+                }
+            }
             assert!(window.find("effect_item_brightness_contrast").visible());
             assert!(window.find("effect_item_levels").visible());
             assert!(window.find("effect_item_chroma_key").visible());
             assert!(window.find("effect_item_luma_key").visible());
+            for _ in 0..8 {
+                window.scroll(
+                    "effects_categories",
+                    gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(-400.))),
+                    cx,
+                );
+                window.render_frame(cx);
+                if window
+                    .try_find("effect_category_text")
+                    .map(|e| e.visible())
+                    .unwrap_or(false)
+                {
+                    break;
+                }
+            }
+            assert!(window.find("effect_category_text").visible());
             assert!(window.find("effect_item_text_outline").visible());
 
             // 2. Add effect to selected layer
@@ -3372,6 +3406,32 @@ mod tests {
             assert!(panel.is_layer_expanded("layer_bg"));
             assert!(panel.is_group_expanded("layer_bg:transform"));
         });
+    }
+
+    #[gpui_kit::test]
+    fn test_viewport_pick_topmost_layer(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (_root, app_view) = setup_test_window(cx);
+        cx.run_until_parked();
+
+        // Accent box sits inside the full-canvas background: picking its
+        // interior must return the accent, not the covered background.
+        // Frame 0 accent world x-range is [-350, -50], y-range [-150, 150].
+        let (boxes, picked) = app_view.read_with(cx, |view, cx| {
+            let panels = view.panels().clone();
+            panels.viewer.read_with(cx, |panel, _| {
+                (panel.pick_boxes.clone(), panel.pick_top_at(-200.0, 0.0))
+            })
+        });
+        assert!(!boxes.is_empty());
+        assert_eq!(boxes[0].id, "layer_accent", "pick order must be topmost-first");
+        assert_eq!(picked.as_deref(), Some("layer_accent"));
+        // Far corner is background-only.
+        let picked_bg = app_view.read_with(cx, |view, cx| {
+            let panels = view.panels().clone();
+            panels.viewer.read_with(cx, |panel, _| panel.pick_top_at(-900.0, -500.0))
+        });
+        assert_eq!(picked_bg.as_deref(), Some("layer_bg"));
     }
 
     #[test]
