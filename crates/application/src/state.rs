@@ -98,6 +98,33 @@ pub fn resolve_font_family(requested: &str) -> String {
     }
 }
 
+/// Viewport preview resolution. Full rasterizes at the capped box size;
+/// Half quarters pixels everywhere (faster interaction AND idle preview
+/// on weak machines). Gestures always drop to Half while held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PreviewQuality {
+    #[default]
+    Full,
+    Half,
+}
+
+impl PreviewQuality {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Full => "Full",
+            Self::Half => "Half",
+        }
+    }
+
+    /// Resolution divisor for raster output sizes.
+    pub const fn divisor(self) -> u32 {
+        match self {
+            Self::Full => 1,
+            Self::Half => 2,
+        }
+    }
+}
+
 /// Central application editor state managing the active project, playback clock,
 /// layer selection, active tool, and composition evaluation.
 pub struct EditorState {
@@ -127,6 +154,9 @@ pub struct EditorState {
     /// of the full per-pixel interpreter, so scrubbing stays fluid and
     /// full quality lands on release.
     pub preview_fast: bool,
+    /// Sticky preview resolution (View menu). Combined with `preview_fast`
+    /// (gestures/playback) to pick raster sizes.
+    pub preview_quality: PreviewQuality,
     /// On-disk path of the open project, if it was saved/loaded.
     pub project_path: Option<PathBuf>,
     /// Session recent-file list for the File menu (newest first, cap 8).
@@ -613,6 +643,7 @@ impl EditorState {
             tool_solid_color: Color::from_rgba_u8(59, 130, 246, 255),
             tool_rotate_step: 15.0,
             preview_fast: false,
+            preview_quality: PreviewQuality::Full,
             project_path: None,
             recent_projects: Vec::new(),
             undo_stack: Vec::new(),
@@ -1093,6 +1124,21 @@ impl EditorState {
             self.clock.play();
         } else {
             self.clock.pause();
+        }
+    }
+
+    /// Set the sticky viewport preview resolution (View menu).
+    pub fn set_preview_quality(&mut self, quality: PreviewQuality) {
+        self.preview_quality = quality;
+    }
+
+    /// Effective raster divisor right now: gestures/playback always halve,
+    /// otherwise the sticky preference applies.
+    pub fn preview_divisor(&self) -> u32 {
+        if self.is_playing || self.preview_fast {
+            2
+        } else {
+            self.preview_quality.divisor()
         }
     }
 

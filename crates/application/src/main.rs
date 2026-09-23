@@ -161,6 +161,9 @@ impl AppView {
 enum TopMenu {
     File,
     Edit,
+    Composition,
+    Layer,
+    View,
     About,
 }
 
@@ -169,6 +172,9 @@ impl TopMenu {
         match self {
             Self::File => "File",
             Self::Edit => "Edit",
+            Self::Composition => "Composition",
+            Self::Layer => "Layer",
+            Self::View => "View",
             Self::About => "About",
         }
     }
@@ -366,7 +372,7 @@ fn render_menubar(
         .border_color(cx.theme().border)
         .text_color(cx.theme().foreground);
 
-    for menu in [TopMenu::File, TopMenu::Edit, TopMenu::About] {
+    for menu in [TopMenu::File, TopMenu::Edit, TopMenu::Composition, TopMenu::Layer, TopMenu::View, TopMenu::About] {
         let a_toggle = app.clone();
         let is_open = open_menu == Some(menu);
         let mut btn = div()
@@ -568,6 +574,280 @@ fn render_menubar(
                             move |cx| {
                                 s.update(cx, |s, cx| {
                                     let _ = s.delete_selected_layer();
+                                    cx.notify();
+                                });
+                                a.update(cx, |this, cx| {
+                                    this.open_menu = None;
+                                    cx.notify();
+                                });
+                            },
+                        ));
+                    }
+                }
+                TopMenu::Composition => {
+                    {
+                        let (a, s) = (app.clone(), state.clone());
+                        let playing = state.read(cx).is_playing;
+                        items = items.child(menu_item(
+                            "menu_play_pause".to_string(),
+                            if playing { "Pause".to_string() } else { "Play".to_string() },
+                            Some("Space".to_string()),
+                            true,
+                            cx,
+                            move |cx| {
+                                s.update(cx, |s, cx| {
+                                    s.toggle_playback();
+                                    cx.notify();
+                                });
+                                a.update(cx, |this, cx| {
+                                    this.open_menu = None;
+                                    cx.notify();
+                                });
+                            },
+                        ));
+                    }
+                    {
+                        let (a, s) = (app.clone(), state.clone());
+                        items = items.child(menu_item("menu_step_back".to_string(), "Step Back".to_string(), Some("←".to_string()), true, cx, move |cx| {
+                            s.update(cx, |s, cx| {
+                                s.step_backward();
+                                cx.notify();
+                            });
+                            a.update(cx, |this, cx| {
+                                this.open_menu = None;
+                                cx.notify();
+                            });
+                        }));
+                    }
+                    {
+                        let (a, s) = (app.clone(), state.clone());
+                        items = items.child(menu_item("menu_step_forward".to_string(), "Step Forward".to_string(), Some("→".to_string()), true, cx, move |cx| {
+                            s.update(cx, |s, cx| {
+                                s.step_forward();
+                                cx.notify();
+                            });
+                            a.update(cx, |this, cx| {
+                                this.open_menu = None;
+                                cx.notify();
+                            });
+                        }));
+                    }
+                    {
+                        let (a, s) = (app.clone(), state.clone());
+                        items = items.child(menu_item("menu_go_start".to_string(), "Go to Start".to_string(), Some("Home".to_string()), true, cx, move |cx| {
+                            s.update(cx, |s, cx| {
+                                s.jump_to_start();
+                                cx.notify();
+                            });
+                            a.update(cx, |this, cx| {
+                                this.open_menu = None;
+                                cx.notify();
+                            });
+                        }));
+                    }
+                    {
+                        let (a, s) = (app.clone(), state.clone());
+                        items = items.child(menu_item("menu_go_end".to_string(), "Go to End".to_string(), Some("End".to_string()), true, cx, move |cx| {
+                            s.update(cx, |s, cx| {
+                                s.jump_to_end();
+                                cx.notify();
+                            });
+                            a.update(cx, |this, cx| {
+                                this.open_menu = None;
+                                cx.notify();
+                            });
+                        }));
+                    }
+                    items = items.child(
+                        div().h(px(1.)).my_0p5().bg(cx.theme().border),
+                    );
+                    {
+                        let a = app.clone();
+                        items = items.child(menu_item(
+                            "menu_project_manager2".to_string(),
+                            "Project Settings & Manager…".to_string(),
+                            None,
+                            true,
+                            cx,
+                            move |cx| {
+                                a.update(cx, |this, cx| {
+                                    this.open_menu = None;
+                                    this.show_project_manager = true;
+                                    cx.notify();
+                                });
+                            },
+                        ));
+                    }
+                }
+                TopMenu::Layer => {
+                    {
+                        let (a, s) = (app.clone(), state.clone());
+                        items = items.child(menu_item("menu_new_solid".to_string(), "New Solid".to_string(), None, true, cx, move |cx| {
+                            s.update(cx, |s, cx| {
+                                let _ = s.add_solid_layer("New Solid", project::Color::from_rgba_u8(245, 158, 11, 255), 400, 400);
+                                cx.notify();
+                            });
+                            a.update(cx, |this, cx| {
+                                this.open_menu = None;
+                                cx.notify();
+                            });
+                        }));
+                    }
+                    {
+                        let (a, s) = (app.clone(), state.clone());
+                        items = items.child(menu_item("menu_new_text".to_string(), "New Text".to_string(), None, true, cx, move |cx| {
+                            s.update(cx, |s, cx| {
+                                let _ = s.add_text_layer("New Text", None);
+                                cx.notify();
+                            });
+                            a.update(cx, |this, cx| {
+                                this.open_menu = None;
+                                cx.notify();
+                            });
+                        }));
+                    }
+                    {
+                        let (a, s) = (app.clone(), state.clone());
+                        items = items.child(menu_item("menu_new_rect".to_string(), "New Rectangle".to_string(), None, true, cx, move |cx| {
+                            s.update(cx, |s, cx| {
+                                let _ = s.add_rectangle_shape_layer(300.0, 200.0, None);
+                                cx.notify();
+                            });
+                            a.update(cx, |this, cx| {
+                                this.open_menu = None;
+                                cx.notify();
+                            });
+                        }));
+                    }
+                    {
+                        let (a, s) = (app.clone(), state.clone());
+                        items = items.child(menu_item("menu_new_ellipse".to_string(), "New Ellipse".to_string(), None, true, cx, move |cx| {
+                            s.update(cx, |s, cx| {
+                                let _ = s.add_ellipse_shape_layer(150.0, 100.0, None);
+                                cx.notify();
+                            });
+                            a.update(cx, |this, cx| {
+                                this.open_menu = None;
+                                cx.notify();
+                            });
+                        }));
+                    }
+                    {
+                        let (a, s) = (app.clone(), state.clone());
+                        items = items.child(menu_item("menu_new_adjustment".to_string(), "New Adjustment Layer".to_string(), None, true, cx, move |cx| {
+                            s.update(cx, |s, cx| {
+                                let _ = s.add_adjustment_layer(None);
+                                cx.notify();
+                            });
+                            a.update(cx, |this, cx| {
+                                this.open_menu = None;
+                                cx.notify();
+                            });
+                        }));
+                    }
+                    items = items.child(
+                        div().h(px(1.)).my_0p5().bg(cx.theme().border),
+                    );
+                    {
+                        let (a, s) = (app.clone(), state.clone());
+                        items = items.child(menu_item(
+                            "menu_layer_up".to_string(),
+                            "Bring Forward".to_string(),
+                            None,
+                            has_selection,
+                            cx,
+                            move |cx| {
+                                s.update(cx, |s, cx| {
+                                    let _ = s.move_selected_layer_up();
+                                    cx.notify();
+                                });
+                                a.update(cx, |this, cx| {
+                                    this.open_menu = None;
+                                    cx.notify();
+                                });
+                            },
+                        ));
+                    }
+                    {
+                        let (a, s) = (app.clone(), state.clone());
+                        items = items.child(menu_item(
+                            "menu_layer_down".to_string(),
+                            "Send Backward".to_string(),
+                            None,
+                            has_selection,
+                            cx,
+                            move |cx| {
+                                s.update(cx, |s, cx| {
+                                    let _ = s.move_selected_layer_down();
+                                    cx.notify();
+                                });
+                                a.update(cx, |this, cx| {
+                                    this.open_menu = None;
+                                    cx.notify();
+                                });
+                            },
+                        ));
+                    }
+                }
+                TopMenu::View => {
+                    {
+                        let (a, s) = (app.clone(), state.clone());
+                        let full = state.read(cx).timeline_full_width;
+                        items = items.child(menu_item(
+                            "menu_timeline_width".to_string(),
+                            if full { "Timeline: Docked".to_string() } else { "Timeline: Full Width".to_string() },
+                            None,
+                            true,
+                            cx,
+                            move |cx| {
+                                s.update(cx, |s, cx| {
+                                    s.toggle_timeline_full_width();
+                                    cx.notify();
+                                });
+                                a.update(cx, |this, cx| {
+                                    this.open_menu = None;
+                                    cx.notify();
+                                });
+                            },
+                        ));
+                    }
+                    {
+                        let (a, s) = (app.clone(), state.clone());
+                        let graph = state.read(cx).spline_editor_open;
+                        items = items.child(menu_item(
+                            "menu_graph_view".to_string(),
+                            if graph { "Timeline View".to_string() } else { "Graph (Splines) View".to_string() },
+                            None,
+                            true,
+                            cx,
+                            move |cx| {
+                                s.update(cx, |s, cx| {
+                                    s.toggle_spline_editor();
+                                    cx.notify();
+                                });
+                                a.update(cx, |this, cx| {
+                                    this.open_menu = None;
+                                    cx.notify();
+                                });
+                            },
+                        ));
+                    }
+                    {
+                        let (a, s) = (app.clone(), state.clone());
+                        let half = state.read(cx).preview_quality == crate::state::PreviewQuality::Half;
+                        items = items.child(menu_item(
+                            "menu_preview_quality".to_string(),
+                            if half { "Preview Quality: Full".to_string() } else { "Preview Quality: Half".to_string() },
+                            None,
+                            true,
+                            cx,
+                            move |cx| {
+                                s.update(cx, |s, cx| {
+                                    s.set_preview_quality(if half {
+                                        crate::state::PreviewQuality::Full
+                                    } else {
+                                        crate::state::PreviewQuality::Half
+                                    });
                                     cx.notify();
                                 });
                                 a.update(cx, |this, cx| {
@@ -1499,6 +1779,26 @@ impl Render for AppView {
                 } else if key == "delete" || key == "backspace" {
                     state_key.update(cx, |s, cx| {
                         let _ = s.delete_selected_layer();
+                        cx.notify();
+                    });
+                } else if key == "home" {
+                    state_key.update(cx, |s, cx| {
+                        s.jump_to_start();
+                        cx.notify();
+                    });
+                } else if key == "end" {
+                    state_key.update(cx, |s, cx| {
+                        s.jump_to_end();
+                        cx.notify();
+                    });
+                } else if key == "left" || key == "arrowleft" {
+                    state_key.update(cx, |s, cx| {
+                        s.step_backward();
+                        cx.notify();
+                    });
+                } else if key == "right" || key == "arrowright" {
+                    state_key.update(cx, |s, cx| {
+                        s.step_forward();
                         cx.notify();
                     });
                 } else if key == "v" {

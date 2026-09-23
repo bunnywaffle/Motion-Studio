@@ -201,13 +201,15 @@ pub fn layer_cache_key(
         e.enabled && matches!(&e.effect_type, EvaluatedEffectType::ShaderLab { .. })
     });
     (if time_varying { frame } else { 0 }).hash(&mut h);
-    // Evaluated transform (world matrix covers parents).
+    // Evaluated transform. Only the linear part (a/b/c/d) affects pixels:
+    // pure translation merely shifts the AABB, and the raster is relative
+    // to the box origin — so move-drags hit the cache and cost only a
+    // GPU-side relayout instead of a re-raster + PNG round-trip. Local
+    // position/scale/rotation/anchor are covered transitively: anything
+    // that changes pixels also changes the world linear part (or the
+    // effects hash below).
     let wm = layer.world_matrix();
-    for v in [wm.a, wm.b, wm.c, wm.d, wm.tx, wm.ty] {
-        v.to_bits().hash(&mut h);
-    }
-    let t = &layer.transform;
-    for v in [t.position.x, t.position.y, t.scale.x, t.scale.y, t.rotation, t.anchor_point.x, t.anchor_point.y] {
+    for v in [wm.a, wm.b, wm.c, wm.d] {
         v.to_bits().hash(&mut h);
     }
     layer.effective_opacity.to_bits().hash(&mut h);
@@ -994,9 +996,33 @@ mod tests {
         assert_ne!(k1, layer_cache_key(&layer, 0, 100, 100, true));
         // Size participates.
         assert_ne!(k1, layer_cache_key(&layer, 0, 50, 50, false));
-        // Mutating the transform changes the key.
-        let mut moved = layer.clone();
-        moved.transform.position = project::Vec2::new(10.0, 0.0);
-        assert_ne!(k1, layer_cache_key(&moved, 0, 100, 100, false));
+        // Pure translation does NOT change the key: the raster is relative
+        // to the box origin, so move-drags hit the cache and cost only a
+        // relayout. Rotation changes the linear part, so it must miss.
+        // (Evaluated through the real evaluator so world matrices match
+        // production; mutating EvaluatedTransform fields by hand would not
+        // refresh the stored world matrix.)
+        let translated = {
+            let mut project = Project::new("p", "P");
+            let mut comp = Composition::hd_1080p_30fps("c", "C", 5.0);
+            let tc = TimeCode::from_frames(0, 30.0);
+            let mut layer = project::Layer::solid("l1", "L", Color::WHITE, 100, 100, tc, tc);
+            layer.transform.position.set_value(project::Vec2::new(111.0, -37.0));
+            comp.add_layer(layer).unwrap();
+            project.add_composition(comp).unwrap();
+            eval_first(&project, "c")
+        };
+        assert_eq!(k1, layer_cache_key(&translated, 0, 100, 100, false));
+        let rotated = {
+            let mut project = Project::new("p", "P");
+            let mut comp = Composition::hd_1080p_30fps("c", "C", 5.0);
+            let tc = TimeCode::from_frames(0, 30.0);
+            let mut layer = project::Layer::solid("l1", "L", Color::WHITE, 100, 100, tc, tc);
+            layer.transform.rotation.set_value(23.0);
+            comp.add_layer(layer).unwrap();
+            project.add_composition(comp).unwrap();
+            eval_first(&project, "c")
+        };
+        assert_ne!(k1, layer_cache_key(&rotated, 0, 100, 100, false));
     }
 }

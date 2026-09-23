@@ -1479,6 +1479,10 @@ pub struct CompositionViewerPanel {
     pub gizmo_drag: Option<ViewerGizmoDrag>,
     /// Per-layer CPU raster cache (layer id -> last raster).
     pub raster_cache: HashMap<String, crate::raster::RasterEntry>,
+    /// Decoded gpui images by PNG payload identity (Arc pointer). New
+    /// `gpui::Image`s hash their bytes on construction, so rebuilding them
+    /// per render wastes milliseconds on cache hits.
+    pub img_cache: HashMap<usize, std::sync::Arc<gpui::Image>>,
     /// Decoded image asset cache (asset id -> RGBA).
     pub asset_cache: HashMap<String, Arc<image::RgbaImage>>,
     /// Decoded image dimensions cache (asset id -> w/h). `image_dimensions`
@@ -1487,6 +1491,8 @@ pub struct CompositionViewerPanel {
     pub img_dims: HashMap<String, (u32, u32)>,
     /// Last fitted canvas size, for cursor mapping before measure.
     pub canvas_px: Option<(f32, f32)>,
+    /// Last viewer build time in ms (status bar readout).
+    pub last_frame_ms: f32,
 }
 
 /// Viewport transform-gizmo drag state (After Effects-style direct
@@ -1535,9 +1541,11 @@ impl CompositionViewerPanel {
             frame_origin: None,
             gizmo_drag: None,
             raster_cache: HashMap::new(),
+            img_cache: HashMap::new(),
             asset_cache: HashMap::new(),
             img_dims: HashMap::new(),
             canvas_px: None,
+            last_frame_ms: 0.0,
         }
     }
 
@@ -1575,6 +1583,7 @@ impl Focusable for CompositionViewerPanel {
 
 impl Render for CompositionViewerPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let render_t0 = std::time::Instant::now();
         let state = self.state.read(cx);
         let comp_opt = state.active_composition();
         let eval_stack = state.evaluate_current_frame().ok();
@@ -1701,19 +1710,16 @@ impl Render for CompositionViewerPanel {
                     // full per-pixel quality via the cache key below.
                     let playing_now = state.is_playing || state.preview_fast;
                     // Raster output size = AABB box, capped for speed (the
-                    // img child stretches to the shell on cap). Fast preview
-                    // (playback / scrub / gestures) halves resolution: 4x
-                    // fewer pixels per layer, full quality on release. The
-                    // cache key covers size + quality flag, so previews
-                    // never poison full-quality entries.
-                    let (mut rw, mut rh) = (
-                        (l_w.ceil().max(1.0) as u32).min(1024),
-                        (l_h.ceil().max(1.0) as u32).min(1024),
+                    // img child stretches to the shell on cap). Halved
+                    // during gestures/playback and per the View > Preview
+                    // Quality preference when idle. The cache key covers
+                    // size + quality flag, so previews never poison
+                    // full-quality entries.
+                    let qdiv = state.preview_divisor().max(1);
+                    let (rw, rh) = (
+                        ((l_w / qdiv as f32).ceil().max(1.0) as u32).min(1024),
+                        ((l_h / qdiv as f32).ceil().max(1.0) as u32).min(1024),
                     );
-                    if playing_now {
-                        rw = (rw / 2).max(1);
-                        rh = (rh / 2).max(1);
-                    }
                     // Decode image assets once into the shared cache.
                     if let LayerSource::Image { asset_id } = &layer.source {
                         if let Some(asset) = state.project.get_asset(asset_id) {
@@ -1728,8 +1734,13 @@ impl Render for CompositionViewerPanel {
                         rh,
                         playing_now,
                     );
+                    // Exotic blend modes sample the backdrop average under
+                    // the box, which moves with translation — the
+                    // translation-stable key would go stale, so those
+                    // layers always re-rasterize.
+                    let cacheable = layer.blend_mode == BlendMode::Normal;
                     let entry = match self.raster_cache.get(&layer.id) {
-                        Some(e) if e.key == cache_key && e.w == rw && e.h == rh => e.clone(),
+                        Some(e) if cacheable && e.key == cache_key && e.w == rw && e.h == rh => e.clone(),
                         _ => {
                             let (buf, avg, empty) = crate::raster::rasterize_layer(
                                 layer,
@@ -1763,6 +1774,7 @@ impl Render for CompositionViewerPanel {
                             // Bound memory: long playbacks evict (recompute).
                             if self.raster_cache.len() > 96 {
                                 self.raster_cache.clear();
+                                self.img_cache.clear();
                                 self.raster_cache.insert(layer.id.clone(), e.clone());
                             }
                             e
@@ -1827,15 +1839,29 @@ impl Render for CompositionViewerPanel {
                         });
 
                     // Raster pixels (CPU compositor output for this layer).
+                    // The decoded gpui::Image is cached per unique PNG
+                    // payload: rebuilding it every render would re-clone
+                    // megabytes and re-hash them (Image ids are content
+                    // hashes) for zero visual change on cache hits.
                     if !entry.empty {
-                        let img_bytes = entry.png.clone();
+                        let png_ptr = std::sync::Arc::as_ptr(&entry.png) as usize;
+                        let img = match self.img_cache.get(&png_ptr) {
+                            Some(im) => im.clone(),
+                            None => {
+                                let im = std::sync::Arc::new(gpui::Image::from_bytes(
+                                    gpui::ImageFormat::Png,
+                                    (*entry.png).clone(),
+                                ));
+                                self.img_cache.insert(png_ptr, im.clone());
+                                if self.img_cache.len() > 96 {
+                                    self.img_cache.clear();
+                                    self.img_cache.insert(png_ptr, im.clone());
+                                }
+                                im
+                            }
+                        };
                         layer_el = layer_el.child(
-                            gpui::img(std::sync::Arc::new(gpui::Image::from_bytes(
-                                gpui::ImageFormat::Png,
-                                (*img_bytes).clone(),
-                            )))
-                            .w(px(l_w))
-                            .h(px(l_h)),
+                            gpui::img(img).w(px(l_w)).h(px(l_h)),
                         );
                     }
 
@@ -2877,7 +2903,11 @@ impl Render for CompositionViewerPanel {
                     )
             )
             // Status bar
-            .child(
+            .child({
+                self.last_frame_ms = render_t0.elapsed().as_secs_f32() * 1000.0;
+                let ms = self.last_frame_ms;
+                let layer_count = comp_opt.map(|c| c.layers.len()).unwrap_or(0);
+                let quality = state.preview_quality.label();
                 h_flex()
                     .px_3()
                     .py_1()
@@ -2887,8 +2917,11 @@ impl Render for CompositionViewerPanel {
                     .text_color(cx.theme().muted_foreground)
                     .justify_between()
                     .child(div().child(format!("Time: {} (Frame {})", current_tc, current_frame)))
-                    .child(div().child("Scroll to Zoom • Space to Play/Pause")),
-            )
+                    .child(div().child(format!(
+                        "{layer_count} layers · {quality} preview · {ms:.1} ms"
+                    )))
+                    .child(div().child("Scroll to Zoom • Space to Play/Pause"))
+            })
     }
 }
 
@@ -5977,7 +6010,6 @@ impl Render for PropertiesPanel {
 
         let state = self.state.read(cx);
         let selected_layer = state.selected_layer();
-        let eval_stack = state.evaluate_current_frame().ok();
 
         let (header_title, layer_type_title) = match selected_layer {
             Some(l) => {
@@ -6145,12 +6177,12 @@ impl Render for PropertiesPanel {
                     .p_3()
                     .gap_3()
                     .children(if let Some(layer) = selected_layer {
-                        let eval_layer = eval_stack.as_ref().and_then(|s| s.get_layer(&layer.id));
-                        let anchor = eval_layer.map(|l| l.transform.anchor_point).unwrap_or(layer.transform.anchor_point.value);
-                        let pos = eval_layer.map(|l| l.transform.position).unwrap_or(layer.transform.position.value);
-                        let sc = eval_layer.map(|l| l.transform.scale).unwrap_or(layer.transform.scale.value);
-                        let rot = eval_layer.map(|l| l.transform.rotation).unwrap_or(layer.transform.rotation.value);
+                        // Local transform values at the playhead (cheap
+                        // property reads). The full scene eval is the
+                        // viewer's job — doing it here too doubled
+                        // evaluation cost on every frame.
                         let current_tc = state.clock.timecode();
+                        let (anchor, pos, sc, rot) = layer.transform.evaluate_at(&current_tc);
                         let op = layer.opacity.evaluate_at(&current_tc).clamp(0.0, 100.0);
 
                         let s_anchor_mx = self.state.clone();
