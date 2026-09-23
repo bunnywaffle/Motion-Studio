@@ -199,6 +199,7 @@ dependencies = [
  "project",
  "renderer",
  "rfd",
+ "serde_json",
 ]
 
 [[package]]

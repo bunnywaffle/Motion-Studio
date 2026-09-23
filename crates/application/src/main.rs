@@ -5,11 +5,12 @@ use state::EditorState;
 
 use std::rc::Rc;
 
-pub use gpui_kit::base::{h_flex, v_flex, StyledExt, TestSupportExt};
+pub use gpui_kit::base::{h_flex, v_flex, Positioner, StyledExt, TestSupportExt};
 pub use gpui_kit::component::dock::{
     panel_handle, BasePanel, DockArea, DockLayout, DockPlacement, DockSkin, Panel, PanelStyle,
 };
 use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
+use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::*;
 
 pub use panels::{
@@ -29,6 +30,16 @@ pub struct AppView {
     _playback_task: Option<Task<()>>,
     /// Last window size the dock layout was fitted to (responsive docks).
     docks_sized_for: Option<(i32, i32)>,
+    /// Open top-level menu (File / Edit / About), if any.
+    open_menu: Option<TopMenu>,
+    /// About dialog visibility.
+    show_about: bool,
+    /// New-project dialog visibility.
+    show_new_project: bool,
+    /// Project settings / manager dialog visibility.
+    pub show_project_manager: bool,
+    /// Last menu/file action note (saved path, errors).
+    menu_note: Option<String>,
 }
 
 impl AppView {
@@ -114,6 +125,11 @@ impl AppView {
             _subscriptions: Vec::new(),
             _playback_task: Some(playback_task),
             docks_sized_for: None,
+            open_menu: None,
+            show_about: false,
+            show_new_project: false,
+            show_project_manager: false,
+            menu_note: None,
         }
     }
 
@@ -138,8 +154,483 @@ impl AppView {
     }
 }
 
-fn render_toolbar(state: &Entity<EditorState>, cx: &App) -> impl IntoElement {
-    let s_read = state.read(cx);
+// --- Top menu bar (File / Edit / About) ---
+
+/// Top-level menu ids for the application menu bar.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TopMenu {
+    File,
+    Edit,
+    About,
+}
+
+impl TopMenu {
+    fn label(self) -> &'static str {
+        match self {
+            Self::File => "File",
+            Self::Edit => "Edit",
+            Self::About => "About",
+        }
+    }
+}
+
+/// Ask the OS for a project file to open (rfd on a worker thread so the
+/// UI never blocks), then load it into the session.
+fn request_open_project(app: &Entity<AppView>, state: &Entity<EditorState>, cx: &mut App) {
+    let s_open = state.clone();
+    let a_open = app.clone();
+    cx.spawn(|cx: &mut AsyncApp| {
+        let cx = cx.clone();
+        async move {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let _ = std::thread::Builder::new()
+                .name("file-dialog-worker".to_string())
+                .stack_size(8 * 1024 * 1024)
+                .spawn(move || {
+                    let file = rfd::FileDialog::new()
+                        .add_filter("Motion Project", &["json", "motion"])
+                        .pick_file();
+                    let _ = tx.send(file);
+                });
+            if let Ok(Some(path)) = rx.recv() {
+                let _ = cx.update(|cx| {
+                    s_open.update(cx, |s, cx| {
+                        match s.load_project_from(&path) {
+                            Ok(()) => {
+                                a_open.update(cx, |a, cx| {
+                                    a.menu_note = Some(format!(
+                                        "Opened {}",
+                                        path.file_name().and_then(|n| n.to_str()).unwrap_or("project")
+                                    ));
+                                    cx.notify();
+                                });
+                            }
+                            Err(e) => {
+                                a_open.update(cx, |a, cx| {
+                                    a.menu_note = Some(format!("Open failed: {e}"));
+                                    cx.notify();
+                                });
+                            }
+                        }
+                        cx.notify();
+                    });
+                });
+            }
+        }
+    })
+    .detach();
+}
+
+/// Ask the OS where to save the project, then save it.
+fn request_save_project_as(app: &Entity<AppView>, state: &Entity<EditorState>, cx: &mut App) {
+    let s_save = state.clone();
+    let a_save = app.clone();
+    let default_name = state
+        .read(cx)
+        .project_display_name()
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == ' ' || c == '_' || c == '-' { c } else { '_' })
+        .collect::<String>();
+    cx.spawn(|cx: &mut AsyncApp| {
+        let cx = cx.clone();
+        async move {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let _ = std::thread::Builder::new()
+                .name("file-dialog-worker".to_string())
+                .stack_size(8 * 1024 * 1024)
+                .spawn(move || {
+                    let file = rfd::FileDialog::new()
+                        .add_filter("Motion Project", &["json", "motion"])
+                        .set_file_name(format!("{default_name}.json"))
+                        .save_file();
+                    let _ = tx.send(file);
+                });
+            if let Ok(Some(path)) = rx.recv() {
+                let _ = cx.update(|cx| {
+                    s_save.update(cx, |s, cx| {
+                        match s.save_project_to(&path) {
+                            Ok(()) => {
+                                a_save.update(cx, |a, cx| {
+                                    a.menu_note = Some(format!(
+                                        "Saved {}",
+                                        path.file_name().and_then(|n| n.to_str()).unwrap_or("project")
+                                    ));
+                                    cx.notify();
+                                });
+                            }
+                            Err(e) => {
+                                a_save.update(cx, |a, cx| {
+                                    a.menu_note = Some(format!("Save failed: {e}"));
+                                    cx.notify();
+                                });
+                            }
+                        }
+                        cx.notify();
+                    });
+                });
+            }
+        }
+    })
+    .detach();
+}
+
+/// Save to the remembered path, or fall back to Save As for untitled work.
+fn request_save_project(app: &Entity<AppView>, state: &Entity<EditorState>, cx: &mut App) {
+    if state.read(cx).project_path.is_none() {
+        request_save_project_as(app, state, cx);
+        return;
+    }
+    let s_save = state.clone();
+    let a_save = app.clone();
+    s_save.update(cx, |s, cx| {
+        match s.save_project() {
+            Ok(()) => {
+                a_save.update(cx, |a, cx| {
+                    a.menu_note = Some(format!("Saved {}", s.project_display_name()));
+                    cx.notify();
+                });
+            }
+            Err(e) => {
+                a_save.update(cx, |a, cx| {
+                    a.menu_note = Some(format!("Save failed: {e}"));
+                    cx.notify();
+                });
+            }
+        }
+        cx.notify();
+    });
+}
+
+/// One menu-bar dropdown item (label + optional shortcut hint).
+fn menu_item<F>(id: String, label: String, hint: Option<String>, enabled: bool, cx: &App, on_pick: F) -> AnyElement
+where
+    F: Fn(&mut App) + 'static,
+{
+    let mut row = h_flex()
+        .id(SharedString::from(id))
+        .test_support()
+        .px_2()
+        .py_1()
+        .rounded_sm()
+        .items_center()
+        .justify_between()
+        .gap_4()
+        .text_xs();
+    if enabled {
+        row = row
+            .cursor_pointer()
+            .text_color(cx.theme().foreground)
+            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                on_pick(cx);
+            });
+    } else {
+        row = row.text_color(cx.theme().muted_foreground.opacity(0.5));
+    }
+    row.child(label)
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground.opacity(0.7))
+                .child(hint.unwrap_or_default()),
+        )
+        .into_any_element()
+}
+
+/// The File / Edit / About bar above the toolbar. Dropdowns anchor under
+/// their buttons (parent-relative, no coordinate math) with viewport
+/// clamping handled by the panel layout.
+fn render_menubar(
+    app: &Entity<AppView>,
+    open_menu: Option<TopMenu>,
+    menu_note: Option<String>,
+    state: &Entity<EditorState>,
+    cx: &App,
+) -> AnyElement {
+    let proj_name = state.read(cx).project_display_name();
+    let can_undo = state.read(cx).can_undo();
+    let can_redo = state.read(cx).can_redo();
+    let has_selection = state.read(cx).selected_layer_id.is_some();
+    let recents: Vec<std::path::PathBuf> = state.read(cx).recent_projects.clone();
+
+    let mut bar = h_flex()
+        .id("top_menubar")
+        .test_support()
+        .w_full()
+        .h(px(30.))
+        .px_2()
+        .gap_0p5()
+        .items_center()
+        .bg(cx.theme().background)
+        .border_b_1()
+        .border_color(cx.theme().border)
+        .text_color(cx.theme().foreground);
+
+    for menu in [TopMenu::File, TopMenu::Edit, TopMenu::About] {
+        let a_toggle = app.clone();
+        let is_open = open_menu == Some(menu);
+        let mut btn = div()
+            .id(SharedString::from(format!("menubar_{:?}", menu).to_lowercase()))
+            .test_support()
+            .cursor_pointer()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .text_xs()
+            .text_color(cx.theme().foreground)
+            .hover(|s| s.bg(cx.theme().muted))
+            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                a_toggle.update(cx, |this, cx| {
+                    this.open_menu = if this.open_menu == Some(menu) { None } else { Some(menu) };
+                    cx.notify();
+                });
+            })
+            .child(menu.label());
+        if is_open {
+            btn = btn.bg(cx.theme().muted);
+            let mut items = v_flex().gap_0p5().p_1().min_w(px(220.));
+            match menu {
+                TopMenu::File => {
+                    {
+                        let a = app.clone();
+                        items = items.child(menu_item("menu_new_project".to_string(), "New Project…".to_string(), None, true, cx, move |cx| {
+                            a.update(cx, |this, cx| {
+                                this.open_menu = None;
+                                this.show_new_project = true;
+                                cx.notify();
+                            });
+                        }));
+                    }
+                    {
+                        let (a, s) = (app.clone(), state.clone());
+                        items = items.child(menu_item("menu_open_project".to_string(), "Open Project…".to_string(), Some("Ctrl+O".to_string()), true, cx, move |cx| {
+                            a.update(cx, |this, cx| {
+                                this.open_menu = None;
+                                cx.notify();
+                            });
+                            request_open_project(&a, &s, cx);
+                        }));
+                    }
+                    {
+                        let (a, s) = (app.clone(), state.clone());
+                        items = items.child(menu_item("menu_save_project".to_string(), "Save".to_string(), Some("Ctrl+S".to_string()), true, cx, move |cx| {
+                            a.update(cx, |this, cx| {
+                                this.open_menu = None;
+                                cx.notify();
+                            });
+                            request_save_project(&a, &s, cx);
+                        }));
+                    }
+                    {
+                        let (a, s) = (app.clone(), state.clone());
+                        items = items.child(menu_item("menu_save_as".to_string(), "Save As…".to_string(), None, true, cx, move |cx| {
+                            a.update(cx, |this, cx| {
+                                this.open_menu = None;
+                                cx.notify();
+                            });
+                            request_save_project_as(&a, &s, cx);
+                        }));
+                    }
+                    {
+                        let a = app.clone();
+                        items = items.child(menu_item(
+                            "menu_project_manager".to_string(),
+                            "Project Settings & Manager…".to_string(),
+                            None,
+                            true,
+                            cx,
+                            move |cx| {
+                                a.update(cx, |this, cx| {
+                                    this.open_menu = None;
+                                    this.show_project_manager = true;
+                                    cx.notify();
+                                });
+                            },
+                        ));
+                    }
+                    items = items.child(
+                        div().h(px(1.)).my_0p5().bg(cx.theme().border),
+                    );
+                    if recents.is_empty() {
+                        items = items.child(
+                            div()
+                                .px_2()
+                                .py_1()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground.opacity(0.6))
+                                .child("No recent projects"),
+                        );
+                    } else {
+                        for (idx, path) in recents.iter().take(6).enumerate() {
+                            let (a, s) = (app.clone(), state.clone());
+                            let p = path.clone();
+                            let label = p
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("project")
+                                .to_string();
+                            items = items.child(menu_item(
+                                format!("menu_recent_{idx}"),
+                                label.clone(),
+                                None,
+                                true,
+                                cx,
+                                move |cx| {
+                                    let label_in = label.clone();
+                                    a.update(cx, |this, cx| {
+                                        this.open_menu = None;
+                                        cx.notify();
+                                    });
+                                    let p_in = p.clone();
+                                    let (a_in, s_in) = (a.clone(), s.clone());
+                                    s_in.update(cx, |s, cx| {
+                                        match s.load_project_from(&p_in) {
+                                            Ok(()) => {
+                                                a_in.update(cx, |a, cx| {
+                                                    a.menu_note = Some(format!("Opened {label_in}"));
+                                                    cx.notify();
+                                                });
+                                            }
+                                            Err(e) => {
+                                                a_in.update(cx, |a, cx| {
+                                                    a.menu_note = Some(format!("Open failed: {e}"));
+                                                    cx.notify();
+                                                });
+                                            }
+                                        }
+                                        cx.notify();
+                                    });
+                                },
+                            ));
+                        }
+                    }
+                }
+                TopMenu::Edit => {
+                    {
+                        let (a, s) = (app.clone(), state.clone());
+                        items = items.child(menu_item("menu_undo".to_string(), "Undo".to_string(), Some("Ctrl+Z".to_string()), can_undo, cx, move |cx| {
+                            s.update(cx, |s, cx| {
+                                s.undo();
+                                cx.notify();
+                            });
+                            a.update(cx, |this, cx| {
+                                this.open_menu = None;
+                                cx.notify();
+                            });
+                        }));
+                    }
+                    {
+                        let (a, s) = (app.clone(), state.clone());
+                        items = items.child(menu_item("menu_redo".to_string(), "Redo".to_string(), Some("Ctrl+Y".to_string()), can_redo, cx, move |cx| {
+                            s.update(cx, |s, cx| {
+                                s.redo();
+                                cx.notify();
+                            });
+                            a.update(cx, |this, cx| {
+                                this.open_menu = None;
+                                cx.notify();
+                            });
+                        }));
+                    }
+                    items = items.child(
+                        div().h(px(1.)).my_0p5().bg(cx.theme().border),
+                    );
+                    {
+                        let (a, s) = (app.clone(), state.clone());
+                        items = items.child(menu_item(
+                            "menu_duplicate_layer".to_string(),
+                            "Duplicate Layer".to_string(),
+                            Some("Ctrl+D".to_string()),
+                            has_selection,
+                            cx,
+                            move |cx| {
+                                s.update(cx, |s, cx| {
+                                    if let Some(id) = s.selected_layer_id.clone() {
+                                        let _ = s.duplicate_layer(&id);
+                                    }
+                                    cx.notify();
+                                });
+                                a.update(cx, |this, cx| {
+                                    this.open_menu = None;
+                                    cx.notify();
+                                });
+                            },
+                        ));
+                    }
+                    {
+                        let (a, s) = (app.clone(), state.clone());
+                        items = items.child(menu_item(
+                            "menu_delete_layer".to_string(),
+                            "Delete Layer".to_string(),
+                            Some("Del".to_string()),
+                            has_selection,
+                            cx,
+                            move |cx| {
+                                s.update(cx, |s, cx| {
+                                    let _ = s.delete_selected_layer();
+                                    cx.notify();
+                                });
+                                a.update(cx, |this, cx| {
+                                    this.open_menu = None;
+                                    cx.notify();
+                                });
+                            },
+                        ));
+                    }
+                }
+                TopMenu::About => {
+                    let a = app.clone();
+                    items = items.child(menu_item("menu_about".to_string(), "About Motion Studio".to_string(), None, true, cx, move |cx| {
+                        a.update(cx, |this, cx| {
+                            this.open_menu = None;
+                            this.show_about = true;
+                            cx.notify();
+                        });
+                    }));
+                }
+            }
+            let dropdown = div()
+                .absolute()
+                .top_full()
+                .left_0()
+                .bg(cx.theme().background)
+                .border_1()
+                .border_color(cx.theme().border)
+                .rounded_md()
+                .shadow_lg()
+                .child(items);
+            btn = btn.child(dropdown);
+        }
+        bar = bar.child(btn);
+    }
+
+    bar.child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .justify_center()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(
+                div()
+                    .truncate()
+                    .child(proj_name),
+            ),
+    )
+    .child(
+        div()
+            .min_w_0()
+            .max_w(px(320.))
+            .truncate()
+            .text_xs()
+            .text_color(cx.theme().primary)
+            .child(menu_note.unwrap_or_default()),
+    )
+    .into_any_element()
+}
+
+fn render_toolbar(state: &Entity<EditorState>, cx: &App) -> impl IntoElement {    let s_read = state.read(cx);
     let active_tool = s_read.active_tool;
     let s_full = state.clone();
     let is_full_width = s_read.timeline_full_width;
@@ -185,10 +676,11 @@ fn render_toolbar(state: &Entity<EditorState>, cx: &App) -> impl IntoElement {
                     h_flex()
                         .gap_1p5()
                         .items_center()
+                        .min_w_0()
                         .font_bold()
                         .text_xs()
                         .child(div().w(px(16.)).h(px(16.)).flex().items_center().justify_center().child(gpui_kit::assets::IconName::Film))
-                        .child("Motion Studio"),
+                        .child(div().truncate().child(format!("Motion Studio — {}", s_read.project_display_name()))),
                 )
                 .child(div().w(px(1.)).h(px(16.)).bg(cx.theme().border).mx_1())
                 .child(
@@ -209,7 +701,9 @@ fn render_toolbar(state: &Entity<EditorState>, cx: &App) -> impl IntoElement {
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state_key = self.state.clone();
+        let app_key = cx.entity().clone();
         let toolbar = render_toolbar(&self.state, cx);
+        let menubar = render_menubar(&cx.entity(), self.open_menu, self.menu_note.clone(), &self.state, cx);
 
         // Responsive docks: refit fixed dock rails when the window size
         // changes so panels never push UI beyond the screen. User dock
@@ -242,6 +736,661 @@ impl Render for AppView {
             });
         }
 
+        let close_key = cx.entity().clone();
+        let new_name_input: Entity<InputState> = window.use_keyed_state("new_project_name", cx, |window, cx| {
+            InputState::new(window, cx)
+        });
+        // Centered modal dialogs (About, New Project) via viewport-clamped
+        // deferred positioning — same infrastructure as context menus.
+        let vw_f = vw as f32;
+        let vh_f = vh as f32;
+        let mut dialogs: Vec<AnyElement> = Vec::new();
+        if self.show_about {
+            let a_close = cx.entity().clone();
+            let dlg_pos = point(px((vw_f - 320.0).max(8.0) / 2.0), px((vh_f - 260.0).max(8.0) / 2.0));
+            dialogs.push(
+                deferred(
+                    Positioner::corner(Anchor::TopLeft, dlg_pos)
+                        .margin(px(8.))
+                        .occlude()
+                        .child(
+                            div()
+                                .id("about_dialog")
+                                .test_support()
+                                .w(px(320.))
+                                .bg(cx.theme().background)
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .rounded_md()
+                                .shadow_lg()
+                                .p_4()
+                                .child(
+                                    v_flex()
+                                        .gap_2()
+                                        .child(div().font_bold().text_sm().child("Motion Studio"))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(format!("Version {}", env!("CARGO_PKG_VERSION"))),
+                                        )
+                                        .child(
+                                            div().text_xs().child(
+                                                "After Effects-style compositing: CPU raster viewport, transform gizmo, keyframe spline editor, Shader Lab shaders, and 31 GPU-validated effects.",
+                                            ),
+                                        )
+                                        .child(
+                                            div()
+                                                .cursor_pointer()
+                                                .px_3()
+                                                .py_1()
+                                                .rounded_sm()
+                                                .bg(cx.theme().primary)
+                                                .text_color(cx.theme().primary_foreground)
+                                                .text_xs()
+                                                .font_semibold()
+                                                .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                    a_close.update(cx, |this, cx| {
+                                                        this.show_about = false;
+                                                        cx.notify();
+                                                    });
+                                                })
+                                                .child("Close"),
+                                        ),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+            );
+        }
+        if self.show_new_project {
+            let a_create = cx.entity().clone();
+            let a_cancel = cx.entity().clone();
+            let s_create = self.state.clone();
+            let input_create = new_name_input.clone();
+            let dlg_pos = point(px((vw_f - 320.0).max(8.0) / 2.0), px((vh_f - 200.0).max(8.0) / 2.0));
+            dialogs.push(
+                deferred(
+                    Positioner::corner(Anchor::TopLeft, dlg_pos)
+                        .margin(px(8.))
+                        .occlude()
+                        .child(
+                            div()
+                                .id("new_project_dialog")
+                                .test_support()
+                                .w(px(320.))
+                                .bg(cx.theme().background)
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .rounded_md()
+                                .shadow_lg()
+                                .p_4()
+                                .child(
+                                    v_flex()
+                                        .gap_2()
+                                        .child(div().font_bold().text_sm().child("New Project"))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child("Name the project (a fresh 1080p composition is included):"),
+                                        )
+                                        .child(Input::new(&new_name_input).id("new_project_name_input").w_full())
+                                        .child(
+                                            h_flex()
+                                                .gap_2()
+                                                .justify_end()
+                                                .child(
+                                                    div()
+                                                        .id("new_project_create")
+                                                        .test_support()
+                                                        .cursor_pointer()
+                                                        .px_3()
+                                                        .py_1()
+                                                        .rounded_sm()
+                                                        .bg(cx.theme().primary)
+                                                        .text_color(cx.theme().primary_foreground)
+                                                        .text_xs()
+                                                        .font_semibold()
+                                                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                            let name = input_create.read(cx).value().to_string();
+                                                            s_create.update(cx, |s, cx| {
+                                                                s.new_project(&name);
+                                                                cx.notify();
+                                                            });
+                                                            a_create.update(cx, |this, cx| {
+                                                                this.show_new_project = false;
+                                                                this.menu_note = Some("New project created".to_string());
+                                                                cx.notify();
+                                                            });
+                                                        })
+                                                        .child("Create"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .cursor_pointer()
+                                                        .px_3()
+                                                        .py_1()
+                                                        .rounded_sm()
+                                                        .bg(cx.theme().muted)
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .text_xs()
+                                                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                            a_cancel.update(cx, |this, cx| {
+                                                                this.show_new_project = false;
+                                                                cx.notify();
+                                                            });
+                                                        })
+                                                        .child("Cancel"),
+                                                ),
+                                        ),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+            );
+        }
+        if self.show_project_manager {
+            let a_close = cx.entity().clone();
+            let dlg_w = 480.0f32;
+            let dlg_h = 440.0f32;
+            let dlg_pos = point(
+                px((vw_f - dlg_w).max(8.0) / 2.0),
+                px((vh_f - dlg_h).max(8.0) / 2.0),
+            );
+
+            let s_r = self.state.read(cx);
+            let proj_name = s_r.project.name.clone();
+            let comps = s_r.project.compositions.clone();
+            let active_id = s_r.active_comp_id.clone();
+            let asset_count = s_r.project.assets.len();
+            let active_comp = s_r.active_composition().cloned();
+
+            let mut comp_rows = v_flex().gap_1p5().w_full();
+            for comp in &comps {
+                let is_active = comp.id == active_id;
+                let c_id = comp.id.clone();
+                let s_sw = self.state.clone();
+                let s_del = self.state.clone();
+                let a_sw = cx.entity().clone();
+                let a_del = cx.entity().clone();
+
+                let mut row = h_flex()
+                    .w_full()
+                    .p_2()
+                    .rounded_sm()
+                    .items_center()
+                    .justify_between()
+                    .border_1()
+                    .border_color(if is_active { cx.theme().primary } else { cx.theme().border })
+                    .bg(if is_active { cx.theme().muted } else { cx.theme().secondary });
+
+                row = row.child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .px_1p5()
+                                .py_0p5()
+                                .rounded_sm()
+                                .text_xs()
+                                .font_semibold()
+                                .bg(if is_active { cx.theme().primary } else { cx.theme().muted })
+                                .text_color(if is_active { cx.theme().primary_foreground } else { cx.theme().muted_foreground })
+                                .child(if is_active { "ACTIVE" } else { "COMP" })
+                        )
+                        .child(
+                            v_flex()
+                                .gap_0p5()
+                                .child(div().font_semibold().text_xs().text_color(cx.theme().foreground).child(comp.name.clone()))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(format!("{}×{} • {:.0} fps • {:.1}s • {} layers",
+                                            comp.width, comp.height, comp.frame_rate, comp.duration.seconds(), comp.layers.len()
+                                        ))
+                                )
+                        )
+                );
+
+                let mut actions = h_flex().gap_1p5().items_center();
+                if !is_active {
+                    actions = actions.child(
+                        div()
+                            .id(SharedString::from(format!("pm_switch_{}", c_id)))
+                            .test_support()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .bg(cx.theme().primary)
+                            .text_color(cx.theme().primary_foreground)
+                            .text_xs()
+                            .font_semibold()
+                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                let cid = c_id.clone();
+                                s_sw.update(cx, |s, cx| {
+                                    s.set_active_composition(&cid);
+                                    cx.notify();
+                                });
+                                a_sw.update(cx, |_this, cx| cx.notify());
+                            })
+                            .child("Switch To"),
+                    );
+                }
+                if comps.len() > 1 {
+                    let c_id_del = comp.id.clone();
+                    actions = actions.child(
+                        div()
+                            .id(SharedString::from(format!("pm_delete_{}", c_id_del)))
+                            .test_support()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .bg(cx.theme().muted)
+                            .text_color(rgb(0xef4444))
+                            .text_xs()
+                            .hover(|s| s.bg(rgb(0xef4444)).text_color(rgb(0xffffff)))
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                let cid = c_id_del.clone();
+                                s_del.update(cx, |s, cx| {
+                                    let _ = s.delete_composition(&cid);
+                                    cx.notify();
+                                });
+                                a_del.update(cx, |_this, cx| cx.notify());
+                            })
+                            .child("Delete"),
+                    );
+                }
+                row = row.child(actions);
+                comp_rows = comp_rows.child(row);
+            }
+
+            let s_new_1080 = self.state.clone();
+            let s_new_4k = self.state.clone();
+            let s_new_sq = self.state.clone();
+            let a_new = cx.entity().clone();
+
+            dialogs.push(
+                deferred(
+                    Positioner::corner(Anchor::TopLeft, dlg_pos)
+                        .margin(px(8.))
+                        .occlude()
+                        .child(
+                            div()
+                                .id("project_manager_dialog")
+                                .test_support()
+                                .w(px(dlg_w))
+                                .max_h(px(520.))
+                                .overflow_y_scroll()
+                                .bg(cx.theme().background)
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .rounded_md()
+                                .shadow_lg()
+                                .p_4()
+                                .child(
+                                    v_flex()
+                                        .gap_3()
+                                        .child(
+                                            h_flex()
+                                                .justify_between()
+                                                .items_center()
+                                                .child(
+                                                    h_flex()
+                                                        .gap_1p5()
+                                                        .items_center()
+                                                        .font_bold()
+                                                        .text_sm()
+                                                        .child(div().w(px(16.)).h(px(16.)).flex().items_center().justify_center().child(gpui_kit::assets::IconName::SlidersHorizontal))
+                                                        .child("Project Settings & Manager")
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id("pm_close_x")
+                                                        .test_support()
+                                                        .cursor_pointer()
+                                                        .px_2()
+                                                        .py_0p5()
+                                                        .rounded_sm()
+                                                        .text_xs()
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .hover(|s| s.bg(cx.theme().muted).text_color(cx.theme().foreground))
+                                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                            a_close.update(cx, |this, cx| {
+                                                                this.show_project_manager = false;
+                                                                cx.notify();
+                                                            });
+                                                        })
+                                                        .child("✕")
+                                                )
+                                        )
+                                        .child(
+                                            v_flex()
+                                                .gap_1p5()
+                                                .p_2p5()
+                                                .rounded_md()
+                                                .bg(cx.theme().secondary)
+                                                .border_1()
+                                                .border_color(cx.theme().border)
+                                                .child(
+                                                    h_flex()
+                                                        .justify_between()
+                                                        .items_center()
+                                                        .child(div().text_xs().font_semibold().text_color(cx.theme().foreground).child(format!("Project: {proj_name}")))
+                                                        .child(div().text_xs().text_color(cx.theme().muted_foreground).child(format!("{asset_count} Assets • {} Compositions", comps.len())))
+                                                )
+                                        )
+                                        .child(
+                                            v_flex()
+                                                .gap_2()
+                                                .child(
+                                                    div().text_xs().font_semibold().text_color(cx.theme().foreground).child("Compositions")
+                                                )
+                                                .child(comp_rows)
+                                                .child(
+                                                    h_flex()
+                                                        .gap_1p5()
+                                                        .items_center()
+                                                        .text_xs()
+                                                        .child(div().text_color(cx.theme().muted_foreground).child("+ New Comp:"))
+                                                        .child(
+                                                            div()
+                                                                .id("pm_create_1080p")
+                                                                .test_support()
+                                                                .cursor_pointer()
+                                                                .px_2()
+                                                                .py_0p5()
+                                                                .rounded_sm()
+                                                                .bg(cx.theme().muted)
+                                                                .hover(|s| s.bg(cx.theme().primary).text_color(cx.theme().primary_foreground))
+                                                                .on_mouse_down(MouseButton::Left, {
+                                                                    let a = a_new.clone();
+                                                                    move |_event, _window, cx| {
+                                                                        s_new_1080.update(cx, |s, cx| {
+                                                                            let num = s.project.compositions.len() + 1;
+                                                                            let _ = s.create_composition(&format!("Comp {num} (1080p)"), 1920, 1080, 30.0, 5.0);
+                                                                            cx.notify();
+                                                                        });
+                                                                        a.update(cx, |_this, cx| cx.notify());
+                                                                    }
+                                                                })
+                                                                .child("1080p 30fps")
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .id("pm_create_4k")
+                                                                .test_support()
+                                                                .cursor_pointer()
+                                                                .px_2()
+                                                                .py_0p5()
+                                                                .rounded_sm()
+                                                                .bg(cx.theme().muted)
+                                                                .hover(|s| s.bg(cx.theme().primary).text_color(cx.theme().primary_foreground))
+                                                                .on_mouse_down(MouseButton::Left, {
+                                                                    let a = a_new.clone();
+                                                                    move |_event, _window, cx| {
+                                                                        s_new_4k.update(cx, |s, cx| {
+                                                                            let num = s.project.compositions.len() + 1;
+                                                                            let _ = s.create_composition(&format!("Comp {num} (4K)"), 3840, 2160, 60.0, 5.0);
+                                                                            cx.notify();
+                                                                        });
+                                                                        a.update(cx, |_this, cx| cx.notify());
+                                                                    }
+                                                                })
+                                                                .child("4K 60fps")
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .id("pm_create_square")
+                                                                .test_support()
+                                                                .cursor_pointer()
+                                                                .px_2()
+                                                                .py_0p5()
+                                                                .rounded_sm()
+                                                                .bg(cx.theme().muted)
+                                                                .hover(|s| s.bg(cx.theme().primary).text_color(cx.theme().primary_foreground))
+                                                                .on_mouse_down(MouseButton::Left, {
+                                                                    let a = a_new.clone();
+                                                                    move |_event, _window, cx| {
+                                                                        s_new_sq.update(cx, |s, cx| {
+                                                                            let num = s.project.compositions.len() + 1;
+                                                                            let _ = s.create_composition(&format!("Comp {num} (Square)"), 1080, 1080, 30.0, 5.0);
+                                                                            cx.notify();
+                                                                        });
+                                                                        a.update(cx, |_this, cx| cx.notify());
+                                                                    }
+                                                                })
+                                                                .child("Square 1:1")
+                                                        )
+                                                )
+                                        )
+                                        .child({
+                                            let s_res1 = self.state.clone();
+                                            let s_res2 = self.state.clone();
+                                            let s_fps1 = self.state.clone();
+                                            let s_fps2 = self.state.clone();
+                                            let s_dur1 = self.state.clone();
+                                            let s_dur2 = self.state.clone();
+                                            let a_upd = cx.entity().clone();
+
+                                            let (cur_w, cur_h, cur_fps, cur_dur) = active_comp.as_ref().map(|c| (c.width, c.height, c.frame_rate, c.duration.seconds())).unwrap_or((1920, 1080, 30.0, 5.0));
+
+                                            v_flex()
+                                                .gap_2()
+                                                .p_2p5()
+                                                .rounded_md()
+                                                .bg(cx.theme().secondary)
+                                                .border_1()
+                                                .border_color(cx.theme().border)
+                                                .child(div().text_xs().font_semibold().text_color(cx.theme().foreground).child("Active Composition Settings"))
+                                                .child(
+                                                    h_flex()
+                                                        .items_center()
+                                                        .justify_between()
+                                                        .text_xs()
+                                                        .child(div().text_color(cx.theme().muted_foreground).child("Resolution Preset"))
+                                                        .child(
+                                                            h_flex()
+                                                                .gap_1()
+                                                                .child(
+                                                                    div()
+                                                                        .id("pm_preset_1080p")
+                                                                        .test_support()
+                                                                        .cursor_pointer()
+                                                                        .px_2()
+                                                                        .py_0p5()
+                                                                        .rounded_sm()
+                                                                        .bg(if cur_w == 1920 && cur_h == 1080 { cx.theme().primary } else { cx.theme().muted })
+                                                                        .text_color(if cur_w == 1920 && cur_h == 1080 { cx.theme().primary_foreground } else { cx.theme().foreground })
+                                                                        .child("1920×1080")
+                                                                        .on_mouse_down(MouseButton::Left, {
+                                                                            let a = a_upd.clone();
+                                                                            move |_event, _window, cx| {
+                                                                                s_res1.update(cx, |s, cx| {
+                                                                                    s.update_project_settings("", 1920, 1080, cur_fps, cur_dur);
+                                                                                    cx.notify();
+                                                                                });
+                                                                                a.update(cx, |_this, cx| cx.notify());
+                                                                            }
+                                                                        })
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .id("pm_preset_4k")
+                                                                        .test_support()
+                                                                        .cursor_pointer()
+                                                                        .px_2()
+                                                                        .py_0p5()
+                                                                        .rounded_sm()
+                                                                        .bg(if cur_w == 3840 && cur_h == 2160 { cx.theme().primary } else { cx.theme().muted })
+                                                                        .text_color(if cur_w == 3840 && cur_h == 2160 { cx.theme().primary_foreground } else { cx.theme().foreground })
+                                                                        .child("3840×2160")
+                                                                        .on_mouse_down(MouseButton::Left, {
+                                                                            let a = a_upd.clone();
+                                                                            move |_event, _window, cx| {
+                                                                                s_res2.update(cx, |s, cx| {
+                                                                                    s.update_project_settings("", 3840, 2160, cur_fps, cur_dur);
+                                                                                    cx.notify();
+                                                                                });
+                                                                                a.update(cx, |_this, cx| cx.notify());
+                                                                            }
+                                                                        })
+                                                                )
+                                                        )
+                                                )
+                                                .child(
+                                                    h_flex()
+                                                        .items_center()
+                                                        .justify_between()
+                                                        .text_xs()
+                                                        .child(div().text_color(cx.theme().muted_foreground).child("Frame Rate"))
+                                                        .child(
+                                                            h_flex()
+                                                                .gap_1()
+                                                                .child(
+                                                                    div()
+                                                                        .id("pm_fps_30")
+                                                                        .test_support()
+                                                                        .cursor_pointer()
+                                                                        .px_2()
+                                                                        .py_0p5()
+                                                                        .rounded_sm()
+                                                                        .bg(if (cur_fps - 30.0).abs() < 0.1 { cx.theme().primary } else { cx.theme().muted })
+                                                                        .text_color(if (cur_fps - 30.0).abs() < 0.1 { cx.theme().primary_foreground } else { cx.theme().foreground })
+                                                                        .child("30 fps")
+                                                                        .on_mouse_down(MouseButton::Left, {
+                                                                            let a = a_upd.clone();
+                                                                            move |_event, _window, cx| {
+                                                                                s_fps1.update(cx, |s, cx| {
+                                                                                    s.update_project_settings("", cur_w, cur_h, 30.0, cur_dur);
+                                                                                    cx.notify();
+                                                                                });
+                                                                                a.update(cx, |_this, cx| cx.notify());
+                                                                            }
+                                                                        })
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .id("pm_fps_60")
+                                                                        .test_support()
+                                                                        .cursor_pointer()
+                                                                        .px_2()
+                                                                        .py_0p5()
+                                                                        .rounded_sm()
+                                                                        .bg(if (cur_fps - 60.0).abs() < 0.1 { cx.theme().primary } else { cx.theme().muted })
+                                                                        .text_color(if (cur_fps - 60.0).abs() < 0.1 { cx.theme().primary_foreground } else { cx.theme().foreground })
+                                                                        .child("60 fps")
+                                                                        .on_mouse_down(MouseButton::Left, {
+                                                                            let a = a_upd.clone();
+                                                                            move |_event, _window, cx| {
+                                                                                s_fps2.update(cx, |s, cx| {
+                                                                                    s.update_project_settings("", cur_w, cur_h, 60.0, cur_dur);
+                                                                                    cx.notify();
+                                                                                });
+                                                                                a.update(cx, |_this, cx| cx.notify());
+                                                                            }
+                                                                        })
+                                                                )
+                                                        )
+                                                )
+                                                .child(
+                                                    h_flex()
+                                                        .items_center()
+                                                        .justify_between()
+                                                        .text_xs()
+                                                        .child(div().text_color(cx.theme().muted_foreground).child("Duration"))
+                                                        .child(
+                                                            h_flex()
+                                                                .gap_1()
+                                                                .child(
+                                                                    div()
+                                                                        .id("pm_dur_5s")
+                                                                        .test_support()
+                                                                        .cursor_pointer()
+                                                                        .px_2()
+                                                                        .py_0p5()
+                                                                        .rounded_sm()
+                                                                        .bg(if (cur_dur - 5.0).abs() < 0.1 { cx.theme().primary } else { cx.theme().muted })
+                                                                        .text_color(if (cur_dur - 5.0).abs() < 0.1 { cx.theme().primary_foreground } else { cx.theme().foreground })
+                                                                        .child("5.0s")
+                                                                        .on_mouse_down(MouseButton::Left, {
+                                                                            let a = a_upd.clone();
+                                                                            move |_event, _window, cx| {
+                                                                                s_dur1.update(cx, |s, cx| {
+                                                                                    s.update_project_settings("", cur_w, cur_h, cur_fps, 5.0);
+                                                                                    cx.notify();
+                                                                                });
+                                                                                a.update(cx, |_this, cx| cx.notify());
+                                                                            }
+                                                                        })
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .id("pm_dur_10s")
+                                                                        .test_support()
+                                                                        .cursor_pointer()
+                                                                        .px_2()
+                                                                        .py_0p5()
+                                                                        .rounded_sm()
+                                                                        .bg(if (cur_dur - 10.0).abs() < 0.1 { cx.theme().primary } else { cx.theme().muted })
+                                                                        .text_color(if (cur_dur - 10.0).abs() < 0.1 { cx.theme().primary_foreground } else { cx.theme().foreground })
+                                                                        .child("10.0s")
+                                                                        .on_mouse_down(MouseButton::Left, {
+                                                                            let a = a_upd.clone();
+                                                                            move |_event, _window, cx| {
+                                                                                s_dur2.update(cx, |s, cx| {
+                                                                                    s.update_project_settings("", cur_w, cur_h, cur_fps, 10.0);
+                                                                                    cx.notify();
+                                                                                });
+                                                                                a.update(cx, |_this, cx| cx.notify());
+                                                                            }
+                                                                        })
+                                                                )
+                                                        )
+                                                )
+                                        })
+                                        .child(
+                                            h_flex()
+                                                .justify_end()
+                                                .child(
+                                                    div()
+                                                        .id("pm_done_button")
+                                                        .test_support()
+                                                        .cursor_pointer()
+                                                        .px_4()
+                                                        .py_1p5()
+                                                        .rounded_sm()
+                                                        .bg(cx.theme().primary)
+                                                        .text_color(cx.theme().primary_foreground)
+                                                        .text_xs()
+                                                        .font_semibold()
+                                                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                                        .on_mouse_down(MouseButton::Left, {
+                                                            let a = cx.entity().clone();
+                                                            move |_event, _window, cx| {
+                                                                a.update(cx, |this, cx| {
+                                                                    this.show_project_manager = false;
+                                                                    cx.notify();
+                                                                });
+                                                            }
+                                                        })
+                                                        .child("Done")
+                                                )
+                                        )
+                                )
+                        )
+                )
+                .into_any_element(),
+            );
+        }
         let main_workspace = if is_full {
             v_flex()
                 .flex_1()
@@ -256,9 +1405,29 @@ impl Render for AppView {
                         .border_color(cx.theme().border)
                         .child(self.panels.timeline.clone()),
                 )
+                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    // Clicking the workspace dismisses open menus.
+                    close_key.update(cx, |this, cx| {
+                        if this.open_menu.take().is_some() {
+                            cx.notify();
+                        }
+                    });
+                })
                 .into_any_element()
         } else {
-            div().flex_1().size_full().child(self.dock_area.clone()).into_any_element()
+            div()
+                .flex_1()
+                .size_full()
+                .child(self.dock_area.clone())
+                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    // Clicking the workspace dismisses open menus.
+                    close_key.update(cx, |this, cx| {
+                        if this.open_menu.take().is_some() {
+                            cx.notify();
+                        }
+                    });
+                })
+                .into_any_element()
         };
 
         div()
@@ -280,7 +1449,48 @@ impl Render for AppView {
                 }
             })
             .on_key_down(move |event, _window, cx| {
+                let mods = event.keystroke.modifiers;
+                let ctrl = mods.control || mods.platform;
                 let key = event.keystroke.key.to_lowercase();
+                // Global menu shortcuts (modifier-guarded so typing is safe).
+                if ctrl && key == "z" && !mods.shift {
+                    state_key.update(cx, |s, cx| {
+                        s.undo();
+                        cx.notify();
+                    });
+                    return;
+                } else if (ctrl && key == "y") || (ctrl && key == "z" && mods.shift) {
+                    state_key.update(cx, |s, cx| {
+                        s.redo();
+                        cx.notify();
+                    });
+                    return;
+                } else if ctrl && key == "s" {
+                    let (a, s) = (app_key.clone(), state_key.clone());
+                    request_save_project(&a, &s, cx);
+                    return;
+                } else if ctrl && key == "o" {
+                    let (a, s) = (app_key.clone(), state_key.clone());
+                    request_open_project(&a, &s, cx);
+                    return;
+                } else if ctrl && key == "d" {
+                    state_key.update(cx, |s, cx| {
+                        if let Some(id) = s.selected_layer_id.clone() {
+                            let _ = s.duplicate_layer(&id);
+                        }
+                        cx.notify();
+                    });
+                    return;
+                } else if key == "escape" {
+                    app_key.update(cx, |this, cx| {
+                        this.open_menu = None;
+                        this.show_about = false;
+                        this.show_new_project = false;
+                        this.show_project_manager = false;
+                        cx.notify();
+                    });
+                    return;
+                }
                 if key == "space" || key == " " {
                     state_key.update(cx, |s, cx| {
                         s.toggle_playback();
@@ -333,8 +1543,10 @@ impl Render for AppView {
                     });
                 }
             })
+            .child(menubar)
             .child(toolbar)
             .child(main_workspace)
+            .children(dialogs)
     }
 }
 
@@ -1461,7 +2673,7 @@ mod tests {
         });
 
         let mut app_view_entity = None;
-        let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
+        let handle = cx.open_window(size(px(1280.), px(1000.)), |window, cx| {
             window.activate_window();
             window.set_window_title("Motion Compositor");
             let view = cx.new(|cx| AppView::new(window, cx));

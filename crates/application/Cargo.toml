@@ -13,6 +13,7 @@ rfd.workspace = true
 image.workspace = true
 fontdb.workspace = true
 cosmic-text.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }

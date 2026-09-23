@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::state::{EditorState, EditorTool};
+use crate::state::{EditorState, EditorTool, EasingPreset, GraphSeries};
 use project::shader::{presets as shader_presets, ShaderParamValue};
 use project::{BlendMode, Color, EffectType, LayerSource, ShapeType, TimeCode, TrackMatteMode, Vec2};
 
@@ -940,6 +940,7 @@ impl Render for ProjectPanel {
                 .flex()
                 .flex_col()
                 .relative()
+                .overflow_hidden()
                 .bg(cx.theme().background)
                 .text_color(cx.theme().foreground)
                 // Header / Actions toolbar
@@ -1952,6 +1953,8 @@ impl Render for CompositionViewerPanel {
                                 .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
                                     let (mx, my) = (event.position.x / px(1.0), event.position.y / px(1.0));
                                     s_h.update(cx, |s, cx| {
+                                        // Gizmo gesture start: checkpoint before select+drag.
+                                        s.checkpoint();
                                         s.select_layer(Some(lid_h.clone()));
                                         s.preview_fast = true;
                                         cx.notify();
@@ -2004,6 +2007,8 @@ impl Render for CompositionViewerPanel {
                                 .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
                                     let (mx, my) = (event.position.x / px(1.0), event.position.y / px(1.0));
                                     s_h.update(cx, |s, cx| {
+                                        // Gizmo gesture start: checkpoint before select+drag.
+                                        s.checkpoint();
                                         s.select_layer(Some(lid_h.clone()));
                                         s.preview_fast = true;
                                         cx.notify();
@@ -2066,6 +2071,8 @@ impl Render for CompositionViewerPanel {
                                 .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
                                     let (mx, my) = (event.position.x / px(1.0), event.position.y / px(1.0));
                                     s_h.update(cx, |s, cx| {
+                                        // Gizmo gesture start: checkpoint before select+drag.
+                                        s.checkpoint();
                                         s.select_layer(Some(lid_h.clone()));
                                         s.preview_fast = true;
                                         cx.notify();
@@ -2109,6 +2116,8 @@ impl Render for CompositionViewerPanel {
                                 .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
                                     let (mx, my) = (event.position.x / px(1.0), event.position.y / px(1.0));
                                     s_h.update(cx, |s, cx| {
+                                        // Gizmo gesture start: checkpoint before select+drag.
+                                        s.checkpoint();
                                         s.select_layer(Some(lid_h.clone()));
                                         s.preview_fast = true;
                                         cx.notify();
@@ -2277,6 +2286,7 @@ impl Render for CompositionViewerPanel {
             .size_full()
             .flex()
             .flex_col()
+            .overflow_hidden()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
@@ -2465,20 +2475,25 @@ impl Render for CompositionViewerPanel {
                     .bg(cx.theme().secondary)
                     .items_center()
                     .justify_between()
+                    .overflow_hidden()
                     .text_xs()
                     .child(
                         h_flex()
                             .gap_3()
                             .items_center()
-                            .child(div().font_bold().child(comp_name))
+                            .min_w_0()
+                            .flex_1()
+                            .child(div().font_bold().truncate().child(comp_name))
                             .child(
                                 div()
                                     .text_color(cx.theme().muted_foreground)
+                                    .flex_none()
                                     .child(comp_res),
                             )
                             .child(
                                 div()
                                     .text_color(cx.theme().muted_foreground)
+                                    .flex_none()
                                     .child(comp_fps),
                             ),
                     )
@@ -2486,6 +2501,7 @@ impl Render for CompositionViewerPanel {
                         h_flex()
                             .gap_2()
                             .items_center()
+                            .flex_none()
                             .child(
                                 div()
                                     .px_2()
@@ -2623,6 +2639,8 @@ impl Render for CompositionViewerPanel {
                                                 cx.notify();
                                             });
                                             s_tool.update(cx, |s, cx| {
+                                                // Gesture start: one undo step per drag/create.
+                                                s.checkpoint();
                                                 if on_layer {
                                                     s.preview_fast = true;
                                                 }
@@ -2883,6 +2901,7 @@ pub struct PropertiesPanel {
     pub transform_expanded: bool,
     pub switches_expanded: bool,
     pub effects_expanded: bool,
+    pub tools_expanded: bool,
     /// Effect ID with the Shader Lab source editor open (`None` = closed).
     pub shader_editor_open: Option<String>,
     /// Live Shader Lab source editor (single open editor; re-created when
@@ -2919,6 +2938,7 @@ impl PropertiesPanel {
             transform_expanded: true,
             switches_expanded: false,
             effects_expanded: true,
+            tools_expanded: false,
             shader_editor_open: None,
             shader_editor: None,
             shader_editor_key: None,
@@ -3032,6 +3052,11 @@ impl PropertiesPanel {
     /// lives on `EditorState` (freely readable during render).
     pub fn begin_value_edit(&mut self, prop: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.end_value_edit(cx);
+        // Typed entry is one undo step: checkpoint before editing.
+        self.state.update(cx, |s, cx| {
+            s.checkpoint();
+            cx.notify();
+        });
         let initial = self
             .state
             .read(cx)
@@ -3152,6 +3177,7 @@ where
                 });
                 // Scrubbing previews fast; release restores quality.
                 state_fast.update(cx, |s, cx| {
+                    s.checkpoint();
                     s.preview_fast = true;
                     cx.notify();
                 });
@@ -3165,6 +3191,8 @@ where
                     let step = if dy > 0.0 { 1.0 } else { -1.0 };
                     let pk = prop_for_wheel.clone();
                     state_scroll.update(cx, |s, cx| {
+                        // Discrete wheel step = one undoable nudge.
+                        s.checkpoint();
                         match pk.as_str() {
                             "anchor_x" => s.nudge_anchor(step, 0.0),
                             "anchor_y" => s.nudge_anchor(0.0, step),
@@ -3922,6 +3950,53 @@ fn render_tool_settings(state: &Entity<EditorState>, cx: &App) -> AnyElement {
         )
         .child(body)
         .into_any_element()
+}
+
+/// Collapsible inspector section card (Properties accordion). Only the
+/// header always renders; the body shows when expanded. Keeps the panel
+/// to what matters for the selection.
+fn prop_section<F>(
+    id: &'static str,
+    title: String,
+    icon: IconName,
+    expanded: bool,
+    on_toggle: F,
+    cx: &App,
+    body: Option<AnyElement>,
+) -> AnyElement
+where
+    F: Fn(&mut App) + 'static,
+{
+    let mut card = v_flex()
+        .p_2p5()
+        .rounded_md()
+        .border_1()
+        .border_color(cx.theme().border)
+        .bg(cx.theme().secondary)
+        .gap_2()
+        .child(
+            h_flex()
+                .id(SharedString::from(format!("props_section_{id}")))
+                .test_support()
+                .gap_1p5()
+                .items_center()
+                .font_semibold()
+                .text_xs()
+                .text_color(cx.theme().foreground)
+                .cursor_pointer()
+                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    on_toggle(cx);
+                })
+                .child(icon_box(if expanded { IconName::ChevronDown } else { IconName::ChevronRight }))
+                .child(icon_box(icon))
+                .child(title),
+        );
+    if let Some(content) = body {
+        if expanded {
+            card = card.child(content);
+        }
+    }
+    card.into_any_element()
 }
 
 fn render_applied_effects(
@@ -6085,106 +6160,106 @@ impl Render for PropertiesPanel {
                                     );
                                 }
 
-                                props_items.push(
-                                    v_flex()
-                                        .id("solid_properties_section")
-                                        .test_support()
-                                        .gap_2()
-                                        .p_2()
-                                        .rounded_sm()
-                                        .bg(cx.theme().secondary)
-                                        .child(
-                                            h_flex()
-                                                .gap_1p5()
-                                                .items_center()
-                                                .font_semibold()
-                                                .text_xs()
-                                                .text_color(cx.theme().foreground)
-                                                .child(icon_box(IconName::Square))
-                                                .child(format!("Solid Source ({}x{})", w, h)),
-                                        )
-                                        .child(
-                                            h_flex()
-                                                .items_center()
-                                                .justify_between()
-                                                .text_xs()
-                                                .child(
-                                                    h_flex()
-                                                        .gap_2()
-                                                        .items_center()
-                                                        .child(
-                                                            div()
-                                                                .id("solid_color_swatch")
-                                                                .test_support()
-                                                                .w(px(28.))
-                                                                .h(px(20.))
-                                                                .rounded_sm()
-                                                                .bg(Rgba { r: c.r, g: c.g, b: c.b, a: 1.0 })
-                                                                .border_1()
-                                                                .border_color(cx.theme().border),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .id("solid_color_hex")
-                                                                .test_support()
-                                                                .font_semibold()
-                                                                .child(hex_code),
-                                                        )
-                                                        .child(div().id("solid_color_wheel").test_support().child(ColorPicker::new(&inspector_color.read(cx).state).label("Color")))
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(cx.theme().muted_foreground)
-                                                        .child("Fine-tune with the color wheel or presets below."),
-                                                )
-                                        )
-                                        .child(
-                                            h_flex()
-                                                .items_center()
-                                                .justify_between()
-                                                .text_xs()
-                                                .child(div().text_color(cx.theme().muted_foreground).child("Presets"))
-                                                .child(palette_row),
-                                        )
-                                        .child(
-                                            h_flex()
-                                                .items_center()
-                                                .justify_between()
-                                                .text_xs()
-                                                .child(div().text_color(cx.theme().muted_foreground).child("Dimensions"))
-                                                .child(
-                                                    h_flex()
-                                                        .gap_1()
-                                                        .items_center()
-                                                        .child(scrub_field(
-                                                            "solid_dim_w",
-                                                            "solid_w".to_string(),
-                                                            format!("{w} px"),
-                                                            None,
-                                                            None,
-                                                            &self.state,
-                                                            &panel_entity,
-                                                            cx,
-                                                            move |_| {},
-                                                            move |_| {},
-                                                        ))
-                                                        .child(scrub_field(
-                                                            "solid_dim_h",
-                                                            "solid_h".to_string(),
-                                                            format!("{h} px"),
-                                                            None,
-                                                            None,
-                                                            &self.state,
-                                                            &panel_entity,
-                                                            cx,
-                                                            move |_| {},
-                                                            move |_| {},
-                                                        )),
-                                                ),
-                                        )
-                                                .into_any_element(),
-                                );
+                                let p_src = panel_entity.clone();
+                                let solid_body = v_flex()
+                                    .id("solid_properties_section")
+                                    .test_support()
+                                    .gap_2()
+                                    .child(
+                                        h_flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .text_xs()
+                                            .child(
+                                                h_flex()
+                                                    .gap_2()
+                                                    .items_center()
+                                                    .child(
+                                                        div()
+                                                            .id("solid_color_swatch")
+                                                            .test_support()
+                                                            .w(px(28.))
+                                                            .h(px(20.))
+                                                            .rounded_sm()
+                                                            .bg(Rgba { r: c.r, g: c.g, b: c.b, a: 1.0 })
+                                                            .border_1()
+                                                            .border_color(cx.theme().border),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .id("solid_color_hex")
+                                                            .test_support()
+                                                            .font_semibold()
+                                                            .child(hex_code),
+                                                    )
+                                                    .child(div().id("solid_color_wheel").test_support().child(ColorPicker::new(&inspector_color.read(cx).state).label("Color")))
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child("Color wheel / swatches"),
+                                            )
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .text_xs()
+                                            .child(div().text_color(cx.theme().muted_foreground).child("Presets"))
+                                            .child(palette_row),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .text_xs()
+                                            .child(div().text_color(cx.theme().muted_foreground).child("Dimensions"))
+                                            .child(
+                                                h_flex()
+                                                    .gap_1()
+                                                    .items_center()
+                                                    .child(scrub_field(
+                                                        "solid_dim_w",
+                                                        "solid_w".to_string(),
+                                                        format!("{w} px"),
+                                                        None,
+                                                        None,
+                                                        &self.state,
+                                                        &panel_entity,
+                                                        cx,
+                                                        move |_| {},
+                                                        move |_| {},
+                                                    ))
+                                                    .child(scrub_field(
+                                                        "solid_dim_h",
+                                                        "solid_h".to_string(),
+                                                        format!("{h} px"),
+                                                        None,
+                                                        None,
+                                                        &self.state,
+                                                        &panel_entity,
+                                                        cx,
+                                                        move |_| {},
+                                                        move |_| {},
+                                                    )),
+                                            ),
+                                    );
+
+                                props_items.push(prop_section(
+                                    "solid_source",
+                                    format!("Solid Source ({}x{})", w, h),
+                                    IconName::Square,
+                                    self.source_expanded,
+                                    move |cx| {
+                                        p_src.update(cx, |this, cx| {
+                                            this.source_expanded = !this.source_expanded;
+                                            cx.notify();
+                                        });
+                                    },
+                                    cx,
+                                    Some(solid_body.into_any_element()),
+                                ));
                             }
                             LayerSource::Text { text, font_family, font_size, fill_color, weight, italic, tracking, leading, align, all_caps, stroke_width, stroke_color, baseline_shift, box_width } => {
                                 let lid_t = layer.id.clone();
@@ -6349,14 +6424,11 @@ impl Render for PropertiesPanel {
                                             .child(font_list),
                                     );
 
-                                props_items.push(
-                                    v_flex()
-                                        .id("text_properties_section")
-                                        .test_support()
-                                        .gap_2()
-                                        .p_2()
-                                        .rounded_sm()
-                                        .bg(cx.theme().secondary)
+                                let p_src = panel_entity.clone();
+                                let text_body = v_flex()
+                                    .id("text_properties_section")
+                                    .test_support()
+                                    .gap_2()
                                         .child(
                                             h_flex()
                                                 .gap_1p5()
@@ -6699,9 +6771,23 @@ impl Render for PropertiesPanel {
                                                         .child(div().id("text_color_wheel").test_support().child(ColorPicker::new(&inspector_color.read(cx).state).label("Fill")))
                                                 )
                                                 .child(text_col_row),
-                                        )
-                                        .into_any_element(),
+                                        );
+
+                                let text_section = prop_section(
+                                    "text_source",
+                                    format!("Typography & Text (\"{}\")", cur_text),
+                                    IconName::Type,
+                                    self.source_expanded,
+                                    move |cx| {
+                                        p_src.update(cx, |this, cx| {
+                                            this.source_expanded = !this.source_expanded;
+                                            cx.notify();
+                                        });
+                                    },
+                                    cx,
+                                    Some(text_body.into_any_element()),
                                 );
+                                props_items.push(text_section);
                             }
                             LayerSource::Shape { shape_type } => {
                                 match shape_type {
@@ -6746,91 +6832,92 @@ impl Render for PropertiesPanel {
                                             );
                                         }
 
-                                        props_items.push(
-                                            v_flex()
-                                                .id("shape_properties_section")
-                                                .test_support()
-                                                .gap_2()
-                                                .p_2()
-                                                .rounded_sm()
-                                                .bg(cx.theme().secondary)
-                                                .child(
-                                                    h_flex()
-                                                        .gap_1p5()
-                                                        .items_center()
-                                                        .font_semibold()
-                                                        .text_xs()
-                                                        .text_color(cx.theme().foreground)
-                                                        .child(icon_box(IconName::Square))
-                                                        .child("Rectangle Geometry"),
-                                                )
-                                                .child(
-                                                    h_flex()
-                                                        .items_center()
-                                                        .justify_between()
-                                                        .text_xs()
-                                                        .child(div().text_color(cx.theme().muted_foreground).child("Fill"))
-                                                        .child(fill_row),
-                                                )
-                                                .child(
-                                                    h_flex()
-                                                        .items_center()
-                                                        .justify_between()
-                                                        .text_xs()
-                                                        .child(div().text_color(cx.theme().muted_foreground).child("Width"))
-                                                        .child(scrub_field(
-                                                            "rect_w_field",
-                                                            "rect_w".to_string(),
-                                                            format!("{w:.0} px"),
-                                                            None,
-                                                            None,
-                                                            &self.state,
-                                                            &panel_entity,
-                                                            cx,
-                                                            move |_| {},
-                                                            move |_| {},
-                                                        )),
-                                                )
-                                                .child(
-                                                    h_flex()
-                                                        .items_center()
-                                                        .justify_between()
-                                                        .text_xs()
-                                                        .child(div().text_color(cx.theme().muted_foreground).child("Height"))
-                                                        .child(scrub_field(
-                                                            "rect_h_field",
-                                                            "rect_h".to_string(),
-                                                            format!("{h:.0} px"),
-                                                            None,
-                                                            None,
-                                                            &self.state,
-                                                            &panel_entity,
-                                                            cx,
-                                                            move |_| {},
-                                                            move |_| {},
-                                                        )),
-                                                )
-                                                .child(
-                                                    h_flex()
-                                                        .items_center()
-                                                        .justify_between()
-                                                        .text_xs()
-                                                        .child(div().text_color(cx.theme().muted_foreground).child("Corner Radius"))
-                                                        .child(scrub_field(
-                                                            "rect_cr_field",
-                                                            "rect_cr".to_string(),
-                                                            format!("{cr:.0} px"),
-                                                            None,
-                                                            None,
-                                                            &self.state,
-                                                            &panel_entity,
-                                                            cx,
-                                                            move |_| {},
-                                                            move |_| {},
-                                                        )),
-                                                )
-                                                .into_any_element(),
+                                        let rect_body = v_flex()
+                                            .id("shape_properties_section")
+                                            .test_support()
+                                            .gap_2()
+                                            .child(
+                                                h_flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .text_xs()
+                                                    .child(div().text_color(cx.theme().muted_foreground).child("Fill"))
+                                                    .child(fill_row),
+                                            )
+                                            .child(
+                                                h_flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .text_xs()
+                                                    .child(div().text_color(cx.theme().muted_foreground).child("Width"))
+                                                    .child(scrub_field(
+                                                        "rect_w_field",
+                                                        "rect_w".to_string(),
+                                                        format!("{w:.0} px"),
+                                                        None,
+                                                        None,
+                                                        &self.state,
+                                                        &panel_entity,
+                                                        cx,
+                                                        move |_| {},
+                                                        move |_| {},
+                                                    )),
+                                            )
+                                            .child(
+                                                h_flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .text_xs()
+                                                    .child(div().text_color(cx.theme().muted_foreground).child("Height"))
+                                                    .child(scrub_field(
+                                                        "rect_h_field",
+                                                        "rect_h".to_string(),
+                                                        format!("{h:.0} px"),
+                                                        None,
+                                                        None,
+                                                        &self.state,
+                                                        &panel_entity,
+                                                        cx,
+                                                        move |_| {},
+                                                        move |_| {},
+                                                    )),
+                                            )
+                                            .child(
+                                                h_flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .text_xs()
+                                                    .child(div().text_color(cx.theme().muted_foreground).child("Corner Radius"))
+                                                    .child(scrub_field(
+                                                        "rect_cr_field",
+                                                        "rect_cr".to_string(),
+                                                        format!("{cr:.0} px"),
+                                                        None,
+                                                        None,
+                                                        &self.state,
+                                                        &panel_entity,
+                                                        cx,
+                                                        move |_| {},
+                                                        move |_| {},
+                                                    )),
+                                            );
+
+                                        let p_src = panel_entity.clone();
+                                        let rect_section = prop_section(
+                                            "shape_source",
+                                            "Rectangle Shape Geometry".to_string(),
+                                            IconName::Square,
+                                            self.source_expanded,
+                                            move |cx| {
+                                                p_src.update(cx, |this, cx| {
+                                                    this.source_expanded = !this.source_expanded;
+                                                    cx.notify();
+                                                });
+                                            },
+                                            cx,
+                                            Some(rect_body.into_any_element()),
                                         );
+                                        props_items.push(rect_section);
                                     }
                                     ShapeType::Ellipse { radius_x, radius_y, fill } => {
                                         let rx = radius_x.value;
@@ -6872,100 +6959,102 @@ impl Render for PropertiesPanel {
                                             );
                                         }
 
-                                        props_items.push(
-                                            v_flex()
-                                                .id("shape_properties_section")
-                                                .test_support()
-                                                .gap_2()
-                                                .p_2()
-                                                .rounded_sm()
-                                                .bg(cx.theme().secondary)
-                                                .child(
-                                                    h_flex()
-                                                        .gap_1p5()
-                                                        .items_center()
-                                                        .font_semibold()
-                                                        .text_xs()
-                                                        .text_color(cx.theme().foreground)
-                                                        .child(icon_box(IconName::Circle))
-                                                        .child("Ellipse Geometry"),
-                                                )
-                                                .child(
-                                                    h_flex()
-                                                        .items_center()
-                                                        .justify_between()
-                                                        .text_xs()
-                                                        .child(div().text_color(cx.theme().muted_foreground).child("Fill"))
-                                                        .child(fill_row),
-                                                )
-                                                .child(
-                                                    h_flex()
-                                                        .items_center()
-                                                        .justify_between()
-                                                        .text_xs()
-                                                        .child(div().text_color(cx.theme().muted_foreground).child("Radius X"))
-                                                        .child(scrub_field(
-                                                            "ellipse_rx_field",
-                                                            "ellipse_rx".to_string(),
-                                                            format!("{rx:.0} px"),
-                                                            None,
-                                                            None,
-                                                            &self.state,
-                                                            &panel_entity,
-                                                            cx,
-                                                            move |_| {},
-                                                            move |_| {},
-                                                        )),
-                                                )
-                                                .child(
-                                                    h_flex()
-                                                        .items_center()
-                                                        .justify_between()
-                                                        .text_xs()
-                                                        .child(div().text_color(cx.theme().muted_foreground).child("Radius Y"))
-                                                        .child(scrub_field(
-                                                            "ellipse_ry_field",
-                                                            "ellipse_ry".to_string(),
-                                                            format!("{ry:.0} px"),
-                                                            None,
-                                                            None,
-                                                            &self.state,
-                                                            &panel_entity,
-                                                            cx,
-                                                            move |_| {},
-                                                            move |_| {},
-                                                        )),
-                                                )
-                                                .into_any_element(),
+                                        let ellipse_body = v_flex()
+                                            .id("shape_properties_section")
+                                            .test_support()
+                                            .gap_2()
+                                            .child(
+                                                h_flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .text_xs()
+                                                    .child(div().text_color(cx.theme().muted_foreground).child("Fill"))
+                                                    .child(fill_row),
+                                            )
+                                            .child(
+                                                h_flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .text_xs()
+                                                    .child(div().text_color(cx.theme().muted_foreground).child("Radius X"))
+                                                    .child(scrub_field(
+                                                        "ellipse_rx_field",
+                                                        "ellipse_rx".to_string(),
+                                                        format!("{rx:.0} px"),
+                                                        None,
+                                                        None,
+                                                        &self.state,
+                                                        &panel_entity,
+                                                        cx,
+                                                        move |_| {},
+                                                        move |_| {},
+                                                    )),
+                                            )
+                                            .child(
+                                                h_flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .text_xs()
+                                                    .child(div().text_color(cx.theme().muted_foreground).child("Radius Y"))
+                                                    .child(scrub_field(
+                                                        "ellipse_ry_field",
+                                                        "ellipse_ry".to_string(),
+                                                        format!("{ry:.0} px"),
+                                                        None,
+                                                        None,
+                                                        &self.state,
+                                                        &panel_entity,
+                                                        cx,
+                                                        move |_| {},
+                                                        move |_| {},
+                                                    )),
+                                            );
+
+                                        let p_src = panel_entity.clone();
+                                        let ellipse_section = prop_section(
+                                            "shape_source",
+                                            "Ellipse Shape Geometry".to_string(),
+                                            IconName::Circle,
+                                            self.source_expanded,
+                                            move |cx| {
+                                                p_src.update(cx, |this, cx| {
+                                                    this.source_expanded = !this.source_expanded;
+                                                    cx.notify();
+                                                });
+                                            },
+                                            cx,
+                                            Some(ellipse_body.into_any_element()),
                                         );
+                                        props_items.push(ellipse_section);
                                     }
                                     ShapeType::Path { path_data, .. } => {
-                                        props_items.push(
-                                            v_flex()
-                                                .id("shape_properties_section")
-                                                .test_support()
-                                                .gap_2()
-                                                .p_2()
-                                                .rounded_sm()
-                                                .bg(cx.theme().secondary)
-                                                .child(
-                                                    h_flex()
-                                                        .gap_1p5()
-                                                        .items_center()
-                                                        .font_semibold()
-                                                        .text_xs()
-                                                        .text_color(cx.theme().foreground)
-                                                        .child(icon_box(IconName::Pen))
-                                                        .child("Vector Pen Path"),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(cx.theme().muted_foreground)
-                                                        .child(format!("Path: {}", if path_data.len() > 40 { format!("{}...", &path_data[..40]) } else { path_data.clone() })),
-                                                )
-                                                .into_any_element(),
+                                        let path_body = v_flex()
+                                            .id("shape_properties_section")
+                                            .test_support()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child(format!("Path: {}", if path_data.len() > 40 { format!("{}...", &path_data[..40]) } else { path_data.clone() })),
+                                            );
+
+                                        let p_src = panel_entity.clone();
+                                        let path_section = prop_section(
+                                            "shape_source",
+                                            "Vector Pen Path".to_string(),
+                                            IconName::Pen,
+                                            self.source_expanded,
+                                            move |cx| {
+                                                p_src.update(cx, |this, cx| {
+                                                    this.source_expanded = !this.source_expanded;
+                                                    cx.notify();
+                                                });
+                                            },
+                                            cx,
+                                            Some(path_body.into_any_element()),
                                         );
+                                        props_items.push(path_section);
                                     }
                                 }
                             }
@@ -6973,81 +7062,84 @@ impl Render for PropertiesPanel {
                                 let asset = state.project.get_asset(asset_id);
                                 let asset_name = asset.map(|a| a.name.clone()).unwrap_or_else(|| asset_id.clone());
                                 let path_str = asset.map(|a| a.path.to_string_lossy().to_string()).unwrap_or_default();
-                                props_items.push(
-                                    v_flex()
-                                        .id("media_properties_section")
-                                        .test_support()
-                                        .gap_1p5()
-                                        .p_2()
-                                        .rounded_sm()
-                                        .bg(cx.theme().secondary)
-                                        .child(
-                                            h_flex()
-                                                .gap_1p5()
-                                                .items_center()
-                                                .font_semibold()
-                                                .text_xs()
-                                                .text_color(cx.theme().foreground)
-                                                .child(icon_box(IconName::Film))
-                                                .child(format!("Image: {asset_name}")),
-                                        )
-                                        .child(div().text_xs().text_color(cx.theme().muted_foreground).child(path_str))
-                                        .into_any_element(),
+                                let media_body = v_flex()
+                                    .id("media_properties_section")
+                                    .test_support()
+                                    .gap_1p5()
+                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child(path_str));
+
+                                let p_src = panel_entity.clone();
+                                let media_section = prop_section(
+                                    "media_source",
+                                    format!("Image: {asset_name}"),
+                                    IconName::Film,
+                                    self.source_expanded,
+                                    move |cx| {
+                                        p_src.update(cx, |this, cx| {
+                                            this.source_expanded = !this.source_expanded;
+                                            cx.notify();
+                                        });
+                                    },
+                                    cx,
+                                    Some(media_body.into_any_element()),
                                 );
+                                props_items.push(media_section);
                             }
                             LayerSource::Video { asset_id, media_start } => {
                                 let asset = state.project.get_asset(asset_id);
                                 let asset_name = asset.map(|a| a.name.clone()).unwrap_or_else(|| asset_id.clone());
                                 let path_str = asset.map(|a| a.path.to_string_lossy().to_string()).unwrap_or_default();
-                                props_items.push(
-                                    v_flex()
-                                        .id("media_properties_section")
-                                        .test_support()
-                                        .gap_1p5()
-                                        .p_2()
-                                        .rounded_sm()
-                                        .bg(cx.theme().secondary)
-                                        .child(
-                                            h_flex()
-                                                .gap_1p5()
-                                                .items_center()
-                                                .font_semibold()
-                                                .text_xs()
-                                                .text_color(cx.theme().foreground)
-                                                .child(icon_box(IconName::Film))
-                                                .child(format!("Video: {asset_name}")),
-                                        )
-                                        .child(div().text_xs().text_color(cx.theme().muted_foreground).child(format!("Start: {} • File: {}", media_start, path_str)))
-                                        .into_any_element(),
+                                let media_body = v_flex()
+                                    .id("media_properties_section")
+                                    .test_support()
+                                    .gap_1p5()
+                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child(format!("Start: {} • File: {}", media_start, path_str)));
+
+                                let p_src = panel_entity.clone();
+                                let media_section = prop_section(
+                                    "media_source",
+                                    format!("Video: {asset_name}"),
+                                    IconName::Film,
+                                    self.source_expanded,
+                                    move |cx| {
+                                        p_src.update(cx, |this, cx| {
+                                            this.source_expanded = !this.source_expanded;
+                                            cx.notify();
+                                        });
+                                    },
+                                    cx,
+                                    Some(media_body.into_any_element()),
                                 );
+                                props_items.push(media_section);
                             }
                             LayerSource::Adjustment => {
-                                props_items.push(
-                                    v_flex()
-                                        .id("adjustment_properties_section")
-                                        .test_support()
-                                        .gap_1p5()
-                                        .p_2()
-                                        .rounded_sm()
-                                        .bg(cx.theme().secondary)
-                                        .child(
-                                            h_flex()
-                                                .gap_1p5()
-                                                .items_center()
-                                                .font_semibold()
-                                                .text_xs()
-                                                .text_color(cx.theme().foreground)
-                                                .child(icon_box(IconName::SlidersHorizontal))
-                                                .child("Adjustment Layer"),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child("Applies effects and blend modes to all underlying layers."),
-                                        )
-                                        .into_any_element(),
+                                let adj_body = v_flex()
+                                    .id("adjustment_properties_section")
+                                    .test_support()
+                                    .gap_1p5()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child("Applies effects and blend modes to all underlying layers."),
+                                    );
+
+                                let p_src = panel_entity.clone();
+                                let adj_section = prop_section(
+                                    "adjustment_source",
+                                    "Adjustment Layer".to_string(),
+                                    IconName::SlidersHorizontal,
+                                    self.source_expanded,
+                                    move |cx| {
+                                        p_src.update(cx, |this, cx| {
+                                            this.source_expanded = !this.source_expanded;
+                                            cx.notify();
+                                        });
+                                    },
+                                    cx,
+                                    Some(adj_body.into_any_element()),
                                 );
+                                props_items.push(adj_section);
                             }
                             _ => {}
                         }
@@ -7332,23 +7424,21 @@ impl Render for PropertiesPanel {
                         }
 
                         // --- Switches & Modes Card ---
-                        let switches_card = v_flex()
-                            .p_2p5()
-                            .rounded_md()
-                            .border_1()
-                            .border_color(cx.theme().border)
-                            .bg(cx.theme().secondary)
+                        let p_switches = panel_entity.clone();
+                        let s_blend = self.state.clone();
+                        let s_matte = self.state.clone();
+                        let s_lock = self.state.clone();
+                        let lid_blend = layer.id.clone();
+                        let lid_matte = layer.id.clone();
+                        let lid_lock = layer.id.clone();
+                        let cur_bm = layer.blend_mode;
+                        let cur_matte = layer.matte_mode;
+                        let is_locked = layer.locked;
+
+                        let switches_body = v_flex()
+                            .id("switches_properties_section")
+                            .test_support()
                             .gap_2()
-                            .child(
-                                h_flex()
-                                    .gap_1p5()
-                                    .items_center()
-                                    .font_semibold()
-                                    .text_xs()
-                                    .text_color(cx.theme().foreground)
-                                    .child(icon_box(IconName::Eye))
-                                    .child("Switches & Modes"),
-                            )
                             .child(
                                 h_flex()
                                     .gap_2()
@@ -7392,48 +7482,164 @@ impl Render for PropertiesPanel {
                                             })
                                             .child(icon_box(IconName::Sparkles))
                                             .child("Solo"),
+                                    )
+                                    .child(
+                                        div()
+                                            .px_2()
+                                            .py_0p5()
+                                            .bg(if is_locked { rgb(0xf59e0b).into() } else { cx.theme().muted })
+                                            .text_color(if is_locked { rgb(0x000000).into() } else { cx.theme().muted_foreground })
+                                            .rounded_sm()
+                                            .cursor_pointer()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                s_lock.update(cx, |s, cx| {
+                                                    s.toggle_layer_lock(&lid_lock);
+                                                    cx.notify();
+                                                });
+                                            })
+                                            .child(icon_box(IconName::Lock))
+                                            .child(if is_locked { "Locked" } else { "Lock" }),
+                                    ),
+                            )
+                            // Blend Mode Row
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .text_xs()
+                                    .child(div().text_color(cx.theme().muted_foreground).child("Blend Mode"))
+                                    .child(
+                                        div()
+                                            .id("props_blend_mode_button")
+                                            .test_support()
+                                            .cursor_pointer()
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_sm()
+                                            .bg(cx.theme().muted)
+                                            .text_color(cx.theme().primary)
+                                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                            .child(cur_bm.as_str())
+                                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                let next_bm = match cur_bm {
+                                                    project::BlendMode::Normal => project::BlendMode::Multiply,
+                                                    project::BlendMode::Multiply => project::BlendMode::Screen,
+                                                    project::BlendMode::Screen => project::BlendMode::Overlay,
+                                                    project::BlendMode::Overlay => project::BlendMode::Add,
+                                                    _ => project::BlendMode::Normal,
+                                                };
+                                                s_blend.update(cx, |s, cx| {
+                                                    s.set_layer_blend_mode(&lid_blend, next_bm);
+                                                    cx.notify();
+                                                });
+                                            }),
+                                    ),
+                            )
+                            // Track Matte Row
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .text_xs()
+                                    .child(div().text_color(cx.theme().muted_foreground).child("Track Matte"))
+                                    .child(
+                                        div()
+                                            .id("props_track_matte_button")
+                                            .test_support()
+                                            .cursor_pointer()
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_sm()
+                                            .bg(cx.theme().muted)
+                                            .text_color(cx.theme().primary)
+                                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                            .child(match cur_matte {
+                                                project::TrackMatteMode::None => "No Matte",
+                                                project::TrackMatteMode::Alpha => "Alpha Matte",
+                                                project::TrackMatteMode::AlphaInverted => "Alpha Invert",
+                                                project::TrackMatteMode::Luma => "Luma Matte",
+                                                project::TrackMatteMode::LumaInverted => "Luma Invert",
+                                            })
+                                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                let next_matte = match cur_matte {
+                                                    project::TrackMatteMode::None => project::TrackMatteMode::Alpha,
+                                                    project::TrackMatteMode::Alpha => project::TrackMatteMode::AlphaInverted,
+                                                    project::TrackMatteMode::AlphaInverted => project::TrackMatteMode::Luma,
+                                                    project::TrackMatteMode::Luma => project::TrackMatteMode::LumaInverted,
+                                                    project::TrackMatteMode::LumaInverted => project::TrackMatteMode::None,
+                                                };
+                                                s_matte.update(cx, |s, cx| {
+                                                    s.set_layer_track_matte(&lid_matte, next_matte, None);
+                                                    cx.notify();
+                                                });
+                                            }),
                                     ),
                             );
 
+                        let switches_card = prop_section(
+                            "switches",
+                            "Switches & Compositing".to_string(),
+                            IconName::Eye,
+                            self.switches_expanded,
+                            move |cx| {
+                                p_switches.update(cx, |this, cx| {
+                                    this.switches_expanded = !this.switches_expanded;
+                                    cx.notify();
+                                });
+                            },
+                            cx,
+                            Some(switches_body.into_any_element()),
+                        );
+
                         // --- Effects Card ---
-                        let effects_card = v_flex()
-                            .p_2p5()
-                            .rounded_md()
-                            .border_1()
-                            .border_color(cx.theme().border)
-                            .bg(cx.theme().secondary)
-                            .gap_2()
-                            .child(
-                                h_flex()
-                                    .gap_1p5()
-                                    .items_center()
-                                    .font_semibold()
-                                    .text_xs()
-                                    .text_color(cx.theme().foreground)
-                                    .child(icon_box(IconName::SlidersHorizontal))
-                                    .child(format!("Applied Effects ({})", layer.effects.len())),
-                            )
-                            .child(div().child(effects_list));
+                        let p_effects = panel_entity.clone();
+                        let effects_card = prop_section(
+                            "effects",
+                            format!("Applied Effects ({})", layer.effects.len()),
+                            IconName::SlidersHorizontal,
+                            self.effects_expanded,
+                            move |cx| {
+                                p_effects.update(cx, |this, cx| {
+                                    this.effects_expanded = !this.effects_expanded;
+                                    cx.notify();
+                                });
+                            },
+                            cx,
+                            Some(effects_list),
+                        );
 
                         props_items.push(transform_card.into_any_element());
-                        props_items.push(switches_card.into_any_element());
-                        props_items.push(effects_card.into_any_element());
-                        // Toolbar tool settings live in Properties too:
-                        // defaults for new layers, always reflecting the
-                        // active tool. Kept last so the inspector layout
-                        // above never shifts under existing workflows.
-                        props_items.push(render_tool_settings(&self.state, cx));
+                        props_items.push(switches_card);
+                        props_items.push(effects_card);
 
                         props_items
                     } else {
                         vec![
                             div()
+                                .id("properties_empty_placeholder")
+                                .test_support()
                                 .p_4()
+                                .flex()
+                                .flex_col()
+                                .items_center()
+                                .justify_center()
+                                .gap_2()
                                 .text_center()
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("No layer selected. Select a layer from the timeline or project panel to inspect its properties.")
+                                .child(icon_box(IconName::Layers))
+                                .child("No layer selected")
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground.opacity(0.7))
+                                        .child("Select a layer from the timeline or project panel to inspect its properties.")
+                                )
                                 .into_any_element(),
+                            render_tool_settings(&self.state, cx),
                         ]
                     }),
             )
@@ -7699,6 +7905,7 @@ impl Render for EffectsPanel {
             .size_full()
             .flex()
             .flex_col()
+            .overflow_hidden()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             // Search / Filter
@@ -8033,6 +8240,7 @@ fn timeline_scrub(
                     });
                     // Scrubbing previews fast; release restores quality.
                     state_fast.update(cx, |s, cx| {
+                        s.checkpoint();
                         s.preview_fast = true;
                         cx.notify();
                     });
@@ -8047,6 +8255,8 @@ fn timeline_scrub(
                         let lid = lid_wheel.clone();
                         let key = key_wheel.clone();
                         state_wheel.update(cx, |s, cx| {
+                            // Discrete wheel step = one undoable nudge.
+                            s.checkpoint();
                             s.nudge_timeline_value(&lid, &key, step);
                             cx.notify();
                         });
@@ -8102,6 +8312,8 @@ pub struct TimelinePanel {
     pub scrub_last_x: Option<f32>,
     pub scrub_moved: bool,
     pub scrub_factor: f32,
+    /// Active spline/graph keyframe drag (time + value).
+    pub graph_drag: Option<GraphKeyDrag>,
 }
 
 /// Describes what kind of drag the user is performing on the timeline layer strip.
@@ -8130,6 +8342,482 @@ pub enum TimelineDragAction {
     },
 }
 
+/// Active drag of a single spline/graph keyframe (After Effects Graph Editor).
+#[derive(Clone, Debug)]
+pub struct GraphKeyDrag {
+    pub layer_id: String,
+    pub path: String,
+    /// Key time at drag start / last committed position (seconds).
+    pub at_s: f64,
+    pub last_x: f32,
+    pub last_y: f32,
+    pub v_min: f32,
+    pub v_max: f32,
+    pub duration: f64,
+}
+
+/// After Effects-style spline/graph editor, rendered inside the Timeline panel.
+///
+/// Shows one normalized curve per animated scalar property of the selected
+/// layer (`graph_series`), sampled via `evaluate_graph_param`. Keyframes are
+/// draggable diamonds (time = x, value = y); right-click cycles
+/// Linear -> Bezier -> Hold. Background slices seek the playhead.
+fn render_graph_view(
+    state: &Entity<EditorState>,
+    panel_entity: &Entity<TimelinePanel>,
+    selected_layer_id: Option<String>,
+    cx: &App,
+) -> AnyElement {
+    let (comp_duration, current_time, fps, spline_prop) = {
+        let s = state.read(cx);
+        let comp = s.active_composition();
+        (
+            comp.map(|c| c.duration_seconds()).unwrap_or(5.0),
+            s.clock.position_seconds(),
+            comp.map(|c| c.frame_rate).unwrap_or(30.0),
+            s.spline_prop_path.clone(),
+        )
+    };
+    let duration = comp_duration.max(0.01);
+
+    // Header: legend + easing presets for the focused property.
+    let lid_opt = selected_layer_id.clone();
+    let series: Vec<GraphSeries> = match &lid_opt {
+        Some(lid) => state.read(cx).graph_series(lid),
+        None => Vec::new(),
+    };
+
+    // Easing preset bar (applies to focused prop, else all series).
+    let mut easing_row = h_flex().gap_1().items_center();
+    {
+        let presets = [
+            (EasingPreset::Linear, "Linear"),
+            (EasingPreset::EaseIn, "Ease In"),
+            (EasingPreset::EaseOut, "Ease Out"),
+            (EasingPreset::EasyEase, "Easy Ease"),
+            (EasingPreset::Hold, "Hold"),
+        ];
+        for (preset, label) in presets {
+            let s_e = state.clone();
+            let lid_e = lid_opt.clone();
+            let focus_e = spline_prop.clone();
+            let series_paths: Vec<String> = series.iter().map(|se| se.path.clone()).collect();
+            easing_row = easing_row.child(
+                div()
+                    .cursor_pointer()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_sm()
+                    .bg(cx.theme().secondary)
+                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                    .text_xs()
+                    .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                        if let Some(ref lid) = lid_e {
+                            let paths = series_paths.clone();
+                            let focus = focus_e.clone();
+                            s_e.update(cx, |s, cx| {
+                                s.checkpoint();
+                                if !focus.is_empty() && paths.iter().any(|p| p == &focus) {
+                                    s.set_layer_property_easing(lid, &focus, preset);
+                                } else {
+                                    for p in &paths {
+                                        s.set_layer_property_easing(lid, p, preset);
+                                    }
+                                }
+                                cx.notify();
+                            });
+                        }
+                    })
+                    .child(label),
+            );
+        }
+    }
+
+    // Legend row: click a series to focus it in the spline editor.
+    let mut legend = h_flex().gap_1().items_center().flex_wrap();
+    if series.is_empty() {
+        legend = legend.child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child("No animated properties — enable a stopwatch, then click ◆ to add keys."),
+        );
+    }
+    for se in &series {
+        let s_f = state.clone();
+        let path_f = se.path.clone();
+        let is_focused = se.path == spline_prop;
+        legend = legend.child(
+            div()
+                .cursor_pointer()
+                .px_2()
+                .py_0p5()
+                .rounded_sm()
+                .border_1()
+                .border_color(cx.theme().border)
+                .bg(if is_focused {
+                    cx.theme().accent
+                } else {
+                    cx.theme().secondary
+                })
+                .text_xs()
+                .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                    let p = path_f.clone();
+                    s_f.update(cx, |s, cx| {
+                        s.set_spline_prop_path(&p);
+                        cx.notify();
+                    });
+                })
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .items_center()
+                        .child(div().w(px(8.)).h(px(8.)).rounded_sm().bg(Rgba {
+                            r: se.color.0,
+                            g: se.color.1,
+                            b: se.color.2,
+                            a: 1.0,
+                        }))
+                        .child(format!("{} ({})", se.label, se.keys.len())),
+                ),
+        );
+    }
+
+    // Empty states.
+    if lid_opt.is_none() {
+        return v_flex()
+            .flex_1()
+            .p_3()
+            .gap_2()
+            .child(legend)
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Select a layer to edit its splines."),
+            )
+            .into_any_element();
+    }
+    if series.is_empty() {
+        let s_add = state.clone();
+        let lid_add = lid_opt.clone().unwrap_or_default();
+        let focus_add = spline_prop.clone();
+        return v_flex()
+            .flex_1()
+            .p_3()
+            .gap_2()
+            .child(legend)
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("No keys yet on this layer."),
+                    )
+                    .child(
+                        div()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .bg(cx.theme().primary)
+                            .text_color(cx.theme().primary_foreground)
+                            .text_xs()
+                            .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                                let lid = lid_add.clone();
+                                let prop = if focus_add.is_empty() {
+                                    "opacity".to_string()
+                                } else {
+                                    focus_add.clone()
+                                };
+                                s_add.update(cx, |s, cx| {
+                                    s.toggle_layer_keyframe_at_current_time(&lid, &prop);
+                                    cx.notify();
+                                });
+                            })
+                            .child("◆ Add key at playhead"),
+                    ),
+            )
+            .into_any_element();
+    }
+
+    // Sample curves + derive a shared value range for vertical fit.
+    const SAMPLES: usize = 80;
+    let mut samples_per_series: Vec<Vec<f32>> = Vec::new();
+    let mut v_min = f32::MAX;
+    let mut v_max = f32::MIN;
+    {
+        let s = state.read(cx);
+        let lid = lid_opt.as_deref().unwrap_or("");
+        for se in &series {
+            let mut vals = Vec::with_capacity(SAMPLES);
+            for i in 0..SAMPLES {
+                let t = i as f64 / (SAMPLES - 1) as f64 * duration;
+                let v = s.evaluate_graph_param(lid, &se.path, t).unwrap_or(0.0);
+                v_min = v_min.min(v);
+                v_max = v_max.max(v);
+                vals.push(v);
+            }
+            for k in &se.keys {
+                v_min = v_min.min(k.v);
+                v_max = v_max.max(k.v);
+            }
+            samples_per_series.push(vals);
+        }
+    }
+    if !(v_min < v_max) {
+        v_min -= 1.0;
+        v_max += 1.0;
+    }
+    let pad = ((v_max - v_min) * 0.12).max(0.001);
+    v_min -= pad;
+    v_max += pad;
+    let span = (v_max - v_min).max(1e-5);
+    let y_to_ratio = |v: f32| -> f32 { ((v - v_min) / span).clamp(0.0, 1.0) };
+
+    let playhead_pct = (current_time / duration * 100.0).clamp(0.0, 100.0) as f32;
+    let lid_graph = lid_opt.clone().unwrap_or_default();
+
+    // Graph canvas: fixed height, axis gutter + plot area.
+    let mut plot = div().flex_1().h(px(190.)).relative().bg(cx.theme().background);
+
+    // Horizontal grid (25/50/75%) + per-second vertical grid (cap 12 lines).
+    for frac in [0.25f32, 0.5, 0.75] {
+        plot = plot.child(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .top(relative(frac))
+                .h(px(1.))
+                .bg(cx.theme().border.opacity(0.35)),
+        );
+    }
+    let vlines = (duration.round() as usize).clamp(1, 12);
+    for i in 1..vlines {
+        let f = i as f32 / vlines as f32;
+        plot = plot.child(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(relative(f))
+                .w(px(1.))
+                .bg(cx.theme().border.opacity(0.22)),
+        );
+    }
+
+    // Background seek slices (below curves/keys so keys stay clickable).
+    for slice_idx in 0..120 {
+        let frac = slice_idx as f64 / 120.0;
+        let s_seek = state.clone();
+        let target = frac * duration;
+        plot = plot.child(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(relative(frac as f32))
+                .w(relative(1.0 / 120.0))
+                .cursor_col_resize()
+                .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                    s_seek.update(cx, |s, cx| {
+                        s.seek(target);
+                        cx.notify();
+                    });
+                }),
+        );
+    }
+
+    // Curves as small dots (80 per series keeps element count bounded).
+    for (si, se) in series.iter().enumerate() {
+        let col = Rgba { r: se.color.0, g: se.color.1, b: se.color.2, a: 0.95 };
+        let dimmed = !spline_prop.is_empty() && se.path != spline_prop;
+        for (i, v) in samples_per_series[si].iter().enumerate() {
+            let x = i as f32 / (SAMPLES - 1) as f32;
+            let y = y_to_ratio(*v);
+            plot = plot.child(
+                div()
+                    .absolute()
+                    .left(relative(x))
+                    .top(relative(1.0 - y))
+                    .w(px(3.))
+                    .h(px(3.))
+                    .ml(px(-1.))
+                    .mt(px(-1.))
+                    .rounded_full()
+                    .bg(col)
+                    .opacity(if dimmed { 0.25 } else { 1.0 }),
+            );
+        }
+    }
+
+    // Playhead.
+    plot = plot.child(
+        div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .w(px(1.))
+            .bg(rgb(0xef4444))
+            .left(relative(playhead_pct / 100.0)),
+    );
+
+    // Keyframes on top: drag to move, right-click cycles interpolation.
+    for se in &series {
+        let dimmed = !spline_prop.is_empty() && se.path != spline_prop;
+        for k in &se.keys {
+            let x = (k.t / duration).clamp(0.0, 1.0) as f32;
+            let y = y_to_ratio(k.v);
+            let p_down = panel_entity.clone();
+            let s_down_ck = state.clone();
+            let s_cycle = state.clone();
+            let lid_k = lid_graph.clone();
+            let path_k = se.path.clone();
+            let at_s = k.t;
+            let (glyph, glyph_col): (&str, Rgba) = match k.interp {
+                project::KeyframeInterpolation::Linear => ("◆", rgb(0x38bdf8)),
+                project::KeyframeInterpolation::Bezier => ("●", rgb(0x4ade80)),
+                project::KeyframeInterpolation::Hold => ("■", rgb(0xf59e0b)),
+            };
+            let drag_vmin = v_min;
+            let drag_vmax = v_max;
+            let drag_dur = duration;
+            let lid_r = lid_graph.clone();
+            let path_r = se.path.clone();
+            plot = plot.child(
+                div()
+                    .absolute()
+                    .left(relative(x))
+                    .top(relative(1.0 - y))
+                    .ml(px(-8.))
+                    .mt(px(-9.))
+                    .w(px(16.))
+                    .h(px(18.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_sm()
+                    .font_bold()
+                    .cursor_pointer()
+                    .text_color(glyph_col)
+                    .opacity(if dimmed { 0.35 } else { 1.0 })
+                    .hover(|s| s.text_color(rgb(0xffffff)))
+                    .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+                        let cxp = event.position.x / px(1.0);
+                        let cyp = event.position.y / px(1.0);
+                        s_down_ck.update(cx, |s, cx| {
+                            s.checkpoint();
+                            s.preview_fast = true;
+                            cx.notify();
+                        });
+                        p_down.update(cx, |this, cx| {
+                            this.graph_drag = Some(GraphKeyDrag {
+                                layer_id: lid_k.clone(),
+                                path: path_k.clone(),
+                                at_s,
+                                last_x: cxp,
+                                last_y: cyp,
+                                v_min: drag_vmin,
+                                v_max: drag_vmax,
+                                duration: drag_dur,
+                            });
+                            cx.notify();
+                        });
+                    })
+                    .on_mouse_down(MouseButton::Right, move |_event, _window, cx| {
+                        let lid = lid_r.clone();
+                        let path = path_r.clone();
+                        s_cycle.update(cx, |s, cx| {
+                            s.checkpoint();
+                            s.cycle_graph_key_interp(&lid, &path, at_s);
+                            cx.notify();
+                        });
+                    })
+                    .child(glyph),
+            );
+        }
+    }
+
+    let mid = (v_min + v_max) * 0.5;
+    let axis = v_flex()
+        .w(px(64.))
+        .h(px(190.))
+        .justify_between()
+        .py_1()
+        .pr_2()
+        .text_xs()
+        .text_color(cx.theme().muted_foreground)
+        .child(div().child(format!("{v_max:.1}")))
+        .child(div().child(format!("{mid:.1}")))
+        .child(div().child(format!("{v_min:.1}")));
+
+    // Quick actions for the focused key under the playhead.
+    let s_add2 = state.clone();
+    let lid_add2 = lid_graph.clone();
+    let focus_add2 = spline_prop.clone();
+    let focus_label = if focus_add2.is_empty() { "opacity".to_string() } else { focus_add2.clone() };
+
+    v_flex()
+        .id("spline_graph_scroll")
+        .test_support()
+        .flex_1()
+        .overflow_y_scroll()
+        .p_2()
+        .gap_2()
+        .child(
+            h_flex()
+                .gap_1()
+                .items_center()
+                .child(div().text_xs().font_semibold().text_color(cx.theme().foreground).child("Graph"))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!("{} · {} props · ◆ Linear  ● Bezier  ■ Hold · drag keys · right-click cycles interp", lid_graph, series.len())),
+                ),
+        )
+        .child(legend)
+        .child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Ease:"))
+                .child(easing_row)
+                .child(
+                    div()
+                        .cursor_pointer()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(cx.theme().muted)
+                        .hover(|s| s.bg(cx.theme().accent))
+                        .text_xs()
+                        .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                            let lid = lid_add2.clone();
+                            let prop = focus_add2.clone();
+                            let prop = if prop.is_empty() { "opacity".to_string() } else { prop };
+                            s_add2.update(cx, |s, cx| {
+                                s.toggle_layer_keyframe_at_current_time(&lid, &prop);
+                                cx.notify();
+                            });
+                        })
+                        .child(format!("◆ Key {focus_label} @ playhead")),
+                ),
+        )
+        .child(h_flex().gap_0().child(axis).child(plot))
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(format!("t 0:00 → {duration:.2}s @ {fps:.0}fps · value [{v_min:.1}, {v_max:.1}] · left-drag background seeks")),
+        )
+        .into_any_element()
+}
+
 impl TimelinePanel {
     pub fn new(state: Entity<EditorState>, cx: &mut Context<Self>) -> Self {
         let _subscription = cx.observe(&state, |_this, _state, cx| {
@@ -8153,6 +8841,7 @@ impl TimelinePanel {
             scrub_last_x: None,
             scrub_moved: false,
             scrub_factor: 1.0,
+            graph_drag: None,
         }
     }
 
@@ -8181,6 +8870,11 @@ impl TimelinePanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Typed entry is one undo step: checkpoint before editing.
+        self.state.update(cx, |s, cx| {
+            s.checkpoint();
+            cx.notify();
+        });
         let prop = format!("tl:{layer_id}:{key}");
         let initial = self
             .state
@@ -8576,10 +9270,13 @@ impl Render for TimelinePanel {
                 // Drag-start clones for trim-in, body-slip, trim-out
                 let p_drag_tin = panel_entity.clone();
                 let lid_drag_tin = layer.id.clone();
+                let s_drag_tin = self.state.clone();
                 let p_drag_slip = panel_entity.clone();
                 let lid_drag_slip = layer.id.clone();
+                let s_drag_slip = self.state.clone();
                 let p_drag_tout = panel_entity.clone();
                 let lid_drag_tout = layer.id.clone();
+                let s_drag_tout = self.state.clone();
                 let layer_in_frame = layer.in_point.frames();
                 let layer_out_frame = layer.out_point.frames();
 
@@ -8628,7 +9325,7 @@ impl Render for TimelinePanel {
                                     .child("[")
                                     .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
                                         let mx = event.position.x / px(1.0);
-                                        p_drag_tin.update(cx, |this, _cx| {
+                                        p_drag_tin.update(cx, |this, cx| {
                                             this.drag_action = Some(TimelineDragAction::TrimIn {
                                                 layer_id: lid_drag_tin.clone(),
                                                 initial_mouse_x: mx,
@@ -8636,6 +9333,13 @@ impl Render for TimelinePanel {
                                                 initial_out_frame: layer_out_frame,
                                             });
                                             this.drag_last_x = mx;
+                                            cx.notify();
+                                        });
+                                        // Trim gesture start: one undo step.
+                                        s_drag_tin.update(cx, |s, cx| {
+                                            s.checkpoint();
+                                            s.preview_fast = true;
+                                            cx.notify();
                                         });
                                     }),
                             )
@@ -8658,7 +9362,7 @@ impl Render for TimelinePanel {
                                             s.select_layer(Some(lid_span.clone()));
                                             cx.notify();
                                         });
-                                        p_drag_slip.update(cx, |this, _cx| {
+                                        p_drag_slip.update(cx, |this, cx| {
                                             this.drag_action = Some(TimelineDragAction::SlipLayer {
                                                 layer_id: lid_drag_slip.clone(),
                                                 initial_mouse_x: mx,
@@ -8666,6 +9370,13 @@ impl Render for TimelinePanel {
                                                 initial_out_frame: layer_out_frame,
                                             });
                                             this.drag_last_x = mx;
+                                            cx.notify();
+                                        });
+                                        // Slip gesture start: one undo step.
+                                        s_drag_slip.update(cx, |s, cx| {
+                                            s.checkpoint();
+                                            s.preview_fast = true;
+                                            cx.notify();
                                         });
                                     })
                                     .on_mouse_down(MouseButton::Right, move |event, _window, cx| {
@@ -8702,7 +9413,7 @@ impl Render for TimelinePanel {
                                     .child("]")
                                     .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
                                         let mx = event.position.x / px(1.0);
-                                        p_drag_tout.update(cx, |this, _cx| {
+                                        p_drag_tout.update(cx, |this, cx| {
                                             this.drag_action = Some(TimelineDragAction::TrimOut {
                                                 layer_id: lid_drag_tout.clone(),
                                                 initial_mouse_x: mx,
@@ -8710,6 +9421,13 @@ impl Render for TimelinePanel {
                                                 initial_out_frame: layer_out_frame,
                                             });
                                             this.drag_last_x = mx;
+                                            cx.notify();
+                                        });
+                                        // Trim gesture start: one undo step.
+                                        s_drag_tout.update(cx, |s, cx| {
+                                            s.checkpoint();
+                                            s.preview_fast = true;
+                                            cx.notify();
                                         });
                                     }),
                             ),
@@ -9382,11 +10100,64 @@ impl Render for TimelinePanel {
             .track_focus(&self.focus_handle)
             .size_full()
             .relative()
+            .overflow_hidden()
             .flex()
             .flex_col()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .on_mouse_move(move |event, window, cx| {
+                // Spline/graph keyframe drag wins over layer-strip drags.
+                let gdrag = p_root_move.read(cx).graph_drag.clone();
+                if let Some(mut gd) = gdrag {
+                    let cur_x = event.position.x / px(1.0);
+                    let cur_y = event.position.y / px(1.0);
+                    let dx = cur_x - gd.last_x;
+                    let dy = cur_y - gd.last_y;
+                    if dx != 0.0 || dy != 0.0 {
+                        let track_w = (window.bounds().size.width / px(1.0) - 560.0).max(200.0);
+                        let graph_h = 190.0f32;
+                        let dt = dx / track_w * gd.duration as f32;
+                        let vspan = (gd.v_max - gd.v_min).max(1e-5);
+                        let dv = -dy / graph_h * vspan;
+                        // Current value of the dragged key.
+                        let cur_v = {
+                            let s = s_root_move.read(cx);
+                            s.graph_series(&gd.layer_id)
+                                .iter()
+                                .find(|se| se.path == gd.path)
+                                .and_then(|se| {
+                                    se.keys
+                                        .iter()
+                                        .min_by(|a, b| {
+                                            (a.t - gd.at_s)
+                                                .abs()
+                                                .partial_cmp(&(b.t - gd.at_s).abs())
+                                                .unwrap_or(std::cmp::Ordering::Equal)
+                                        })
+                                        .map(|k| k.v)
+                                })
+                                .unwrap_or(0.0)
+                        };
+                        let new_t = (gd.at_s + dt as f64).clamp(0.0, gd.duration);
+                        let new_v = (cur_v + dv).clamp(gd.v_min, gd.v_max);
+                        let lid = gd.layer_id.clone();
+                        let path = gd.path.clone();
+                        let at_s = gd.at_s;
+                        s_root_move.update(cx, |s, cx| {
+                            s.preview_fast = true;
+                            s.move_graph_keyframe_live(&lid, &path, at_s, new_t, new_v);
+                            cx.notify();
+                        });
+                        gd.at_s = new_t;
+                        gd.last_x = cur_x;
+                        gd.last_y = cur_y;
+                        p_root_move.update(cx, |this, cx| {
+                            this.graph_drag = Some(gd);
+                            cx.notify();
+                        });
+                    }
+                    return;
+                }
                 let action = p_root_move.read(cx).drag_action.clone();
                 if let Some(action) = action {
                     let track_width = (window.bounds().size.width / px(1.0) - 380.0).max(200.0);
@@ -9491,6 +10262,7 @@ impl Render for TimelinePanel {
                 p_root_up.update(cx, |this, cx| {
                     this.is_scrubbing_ruler = false;
                     this.drag_action = None;
+                    this.graph_drag = None;
                     this.scrub_layer = None;
                     this.scrub_key = None;
                     this.scrub_last_x = None;
@@ -9511,6 +10283,7 @@ impl Render for TimelinePanel {
                 p_root_up_out.update(cx, |this, cx| {
                     this.is_scrubbing_ruler = false;
                     this.drag_action = None;
+                    this.graph_drag = None;
                     this.scrub_layer = None;
                     this.scrub_key = None;
                     this.scrub_last_x = None;
@@ -9683,6 +10456,56 @@ impl Render for TimelinePanel {
                                     .child(icon_box(IconName::Repeat))
                                     .child("Loop"),
                             )
+                            .child({
+                                let s_graph_tl = self.state.clone();
+                                let s_graph_gr = self.state.clone();
+                                let is_graph = self.state.read(cx).spline_editor_open;
+                                h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .id("timeline_view_timeline")
+                                            .test_support()
+                                            .cursor_pointer()
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_sm()
+                                            .bg(if !is_graph { cx.theme().primary } else { cx.theme().muted })
+                                            .text_color(if !is_graph { cx.theme().primary_foreground } else { cx.theme().foreground })
+                                            .text_xs()
+                                            .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                                                s_graph_tl.update(cx, |s, cx| {
+                                                    if s.spline_editor_open {
+                                                        s.toggle_spline_editor();
+                                                    }
+                                                    cx.notify();
+                                                });
+                                            })
+                                            .child("Timeline"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("timeline_view_graph")
+                                            .test_support()
+                                            .cursor_pointer()
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_sm()
+                                            .bg(if is_graph { cx.theme().primary } else { cx.theme().muted })
+                                            .text_color(if is_graph { cx.theme().primary_foreground } else { cx.theme().foreground })
+                                            .text_xs()
+                                            .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                                                s_graph_gr.update(cx, |s, cx| {
+                                                    if !s.spline_editor_open {
+                                                        s.toggle_spline_editor();
+                                                    }
+                                                    cx.notify();
+                                                });
+                                            })
+                                            .child("Graph"),
+                                    )
+                            })
                             .child(
                                 h_flex()
                                     .gap_1()
@@ -9871,23 +10694,35 @@ impl Render for TimelinePanel {
                         ruler_track
                     }),
             )
-            // Tracks area
+            // Tracks area: classic rows or spline/graph editor.
             .child({
                 let p_tl_ctx = panel_entity.clone();
-                v_flex()
-                    .id("timeline")
-                    .test_support()
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .overflow_x_scroll()
-                    .children(timeline_rows)
-                    .on_mouse_down(MouseButton::Right, move |event, _window, cx| {
-                        let pos = event.position;
-                        p_tl_ctx.update(cx, |this, cx| {
-                            this.open_context_menu(ContextMenuTarget::EmptyTrackArea, pos);
-                            cx.notify();
-                        });
-                    })
+                if state.spline_editor_open {
+                    let sel = state.selected_layer_id.clone();
+                    div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .overflow_hidden()
+                        .child(render_graph_view(&self.state, &panel_entity, sel, cx))
+                        .into_any_element()
+                } else {
+                    v_flex()
+                        .id("timeline")
+                        .test_support()
+                        .flex_1()
+                        .overflow_y_scroll()
+                        .overflow_x_scroll()
+                        .children(timeline_rows)
+                        .on_mouse_down(MouseButton::Right, move |event, _window, cx| {
+                            let pos = event.position;
+                            p_tl_ctx.update(cx, |this, cx| {
+                                this.open_context_menu(ContextMenuTarget::EmptyTrackArea, pos);
+                                cx.notify();
+                            });
+                        })
+                        .into_any_element()
+                }
             });
 
         // Blend Mode Dropdown Overlay

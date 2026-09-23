@@ -2,8 +2,9 @@ use compositor::{EvaluatedStack, LayerStackEvaluator, SceneGraph};
 use gpui_kit::component::input::InputState;
 use gpui_kit::{Entity, Subscription};
 use project::{
-    Asset, BlendMode, Color, Composition, Effect, EffectType, Keyframe, KeyframeTangent, Layer,
-    LayerSource, PlaybackClock, Project, Property, ShapeType, TimeCode, TrackMatteMode, Vec2,
+    Asset, BlendMode, Color, Composition, Effect, EffectType, Keyframe, KeyframeInterpolation,
+    KeyframeTangent, Layer, LayerSource, PlaybackClock, Project, Property, ShapeType, TimeCode,
+    TrackMatteMode, Vec2,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -126,6 +127,377 @@ pub struct EditorState {
     /// of the full per-pixel interpreter, so scrubbing stays fluid and
     /// full quality lands on release.
     pub preview_fast: bool,
+    /// On-disk path of the open project, if it was saved/loaded.
+    pub project_path: Option<PathBuf>,
+    /// Session recent-file list for the File menu (newest first, cap 8).
+    pub recent_projects: Vec<PathBuf>,
+    /// Undo history (project snapshots with selection context).
+    undo_stack: Vec<HistoryEntry>,
+    /// Redo history, cleared by every new checkpoint.
+    redo_stack: Vec<HistoryEntry>,
+    /// True when Timeline Graph / Spline Editor view is toggled open.
+    pub spline_editor_open: bool,
+    /// Property path currently targeted in the Spline Editor (e.g. "transform.position.y").
+    pub spline_prop_path: String,
+}
+
+/// One undo/redo snapshot: the whole project plus UI context.
+/// Projects are small (layers + effects), so full snapshots stay cheap
+/// and every mutation path shares one mechanism — predictable and easy
+/// to extend (new mutating methods just call `checkpoint()` first).
+#[derive(Debug, Clone)]
+struct HistoryEntry {
+    project: Project,
+    active_comp_id: String,
+    selected_layer_id: Option<String>,
+}
+
+impl HistoryEntry {
+    fn capture(s: &EditorState) -> Self {
+        Self {
+            project: s.project.clone(),
+            active_comp_id: s.active_comp_id.clone(),
+            selected_layer_id: s.selected_layer_id.clone(),
+        }
+    }
+
+    fn restore(&self, s: &mut EditorState) {
+        s.project = self.project.clone();
+        s.active_comp_id = self.active_comp_id.clone();
+        s.selected_layer_id = self.selected_layer_id.clone();
+    }
+}
+
+/// Easing presets for the Graph / Spline Editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EasingPreset {
+    Linear,
+    EaseIn,
+    EaseOut,
+    EasyEase,
+    Hold,
+}
+
+impl EasingPreset {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Linear => "Linear",
+            Self::EaseIn => "Ease In",
+            Self::EaseOut => "Ease Out",
+            Self::EasyEase => "Easy Ease",
+            Self::Hold => "Hold",
+        }
+    }
+}
+
+fn apply_easing_to_prop<T: project::Interpolate>(prop: &mut project::Property<T>, easing: EasingPreset) {
+    for kf in prop.keyframes_mut() {
+        match easing {
+            EasingPreset::Linear => {
+                kf.interpolation = project::KeyframeInterpolation::Linear;
+                kf.in_tangent = Some(project::KeyframeTangent::linear_in());
+                kf.out_tangent = Some(project::KeyframeTangent::linear_out());
+            }
+            EasingPreset::EaseIn => {
+                kf.interpolation = project::KeyframeInterpolation::Bezier;
+                kf.in_tangent = Some(project::KeyframeTangent::ease_in_in());
+                kf.out_tangent = Some(project::KeyframeTangent::ease_in_out());
+            }
+            EasingPreset::EaseOut => {
+                kf.interpolation = project::KeyframeInterpolation::Bezier;
+                kf.in_tangent = Some(project::KeyframeTangent::ease_out_in());
+                kf.out_tangent = Some(project::KeyframeTangent::ease_out_out());
+            }
+            EasingPreset::EasyEase => {
+                kf.interpolation = project::KeyframeInterpolation::Bezier;
+                kf.in_tangent = Some(project::KeyframeTangent::ease_in_out_in());
+                kf.out_tangent = Some(project::KeyframeTangent::ease_in_out_out());
+            }
+            EasingPreset::Hold => {
+                kf.interpolation = project::KeyframeInterpolation::Hold;
+                kf.in_tangent = None;
+                kf.out_tangent = None;
+            }
+        }
+    }
+}
+
+// --- Spline / graph editor data + mutations ---
+//
+// Graph paths name scalar animated values: `transform.anchor_point.x`,
+// `transform.position.y`, `transform.scale.x`, `transform.rotation`,
+// `opacity`, `text.font_size`, `shape.rect_width`, ...,
+// `effect:<effect_id>:<param>`. The Graph panel owns drawing; these
+// methods own enumeration, sampling, and keyframe edits.
+
+/// One keyframe point for the graph editor.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraphKey {
+    pub t: f64,
+    pub v: f32,
+    pub interp: KeyframeInterpolation,
+    pub in_tan: Option<(f32, f32)>,
+    pub out_tan: Option<(f32, f32)>,
+}
+
+/// One plottable series (a scalar prop with keyframes).
+#[derive(Debug, Clone)]
+pub struct GraphSeries {
+    pub path: String,
+    pub label: String,
+    pub color: (f32, f32, f32),
+    pub keys: Vec<GraphKey>,
+}
+
+/// Mutable access to a scalar graph property.
+enum GraphPropMut<'a> {
+    F32(&'a mut Property<f32>),
+    Vec2Comp(&'a mut Property<Vec2>, usize),
+}
+
+/// Resolve a graph path to a mutable scalar property on a layer.
+fn graph_prop_mut<'a>(
+    layer: &'a mut Layer,
+    path: &str,
+) -> Option<GraphPropMut<'a>> {
+    let (base, comp) = match path.rsplit_once('.') {
+        Some((b, c)) if ["x", "y"].contains(&c) => (b, Some(c)),
+        _ => (path, None),
+    };
+    let axis = match comp {
+        Some("x") => 0,
+        Some("y") => 1,
+        _ => 0,
+    };
+    match base {
+        "transform.anchor_point" => {
+            Some(GraphPropMut::Vec2Comp(&mut layer.transform.anchor_point, axis))
+        }
+        "transform.position" => {
+            Some(GraphPropMut::Vec2Comp(&mut layer.transform.position, axis))
+        }
+        "transform.scale" => Some(GraphPropMut::Vec2Comp(&mut layer.transform.scale, axis)),
+        "transform.rotation" => Some(GraphPropMut::F32(&mut layer.transform.rotation)),
+        "opacity" => Some(GraphPropMut::F32(&mut layer.opacity)),
+        "text.font_size" => match &mut layer.source {
+            LayerSource::Text { font_size, .. } => Some(GraphPropMut::F32(font_size)),
+            _ => None,
+        },
+        "shape.rect_width" => match &mut layer.source {
+            LayerSource::Shape { shape_type: ShapeType::Rectangle { width, .. } } => {
+                Some(GraphPropMut::F32(width))
+            }
+            _ => None,
+        },
+        "shape.rect_height" => match &mut layer.source {
+            LayerSource::Shape { shape_type: ShapeType::Rectangle { height, .. } } => {
+                Some(GraphPropMut::F32(height))
+            }
+            _ => None,
+        },
+        "shape.corner_radius" => match &mut layer.source {
+            LayerSource::Shape { shape_type: ShapeType::Rectangle { corner_radius, .. } } => {
+                Some(GraphPropMut::F32(corner_radius))
+            }
+            _ => None,
+        },
+        "shape.ellipse_rx" => match &mut layer.source {
+            LayerSource::Shape { shape_type: ShapeType::Ellipse { radius_x, .. } } => {
+                Some(GraphPropMut::F32(radius_x))
+            }
+            _ => None,
+        },
+        "shape.ellipse_ry" => match &mut layer.source {
+            LayerSource::Shape { shape_type: ShapeType::Ellipse { radius_y, .. } } => {
+                Some(GraphPropMut::F32(radius_y))
+            }
+            _ => None,
+        },
+        _ => {
+            let rest = base.strip_prefix("effect:")?;
+            let mut parts = rest.splitn(2, ':');
+            let eid = parts.next()?;
+            let pname = parts.next()?;
+            let fx = layer.get_effect_mut(eid)?;
+            Some(GraphPropMut::F32(fx.get_param_property_mut(pname)?))
+        }
+    }
+}
+
+/// Split a graph path into its base and optional Vec2 component.
+/// Returns `None` for malformed paths. Scalar paths (rotation,
+/// opacity, effect params, ...) carry no component.
+fn split_graph_path(path: &str) -> Option<(&str, Option<usize>)> {
+    if let Some((b, c)) = path.rsplit_once('.') {
+        if c == "x" {
+            return Some((b, Some(0)));
+        }
+        if c == "y" {
+            return Some((b, Some(1)));
+        }
+    }
+    // No component suffix: valid for scalar bases, resolved per base.
+    Some((path, None))
+}
+
+/// Read-only snapshot of one scalar graph property.
+fn graph_prop_read(layer: &Layer, path: &str) -> Option<(Vec<GraphKey>, f32)> {
+    let (base, comp) = split_graph_path(path)?;
+    // Vec2 bases require an explicit component; scalar bases must not
+    // have one.
+    let is_vec2_base = matches!(
+        base,
+        "transform.anchor_point" | "transform.position" | "transform.scale"
+    );
+    if is_vec2_base && comp.is_none() {
+        return None;
+    }
+    if !is_vec2_base && comp.is_some() {
+        return None;
+    }
+    let axis = comp.unwrap_or(1);
+    let take_f32 = |prop: &Property<f32>| -> (Vec<GraphKey>, f32) {
+        let keys = prop
+            .keyframes()
+            .iter()
+            .map(|k| GraphKey {
+                t: k.time_seconds(),
+                v: k.value,
+                interp: k.interpolation,
+                in_tan: k.in_tangent.map(|t| (t.x, t.y)),
+                out_tan: k.out_tangent.map(|t| (t.x, t.y)),
+            })
+            .collect();
+        (keys, prop.value)
+    };
+    let take_vec2 = |prop: &Property<Vec2>| -> (Vec<GraphKey>, f32) {
+        let keys = prop
+            .keyframes()
+            .iter()
+            .map(|k| GraphKey {
+                t: k.time_seconds(),
+                v: if axis == 0 { k.value.x } else { k.value.y },
+                interp: k.interpolation,
+                in_tan: k.in_tangent.map(|t| (t.x, t.y)),
+                out_tan: k.out_tangent.map(|t| (t.x, t.y)),
+            })
+            .collect();
+        let cur = if axis == 0 { prop.value.x } else { prop.value.y };
+        (keys, cur)
+    };
+    Some(match base {
+        "transform.anchor_point" => take_vec2(&layer.transform.anchor_point),
+        "transform.position" => take_vec2(&layer.transform.position),
+        "transform.scale" => take_vec2(&layer.transform.scale),
+        "transform.rotation" => take_f32(&layer.transform.rotation),
+        "opacity" => take_f32(&layer.opacity),
+        "text.font_size" => match &layer.source {
+            LayerSource::Text { font_size, .. } => take_f32(font_size),
+            _ => return None,
+        },
+        "shape.rect_width" => match &layer.source {
+            LayerSource::Shape { shape_type: ShapeType::Rectangle { width, .. } } => {
+                take_f32(width)
+            }
+            _ => return None,
+        },
+        "shape.rect_height" => match &layer.source {
+            LayerSource::Shape { shape_type: ShapeType::Rectangle { height, .. } } => {
+                take_f32(height)
+            }
+            _ => return None,
+        },
+        "shape.corner_radius" => match &layer.source {
+            LayerSource::Shape { shape_type: ShapeType::Rectangle { corner_radius, .. } } => {
+                take_f32(corner_radius)
+            }
+            _ => return None,
+        },
+        "shape.ellipse_rx" => match &layer.source {
+            LayerSource::Shape { shape_type: ShapeType::Ellipse { radius_x, .. } } => {
+                take_f32(radius_x)
+            }
+            _ => return None,
+        },
+        "shape.ellipse_ry" => match &layer.source {
+            LayerSource::Shape { shape_type: ShapeType::Ellipse { radius_y, .. } } => {
+                take_f32(radius_y)
+            }
+            _ => return None,
+        },
+        _ => {
+            let rest = base.strip_prefix("effect:")?;
+            let mut parts = rest.splitn(2, ':');
+            let (eid, pname) = (parts.next()?, parts.next()?);
+            take_f32(layer.get_effect(eid)?.get_param_property(pname)?)
+        }
+    })
+}
+
+/// Candidate graph paths for a layer (labels + palette).
+fn graph_candidates(layer: &Layer) -> Vec<(String, String)> {
+    let mut out = vec![
+        ("transform.anchor_point.x".to_string(), "Anchor X".to_string()),
+        ("transform.anchor_point.y".to_string(), "Anchor Y".to_string()),
+        ("transform.position.x".to_string(), "Position X".to_string()),
+        ("transform.position.y".to_string(), "Position Y".to_string()),
+        ("transform.scale.x".to_string(), "Scale X".to_string()),
+        ("transform.scale.y".to_string(), "Scale Y".to_string()),
+        ("transform.rotation".to_string(), "Rotation".to_string()),
+        ("opacity".to_string(), "Opacity".to_string()),
+    ];
+    match &layer.source {
+        LayerSource::Text { .. } => {
+            out.push(("text.font_size".to_string(), "Font Size".to_string()));
+        }
+        LayerSource::Shape { shape_type } => match shape_type {
+            ShapeType::Rectangle { .. } => {
+                out.push(("shape.rect_width".to_string(), "Rect Width".to_string()));
+                out.push(("shape.rect_height".to_string(), "Rect Height".to_string()));
+                out.push(("shape.corner_radius".to_string(), "Corner Radius".to_string()));
+            }
+            ShapeType::Ellipse { .. } => {
+                out.push(("shape.ellipse_rx".to_string(), "Ellipse RX".to_string()));
+                out.push(("shape.ellipse_ry".to_string(), "Ellipse RY".to_string()));
+            }
+            _ => {}
+        },
+        _ => {}
+    }
+    for eff in &layer.effects {
+        for name in ["radius", "brightness", "contrast", "amount", "distance", "softness", "opacity", "param1", "param2", "param3", "param4", "max_horizontal", "max_vertical", "tolerance", "threshold", "feather", "size", "angle", "skew_x", "skew_y", "width", "strength", "intensity", "tiles_x", "tiles_y", "scale", "exposure", "vibrance"] {
+            if eff.get_param_property(name).is_some() {
+                out.push((
+                    format!("effect:{}:{name}", eff.id),
+                    format!("{} · {}", eff.name, name),
+                ));
+            }
+        }
+    }
+    out
+}
+
+const GRAPH_COLORS: [(f32, f32, f32); 8] = [
+    (0.95, 0.45, 0.45),
+    (0.45, 0.75, 0.95),
+    (0.55, 0.85, 0.45),
+    (0.95, 0.8, 0.35),
+    (0.75, 0.55, 0.95),
+    (0.95, 0.6, 0.8),
+    (0.5, 0.9, 0.85),
+    (0.9, 0.9, 0.9),
+];
+
+/// All plottable (animated) series for a layer.
+fn with_graph_scalar<R>(
+    layer: &mut Layer,
+    path: &str,
+    f: impl FnOnce(&mut Property<f32>) -> R,
+) -> Option<R> {
+    match graph_prop_mut(layer, path)? {
+        GraphPropMut::F32(p) => Some(f(p)),
+        GraphPropMut::Vec2Comp(_, _) => None,
+    }
 }
 
 impl EditorState {
@@ -250,6 +622,12 @@ impl EditorState {
             tool_solid_color: Color::from_rgba_u8(59, 130, 246, 255),
             tool_rotate_step: 15.0,
             preview_fast: false,
+            project_path: None,
+            recent_projects: Vec::new(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            spline_editor_open: false,
+            spline_prop_path: "transform.position".to_string(),
         }
     }
 
@@ -368,6 +746,7 @@ impl EditorState {
         param_name: &str,
         v: f32,
     ) -> Result<(), String> {
+        self.checkpoint();
         let selected_id = self
             .selected_layer_id
             .clone()
@@ -402,6 +781,7 @@ impl EditorState {
         index: usize,
         v: f32,
     ) -> Result<(), String> {
+        self.checkpoint();
         let selected_id = self
             .selected_layer_id
             .clone()
@@ -463,6 +843,7 @@ impl EditorState {
         effect_id: &str,
         source: &str,
     ) -> Result<(), String> {
+        self.checkpoint();
         let selected_id = self
             .selected_layer_id
             .clone()
@@ -570,6 +951,150 @@ impl EditorState {
         self.selected_layer_id = layer_id;
     }
 
+    // --- Undo / redo (snapshot history) ---
+
+    /// Record the current state for undo. Call BEFORE performing a
+    /// structural or value mutation (gesture starts, menu actions,
+    /// button clicks). Coalesces rapid repeats from the same caller.
+    pub fn checkpoint(&mut self) {
+        let entry = HistoryEntry::capture(self);
+        // Coalesce: skip when identical to the last checkpoint (bursty
+        // wheel ticks and drag frames share one undo step).
+        if self.undo_stack.last().map(|e| {
+            e.project == entry.project
+                && e.active_comp_id == entry.active_comp_id
+                && e.selected_layer_id == entry.selected_layer_id
+        }).unwrap_or(false) {
+            return;
+        }
+        self.undo_stack.push(entry);
+        if self.undo_stack.len() > 100 {
+            self.undo_stack.remove(0);
+        }
+        self.redo_stack.clear();
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.undo_stack.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo_stack.is_empty()
+    }
+
+    /// Step back to the last checkpoint. Returns false when empty.
+    pub fn undo(&mut self) -> bool {
+        let Some(entry) = self.undo_stack.pop() else {
+            return false;
+        };
+        self.redo_stack.push(HistoryEntry::capture(self));
+        entry.restore(self);
+        true
+    }
+
+    /// Re-apply an undone checkpoint. Returns false when empty.
+    pub fn redo(&mut self) -> bool {
+        let Some(entry) = self.redo_stack.pop() else {
+            return false;
+        };
+        self.undo_stack.push(HistoryEntry::capture(self));
+        entry.restore(self);
+        true
+    }
+
+    // --- Project file management ---
+
+    /// Start a fresh project (used by File > New Project). Clears history.
+    pub fn new_project(&mut self, name: &str) {
+        let clean = if name.trim().is_empty() { "Untitled Project" } else { name.trim() };
+        self.project = Project::new(
+            format!("proj_{}", clean.to_lowercase().replace(' ', "_")),
+            clean,
+        );
+        let mut comp = Composition::hd_1080p_30fps("comp_main", "Main Composition", 5.0);
+        // Seed the same starter layers as a fresh session so a new
+        // project never opens empty.
+        let fps = 30.0;
+        let tc0 = TimeCode::from_frames(0, fps);
+        let tc150 = TimeCode::from_frames(150, fps);
+        let mut bg = Layer::solid(
+            "layer_bg",
+            "Background Solid",
+            Color::from_hex("#121316").unwrap_or(Color::BLACK),
+            1920,
+            1080,
+            tc0,
+            tc150,
+        );
+        bg.transform.position.set_value(Vec2::ZERO);
+        bg.transform.anchor_point.set_value(Vec2::new(960.0, 540.0));
+        let _ = comp.add_layer(bg);
+        self.project.add_composition(comp).ok();
+        self.active_comp_id = "comp_main".to_string();
+        self.selected_layer_id = None;
+        self.is_playing = false;
+        self.clock = PlaybackClock::from_composition(
+            self.project.get_composition(&self.active_comp_id).unwrap(),
+        );
+        self.project_path = None;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+    }
+
+    /// Serialize the project to a JSON file and remember the path.
+    pub fn save_project_to(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let text = serde_json::to_string_pretty(&self.project)
+            .map_err(|e| format!("Serialize failed: {e}"))?;
+        std::fs::write(path, text).map_err(|e| format!("Write failed: {e}"))?;
+        self.project_path = Some(path.to_path_buf());
+        self.remember_recent(path);
+        Ok(())
+    }
+
+    /// Save to the remembered path, or fail when the project is untitled.
+    pub fn save_project(&mut self) -> Result<(), String> {
+        let path = self.project_path.clone().ok_or_else(|| "No path yet".to_string())?;
+        self.save_project_to(&path)
+    }
+
+    /// Load a project JSON file, replacing the session. Clears history.
+    pub fn load_project_from(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("Read failed: {e}"))?;
+        let project: Project =
+            serde_json::from_str(&text).map_err(|e| format!("Parse failed: {e}"))?;
+        let Some(first) = project.compositions.first() else {
+            return Err("Project has no compositions".to_string());
+        };
+        self.active_comp_id = first.id.clone();
+        self.project = project;
+        self.selected_layer_id = None;
+        self.is_playing = false;
+        self.clock = PlaybackClock::from_composition(
+            self.project.get_composition(&self.active_comp_id).unwrap(),
+        );
+        self.project_path = Some(path.to_path_buf());
+        self.remember_recent(path);
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        Ok(())
+    }
+
+    /// File stem for window titles and menu labels.
+    pub fn project_display_name(&self) -> String {
+        if let Some(path) = &self.project_path {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                return stem.to_string();
+            }
+        }
+        self.project.name.clone()
+    }
+
+    fn remember_recent(&mut self, path: &std::path::Path) {
+        self.recent_projects.retain(|p| p != path);
+        self.recent_projects.insert(0, path.to_path_buf());
+        self.recent_projects.truncate(8);
+    }
+
     /// Toggle play/pause transport state.
     pub fn toggle_playback(&mut self) {
         self.is_playing = !self.is_playing;
@@ -671,6 +1196,7 @@ impl EditorState {
         duration_secs: f64,
         background: Color,
     ) -> Result<String, String> {
+        self.checkpoint();
         let mut counter = self.project.compositions.len() + 1;
         let mut id = format!("comp_{counter}");
         while self.project.get_composition(&id).is_some() {
@@ -707,6 +1233,7 @@ impl EditorState {
         width: u32,
         height: u32,
     ) -> Result<String, String> {
+        self.checkpoint();
         let (id, in_pt, out_pt, _comp_w, _comp_h) = {
             let comp = self
                 .active_composition()
@@ -746,6 +1273,7 @@ impl EditorState {
 
     /// Add a new Adjustment layer to the active composition.
     pub fn add_adjustment_layer(&mut self, name: Option<&str>) -> Result<String, String> {
+        self.checkpoint();
         let (id, in_pt, out_pt, comp_w, comp_h) = {
             let comp = self
                 .active_composition()
@@ -787,6 +1315,7 @@ impl EditorState {
     /// Import a media file from disk (image or video), register it in project assets,
     /// and add a new centered layer to the active composition.
     pub fn import_media_file(&mut self, path: PathBuf) -> Result<String, String> {
+        self.checkpoint();
         let (_comp_w, _comp_h, frame_rate, duration) = {
             let comp = self
                 .active_composition()
@@ -861,6 +1390,7 @@ impl EditorState {
 
     /// Add an existing asset from the project into the active composition as a layer.
     pub fn add_asset_layer(&mut self, asset_id: &str) -> Result<String, String> {
+        self.checkpoint();
         let (_comp_w, _comp_h, frame_rate, duration) = {
             let comp = self
                 .active_composition()
@@ -965,6 +1495,7 @@ impl EditorState {
 
     /// Delete the currently selected layer from the active composition.
     pub fn delete_selected_layer(&mut self) -> Result<String, String> {
+        self.checkpoint();
         let sel_id = self
             .selected_layer_id
             .take()
@@ -984,6 +1515,7 @@ impl EditorState {
 
     /// Remove a layer by its ID.
     pub fn remove_layer_by_id(&mut self, layer_id: &str) -> Result<(), String> {
+        self.checkpoint();
         let is_selected = self.selected_layer_id.as_deref() == Some(layer_id);
         let comp = self
             .active_composition_mut()
@@ -1000,6 +1532,7 @@ impl EditorState {
 
     /// Move the currently selected layer up in the stack (toward index 0, on top visually).
     pub fn move_selected_layer_up(&mut self) -> Result<(), String> {
+        self.checkpoint();
         let sel_id = self
             .selected_layer_id
             .clone()
@@ -1009,6 +1542,7 @@ impl EditorState {
 
     /// Move the currently selected layer down in the stack (away from index 0, lower visually).
     pub fn move_selected_layer_down(&mut self) -> Result<(), String> {
+        self.checkpoint();
         let sel_id = self
             .selected_layer_id
             .clone()
@@ -1102,6 +1636,7 @@ impl EditorState {
         &mut self,
         effect_type: EffectType,
     ) -> Result<String, String> {
+        self.checkpoint();
         let type_name = effect_type.type_name();
         let selected_id = self
             .selected_layer_id
@@ -1125,6 +1660,7 @@ impl EditorState {
 
     /// Remove an effect by ID from a specific layer.
     pub fn remove_layer_effect(&mut self, layer_id: &str, effect_id: &str) -> Result<(), String> {
+        self.checkpoint();
         let comp = self
             .active_composition_mut()
             .ok_or_else(|| "No active composition".to_string())?;
@@ -1140,6 +1676,7 @@ impl EditorState {
 
     /// Remove an effect by ID from the currently selected layer.
     pub fn remove_effect_from_selected_layer(&mut self, effect_id: &str) -> Result<(), String> {
+        self.checkpoint();
         let selected_id = self
             .selected_layer_id
             .clone()
@@ -1165,6 +1702,7 @@ impl EditorState {
 
     /// Toggle enabled state of an effect on the currently selected layer.
     pub fn toggle_effect_enabled(&mut self, effect_id: &str) -> Result<(), String> {
+        self.checkpoint();
         let selected_id = self
             .selected_layer_id
             .clone()
@@ -1233,6 +1771,7 @@ impl EditorState {
         effect_id: &str,
         code: String,
     ) -> Result<(), String> {
+        self.checkpoint();
         let selected_id = self
             .selected_layer_id
             .clone()
@@ -1262,6 +1801,7 @@ impl EditorState {
         effect_id: &str,
         key_color: Color,
     ) -> Result<(), String> {
+        self.checkpoint();
         let selected_id = self
             .selected_layer_id
             .clone()
@@ -1292,6 +1832,7 @@ impl EditorState {
         map_black: Option<Color>,
         map_white: Option<Color>,
     ) -> Result<(), String> {
+        self.checkpoint();
         let selected_id = self
             .selected_layer_id
             .clone()
@@ -1326,6 +1867,7 @@ impl EditorState {
         effect_id: &str,
         color: Color,
     ) -> Result<(), String> {
+        self.checkpoint();
         let selected_id = self
             .selected_layer_id
             .clone()
@@ -1354,6 +1896,7 @@ impl EditorState {
         &mut self,
         effect_id: &str,
     ) -> Result<(), String> {
+        self.checkpoint();
         let selected_id = self
             .selected_layer_id
             .clone()
@@ -1976,6 +2519,7 @@ impl EditorState {
     /// Reset a layer pivot to its content center, keeping pixels in place.
     /// Every new layer already spawns centered; this repairs drifted pivots.
     pub fn reset_layer_anchor_center(&mut self, layer_id: &str) {
+        self.checkpoint();
         let (bw, bh) = match self.content_size(layer_id) {
             Some(s) => s,
             None => return,
@@ -2043,6 +2587,7 @@ impl EditorState {
 
     /// Set a shape layer fill color.
     pub fn set_layer_shape_fill(&mut self, layer_id: &str, color: Color) -> Result<(), String> {
+        self.checkpoint();
         let comp = self
             .active_composition_mut()
             .ok_or_else(|| "No active composition".to_string())?;
@@ -2075,6 +2620,7 @@ impl EditorState {
         field: &str,
         color: Color,
     ) -> Result<(), String> {
+        self.checkpoint();
         let comp = self
             .active_composition_mut()
             .ok_or_else(|| "No active composition".to_string())?;
@@ -2308,6 +2854,7 @@ impl EditorState {
     /// - If toggled ON: records an initial keyframe at the current playback time with the current value.
     /// - If toggled OFF: clears all keyframes on the property.
     pub fn toggle_layer_property_animation(&mut self, layer_id: &str, prop_path: &str) {
+        self.checkpoint();
         let current_tc = self.clock.timecode();
         let comp = match self.active_composition_mut() {
             Some(c) => c,
@@ -2430,8 +2977,471 @@ impl EditorState {
     }
 
     /// Toggle a keyframe at the current playback timecode for a property path on the layer.
+
+    /// Add a keyframe at an absolute time (value sampled from the track).
+    pub fn add_graph_keyframe(&mut self, layer_id: &str, path: &str, t_s: f64) -> bool {
+        self.checkpoint();
+        let (fps, current) = match self.active_composition() {
+            Some(c) => match self.evaluate_graph_param(layer_id, path, t_s) {
+                Some(v) => (c.frame_rate, v),
+                None => return false,
+            },
+            None => return false,
+        };
+        let comp = match self.active_composition_mut() {
+            Some(c) => c,
+            None => return false,
+        };
+        let layer = match comp.get_layer_mut(layer_id) {
+            Some(l) => l,
+            None => return false,
+        };
+        let tc = TimeCode::from_seconds(t_s.max(0.0), fps);
+        let (base, comp_sfx) = match split_graph_path(path) {
+            Some(v) => v,
+            None => return false,
+        };
+        let axis = comp_sfx.unwrap_or(0);
+        match base {
+            "transform.anchor_point" | "transform.position" | "transform.scale" => {
+                let prop = match base {
+                    "transform.anchor_point" => &mut layer.transform.anchor_point,
+                    "transform.position" => &mut layer.transform.position,
+                    _ => &mut layer.transform.scale,
+                };
+                // Full Vec2 from the evaluated track, with the graphed
+                // component pinned to the sampled value.
+                let full = if prop.is_animated() {
+                    prop.evaluate_at(&tc)
+                } else {
+                    prop.value
+                };
+                let v = if axis == 0 {
+                    Vec2::new(current, full.y)
+                } else {
+                    Vec2::new(full.x, current)
+                };
+                prop.add_keyframe(Keyframe::new(tc, v));
+                true
+            }
+            _ => {
+                let mut done = false;
+                match with_graph_scalar(layer, path, |p| {
+                    p.add_keyframe(Keyframe::new(tc, current));
+                    done = true;
+                }) {
+
+                    Some(_) => done,
+
+                    None => return false,
+
+                }
+            }
+        }
+    }
+
+    /// Delete the keyframe near an absolute time.
+    pub fn remove_graph_keyframe(&mut self, layer_id: &str, path: &str, at_s: f64) -> bool {
+        self.checkpoint();
+        let fps = match self.active_composition() {
+            Some(c) => c.frame_rate,
+            None => return false,
+        };
+        let comp = match self.active_composition_mut() {
+            Some(c) => c,
+            None => return false,
+        };
+        let layer = match comp.get_layer_mut(layer_id) {
+            Some(l) => l,
+            None => return false,
+        };
+        let tc = TimeCode::from_seconds(at_s.max(0.0), fps);
+        let (base, _) = match split_graph_path(path) {
+            Some(v) => v,
+            None => return false,
+        };
+        let found = match base {
+            "transform.anchor_point" => {
+                layer.transform.anchor_point.remove_keyframe_at(&tc).is_some()
+            }
+            "transform.position" => layer.transform.position.remove_keyframe_at(&tc).is_some(),
+            "transform.scale" => layer.transform.scale.remove_keyframe_at(&tc).is_some(),
+            _ => {
+                let mut done = false;
+                match with_graph_scalar(layer, path, |p| {
+                    done = p.remove_keyframe_at(&tc).is_some();
+                }) {
+
+                    Some(_) => done,
+
+                    None => return false,
+
+                }
+            }
+        };
+        found
+    }
+
+    /// Cycle a keyframe's interpolation Linear -> Bezier -> Hold.
+    pub fn cycle_graph_key_interp(&mut self, layer_id: &str, path: &str, at_s: f64) -> bool {
+        self.checkpoint();
+        let fps = match self.active_composition() {
+            Some(c) => c.frame_rate,
+            None => return false,
+        };
+        let comp = match self.active_composition_mut() {
+            Some(c) => c,
+            None => return false,
+        };
+        let layer = match comp.get_layer_mut(layer_id) {
+            Some(l) => l,
+            None => return false,
+        };
+        let tol = 0.5 / fps.max(1.0);
+        let cycle = |interp: &mut KeyframeInterpolation| {
+            *interp = match interp {
+                KeyframeInterpolation::Linear => KeyframeInterpolation::Bezier,
+                KeyframeInterpolation::Bezier => KeyframeInterpolation::Hold,
+                KeyframeInterpolation::Hold => KeyframeInterpolation::Linear,
+            };
+        };
+        let (base, _) = match split_graph_path(path) {
+            Some(v) => v,
+            None => return false,
+        };
+        match base {
+            "transform.anchor_point" => {
+                let kfs = layer.transform.anchor_point.keyframes_mut();
+                let kf = match kfs.iter_mut().find(|k| (k.time_seconds() - at_s).abs() <= tol) {
+                    Some(k) => k,
+                    None => return false,
+                };
+                cycle(&mut kf.interpolation);
+                true
+            }
+            "transform.position" => {
+                let kfs = layer.transform.position.keyframes_mut();
+                let kf = match kfs.iter_mut().find(|k| (k.time_seconds() - at_s).abs() <= tol) {
+                    Some(k) => k,
+                    None => return false,
+                };
+                cycle(&mut kf.interpolation);
+                true
+            }
+            "transform.scale" => {
+                let kfs = layer.transform.scale.keyframes_mut();
+                let kf = match kfs.iter_mut().find(|k| (k.time_seconds() - at_s).abs() <= tol) {
+                    Some(k) => k,
+                    None => return false,
+                };
+                cycle(&mut kf.interpolation);
+                true
+            }
+            _ => {
+                let mut done = false;
+                match with_graph_scalar(layer, path, |p| {
+                    if let Some(kf) = p
+                        .keyframes_mut()
+                        .iter_mut()
+                        .find(|k| (k.time_seconds() - at_s).abs() <= tol)
+                    {
+                        cycle(&mut kf.interpolation);
+                        done = true;
+                    }
+                }) {
+
+                    Some(_) => done,
+
+                    None => return false,
+
+                }
+            }
+        }
+    }
+
+    /// Set bezier tangents on a keyframe (forces Bezier interpolation).
+    pub fn set_graph_key_tangents(
+        &mut self,
+        layer_id: &str,
+        path: &str,
+        at_s: f64,
+        in_tan: Option<(f32, f32)>,
+        out_tan: Option<(f32, f32)>,
+    ) -> bool {
+        self.checkpoint();
+        let fps = match self.active_composition() {
+            Some(c) => c.frame_rate,
+            None => return false,
+        };
+        let comp = match self.active_composition_mut() {
+            Some(c) => c,
+            None => return false,
+        };
+        let layer = match comp.get_layer_mut(layer_id) {
+            Some(l) => l,
+            None => return false,
+        };
+        let tol = 0.5 / fps.max(1.0);
+        let apply = |interp: &mut KeyframeInterpolation,
+                     it: &mut Option<KeyframeTangent>,
+                     ot: &mut Option<KeyframeTangent>| {
+            *interp = KeyframeInterpolation::Bezier;
+            if let Some((x, y)) = in_tan {
+                *it = Some(KeyframeTangent::new(x, y));
+            }
+            if let Some((x, y)) = out_tan {
+                *ot = Some(KeyframeTangent::new(x, y));
+            }
+        };
+        let (base, _) = match split_graph_path(path) {
+            Some(v) => v,
+            None => return false,
+        };
+        match base {
+            "transform.anchor_point" => {
+                let kfs = layer.transform.anchor_point.keyframes_mut();
+                let kf = match kfs.iter_mut().find(|k| (k.time_seconds() - at_s).abs() <= tol) {
+                    Some(k) => k,
+                    None => return false,
+                };
+                apply(&mut kf.interpolation, &mut kf.in_tangent, &mut kf.out_tangent);
+                true
+            }
+            "transform.position" => {
+                let kfs = layer.transform.position.keyframes_mut();
+                let kf = match kfs.iter_mut().find(|k| (k.time_seconds() - at_s).abs() <= tol) {
+                    Some(k) => k,
+                    None => return false,
+                };
+                apply(&mut kf.interpolation, &mut kf.in_tangent, &mut kf.out_tangent);
+                true
+            }
+            "transform.scale" => {
+                let kfs = layer.transform.scale.keyframes_mut();
+                let kf = match kfs.iter_mut().find(|k| (k.time_seconds() - at_s).abs() <= tol) {
+                    Some(k) => k,
+                    None => return false,
+                };
+                apply(&mut kf.interpolation, &mut kf.in_tangent, &mut kf.out_tangent);
+                true
+            }
+            _ => {
+                let mut done = false;
+                match with_graph_scalar(layer, path, |p| {
+                    if let Some(kf) = p
+                        .keyframes_mut()
+                        .iter()
+                        .position(|k| (k.time_seconds() - at_s).abs() <= tol)
+                    {
+                        let kf = &mut p.keyframes_mut()[kf];
+                        apply(&mut kf.interpolation, &mut kf.in_tangent, &mut kf.out_tangent);
+                        done = true;
+                    }
+                }) {
+
+                    Some(_) => done,
+
+                    None => return false,
+
+                }
+            }
+        }
+    }
+
+    pub fn graph_series(&self, layer_id: &str) -> Vec<GraphSeries> {
+        let comp = match self.active_composition() {
+            Some(c) => c,
+            None => return Vec::new(),
+        };
+        let layer = match comp.get_layer(layer_id) {
+            Some(l) => l,
+            None => return Vec::new(),
+        };
+        graph_candidates(layer)
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, (path, label))| {
+                let (keys, _) = graph_prop_read(layer, &path)?;
+                if keys.is_empty() {
+                    return None;
+                }
+                Some(GraphSeries {
+                    path,
+                    label,
+                    color: GRAPH_COLORS[i % GRAPH_COLORS.len()],
+                    keys,
+                })
+            })
+            .collect()
+    }
+
+    /// Sample a graph path at absolute seconds (for curve drawing).
+    pub fn evaluate_graph_param(&self, layer_id: &str, path: &str, seconds: f64) -> Option<f32> {
+        let comp = self.active_composition()?;
+        let layer = comp.get_layer(layer_id)?;
+        let fps = comp.frame_rate;
+        let tc = TimeCode::from_seconds(seconds.max(0.0), fps);
+        let (base, comp_sfx) = split_graph_path(path)?;
+        let is_vec2_base = matches!(
+            base,
+            "transform.anchor_point" | "transform.position" | "transform.scale"
+        );
+        if is_vec2_base != comp_sfx.is_some() {
+            return None;
+        }
+        let axis = comp_sfx.unwrap_or(1);
+        let get_vec = |p: &Property<Vec2>| {
+            let v = if p.is_animated() { p.evaluate_at(&tc) } else { p.value };
+            if axis == 0 { v.x } else { v.y }
+        };
+        let get_f32 = |p: &Property<f32>| {
+            if p.is_animated() { p.evaluate_at(&tc) } else { p.value }
+        };
+        Some(match base {
+            "transform.anchor_point" => get_vec(&layer.transform.anchor_point),
+            "transform.position" => get_vec(&layer.transform.position),
+            "transform.scale" => get_vec(&layer.transform.scale),
+            "transform.rotation" => get_f32(&layer.transform.rotation),
+            "opacity" => get_f32(&layer.opacity),
+            "text.font_size" => match &layer.source {
+                LayerSource::Text { font_size, .. } => get_f32(font_size),
+                _ => return None,
+            },
+            "shape.rect_width" => match &layer.source {
+                LayerSource::Shape { shape_type: ShapeType::Rectangle { width, .. } } => get_f32(width),
+                _ => return None,
+            },
+            "shape.rect_height" => match &layer.source {
+                LayerSource::Shape { shape_type: ShapeType::Rectangle { height, .. } } => get_f32(height),
+                _ => return None,
+            },
+            "shape.corner_radius" => match &layer.source {
+                LayerSource::Shape { shape_type: ShapeType::Rectangle { corner_radius, .. } } => {
+                    get_f32(corner_radius)
+                }
+                _ => return None,
+            },
+            "shape.ellipse_rx" => match &layer.source {
+                LayerSource::Shape { shape_type: ShapeType::Ellipse { radius_x, .. } } => get_f32(radius_x),
+                _ => return None,
+            },
+            "shape.ellipse_ry" => match &layer.source {
+                LayerSource::Shape { shape_type: ShapeType::Ellipse { radius_y, .. } } => get_f32(radius_y),
+                _ => return None,
+            },
+            _ => {
+                let rest = base.strip_prefix("effect:")?;
+                let mut parts = rest.splitn(2, ':');
+                let (eid, pname) = (parts.next()?, parts.next()?);
+                get_f32(layer.get_effect(eid)?.get_param_property(pname)?)
+            }
+        })
+    }
+
+    /// Find a keyframe index on a scalar prop near `at_s` (half-frame window).
+
+    /// Move a keyframe to a new time/value, preserving interpolation.
+    pub fn move_graph_keyframe(
+        &mut self,
+        layer_id: &str,
+        path: &str,
+        at_s: f64,
+        new_t_s: f64,
+        new_v: f32,
+    ) -> bool {
+        self.checkpoint();
+        self.move_graph_keyframe_live(layer_id, path, at_s, new_t_s, new_v)
+    }
+
+    /// Move a keyframe without creating an undo checkpoint (for live drags;
+    /// callers checkpoint once on drag start).
+    pub fn move_graph_keyframe_live(
+        &mut self,
+        layer_id: &str,
+        path: &str,
+        at_s: f64,
+        new_t_s: f64,
+        new_v: f32,
+    ) -> bool {
+        let fps = match self.active_composition() {
+            Some(c) => c.frame_rate,
+            None => return false,
+        };
+        let comp = match self.active_composition_mut() {
+            Some(c) => c,
+            None => return false,
+        };
+        let layer = match comp.get_layer_mut(layer_id) {
+            Some(l) => l,
+            None => return false,
+        };
+        let (base, comp_sfx) = match split_graph_path(path) {
+            Some(v) => v,
+            None => return false,
+        };
+        let axis = comp_sfx.unwrap_or(0);
+        let tol = 0.5 / fps.max(1.0);
+        let new_tc = TimeCode::from_seconds(new_t_s.max(0.0), fps);
+        match base {
+            "transform.anchor_point" | "transform.position" | "transform.scale" => {
+                let prop = match base {
+                    "transform.anchor_point" => &mut layer.transform.anchor_point,
+                    "transform.position" => &mut layer.transform.position,
+                    _ => &mut layer.transform.scale,
+                };
+                let idx = match prop
+                    .keyframes()
+                    .iter()
+                    .position(|k| (k.time_seconds() - at_s).abs() <= tol)
+                {
+                    Some(i) => i,
+                    None => return false,
+                };
+                let mut kf = prop.keyframes()[idx].clone();
+                let mut v = kf.value;
+                if axis == 0 {
+                    v.x = new_v;
+                } else {
+                    v.y = new_v;
+                }
+                kf.value = v;
+                kf.time = new_tc;
+                prop.keyframes_mut().remove(idx);
+                prop.add_keyframe(kf);
+                true
+            }
+            _ => {
+                let mut done = false;
+                match with_graph_scalar(layer, path, |p| {
+                    let idx = match p
+                        .keyframes()
+                        .iter()
+                        .position(|k| (k.time_seconds() - at_s).abs() <= tol)
+                    {
+                        Some(i) => i,
+                        None => return,
+                    };
+                    let mut kf = p.keyframes()[idx].clone();
+                    kf.value = new_v;
+                    kf.time = new_tc;
+                    p.keyframes_mut().remove(idx);
+                    p.add_keyframe(kf);
+                    done = true;
+                }) {
+
+                    Some(_) => done,
+
+                    None => return false,
+
+                }
+            }
+        }
+    }
+
+    /// Helper: run a closure over a scalar (f32) graph property.
+
     pub fn toggle_layer_keyframe_at_current_time(&mut self, layer_id: &str, prop_path: &str) {
-        let current_tc = self.clock.timecode();
+        self.checkpoint();        let current_tc = self.clock.timecode();
         let comp = match self.active_composition_mut() {
             Some(c) => c,
             None => return,
@@ -2738,8 +3748,228 @@ impl EditorState {
         }
     }
 
+    /// Toggle Timeline Spline / Graph Editor view.
+    pub fn toggle_spline_editor(&mut self) {
+        self.spline_editor_open = !self.spline_editor_open;
+    }
+
+    /// Set the active property inspected in the Spline Editor.
+    pub fn set_spline_prop_path(&mut self, path: &str) {
+        self.spline_prop_path = path.to_string();
+    }
+
+    /// Apply an easing preset (Linear, Ease In, Ease Out, Easy Ease, Hold) to all keyframes
+    /// of the specified property path on the layer.
+    pub fn set_layer_property_easing(&mut self, layer_id: &str, prop_path: &str, easing: EasingPreset) {
+        self.checkpoint();
+        let comp = match self.active_composition_mut() {
+            Some(c) => c,
+            None => return,
+        };
+        let layer = match comp.get_layer_mut(layer_id) {
+            Some(l) => l,
+            None => return,
+        };
+        match prop_path {
+            "transform.anchor_point" => apply_easing_to_prop(&mut layer.transform.anchor_point, easing),
+            "transform.position" | "transform.position.x" | "transform.position.y" => {
+                apply_easing_to_prop(&mut layer.transform.position, easing)
+            }
+            "transform.scale" | "transform.scale.x" | "transform.scale.y" => {
+                apply_easing_to_prop(&mut layer.transform.scale, easing)
+            }
+            "transform.rotation" => apply_easing_to_prop(&mut layer.transform.rotation, easing),
+            "opacity" => apply_easing_to_prop(&mut layer.opacity, easing),
+            _ => {
+                if let Some(rest) = prop_path.strip_prefix("effect:") {
+                    let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                    if parts.len() == 2 {
+                        if let Some(fx) = layer.get_effect_mut(parts[0]) {
+                            if let Some(prop) = fx.get_param_property_mut(parts[1]) {
+                                apply_easing_to_prop(prop, easing);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Return normalized keyframe points `(time_ratio, scalar_value, interpolation)` for the spline graph.
+    pub fn get_spline_keyframe_points(&self, layer_id: &str, prop_path: &str) -> Vec<(f32, f32, project::KeyframeInterpolation)> {
+        let comp = match self.active_composition() {
+            Some(c) => c,
+            None => return Vec::new(),
+        };
+        let duration = comp.duration_seconds().max(0.01) as f32;
+        let layer = match comp.get_layer(layer_id) {
+            Some(l) => l,
+            None => return Vec::new(),
+        };
+        let mut pts = Vec::new();
+        match prop_path {
+            "transform.position" | "transform.position.x" => {
+                for kf in layer.transform.position.keyframes() {
+                    let t = (kf.time.seconds() as f32 / duration).clamp(0.0, 1.0);
+                    pts.push((t, kf.value.x, kf.interpolation));
+                }
+            }
+            "transform.position.y" => {
+                for kf in layer.transform.position.keyframes() {
+                    let t = (kf.time.seconds() as f32 / duration).clamp(0.0, 1.0);
+                    pts.push((t, kf.value.y, kf.interpolation));
+                }
+            }
+            "transform.rotation" => {
+                for kf in layer.transform.rotation.keyframes() {
+                    let t = (kf.time.seconds() as f32 / duration).clamp(0.0, 1.0);
+                    pts.push((t, kf.value, kf.interpolation));
+                }
+            }
+            "transform.scale" | "transform.scale.x" => {
+                for kf in layer.transform.scale.keyframes() {
+                    let t = (kf.time.seconds() as f32 / duration).clamp(0.0, 1.0);
+                    pts.push((t, kf.value.x, kf.interpolation));
+                }
+            }
+            "transform.scale.y" => {
+                for kf in layer.transform.scale.keyframes() {
+                    let t = (kf.time.seconds() as f32 / duration).clamp(0.0, 1.0);
+                    pts.push((t, kf.value.y, kf.interpolation));
+                }
+            }
+            "opacity" => {
+                for kf in layer.opacity.keyframes() {
+                    let t = (kf.time.seconds() as f32 / duration).clamp(0.0, 1.0);
+                    pts.push((t, kf.value, kf.interpolation));
+                }
+            }
+            _ => {}
+        }
+        pts
+    }
+
+    /// Evaluates `sample_count` curve samples across composition duration for spline graph plotting.
+    pub fn get_spline_curve_samples(&self, layer_id: &str, prop_path: &str, sample_count: usize) -> Vec<(f32, f32)> {
+        let comp = match self.active_composition() {
+            Some(c) => c,
+            None => return Vec::new(),
+        };
+        let total_dur = comp.duration_seconds().max(0.01);
+        let layer = match comp.get_layer(layer_id) {
+            Some(l) => l,
+            None => return Vec::new(),
+        };
+        let samples = sample_count.max(10);
+        let mut curve = Vec::with_capacity(samples);
+        for i in 0..samples {
+            let frac = i as f64 / (samples - 1) as f64;
+            let time_sec = frac * total_dur;
+            let val = match prop_path {
+                "transform.position" | "transform.position.x" => {
+                    layer.transform.position.evaluate_at_seconds(time_sec).x
+                }
+                "transform.position.y" => {
+                    layer.transform.position.evaluate_at_seconds(time_sec).y
+                }
+                "transform.rotation" => {
+                    layer.transform.rotation.evaluate_at_seconds(time_sec)
+                }
+                "transform.scale" | "transform.scale.x" => {
+                    layer.transform.scale.evaluate_at_seconds(time_sec).x
+                }
+                "transform.scale.y" => {
+                    layer.transform.scale.evaluate_at_seconds(time_sec).y
+                }
+                "opacity" => {
+                    layer.opacity.evaluate_at_seconds(time_sec)
+                }
+                _ => 0.0,
+            };
+            curve.push((frac as f32, val));
+        }
+        curve
+    }
+
+    /// Update project and active composition settings (Project Manager).
+    pub fn update_project_settings(
+        &mut self,
+        name: &str,
+        width: u32,
+        height: u32,
+        fps: f64,
+        duration_secs: f64,
+    ) {
+        self.checkpoint();
+        let trimmed = name.trim();
+        if !trimmed.is_empty() {
+            self.project.name = trimmed.to_string();
+        }
+        if let Some(comp) = self.active_composition_mut() {
+            if !trimmed.is_empty() {
+                comp.name = trimmed.to_string();
+            }
+            comp.width = width.clamp(320, 7680);
+            comp.height = height.clamp(240, 4320);
+            comp.frame_rate = fps.clamp(1.0, 120.0);
+            let frames = (duration_secs * comp.frame_rate).round() as i64;
+            comp.duration = project::TimeCode::from_frames(frames, comp.frame_rate);
+        }
+    }
+
+    /// Create a new composition in the project and set it as active (Project Manager).
+    pub fn create_composition(
+        &mut self,
+        name: &str,
+        width: u32,
+        height: u32,
+        fps: f64,
+        duration_secs: f64,
+    ) -> String {
+        self.checkpoint();
+        let fps = fps.clamp(1.0, 120.0);
+        let frames = (duration_secs * fps).round() as i64;
+        let mut counter = self.project.compositions.len() + 1;
+        let mut id = format!("comp_{counter}");
+        while self.project.compositions.iter().any(|c| c.id == id) {
+            counter += 1;
+            id = format!("comp_{counter}");
+        }
+        let duration = project::TimeCode::from_frames(frames, fps);
+        let comp = project::Composition::new(&id, name, width.clamp(320, 7680), height.clamp(240, 4320), fps, duration);
+        let _ = self.project.add_composition(comp);
+        self.active_comp_id = id.clone();
+        self.selected_layer_id = None;
+        id
+    }
+
+    /// Switch active composition by ID.
+    pub fn set_active_composition(&mut self, comp_id: &str) {
+        if self.project.compositions.iter().any(|c| c.id == comp_id) {
+            self.active_comp_id = comp_id.to_string();
+            self.selected_layer_id = None;
+        }
+    }
+
+    /// Delete a composition by ID (guards against deleting the only composition).
+    pub fn delete_composition(&mut self, comp_id: &str) -> Result<(), String> {
+        if self.project.compositions.len() <= 1 {
+            return Err("Cannot delete the only composition in the project".to_string());
+        }
+        self.checkpoint();
+        self.project.remove_composition(comp_id);
+        if self.active_comp_id == comp_id {
+            if let Some(first) = self.project.compositions.first() {
+                self.active_comp_id = first.id.clone();
+                self.selected_layer_id = None;
+            }
+        }
+        Ok(())
+    }
+
     /// Set blend mode on the specified layer.
     pub fn set_layer_blend_mode(&mut self, layer_id: &str, mode: BlendMode) {
+        self.checkpoint();
         if let Some(comp) = self.active_composition_mut() {
             if let Some(layer) = comp.get_layer_mut(layer_id) {
                 layer.blend_mode = mode;
@@ -2749,6 +3979,7 @@ impl EditorState {
 
     /// Set track matte mode and optional target matte layer ID on the specified layer.
     pub fn set_layer_track_matte(&mut self, layer_id: &str, mode: TrackMatteMode, target_id: Option<String>) {
+        self.checkpoint();
         if let Some(comp) = self.active_composition_mut() {
             if let Some(layer) = comp.get_layer_mut(layer_id) {
                 layer.set_matte(mode, target_id);
@@ -2758,6 +3989,7 @@ impl EditorState {
 
     /// Set parent layer ID on the specified layer.
     pub fn set_layer_parent(&mut self, layer_id: &str, parent_id: Option<String>) {
+        self.checkpoint();
         if let Some(comp) = self.active_composition_mut() {
             if let Some(layer) = comp.get_layer_mut(layer_id) {
                 layer.set_parent(parent_id);
@@ -2776,6 +4008,7 @@ impl EditorState {
 
     /// Toggle visibility of the currently selected layer.
     pub fn toggle_selected_layer_visibility(&mut self) {
+        self.checkpoint();
         if let Some(id) = self.selected_layer_id.clone() {
             self.toggle_layer_visibility(&id);
         }
@@ -2783,6 +4016,7 @@ impl EditorState {
 
     /// Toggle solo state of the currently selected layer.
     pub fn toggle_selected_layer_solo(&mut self) {
+        self.checkpoint();
         if let Some(id) = self.selected_layer_id.clone() {
             self.toggle_layer_solo(&id);
         }
@@ -2811,6 +4045,7 @@ impl EditorState {
 
     /// Add a new Text layer with given text and optional position.
     pub fn add_text_layer(&mut self, text: &str, pos: Option<Vec2>) -> Result<String, String> {
+        self.checkpoint();
         let (_comp_w, _comp_h, frame_rate, duration) = {
             let comp = self
                 .active_composition()
@@ -2873,6 +4108,7 @@ impl EditorState {
         height: f32,
         pos: Option<Vec2>,
     ) -> Result<String, String> {
+        self.checkpoint();
         let (_comp_w, _comp_h, frame_rate, duration) = {
             let comp = self
                 .active_composition()
@@ -2931,6 +4167,7 @@ impl EditorState {
         radius_y: f32,
         pos: Option<Vec2>,
     ) -> Result<String, String> {
+        self.checkpoint();
         let (_comp_w, _comp_h, frame_rate, duration) = {
             let comp = self
                 .active_composition()
@@ -2984,6 +4221,7 @@ impl EditorState {
     /// Add a vector path point using the Pen tool. If the currently selected layer is a Path shape,
     /// appends the vertex; otherwise creates a new vector Path layer starting at `point`.
     pub fn add_pen_point(&mut self, point: Vec2) -> Result<String, String> {
+        self.checkpoint();
         // Check if selected layer is a Path shape
         let sel_id = self.selected_layer_id.clone();
         if let Some(id) = sel_id {
@@ -3045,6 +4283,7 @@ impl EditorState {
 
     /// Duplicate the specified layer in the active composition.
     pub fn duplicate_layer(&mut self, layer_id: &str) -> Result<String, String> {
+        self.checkpoint();
         let comp = self
             .active_composition()
             .ok_or_else(|| "No active composition".to_string())?;
@@ -3081,6 +4320,7 @@ impl EditorState {
 
     /// Duplicate the currently selected layer.
     pub fn duplicate_selected_layer(&mut self) -> Result<String, String> {
+        self.checkpoint();
         let sel_id = self
             .selected_layer_id
             .clone()
@@ -3090,6 +4330,7 @@ impl EditorState {
 
     /// Reset transform properties of the specified layer to defaults.
     pub fn reset_layer_transform(&mut self, layer_id: &str) {
+        self.checkpoint();
         if let Some(comp) = self.active_composition_mut() {
             if let Some(layer) = comp.get_layer_mut(layer_id) {
                 layer.transform = project::Transform::default();
@@ -3130,6 +4371,7 @@ impl EditorState {
 
     /// Add keyframes to all spatial and opacity properties of the specified layer at the current playhead time.
     pub fn add_keyframe_to_all_transforms_at_playhead(&mut self, layer_id: &str) {
+        self.checkpoint();
         let tc = self.clock.timecode();
         if let Some(comp) = self.active_composition_mut() {
             if let Some(layer) = comp.get_layer_mut(layer_id) {
@@ -3163,6 +4405,7 @@ impl EditorState {
 
     /// Set the solid color on a Solid layer.
     pub fn set_layer_solid_color(&mut self, layer_id: &str, color: Color) -> Result<(), String> {
+        self.checkpoint();
         let comp = self
             .active_composition_mut()
             .ok_or_else(|| "No active composition".to_string())?;
@@ -3186,6 +4429,7 @@ impl EditorState {
         width: u32,
         height: u32,
     ) -> Result<(), String> {
+        self.checkpoint();
         let comp = self
             .active_composition_mut()
             .ok_or_else(|| "No active composition".to_string())?;
@@ -3231,6 +4475,7 @@ impl EditorState {
 
     /// Set text content on a Text layer.
     pub fn set_layer_text(&mut self, layer_id: &str, text: &str) -> Result<(), String> {
+        self.checkpoint();
         let current_tc = self.clock.timecode();
         let comp = self
             .active_composition_mut()
@@ -3261,6 +4506,7 @@ impl EditorState {
 
     /// Set font size on a Text layer.
     pub fn set_layer_font_size(&mut self, layer_id: &str, size: f32) -> Result<(), String> {
+        self.checkpoint();
         let current_tc = self.clock.timecode();
         let comp = self
             .active_composition_mut()
@@ -3325,6 +4571,7 @@ impl EditorState {
 
     /// Set the font family on a Text layer.
     pub fn set_layer_font_family(&mut self, layer_id: &str, family: &str) -> Result<(), String> {
+        self.checkpoint();
         let comp = self.active_composition_mut().ok_or_else(|| "No active composition".to_string())?;
         let layer = comp.get_layer_mut(layer_id).ok_or_else(|| format!("Layer {layer_id} not found"))?;
         match &mut layer.source {
@@ -3338,6 +4585,7 @@ impl EditorState {
 
     /// Set font weight (100..900) on a Text layer.
     pub fn set_layer_font_weight(&mut self, layer_id: &str, weight: u16) -> Result<(), String> {
+        self.checkpoint();
         let comp = self.active_composition_mut().ok_or_else(|| "No active composition".to_string())?;
         let layer = comp.get_layer_mut(layer_id).ok_or_else(|| format!("Layer {layer_id} not found"))?;
         match &mut layer.source {
@@ -3351,6 +4599,7 @@ impl EditorState {
 
     /// Toggle faux italic on a Text layer.
     pub fn toggle_layer_italic(&mut self, layer_id: &str) -> Result<(), String> {
+        self.checkpoint();
         let comp = self.active_composition_mut().ok_or_else(|| "No active composition".to_string())?;
         let layer = comp.get_layer_mut(layer_id).ok_or_else(|| format!("Layer {layer_id} not found"))?;
         match &mut layer.source {
@@ -3364,6 +4613,7 @@ impl EditorState {
 
     /// Toggle all-caps on a Text layer.
     pub fn toggle_layer_caps(&mut self, layer_id: &str) -> Result<(), String> {
+        self.checkpoint();
         let comp = self.active_composition_mut().ok_or_else(|| "No active composition".to_string())?;
         let layer = comp.get_layer_mut(layer_id).ok_or_else(|| format!("Layer {layer_id} not found"))?;
         match &mut layer.source {
@@ -3377,6 +4627,7 @@ impl EditorState {
 
     /// Set paragraph alignment on a Text layer.
     pub fn set_layer_text_align(&mut self, layer_id: &str, align: project::TextAlign) -> Result<(), String> {
+        self.checkpoint();
         let comp = self.active_composition_mut().ok_or_else(|| "No active composition".to_string())?;
         let layer = comp.get_layer_mut(layer_id).ok_or_else(|| format!("Layer {layer_id} not found"))?;
         match &mut layer.source {
@@ -3391,6 +4642,7 @@ impl EditorState {
     /// Set a scalar text property (tracking / leading / stroke_width /
     /// baseline_shift / box_width) on a Text layer. Keyframe-aware.
     pub fn set_layer_text_scalar(&mut self, layer_id: &str, field: &str, v: f32) -> Result<(), String> {
+        self.checkpoint();
         if !v.is_finite() {
             return Err("Non-finite value".to_string());
         }
@@ -3426,6 +4678,7 @@ impl EditorState {
 
     /// Set stroke color on a Text layer.
     pub fn set_layer_stroke_color(&mut self, layer_id: &str, color: Color) -> Result<(), String> {
+        self.checkpoint();
         let comp = self.active_composition_mut().ok_or_else(|| "No active composition".to_string())?;
         let layer = comp.get_layer_mut(layer_id).ok_or_else(|| format!("Layer {layer_id} not found"))?;
         match &mut layer.source {
@@ -3445,6 +4698,7 @@ impl EditorState {
         height: f32,
         corner_radius: f32,
     ) -> Result<(), String> {
+        self.checkpoint();
         let comp = self
             .active_composition_mut()
             .ok_or_else(|| "No active composition".to_string())?;
@@ -3503,6 +4757,7 @@ impl EditorState {
         radius_x: f32,
         radius_y: f32,
     ) -> Result<(), String> {
+        self.checkpoint();
         let comp = self
             .active_composition_mut()
             .ok_or_else(|| "No active composition".to_string())?;
@@ -3587,6 +4842,7 @@ impl EditorState {
 
     /// Nudge layer In-Point by `delta_frames`.
     pub fn nudge_layer_in_point(&mut self, layer_id: &str, delta_frames: i64) -> Result<(), String> {
+        // Per-tick trim nudges share the trim-start checkpoint (no spam).
         let (current_in, fps) = {
             let comp = self
                 .active_composition()
@@ -3602,6 +4858,7 @@ impl EditorState {
 
     /// Nudge layer Out-Point by `delta_frames`.
     pub fn nudge_layer_out_point(&mut self, layer_id: &str, delta_frames: i64) -> Result<(), String> {
+        // Per-tick trim nudges share the trim-start checkpoint (no spam).
         let (current_out, fps) = {
             let comp = self
                 .active_composition()
