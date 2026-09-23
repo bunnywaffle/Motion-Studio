@@ -3,10 +3,9 @@ use image::RgbaImage;
 use project::{Color, LayerSource};
 use std::collections::HashMap;
 use std::sync::Arc;
-use super::affine::{Aff, aff_mul, skew_about};
+use super::affine::{Aff, aff_mul, fold_transform, skew_about};
 use super::buffer::{FloatBuf, blur_buffer};
-use super::effects::RasterFx;
-use super::layer::{apply_adjustment, apply_bloom, apply_layer_fx, blit_affine, layer_base_dims, raster_layer_content};
+use super::effects::RasterFx;use super::layer::{apply_adjustment, apply_bloom, apply_layer_fx, blit_affine, layer_base_dims, raster_layer_content};
 use super::pixel::Px;
 
 /// Full composition raster at `out_w` x `out_h` (canvas px).
@@ -68,7 +67,7 @@ pub fn rasterize_comp(
         if matches!(&layer.source, LayerSource::Adjustment) {
             // True AE semantics: adjustment layers post-process everything
             // composited beneath them.
-            apply_adjustment(&mut dst, &layer.effects);
+            apply_adjustment(&mut dst, &layer.effects, &fx);
             continue;
         }
         // Base dims mirror the viewer estimate (anchor/pivot consistent).
@@ -93,6 +92,26 @@ pub fn rasterize_comp(
                     map = aff_mul(map, skew_about(*skew_x, *skew_y, base_w / 2.0, base_h / 2.0));
                 }
                 break;
+            }
+        }
+        // Transform stock plug-in folds into the map (output-space).
+        for eff in &layer.effects {
+            if !eff.enabled {
+                continue;
+            }
+            if let EvaluatedEffectType::Stock { plugin, params, .. } = &eff.effect_type {
+                if *plugin == project::StockPlugin::TransformFx {
+                    use compositor::fx::stock_p;
+                    map = fold_transform(
+                        map,
+                        ow as f32 * 0.5,
+                        oh as f32 * 0.5,
+                        stock_p(*plugin, params, 0) * k,
+                        stock_p(*plugin, params, 1) * k,
+                        stock_p(*plugin, params, 2),
+                        stock_p(*plugin, params, 3),
+                    );
+                }
             }
         }
         // Output bounds: world AABB in output px.
@@ -174,6 +193,7 @@ pub fn rasterize_comp(
                 layer.effective_opacity.clamp(0.0, 1.0),
                 layer.blend_mode,
                 shadow,
+                None,
             );
             // Composite sub-region back (already blended vs transparent;
             // blend vs backdrop per pixel using sampled backdrop average is

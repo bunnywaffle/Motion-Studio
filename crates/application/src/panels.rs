@@ -1481,6 +1481,10 @@ pub struct CompositionViewerPanel {
     pub raster_cache: HashMap<String, crate::raster::RasterEntry>,
     /// Decoded image asset cache (asset id -> RGBA).
     pub asset_cache: HashMap<String, Arc<image::RgbaImage>>,
+    /// Decoded image dimensions cache (asset id -> w/h). `image_dimensions`
+    /// hits the disk, so without this every viewport render re-reads every
+    /// image file — visible as gizmo/effect lag.
+    pub img_dims: HashMap<String, (u32, u32)>,
     /// Last fitted canvas size, for cursor mapping before measure.
     pub canvas_px: Option<(f32, f32)>,
 }
@@ -1532,6 +1536,7 @@ impl CompositionViewerPanel {
             gizmo_drag: None,
             raster_cache: HashMap::new(),
             asset_cache: HashMap::new(),
+            img_dims: HashMap::new(),
             canvas_px: None,
         }
     }
@@ -1630,8 +1635,17 @@ impl Render for CompositionViewerPanel {
                         }
                         LayerSource::Image { asset_id } => {
                             if let Some(asset) = state.project.get_asset(asset_id) {
-                                let (dim_w, dim_h) = image::image_dimensions(&asset.path)
-                                    .unwrap_or((1920, 1080));
+                                // Cached: image_dimensions hits the disk, and
+                                // this runs for every image layer per render.
+                                let (dim_w, dim_h) = match self.img_dims.get(asset_id) {
+                                    Some(&d) => d,
+                                    None => {
+                                        let d = image::image_dimensions(&asset.path)
+                                            .unwrap_or((1920, 1080));
+                                        self.img_dims.insert(asset_id.clone(), d);
+                                        d
+                                    }
+                                };
                                 (dim_w as f32, dim_h as f32)
                             } else {
                                 (400.0, 300.0)
@@ -1687,9 +1701,19 @@ impl Render for CompositionViewerPanel {
                     // full per-pixel quality via the cache key below.
                     let playing_now = state.is_playing || state.preview_fast;
                     // Raster output size = AABB box, capped for speed (the
-                    // img child stretches to the shell on cap).
-                    let rw = (l_w.ceil().max(1.0) as u32).min(1024);
-                    let rh = (l_h.ceil().max(1.0) as u32).min(1024);
+                    // img child stretches to the shell on cap). Fast preview
+                    // (playback / scrub / gestures) halves resolution: 4x
+                    // fewer pixels per layer, full quality on release. The
+                    // cache key covers size + quality flag, so previews
+                    // never poison full-quality entries.
+                    let (mut rw, mut rh) = (
+                        (l_w.ceil().max(1.0) as u32).min(1024),
+                        (l_h.ceil().max(1.0) as u32).min(1024),
+                    );
+                    if playing_now {
+                        rw = (rw / 2).max(1);
+                        rh = (rh / 2).max(1);
+                    }
                     // Decode image assets once into the shared cache.
                     if let LayerSource::Image { asset_id } = &layer.source {
                         if let Some(asset) = state.project.get_asset(asset_id) {
@@ -2329,12 +2353,11 @@ impl Render for CompositionViewerPanel {
                     let st = this.state.clone();
                     match drag {
                         ViewerGizmoDrag::Rotate { layer_id, start_rot, start_angle } => {
-                            let anchor_world = st.read(cx).evaluate_current_frame().ok()
-                                .and_then(|stack| stack.get_layer(&layer_id).cloned())
-                                .map(|lay| {
-                                    let a = lay.transform.anchor_point;
-                                    lay.local_to_world_point(a)
-                                });
+                            // Cached drag frame: anchor world from the cheap
+                            // matrix path, no full scene evaluation per move.
+                            let anchor_world = st.read(cx).layer_drag_frame(&layer_id).map(|(world, anchor)| {
+                                world.transform_point(anchor)
+                            });
                             if let Some(aw) = anchor_world {
                                 let ang = (cmy - aw.y).atan2(cmx - aw.x);
                                 let delta_deg = (ang - start_angle).to_degrees();
@@ -2345,9 +2368,9 @@ impl Render for CompositionViewerPanel {
                             }
                         }
                         ViewerGizmoDrag::Scale { layer_id, uniform, use_x, use_y, start_scale, start_local, anchor_local } => {
-                            let local = st.read(cx).evaluate_current_frame().ok()
-                                .and_then(|stack| stack.get_layer(&layer_id).cloned())
-                                .and_then(|lay| lay.world_to_local_point(Vec2::new(cmx, cmy)));
+                            let local = st.read(cx).layer_drag_frame(&layer_id).and_then(|(world, _)| {
+                                world.transform_point_inverse(Vec2::new(cmx, cmy))
+                            });
                             if let Some(loc) = local {
                                 let denom_x = (start_local.x - anchor_local.x).abs().max(1.0);
                                 let denom_y = (start_local.y - anchor_local.y).abs().max(1.0);
@@ -2380,9 +2403,9 @@ impl Render for CompositionViewerPanel {
                             }
                         }
                         ViewerGizmoDrag::Anchor { layer_id, start_local } => {
-                            let local = st.read(cx).evaluate_current_frame().ok()
-                                .and_then(|stack| stack.get_layer(&layer_id).cloned())
-                                .and_then(|lay| lay.world_to_local_point(Vec2::new(cmx, cmy)));
+                            let local = st.read(cx).layer_drag_frame(&layer_id).and_then(|(world, _)| {
+                                world.transform_point_inverse(Vec2::new(cmx, cmy))
+                            });
                             if let Some(loc) = local {
                                 let d = Vec2::new(loc.x - start_local.x, loc.y - start_local.y);
                                 st.update(cx, |s, cx| {
@@ -5596,6 +5619,61 @@ fn render_applied_effects(
                         cx,
                     ));
                 }
+                EffectType::Levels { input_black, input_white, gamma, output_black, output_white } => {
+                    effect_box = effect_box
+                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "input_black", "Input Black", format!("{:.0}", input_black.value), 5.0, cx))
+                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "input_white", "Input White", format!("{:.0}", input_white.value), 5.0, cx))
+                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "gamma", "Gamma", format!("{:.2}", gamma.value), 0.1, cx))
+                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "output_black", "Output Black", format!("{:.0}", output_black.value), 5.0, cx))
+                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "output_white", "Output White", format!("{:.0}", output_white.value), 5.0, cx));
+                }
+                EffectType::HueSaturation { hue_shift, saturation, lightness } => {
+                    effect_box = effect_box
+                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "hue_shift", "Hue Shift", format!("{:+.0}°", hue_shift.value), 5.0, cx))
+                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "saturation", "Saturation", format!("{:+.0}", saturation.value), 5.0, cx))
+                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "lightness", "Lightness", format!("{:+.0}", lightness.value), 5.0, cx));
+                }
+                EffectType::Sharpen { amount, radius } => {
+                    effect_box = effect_box
+                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "amount", "Amount", format!("{:.0}%", amount.value), 5.0, cx))
+                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "radius", "Radius", format!("{:.1} px", radius.value), 0.5, cx));
+                }
+                EffectType::Vignette { amount, softness } => {
+                    effect_box = effect_box
+                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "amount", "Amount", format!("{:.0}%", amount.value), 5.0, cx))
+                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "softness", "Softness", format!("{:.0}%", softness.value), 5.0, cx));
+                }
+                // Modular stock plug-ins render generically from the
+                // descriptor: one scrub row per scalar param plus swatch
+                // rows for color slots. No per-effect UI needed.
+                EffectType::Stock { .. } => {
+                    for (name, label, value, step) in effect.stock_scalar_params() {
+                        effect_box = effect_box.child(fx_scrub_row(
+                            state,
+                            panel_entity,
+                            &layer.id,
+                            &eff_id,
+                            name,
+                            label,
+                            format!("{value:.2}"),
+                            step,
+                            cx,
+                        ));
+                    }
+                    for slot in effect.color_slots() {
+                        if let Some(col) = effect.stock_color(slot) {
+                            effect_box = effect_box.child(fx_swatch_row(
+                                state,
+                                &layer.id,
+                                &eff_id,
+                                slot,
+                                slot,
+                                col,
+                                cx,
+                            ));
+                        }
+                    }
+                }
             }
 
             fx_col = fx_col.child(effect_box);
@@ -7728,8 +7806,8 @@ impl Focusable for EffectsPanel {
 }
 
 fn effect_item_row(
-    id_str: &'static str,
-    title: &'static str,
+    id_str: &str,
+    title: &str,
     effect_type: EffectType,
     state: &Option<Entity<EditorState>>,
     cx: &App,
@@ -7761,7 +7839,7 @@ fn effect_item_row(
             .gap_1p5()
             .items_center()
             .child(icon_box(IconName::Sparkles))
-            .child(div().text_xs().text_color(cx.theme().foreground).child(title)),
+            .child(div().text_xs().text_color(cx.theme().foreground).child(title.to_string())),
     )
     .child(
         h_flex()
@@ -7813,13 +7891,100 @@ fn category_header(
         .child(title)
 }
 
+/// Stable accordion key per OFX category (matches the test hooks).
+fn ofx_category_key(cat: project::OfxCategory) -> &'static str {
+    match cat {
+        project::OfxCategory::Blur => "blur",
+        project::OfxCategory::Color => "color",
+        project::OfxCategory::Light => "light",
+        project::OfxCategory::Key => "keying",
+        project::OfxCategory::Distort => "distort",
+        project::OfxCategory::Stylize => "stylize",
+        project::OfxCategory::Noise => "noise",
+        project::OfxCategory::Generate => "generate",
+        project::OfxCategory::Spatial => "spatial",
+        project::OfxCategory::Cleanup => "cleanup",
+        project::OfxCategory::Text => "text",
+        project::OfxCategory::Custom => "custom",
+    }
+}
+
+/// Accordion icon per OFX category.
+fn ofx_category_icon(cat: project::OfxCategory) -> IconName {
+    match cat {
+        project::OfxCategory::Blur => IconName::SlidersHorizontal,
+        project::OfxCategory::Color => IconName::Palette,
+        project::OfxCategory::Light => IconName::Sun,
+        project::OfxCategory::Key => IconName::Scissors,
+        project::OfxCategory::Distort => IconName::WandSparkles,
+        project::OfxCategory::Stylize => IconName::Sparkles,
+        project::OfxCategory::Noise => IconName::Film,
+        project::OfxCategory::Generate => IconName::Plus,
+        project::OfxCategory::Spatial => IconName::Move,
+        project::OfxCategory::Cleanup => IconName::Circle,
+        project::OfxCategory::Text => IconName::Type,
+        project::OfxCategory::Custom => IconName::Code,
+    }
+}
+
+/// Default-constructed template for a registry plug-in id: legacy ctors
+/// for the hand-rolled suite, descriptor-built stock for everything else.
+fn effect_template_for(plugin_id: &str) -> Option<EffectType> {
+    if let Some(plugin) = project::stock_from_id(plugin_id) {
+        return Some(EffectType::Stock {
+            plugin,
+            params: EffectType::stock_params(plugin),
+            colors: EffectType::stock_colors(plugin),
+        });
+    }
+    Some(match plugin_id {
+        "net.sf.openfx.blur" => EffectType::gaussian_blur(10.0),
+        "net.sf.openfx.brightness_contrast" => EffectType::brightness_contrast(15.0, 10.0),
+        "net.sf.openfx.tint" => EffectType::tint(Color::BLACK, Color::WHITE, 100.0),
+        "net.sf.openfx.invert" => EffectType::invert(100.0),
+        "net.sf.openfx.exposure" => EffectType::exposure(0.0),
+        "net.sf.openfx.vibrance" => EffectType::vibrance(30.0),
+        "net.sf.openfx.chroma_key" => {
+            EffectType::chroma_key(Color::from_hex("#00FF00").unwrap(), 30.0, 10.0)
+        }
+        "net.sf.openfx.luma_key" => EffectType::luma_key(20.0, 10.0),
+        "net.sf.openfx.drop_shadow" => {
+            EffectType::drop_shadow(8.0, 45.0, 10.0, 75.0, Color::BLACK)
+        }
+        "net.sf.openfx.displacement" => EffectType::displacement(50.0, 50.0),
+        "net.sf.openfx.perspective" => EffectType::perspective(0.0, 0.0),
+        "net.sf.openfx.tiler" => EffectType::tiler(2.0, 2.0),
+        "net.sf.openfx.warp" => EffectType::warp(30.0, 1.0),
+        "net.sf.openfx.bloom" => EffectType::bloom(40.0, 10.0),
+        "net.sf.openfx.noise" => EffectType::noise_generator(25.0, true),
+        "net.sf.openfx.checkerboard" => {
+            EffectType::checkerboard(32.0, Color::BLACK, Color::WHITE)
+        }
+        "net.sf.openfx.gradient_ramp" => {
+            EffectType::gradient_ramp(Color::BLACK, Color::rgb(0.9, 0.3, 0.1), 90.0)
+        }
+        "net.sf.openfx.text_outline" => EffectType::text_outline(3.0, Color::BLACK),
+        "net.sf.openfx.text_bevel" => EffectType::text_bevel(60.0, 30.0),
+        "net.sf.openfx.custom.glsl" => EffectType::glsl_shader(
+            project::Effect::default_glsl_code(),
+            1.0,
+            50.0,
+            1.0,
+            100.0,
+        ),
+        "net.sf.openfx.custom.shader_lab" => EffectType::shader_lab(shader_presets::GRADE),
+        _ => return None,
+    })
+}
+
 impl Render for EffectsPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let panel = cx.entity().clone();
         let is_open = |key: &str| !self.collapsed.contains(key);
 
-        // After Effects-style accordion: every category starts collapsed;
-        // click its header to expand. Keying and Text are new categories.
+        // Registry-driven accordion: every row comes from the OFX suites
+        // (`project::ofx`), so new plug-ins appear with zero panel code.
+        // Each row creates exactly the plug-in it names.
         let mut cats = v_flex()
             .id("effects_categories")
             .test_support()
@@ -7828,74 +7993,37 @@ impl Render for EffectsPanel {
             .p_2()
             .gap_1();
 
-        cats = cats.child(category_header("blur", "Blur & Sharpen", IconName::SlidersHorizontal, is_open("blur"), &panel, cx));
-        if is_open("blur") {
-            cats = cats
-                .child(effect_item_row("gaussian_blur", "Gaussian Blur", EffectType::gaussian_blur(10.0), &self.state, cx))
-                .child(effect_item_row("fast_box_blur", "Fast Box Blur", EffectType::gaussian_blur(5.0), &self.state, cx))
-                .child(effect_item_row("directional_blur", "Directional Blur", EffectType::gaussian_blur(15.0), &self.state, cx))
-                .child(effect_item_row("sharpen", "Sharpen", EffectType::brightness_contrast(0.0, 25.0), &self.state, cx));
-        }
-
-        cats = cats.child(category_header("color", "Color Correction", IconName::Palette, is_open("color"), &panel, cx));
-        if is_open("color") {
-            cats = cats
-                .child(effect_item_row("brightness_contrast", "Brightness & Contrast", EffectType::brightness_contrast(15.0, 10.0), &self.state, cx))
-                .child(effect_item_row("tint", "Tint", EffectType::tint(Color::BLACK, Color::WHITE, 100.0), &self.state, cx))
-                .child(effect_item_row("invert", "Invert", EffectType::invert(100.0), &self.state, cx))
-                .child(effect_item_row("exposure", "Exposure", EffectType::exposure(0.0), &self.state, cx))
-                .child(effect_item_row("vibrance", "Vibrance", EffectType::vibrance(30.0), &self.state, cx))
-                .child(effect_item_row("color_balance", "Color Balance (HLS)", EffectType::tint(Color::rgb(0.1, 0.0, 0.0), Color::rgb(1.0, 0.9, 0.8), 50.0), &self.state, cx))
-                .child(effect_item_row("lumetri_color", "Lumetri Color", EffectType::brightness_contrast(5.0, 15.0), &self.state, cx));
-        }
-
-        cats = cats.child(category_header("distort", "Distort & Perspective", IconName::WandSparkles, is_open("distort"), &panel, cx));
-        if is_open("distort") {
-            cats = cats
-                .child(effect_item_row("drop_shadow", "Drop Shadow", EffectType::drop_shadow(8.0, 45.0, 10.0, 75.0, Color::BLACK), &self.state, cx))
-                .child(effect_item_row("transform", "Transform", EffectType::drop_shadow(0.0, 0.0, 0.0, 100.0, Color::BLACK), &self.state, cx))
-                .child(effect_item_row("perspective", "Perspective", EffectType::perspective(0.0, 0.0), &self.state, cx))
-                .child(effect_item_row("tiler", "Tiler", EffectType::tiler(2.0, 2.0), &self.state, cx))
-                .child(effect_item_row("warp", "Warp", EffectType::warp(30.0, 1.0), &self.state, cx));
-        }
-
-        cats = cats.child(category_header("generate", "Generate & Stylize", IconName::Sparkles, is_open("generate"), &panel, cx));
-        if is_open("generate") {
-            cats = cats
-                .child(effect_item_row("fill", "Fill", EffectType::tint(Color::rgb(0.2, 0.4, 0.8), Color::rgb(0.2, 0.4, 0.8), 100.0), &self.state, cx))
-                .child(effect_item_row("gradient_ramp", "Gradient Ramp", EffectType::gradient_ramp(Color::BLACK, Color::rgb(0.9, 0.3, 0.1), 90.0), &self.state, cx))
-                .child(effect_item_row("checkerboard", "Checkerboard", EffectType::checkerboard(32.0, Color::BLACK, Color::WHITE), &self.state, cx))
-                .child(effect_item_row("noise_generator", "Noise", EffectType::noise_generator(25.0, true), &self.state, cx))
-                .child(effect_item_row("bloom", "Bloom", EffectType::bloom(40.0, 10.0), &self.state, cx));
-        }
-
-        cats = cats.child(category_header("transition", "Transition", IconName::RotateCw, is_open("transition"), &panel, cx));
-        if is_open("transition") {
-            cats = cats.child(effect_item_row("linear_wipe", "Linear Wipe", EffectType::invert(50.0), &self.state, cx));
-        }
-
-        cats = cats.child(category_header("keying", "Keying", IconName::Scissors, is_open("keying"), &panel, cx));
-        if is_open("keying") {
-            cats = cats
-                .child(effect_item_row("chroma_key", "Chroma Key", EffectType::chroma_key(Color::from_hex("#00FF00").unwrap(), 30.0, 10.0), &self.state, cx))
-                .child(effect_item_row("luma_key", "Luma Key", EffectType::luma_key(20.0, 10.0), &self.state, cx));
-        }
-
-        cats = cats.child(category_header("text", "Text", IconName::Type, is_open("text"), &panel, cx));
-        if is_open("text") {
-            cats = cats
-                .child(effect_item_row("text_fill", "Text Fill", EffectType::tint(Color::WHITE, Color::rgb(0.2, 0.5, 1.0), 100.0), &self.state, cx))
-                .child(effect_item_row("text_gradient", "Text Gradient", EffectType::tint(Color::rgb(0.1, 0.1, 0.2), Color::rgb(1.0, 0.8, 0.2), 85.0), &self.state, cx))
-                .child(effect_item_row("text_shadow", "Text Drop Shadow", EffectType::drop_shadow(4.0, 135.0, 6.0, 80.0, Color::BLACK), &self.state, cx))
-                .child(effect_item_row("text_outline", "Text Outline", EffectType::text_outline(3.0, Color::BLACK), &self.state, cx))
-                .child(effect_item_row("text_bevel", "Text Bevel", EffectType::text_bevel(60.0, 30.0), &self.state, cx));
-        }
-
-        cats = cats.child(category_header("custom", "Custom Shaders (GLSL/WGSL)", IconName::Code, is_open("custom"), &panel, cx));
-        if is_open("custom") {
-            cats = cats
-                .child(effect_item_row("shader_lab", "Shader Lab", EffectType::shader_lab(shader_presets::GRADE), &self.state, cx))
-                .child(effect_item_row("custom_glsl", "Custom GLSL Shader", EffectType::glsl_shader(project::Effect::default_glsl_code(), 1.0, 50.0, 1.0, 100.0), &self.state, cx));
+        for cat in [
+            project::OfxCategory::Blur,
+            project::OfxCategory::Color,
+            project::OfxCategory::Light,
+            project::OfxCategory::Key,
+            project::OfxCategory::Distort,
+            project::OfxCategory::Stylize,
+            project::OfxCategory::Noise,
+            project::OfxCategory::Generate,
+            project::OfxCategory::Spatial,
+            project::OfxCategory::Cleanup,
+            project::OfxCategory::Text,
+            project::OfxCategory::Custom,
+        ] {
+            let key = ofx_category_key(cat);
+            cats = cats.child(category_header(
+                key,
+                cat.label(),
+                ofx_category_icon(cat),
+                is_open(key),
+                &panel,
+                cx,
+            ));
+            if is_open(key) {
+                for desc in project::ofx_in_category(cat) {
+                    if let Some(template) = effect_template_for(desc.id) {
+                        let slug = desc.id.rsplit('.').next().unwrap_or(desc.id);
+                        cats = cats.child(effect_item_row(slug, desc.label, template, &self.state, cx));
+                    }
+                }
+            }
         }
 
         div()
@@ -7993,7 +8121,7 @@ fn next_matte_mode(mode: TrackMatteMode) -> TrackMatteMode {
 fn timeline_stopwatch_nav(
     state: &Entity<EditorState>,
     layer_id: &str,
-    prop_path: &'static str,
+    prop_path: &str,
     is_animated: bool,
     has_kf_at_playhead: bool,
     has_prev_kf: bool,
@@ -8008,6 +8136,14 @@ fn timeline_stopwatch_nav(
     let lid2 = layer_id.to_string();
     let lid3 = layer_id.to_string();
     let lid4 = layer_id.to_string();
+    // Owned paths: effect rows pass `effect:<fx_id>:<param>` (the timeline
+    // used to pass bare `effect:<param>` with no id, so effect stopwatches,
+    // diamonds, and prev/next nav silently no-op'd).
+    let p_toggle = prop_path.to_string();
+    let p_prev = prop_path.to_string();
+    let p_kf = prop_path.to_string();
+    let p_next = prop_path.to_string();
+    let id_path = prop_path.to_string();
 
     let stopwatch_btn = div()
         .cursor_pointer()
@@ -8021,7 +8157,7 @@ fn timeline_stopwatch_nav(
         })
         .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
             s_toggle.update(cx, |s, cx| {
-                s.toggle_layer_property_animation(&lid1, prop_path);
+                s.toggle_layer_property_animation(&lid1, &p_toggle);
                 cx.notify();
             });
         })
@@ -8044,7 +8180,7 @@ fn timeline_stopwatch_nav(
                 .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                     if has_prev_kf {
                         s_prev.update(cx, |s, cx| {
-                            s.seek_previous_keyframe(&lid2, prop_path);
+                            s.seek_previous_keyframe(&lid2, &p_prev);
                             cx.notify();
                         });
                     }
@@ -8053,7 +8189,7 @@ fn timeline_stopwatch_nav(
         )
         .child(
             div()
-                .id(SharedString::from(format!("timeline_kf_{layer_id}_{prop_path}")))
+                .id(SharedString::from(format!("timeline_kf_{layer_id}_{id_path}")))
                 .test_support()
                 .cursor_pointer()
                 .px_0p5()
@@ -8069,7 +8205,7 @@ fn timeline_stopwatch_nav(
                         // After Effects behavior: the diamond always works.
                         // When the stopwatch is off, this records the first
                         // keyframe and enables animation for the property.
-                        s.toggle_layer_keyframe_at_current_time(&lid3, prop_path);
+                        s.toggle_layer_keyframe_at_current_time(&lid3, &p_kf);
                         cx.notify();
                     });
                 })
@@ -8089,7 +8225,7 @@ fn timeline_stopwatch_nav(
                 .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                     if has_next_kf {
                         s_next.update(cx, |s, cx| {
-                            s.seek_next_keyframe(&lid4, prop_path);
+                            s.seek_next_keyframe(&lid4, &p_next);
                             cx.notify();
                         });
                     }
@@ -8301,6 +8437,8 @@ pub struct TimelinePanel {
     expanded_layers: HashSet<String>,
     expanded_groups: HashSet<String>,
     pub active_blend_dropdown: Option<String>,
+    /// Layer id whose parent picker is open (timeline Parent pill).
+    pub active_parent_dropdown: Option<String>,
     pub context_menu: Option<ContextMenuState>,
     pub is_scrubbing_ruler: bool,
     /// Drag state for layer strip interactions (After Effects-style)
@@ -8832,6 +8970,7 @@ impl TimelinePanel {
             expanded_layers,
             expanded_groups,
             active_blend_dropdown: None,
+            active_parent_dropdown: None,
             context_menu: None,
             is_scrubbing_ruler: false,
             drag_action: None,
@@ -8847,10 +8986,20 @@ impl TimelinePanel {
 
     pub fn open_blend_dropdown(&mut self, layer_id: String) {
         self.active_blend_dropdown = Some(layer_id);
+        self.active_parent_dropdown = None;
     }
 
     pub fn close_blend_dropdown(&mut self) {
         self.active_blend_dropdown = None;
+    }
+
+    pub fn open_parent_dropdown(&mut self, layer_id: String) {
+        self.active_parent_dropdown = Some(layer_id);
+        self.active_blend_dropdown = None;
+    }
+
+    pub fn close_parent_dropdown(&mut self) {
+        self.active_parent_dropdown = None;
     }
 
     pub fn open_context_menu(&mut self, target: ContextMenuTarget, pos: Point<Pixels>) {
@@ -9013,7 +9162,6 @@ impl Render for TimelinePanel {
                 let solo_state = self.state.clone();
                 let lock_state = self.state.clone();
                 let matte_state = self.state.clone();
-                let parent_state = self.state.clone();
                 let s_up = self.state.clone();
                 let s_down = self.state.clone();
 
@@ -9026,7 +9174,6 @@ impl Render for TimelinePanel {
                 let lid_up = layer.id.clone();
                 let lid_down = layer.id.clone();
                 let current_matte = layer.matte_mode;
-                let current_parent = layer.parent_id.clone();
 
                 let p_twirl = panel_entity.clone();
                 let lid_twirl = layer.id.clone();
@@ -9240,9 +9387,15 @@ impl Render for TimelinePanel {
                                         TrackMatteMode::LumaInverted => "Inv Luma",
                                     }),
                             )
-                            // Parent & Link
-                            .child(
+                            // Parent picker: any layer can parent any other
+                            // (except itself and its own descendants, which
+                            // would cycle). (Un)parenting preserves the
+                            // child's world transform.
+                            .child({
+                                let p_pick = panel_entity.clone();
                                 div()
+                                    .id(SharedString::from(format!("parent_picker_{}", layer.id)))
+                                    .test_support()
                                     .cursor_pointer()
                                     .px_1p5()
                                     .py_0p5()
@@ -9252,14 +9405,23 @@ impl Render for TimelinePanel {
                                     .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
                                     .text_xs()
                                     .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                        parent_state.update(cx, |s, cx| {
-                                            let next_p = if current_parent.is_some() { None } else { Some("layer_bg".to_string()) };
-                                            s.set_layer_parent(&lid_parent, next_p);
+                                        let lid = lid_parent.clone();
+                                        p_pick.update(cx, |this, cx| {
+                                            if this.active_parent_dropdown.as_deref() == Some(&lid) {
+                                                this.close_parent_dropdown();
+                                            } else {
+                                                this.open_parent_dropdown(lid);
+                                            }
                                             cx.notify();
                                         });
                                     })
-                                    .child(layer.parent_id.clone().unwrap_or_else(|| "None".to_string())),
-                            ),
+                                    .child(
+                                        layer
+                                            .parent_id
+                                            .clone()
+                                            .unwrap_or_else(|| "None".to_string()),
+                                    )
+                            }),
                     );
 
                 let span_state = self.state.clone();
@@ -9998,43 +10160,46 @@ impl Render for TimelinePanel {
                                         EffectType::Vibrance { vibrance } => {
                                             param_entries.push(("vibrance", "Vibrance", vibrance.evaluate_at(&current_tc), 5.0));
                                         }
+                                        EffectType::Levels { input_black, input_white, gamma, output_black, output_white } => {
+                                            param_entries.push(("input_black", "In Black", input_black.evaluate_at(&current_tc), 5.0));
+                                            param_entries.push(("input_white", "In White", input_white.evaluate_at(&current_tc), 5.0));
+                                            param_entries.push(("gamma", "Gamma", gamma.evaluate_at(&current_tc), 0.1));
+                                            param_entries.push(("output_black", "Out Black", output_black.evaluate_at(&current_tc), 5.0));
+                                            param_entries.push(("output_white", "Out White", output_white.evaluate_at(&current_tc), 5.0));
+                                        }
+                                        EffectType::HueSaturation { hue_shift, saturation, lightness } => {
+                                            param_entries.push(("hue_shift", "Hue Shift", hue_shift.evaluate_at(&current_tc), 5.0));
+                                            param_entries.push(("saturation", "Saturation", saturation.evaluate_at(&current_tc), 5.0));
+                                            param_entries.push(("lightness", "Lightness", lightness.evaluate_at(&current_tc), 5.0));
+                                        }
+                                        EffectType::Sharpen { amount, radius } => {
+                                            param_entries.push(("amount", "Amount", amount.evaluate_at(&current_tc), 5.0));
+                                            param_entries.push(("radius", "Radius", radius.evaluate_at(&current_tc), 0.5));
+                                        }
+                                        EffectType::Vignette { amount, softness } => {
+                                            param_entries.push(("amount", "Amount", amount.evaluate_at(&current_tc), 5.0));
+                                            param_entries.push(("softness", "Softness", softness.evaluate_at(&current_tc), 5.0));
+                                        }
                                         // Shader Lab parameters are edited in the Properties
                                         // panel (dynamic uniforms have no static keyframe paths).
                                         EffectType::ShaderLab { .. } => {}
+                                        // Stock plug-ins enumerate from the descriptor.
+                                        EffectType::Stock { .. } => {
+                                            for (name, label, _v, step) in effect.stock_scalar_params() {
+                                                let val = effect
+                                                    .get_param_property(name)
+                                                    .map(|p| p.evaluate_at(&current_tc))
+                                                    .unwrap_or(0.0);
+                                                param_entries.push((name, label, val, step));
+                                            }
+                                        }
                                     }
 
                                     for (p_slug, p_label, p_val, p_step) in param_entries {
-                                        let prop_path_static: &'static str = match p_slug {
-                                            "radius" => "effect:radius",
-                                            "brightness" => "effect:brightness",
-                                            "contrast" => "effect:contrast",
-                                            "amount" => "effect:amount",
-                                            "distance" => "effect:distance",
-                                            "softness" => "effect:softness",
-                                            "opacity" => "effect:opacity",
-                                            "param1" => "effect:param1",
-                                            "param2" => "effect:param2",
-                                            "param3" => "effect:param3",
-                                            "param4" => "effect:param4",
-                                            "max_horizontal" => "effect:max_horizontal",
-                                            "max_vertical" => "effect:max_vertical",
-                                            "tolerance" => "effect:tolerance",
-                                            "threshold" => "effect:threshold",
-                                            "feather" => "effect:feather",
-                                            "size" => "effect:size",
-                                            "angle" => "effect:angle",
-                                            "skew_x" => "effect:skew_x",
-                                            "skew_y" => "effect:skew_y",
-                                            "width" => "effect:width",
-                                            "strength" => "effect:strength",
-                                            "intensity" => "effect:intensity",
-                                            "tiles_x" => "effect:tiles_x",
-                                            "tiles_y" => "effect:tiles_y",
-                                            "scale" => "effect:scale",
-                                            "exposure" => "effect:exposure",
-                                            "vibrance" => "effect:vibrance",
-                                            _ => "effect:param",
-                                        };
+                                        // Full effect path carries the effect id, so the
+                                        // stopwatch / diamond / prev-next nav resolve the
+                                        // exact keyframed property.
+                                        let fx_prop_path = format!("effect:{}:{p_slug}", effect.id);
 
                                         let prop_ref = effect.get_param_property(p_slug);
                                         let is_anim = prop_ref.map(|p| p.is_animated()).unwrap_or(false);
@@ -10060,7 +10225,7 @@ impl Render for TimelinePanel {
                                                 h_flex()
                                                     .gap_1()
                                                     .items_center()
-                                                    .child(timeline_stopwatch_nav(&self.state, &layer.id, prop_path_static, is_anim, has_kf, prev_kf, next_kf, cx))
+                                                    .child(timeline_stopwatch_nav(&self.state, &layer.id, &fx_prop_path, is_anim, has_kf, prev_kf, next_kf, cx))
                                                     .child(div().w(px(100.)).truncate().text_color(cx.theme().foreground).child(p_label)),
                                             )
                                             .child(
@@ -10817,6 +10982,161 @@ impl Render for TimelinePanel {
                         .child(cat_columns),
                 );
             root = root.child(blend_dropdown_overlay);
+        }
+
+        // Parent Picker Dropdown Overlay: every layer except the target
+        // itself and its descendants (which would create a cycle), plus
+        // None to unparent. (Un)parenting preserves world transform.
+        if let Some(ref target_lid) = self.active_parent_dropdown {
+            let s_pick = self.state.clone();
+            let p_close = panel_entity.clone();
+            let target_lid_str = target_lid.clone();
+
+            // Candidate parent ids + display names in layer order.
+            let (candidates, current_parent) = {
+                let s = self.state.read(cx);
+                match s.active_composition() {
+                    Some(comp) => {
+                        let mut forbidden = vec![target_lid_str.clone()];
+                        let mut stack = vec![target_lid_str.clone()];
+                        while let Some(id) = stack.pop() {
+                            for child in comp.get_children(&id) {
+                                forbidden.push(child.id.clone());
+                                stack.push(child.id.clone());
+                            }
+                        }
+                        let cands: Vec<(String, String)> = comp
+                            .layers
+                            .iter()
+                            .filter(|l| !forbidden.contains(&l.id))
+                            .map(|l| (l.id.clone(), l.name.clone()))
+                            .collect();
+                        let cur = comp
+                            .get_layer(&target_lid_str)
+                            .and_then(|l| l.parent_id.clone());
+                        (cands, cur)
+                    }
+                    None => (Vec::new(), None),
+                }
+            };
+
+            let mut list = v_flex()
+                .id("parent_pick_list")
+                .test_support()
+                .gap_0p5()
+                .p_1()
+                .overflow_y_scroll();
+            {
+                let s_item = s_pick.clone();
+                let p_close_item = p_close.clone();
+                let target_lid_item = target_lid_str.clone();
+                let is_cur = current_parent.is_none();
+                list = list.child(
+                    div()
+                        .id("parent_pick_none")
+                        .test_support()
+                        .cursor_pointer()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .text_xs()
+                        .bg(if is_cur {
+                            cx.theme().accent
+                        } else {
+                            cx.theme().secondary
+                        })
+                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            s_item.update(cx, |s, cx| {
+                                s.set_layer_parent(&target_lid_item, None);
+                                cx.notify();
+                            });
+                            p_close_item.update(cx, |this, cx| {
+                                this.close_parent_dropdown();
+                                cx.notify();
+                            });
+                        })
+                        .child("None (unparent)"),
+                );
+            }
+            for (cid, cname) in candidates {
+                let s_item = s_pick.clone();
+                let p_close_item = p_close.clone();
+                let target_lid_item = target_lid_str.clone();
+                let is_cur = current_parent.as_deref() == Some(&cid);
+                let label = format!("{cname} ({cid})");
+                list = list.child(
+                    div()
+                        .id(SharedString::from(format!("parent_pick_{cid}")))
+                        .test_support()
+                        .cursor_pointer()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .text_xs()
+                        .bg(if is_cur {
+                            cx.theme().accent
+                        } else {
+                            cx.theme().secondary
+                        })
+                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            s_item.update(cx, |s, cx| {
+                                s.set_layer_parent(&target_lid_item, Some(cid.clone()));
+                                cx.notify();
+                            });
+                            p_close_item.update(cx, |this, cx| {
+                                this.close_parent_dropdown();
+                                cx.notify();
+                            });
+                        })
+                        .child(label),
+                );
+            }
+
+            let p_close_bg = p_close.clone();
+            let parent_dropdown_overlay = div()
+                .id("parent_picker_dropdown")
+                .test_support()
+                .absolute()
+                .top(px(40.))
+                .left(px(180.))
+                .w(px(260.))
+                .h(px(300.))
+                .bg(cx.theme().background)
+                .border_1()
+                .border_color(cx.theme().border)
+                .rounded_md()
+                .shadow_lg()
+                .child(
+                    v_flex()
+                        .child(
+                            h_flex()
+                                .justify_between()
+                                .items_center()
+                                .px_2()
+                                .py_1()
+                                .border_b_1()
+                                .border_color(cx.theme().border)
+                                .bg(cx.theme().secondary)
+                                .child(div().font_bold().text_xs().child("Parent Layer"))
+                                .child(
+                                    div()
+                                        .cursor_pointer()
+                                        .text_xs()
+                                        .hover(|s| s.text_color(rgb(0xef4444)))
+                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                            p_close_bg.update(cx, |this, cx| {
+                                                this.close_parent_dropdown();
+                                                cx.notify();
+                                            });
+                                        })
+                                        .child("✕"),
+                                ),
+                        )
+                        .child(list),
+                );
+            root = root.child(parent_dropdown_overlay);
         }
 
         // Context Menu Overlay

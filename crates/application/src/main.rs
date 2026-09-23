@@ -2714,11 +2714,13 @@ mod tests {
                 cx.notify();
             });
             window.render_frame(cx);
-            assert!(window.find("effect_item_gaussian_blur").visible());
+            assert!(window.find("effect_item_blur").visible());
+            assert!(window.find("effect_item_sharpen").visible());
             assert!(window.find("effect_item_brightness_contrast").visible());
+            assert!(window.find("effect_item_levels").visible());
             assert!(window.find("effect_item_chroma_key").visible());
             assert!(window.find("effect_item_luma_key").visible());
-            assert!(window.find("effect_item_text_fill").visible());
+            assert!(window.find("effect_item_text_outline").visible());
 
             // 2. Add effect to selected layer
             let state_entity = app_view.read(cx).state().clone();
@@ -3090,9 +3092,29 @@ mod tests {
         assert_eq!(layer.matte_mode, TrackMatteMode::Alpha);
         assert_eq!(layer.matte_layer_id.as_deref(), Some("layer_bg"));
 
-        // Parenting
-        state.set_layer_parent(layer_id, Some("layer_bg".to_string()));
+        // Parenting preserves the child's world transform (no jump).
+        let world_before = state.layer_world_matrix_fast(layer_id).unwrap();
+        assert!(state.set_layer_parent(layer_id, Some("layer_bg".to_string())));
         assert_eq!(state.active_composition().unwrap().get_layer(layer_id).unwrap().parent_id.as_deref(), Some("layer_bg"));
+        let world_after = state.layer_world_matrix_fast(layer_id).unwrap();
+        for (a, b) in [world_before.a, world_before.b, world_before.c, world_before.d, world_before.tx, world_before.ty]
+            .iter()
+            .zip([world_after.a, world_after.b, world_after.c, world_after.d, world_after.tx, world_after.ty].iter())
+        {
+            assert!((a - b).abs() < 1e-3, "{world_before:?} vs {world_after:?}");
+        }
+        // Any layer can be a parent; unparenting also preserves world.
+        assert!(!state.set_layer_parent("layer_bg", Some(layer_id.to_string())), "child-as-parent must cycle-reject");
+        assert!(!state.set_layer_parent(layer_id, Some(layer_id.to_string())), "self-parent must reject");
+        assert!(!state.set_layer_parent(layer_id, Some("nope".to_string())), "missing parent must reject");
+        assert!(state.set_layer_parent(layer_id, None));
+        let world_unparented = state.layer_world_matrix_fast(layer_id).unwrap();
+        for (a, b) in [world_before.a, world_before.b, world_before.c, world_before.d, world_before.tx, world_before.ty]
+            .iter()
+            .zip([world_unparented.a, world_unparented.b, world_unparented.c, world_unparented.d, world_unparented.tx, world_unparented.ty].iter())
+        {
+            assert!((a - b).abs() < 1e-3, "{world_before:?} vs {world_unparented:?}");
+        }
 
         // Lock
         state.toggle_layer_lock(layer_id);

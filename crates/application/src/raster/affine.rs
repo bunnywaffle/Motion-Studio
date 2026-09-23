@@ -59,4 +59,31 @@ pub fn skew_about(sx_deg: f32, sy_deg: f32, cx: f32, cy: f32) -> Aff {
     }
 }
 
+/// Post-transform for the Transform stock plug-in: translate (`tx`, `ty`
+/// in output px), uniform scale (percent), and rotation (degrees) about
+/// (`cx`, `cy`), applied AFTER an existing local->output map.
+pub fn fold_transform(
+    map: Aff,
+    cx: f32,
+    cy: f32,
+    tx: f32,
+    ty: f32,
+    scale_pct: f32,
+    rot_deg: f32,
+) -> Aff {
+    let s = (scale_pct / 100.0).max(0.01);
+    let r = rot_deg.to_radians();
+    let (c, sn) = (r.cos(), r.sin());
+    // T(cx+tx, cy+ty) * R * S * T(-cx, -cy), then the existing map.
+    let post = Aff {
+        a: s * c,
+        b: s * sn,
+        c: -s * sn,
+        d: s * c,
+        tx: cx + tx - s * c * cx + s * sn * cy,
+        ty: cy + ty - s * sn * cx - s * c * cy,
+    };
+    aff_mul(post, map)
+}
+
 // ---------------------------------------------------------------------------

@@ -1,5 +1,6 @@
 pub mod error;
 pub mod evaluation;
+pub mod fx;
 pub mod graph;
 pub mod node;
 pub mod transform;

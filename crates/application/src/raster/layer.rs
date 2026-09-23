@@ -1,13 +1,14 @@
 use compositor::{EvaluatedEffect, EvaluatedEffectType, EvaluatedLayer};
 use image::RgbaImage;
-use project::{BlendMode, Color, LayerSource, ShapeType};
+use project::{BlendMode, Color, LayerSource, ShapeType, StockPlugin};
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use super::affine::{Aff, aff_apply, aff_invert};
+use super::affine::{Aff, aff_apply, aff_invert, aff_mul, fold_transform, skew_about};
 use super::buffer::{FloatBuf, blur_buffer};
-use super::effects::{RasterFx, apply_effect_pixels};
+use super::effects::{RasterFx, apply_effect_pixels, apply_sharpen, apply_vignette};
+use super::stock::apply_stock;
 use super::pixel::Px;
 use super::shapes::{fill_ellipse, fill_rect, stroke_path};
 use super::text::{TextSpec, raster_text};
@@ -324,6 +325,11 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
         EvaluatedEffectType::Warp { .. } => 19,
         EvaluatedEffectType::Exposure { .. } => 20,
         EvaluatedEffectType::Vibrance { .. } => 21,
+        EvaluatedEffectType::Levels { .. } => 22,
+        EvaluatedEffectType::HueSaturation { .. } => 23,
+        EvaluatedEffectType::Sharpen { .. } => 24,
+        EvaluatedEffectType::Vignette { .. } => 25,
+        EvaluatedEffectType::Stock { plugin, .. } => 100 + *plugin as u8,
     };
     disc.hash(h);
     match fx {
@@ -414,6 +420,35 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
         }
         EvaluatedEffectType::Exposure { exposure } => exposure.to_bits().hash(h),
         EvaluatedEffectType::Vibrance { vibrance } => vibrance.to_bits().hash(h),
+        EvaluatedEffectType::Levels { input_black, input_white, gamma, output_black, output_white } => {
+            input_black.to_bits().hash(h);
+            input_white.to_bits().hash(h);
+            gamma.to_bits().hash(h);
+            output_black.to_bits().hash(h);
+            output_white.to_bits().hash(h);
+        }
+        EvaluatedEffectType::HueSaturation { hue_shift, saturation, lightness } => {
+            hue_shift.to_bits().hash(h);
+            saturation.to_bits().hash(h);
+            lightness.to_bits().hash(h);
+        }
+        EvaluatedEffectType::Sharpen { amount, radius } => {
+            amount.to_bits().hash(h);
+            radius.to_bits().hash(h);
+        }
+        EvaluatedEffectType::Vignette { amount, softness } => {
+            amount.to_bits().hash(h);
+            softness.to_bits().hash(h);
+        }
+        EvaluatedEffectType::Stock { params, colors, .. } => {
+            params.len().hash(h);
+            for v in params {
+                v.to_bits().hash(h);
+            }
+            for c in colors {
+                color_hash(c, h);
+            }
+        }
     }
 }
 
@@ -492,7 +527,18 @@ pub fn rasterize_layer(
     if matches!(&layer.source, LayerSource::Adjustment) {
         return (out, backdrop, true);
     }
-    let k = ow as f32 / comp_w.max(1.0);
+    // World map (local -> output px of this AABB box).
+    //
+    // The output box IS the layer AABB (the viewer shell draws this exact
+    // box, stretched to canvas scale), so the local->output scale is
+    // `out / bbox` — NOT `out / comp`. Using comp width here shrank every
+    // layer's pixels inside its gizmo (e.g. a 300px solid in a 1920px comp
+    // rendered ~6x too small).
+    let bbox = layer.world_bounds(base_w, base_h);
+    let bw = (bbox.max.x - bbox.min.x).max(1e-3);
+    let bh = (bbox.max.y - bbox.min.y).max(1e-3);
+    let kx = ow as f32 / bw;
+    let ky = oh as f32 / bh;
     let fx = RasterFx {
         time_s,
         frame,
@@ -524,49 +570,87 @@ pub fn rasterize_layer(
         }
     }
     if blur_total > 0.25 {
-        blur_buffer(&mut work, blur_total * k.max(0.25));
+        // Blur runs in work-buffer (local px) space, before the world map,
+        // so the radius applies unscaled — it is a content-space value.
+        blur_buffer(&mut work, blur_total);
     }
     if let Some((intensity, radius)) = bloom {
-        apply_bloom(&mut work, intensity, radius * k.max(0.25));
+        apply_bloom(&mut work, intensity, radius);
     }
-    // World map (local -> canvas px of this AABB box).
+    // World map (local -> output px of this AABB box).
     let wm = layer.world_matrix();
-    let full = Aff {
-        a: wm.a * k,
-        b: wm.b * k,
-        c: wm.c * k,
-        d: wm.d * k,
-        tx: (wm.tx + comp_w / 2.0) * k,
-        ty: (wm.ty + comp_h / 2.0) * k,
+    let mut pmap = Aff {
+        a: wm.a * kx,
+        b: wm.b * kx,
+        c: wm.c * ky,
+        d: wm.d * ky,
+        tx: (wm.tx - bbox.min.x) * kx,
+        ty: (wm.ty - bbox.min.y) * ky,
     };
-    // AABB origin in canvas px (matches the viewer shell math).
-    let bbox = layer.world_bounds(base_w, base_h);
-    let ox = (bbox.min.x + comp_w / 2.0) * k;
-    let oy = (bbox.min.y + comp_h / 2.0) * k;
-    let shifted = Aff {
-        a: full.a,
-        b: full.b,
-        c: full.c,
-        d: full.d,
-        tx: full.tx - ox.floor(),
-        ty: full.ty - oy.floor(),
-    };
-    // Drop shadow.
-    let mut shadow = None;
+    // Perspective skew folds into the map (same as the full-comp path:
+    // the skew runs first in local px, the world map scales after it).
     for eff in &layer.effects {
         if !eff.enabled {
             continue;
         }
-        if let EvaluatedEffectType::DropShadow { distance, angle, opacity, color, .. } =
+        if let EvaluatedEffectType::Perspective { skew_x, skew_y } = &eff.effect_type {
+            if skew_x.abs() >= 0.05 || skew_y.abs() >= 0.05 {
+                pmap = aff_mul(
+                    pmap,
+                    skew_about(*skew_x, *skew_y, base_w / 2.0, base_h / 2.0),
+                );
+            }
+            break;
+        }
+    }
+    let mut shifted = pmap;
+    // Transform stock plug-in folds into the map (translate in output px,
+    // scale/rotate about the AABB center).
+    for eff in &layer.effects {
+        if !eff.enabled {
+            continue;
+        }
+        if let EvaluatedEffectType::Stock { plugin, params, .. } = &eff.effect_type {
+            if *plugin == StockPlugin::TransformFx {
+                use compositor::fx::stock_p;
+                shifted = fold_transform(
+                    shifted,
+                    ow as f32 * 0.5,
+                    oh as f32 * 0.5,
+                    stock_p(*plugin, params, 0) * kx,
+                    stock_p(*plugin, params, 1) * ky,
+                    stock_p(*plugin, params, 2),
+                    stock_p(*plugin, params, 3),
+                );
+            }
+        }
+    }
+    // Drop shadow (softness blurs the silhouette once, up front).
+    let mut shadow = None;
+    let mut shadow_blurred: Option<FloatBuf> = None;
+    for eff in &layer.effects {
+        if !eff.enabled {
+            continue;
+        }
+        if let EvaluatedEffectType::DropShadow { distance, angle, softness, opacity, color } =
             &eff.effect_type
         {
             let rad = angle.to_radians();
             shadow = Some((
-                distance * rad.cos() * k,
-                distance * rad.sin() * k,
+                distance * rad.cos() * kx,
+                distance * rad.sin() * ky,
                 (opacity / 100.0).clamp(0.0, 1.0) * 0.75,
                 *color,
             ));
+            if *softness > 0.5 {
+                // Alpha-only silhouette, blurred in work px.
+                let mut sil = FloatBuf::clear(work.w, work.h);
+                for (d, s) in sil.px.iter_mut().zip(work.px.iter()) {
+                    *d = Px { r: 0.0, g: 0.0, b: 0.0, a: s.a };
+                }
+                blur_buffer(&mut sil, *softness);
+                shadow_blurred = Some(sil);
+            }
             break;
         }
     }
@@ -579,6 +663,7 @@ pub fn rasterize_layer(
             layer.effective_opacity.clamp(0.0, 1.0),
             BlendMode::Normal,
             shadow,
+            shadow_blurred.as_ref(),
         );
     } else {
         // Exotic modes blend against the sampled backdrop average, the
@@ -595,6 +680,7 @@ pub fn rasterize_layer(
             layer.effective_opacity.clamp(0.0, 1.0),
             BlendMode::Normal,
             shadow,
+            shadow_blurred.as_ref(),
         );
         for p in bg.px.iter_mut() {
             if p.a <= 0.003 {
@@ -613,7 +699,8 @@ pub fn rasterize_layer(
 
 /// Blit `src` into `dst` through an affine local->dst map with bilinear
 /// sampling, opacity, and blend mode. `shadow` draws a blurred offset
-/// silhouette underneath first (drop shadow).
+/// silhouette underneath first (drop shadow); `shadow_src` optionally
+/// overrides the silhouette shape (pre-softened alpha buffer).
 pub fn blit_affine(
     dst: &mut FloatBuf,
     src: &FloatBuf,
@@ -621,6 +708,7 @@ pub fn blit_affine(
     opacity: f32,
     blend: BlendMode,
     shadow: Option<(f32, f32, f32, Color)>,
+    shadow_src: Option<&FloatBuf>,
 ) {
     let inv = match aff_invert(map) {
         Some(m) => m,
@@ -630,10 +718,16 @@ pub fn blit_affine(
     // Drop shadow silhouettes first.
     if let Some((sh_dx, sh_dy, sh_alpha, sh_color)) = shadow {
         if sh_alpha > 0.01 {
+            // Softened silhouette when provided, else the sharp source.
+            let sil = shadow_src.unwrap_or(src);
+            // The silhouette buffer lives in work px; map it through the
+            // same transform by scaling sample coords into its space.
+            let sx = sil.w as f32 / src.w.max(1) as f32;
+            let sy = sil.h as f32 / src.h.max(1) as f32;
             for y in 0..dst.h {
                 for x in 0..dst.w {
                     let (u, v) = aff_apply(inv, x as f32 - sh_dx, y as f32 - sh_dy);
-                    let s = src.sample(u, v);
+                    let s = sil.sample(u * sx, v * sy);
                     if s.a > 0.01 {
                         let a = (s.a * sh_alpha * op).clamp(0.0, 1.0);
                         let p = Px {
@@ -800,18 +894,49 @@ pub(crate) fn apply_bloom(buf: &mut FloatBuf, intensity: f32, radius_px: f32) {
 }
 
 /// Adjustment layer: post-process the composite beneath it.
-pub(crate) fn apply_adjustment(buf: &mut FloatBuf, effects: &[EvaluatedEffect]) {
+pub(crate) fn apply_adjustment(buf: &mut FloatBuf, effects: &[EvaluatedEffect], fx: &RasterFx) {
     let mut blur_total = 0.0f32;
+    let mut sharpen: Option<(f32, f32)> = None;
+    let mut vignette: Option<(f32, f32)> = None;
     for eff in effects {
         if !eff.enabled {
             continue;
         }
-        if let EvaluatedEffectType::GaussianBlur { radius } = &eff.effect_type {
-            blur_total += *radius;
+        match &eff.effect_type {
+            EvaluatedEffectType::GaussianBlur { radius } => blur_total += *radius,
+            EvaluatedEffectType::Sharpen { amount, radius } => {
+                if *amount > 0.5 {
+                    sharpen = Some((*amount, *radius));
+                }
+            }
+            EvaluatedEffectType::Vignette { amount, softness } => {
+                if *amount > 0.05 {
+                    vignette = Some((*amount, *softness));
+                }
+            }
+            _ => {}
         }
     }
     if blur_total > 0.25 {
         blur_buffer(buf, blur_total);
+    }
+    if let Some((amount, radius)) = sharpen {
+        apply_sharpen(buf, amount, radius);
+    }
+    if let Some((amount, softness)) = vignette {
+        apply_vignette(buf, amount, softness);
+    }
+    // Spatial stock plug-ins resolve at buffer level; per-pixel stock
+    // resolves through process_color in the loop below.
+    for eff in effects {
+        if !eff.enabled {
+            continue;
+        }
+        if let EvaluatedEffectType::Stock { plugin, params, colors } = &eff.effect_type {
+            if plugin.descriptor().spatial {
+                apply_stock(buf, *plugin, params, colors, fx);
+            }
+        }
     }
     for eff in effects {
         if !eff.enabled {

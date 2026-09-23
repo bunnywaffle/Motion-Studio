@@ -118,6 +118,37 @@ impl AffineTransform2D {
         )
     }
 
+    /// Decompose a local matrix `M = T(pos) * R(rot) * S(scale) * T(-anchor)`
+    /// back into `(position, scale_percent, rotation_degrees)`.
+    ///
+    /// Used for world-preserving (un)parenting: `new_local =
+    /// new_parent_world^-1 * child_world`, then the child's local
+    /// position/rotation/scale are rewritten from the decomposition while
+    /// its anchor stays put. Returns None for degenerate (near-zero scale)
+    /// or non-finite matrices. The pipeline never produces skew, so the
+    /// linear part is always pure rotation-times-scale.
+    pub fn decompose_components(m: Self, anchor: Vec2) -> Option<(Vec2, Vec2, f32)> {
+        for v in [m.a, m.b, m.c, m.d, m.tx, m.ty] {
+            if !v.is_finite() {
+                return None;
+            }
+        }
+        let sx = (m.a * m.a + m.b * m.b).sqrt();
+        let sy = (m.c * m.c + m.d * m.d).sqrt();
+        if sx < 1e-6 || sy < 1e-6 {
+            return None;
+        }
+        let rot = m.b.atan2(m.a).to_degrees();
+        let pos = Vec2::new(
+            m.tx + m.a * anchor.x + m.c * anchor.y,
+            m.ty + m.b * anchor.x + m.d * anchor.y,
+        );
+        if !pos.x.is_finite() || !pos.y.is_finite() || !rot.is_finite() {
+            return None;
+        }
+        Some((pos, Vec2::new(sx * 100.0, sy * 100.0), rot))
+    }
+
     /// Check if all components of this transform are finite (not NaN or infinite).
     pub fn is_finite(&self) -> bool {
         self.a.is_finite()
@@ -626,5 +657,87 @@ impl TransformResolver {
         graph: &SceneGraph,
     ) -> Result<HashMap<String, EvaluatedTransform>, SceneGraphError> {
         Self::resolve_scene_graph_at(graph, &TimeCode::zero(graph.frame_rate))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use project::Vec2;
+
+    fn roundtrip(pos: Vec2, scale: Vec2, rot: f32, anchor: Vec2) {
+        let m = AffineTransform2D::from_transform_components(pos, scale, rot, anchor);
+        let (p2, s2, r2) = AffineTransform2D::decompose_components(m, anchor)
+            .expect("decompose must succeed");
+        assert!((p2.x - pos.x).abs() < 1e-3, "pos.x {p2:?} vs {pos:?}");
+        assert!((p2.y - pos.y).abs() < 1e-3, "pos.y {p2:?} vs {pos:?}");
+        assert!((s2.x - scale.x).abs() < 1e-2, "scale.x {s2:?} vs {scale:?}");
+        assert!((s2.y - scale.y).abs() < 1e-2, "scale.y {s2:?} vs {scale:?}");
+        // Rotation wraps; compare modulo 360.
+        let mut d = (r2 - rot) % 360.0;
+        if d > 180.0 {
+            d -= 360.0;
+        }
+        if d < -180.0 {
+            d += 360.0;
+        }
+        assert!(d.abs() < 1e-2, "rot {r2} vs {rot}");
+        // Recomposed matrix must match (world preservation guarantee).
+        let m2 = AffineTransform2D::from_transform_components(p2, s2, r2, anchor);
+        for (a, b) in [m.a, m.b, m.c, m.d, m.tx, m.ty]
+            .iter()
+            .zip([m2.a, m2.b, m2.c, m2.d, m2.tx, m2.ty].iter())
+        {
+            assert!((a - b).abs() < 1e-3, "{m:?} vs {m2:?}");
+        }
+    }
+
+    #[test]
+    fn decompose_roundtrips_transforms() {
+        roundtrip(Vec2::ZERO, Vec2::new(100.0, 100.0), 0.0, Vec2::ZERO);
+        roundtrip(Vec2::new(120.0, -40.0), Vec2::new(100.0, 100.0), 30.0, Vec2::new(50.0, 25.0));
+        roundtrip(Vec2::new(-300.0, 200.0), Vec2::new(50.0, 200.0), -135.0, Vec2::new(10.0, 10.0));
+        roundtrip(Vec2::new(5.0, 5.0), Vec2::new(250.0, 33.0), 359.0, Vec2::ZERO);
+    }
+
+    #[test]
+    fn decompose_rejects_degenerate() {
+        let anchor = Vec2::ZERO;
+        assert!(AffineTransform2D::decompose_components(
+            AffineTransform2D::new(0.0, 0.0, 0.0, 0.0, 1.0, 2.0),
+            anchor
+        )
+        .is_none());
+        assert!(AffineTransform2D::decompose_components(
+            AffineTransform2D::new(f32::NAN, 0.0, 0.0, 1.0, 0.0, 0.0),
+            anchor
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn reparent_math_preserves_world_point() {
+        // Simulate AE parenting: child world must be identical after
+        // rewriting locals through the new parent.
+        let anchor = Vec2::new(20.0, 10.0);
+        let child_local =
+            AffineTransform2D::from_transform_components(Vec2::new(30.0, 40.0), Vec2::new(100.0, 100.0), 15.0, anchor);
+        let parent_world = AffineTransform2D::from_transform_components(
+            Vec2::new(200.0, -100.0),
+            Vec2::new(150.0, 150.0),
+            -20.0,
+            Vec2::ZERO,
+        );
+        let child_world = parent_world * child_local;
+        // Unparent: new local must equal the old world (identity parent).
+        let new_local = AffineTransform2D::IDENTITY.inverse().unwrap() * child_world;
+        let (pos, scale, rot) =
+            AffineTransform2D::decompose_components(new_local, anchor).unwrap();
+        let rebuilt =
+            AffineTransform2D::from_transform_components(pos, scale, rot, anchor);
+        let probe = Vec2::new(7.0, -3.0);
+        let a = child_world.transform_point(probe);
+        let b = rebuilt.transform_point(probe);
+        assert!((a.x - b.x).abs() < 1e-2 && (a.y - b.y).abs() < 1e-2);
     }
 }

@@ -1,4 +1,4 @@
-use compositor::{EvaluatedStack, LayerStackEvaluator, SceneGraph};
+use compositor::{AffineTransform2D, EvaluatedStack, LayerStackEvaluator, SceneGraph};
 use gpui_kit::component::input::InputState;
 use gpui_kit::{Entity, Subscription};
 use project::{
@@ -249,68 +249,47 @@ pub struct GraphSeries {
     pub keys: Vec<GraphKey>,
 }
 
-/// Mutable access to a scalar graph property.
-enum GraphPropMut<'a> {
-    F32(&'a mut Property<f32>),
-    Vec2Comp(&'a mut Property<Vec2>, usize),
-}
-
-/// Resolve a graph path to a mutable scalar property on a layer.
-fn graph_prop_mut<'a>(
-    layer: &'a mut Layer,
-    path: &str,
-) -> Option<GraphPropMut<'a>> {
+/// Resolve a graph path to a mutable scalar (`f32`) property on a layer.
+///
+/// Vec2-backed paths (`transform.position.x`, ...) return `None` here:
+/// Vec2 components are edited through the dedicated Vec2 arms in
+/// `move_graph_keyframe` / `cycle_graph_key_interp` /
+/// `set_graph_key_tangents`, never through this scalar helper.
+fn graph_prop_mut<'a>(layer: &'a mut Layer, path: &str) -> Option<&'a mut Property<f32>> {
     let (base, comp) = match path.rsplit_once('.') {
         Some((b, c)) if ["x", "y"].contains(&c) => (b, Some(c)),
         _ => (path, None),
     };
-    let axis = match comp {
-        Some("x") => 0,
-        Some("y") => 1,
-        _ => 0,
-    };
+    let _ = comp;
     match base {
-        "transform.anchor_point" => {
-            Some(GraphPropMut::Vec2Comp(&mut layer.transform.anchor_point, axis))
-        }
-        "transform.position" => {
-            Some(GraphPropMut::Vec2Comp(&mut layer.transform.position, axis))
-        }
-        "transform.scale" => Some(GraphPropMut::Vec2Comp(&mut layer.transform.scale, axis)),
-        "transform.rotation" => Some(GraphPropMut::F32(&mut layer.transform.rotation)),
-        "opacity" => Some(GraphPropMut::F32(&mut layer.opacity)),
+        // Vec2-backed bases have no scalar property; see doc comment above.
+        "transform.anchor_point" | "transform.position" | "transform.scale" => None,
+        "transform.rotation" => Some(&mut layer.transform.rotation),
+        "opacity" => Some(&mut layer.opacity),
         "text.font_size" => match &mut layer.source {
-            LayerSource::Text { font_size, .. } => Some(GraphPropMut::F32(font_size)),
+            LayerSource::Text { font_size, .. } => Some(font_size),
             _ => None,
         },
         "shape.rect_width" => match &mut layer.source {
-            LayerSource::Shape { shape_type: ShapeType::Rectangle { width, .. } } => {
-                Some(GraphPropMut::F32(width))
-            }
+            LayerSource::Shape { shape_type: ShapeType::Rectangle { width, .. } } => Some(width),
             _ => None,
         },
         "shape.rect_height" => match &mut layer.source {
-            LayerSource::Shape { shape_type: ShapeType::Rectangle { height, .. } } => {
-                Some(GraphPropMut::F32(height))
-            }
+            LayerSource::Shape { shape_type: ShapeType::Rectangle { height, .. } } => Some(height),
             _ => None,
         },
         "shape.corner_radius" => match &mut layer.source {
             LayerSource::Shape { shape_type: ShapeType::Rectangle { corner_radius, .. } } => {
-                Some(GraphPropMut::F32(corner_radius))
+                Some(corner_radius)
             }
             _ => None,
         },
         "shape.ellipse_rx" => match &mut layer.source {
-            LayerSource::Shape { shape_type: ShapeType::Ellipse { radius_x, .. } } => {
-                Some(GraphPropMut::F32(radius_x))
-            }
+            LayerSource::Shape { shape_type: ShapeType::Ellipse { radius_x, .. } } => Some(radius_x),
             _ => None,
         },
         "shape.ellipse_ry" => match &mut layer.source {
-            LayerSource::Shape { shape_type: ShapeType::Ellipse { radius_y, .. } } => {
-                Some(GraphPropMut::F32(radius_y))
-            }
+            LayerSource::Shape { shape_type: ShapeType::Ellipse { radius_y, .. } } => Some(radius_y),
             _ => None,
         },
         _ => {
@@ -319,7 +298,7 @@ fn graph_prop_mut<'a>(
             let eid = parts.next()?;
             let pname = parts.next()?;
             let fx = layer.get_effect_mut(eid)?;
-            Some(GraphPropMut::F32(fx.get_param_property_mut(pname)?))
+            Some(fx.get_param_property_mut(pname)?)
         }
     }
 }
@@ -465,13 +444,28 @@ fn graph_candidates(layer: &Layer) -> Vec<(String, String)> {
         _ => {}
     }
     for eff in &layer.effects {
-        for name in ["radius", "brightness", "contrast", "amount", "distance", "softness", "opacity", "param1", "param2", "param3", "param4", "max_horizontal", "max_vertical", "tolerance", "threshold", "feather", "size", "angle", "skew_x", "skew_y", "width", "strength", "intensity", "tiles_x", "tiles_y", "scale", "exposure", "vibrance"] {
+        use std::collections::HashSet;
+        let mut seen: HashSet<&str> = HashSet::new();
+        // Legacy params by name probe.
+        for name in ["radius", "brightness", "contrast", "amount", "distance", "softness", "opacity", "param1", "param2", "param3", "param4", "max_horizontal", "max_vertical", "tolerance", "threshold", "feather", "size", "angle", "skew_x", "skew_y", "width", "strength", "intensity", "tiles_x", "tiles_y", "scale", "exposure", "vibrance", "input_black", "input_white", "gamma", "output_black", "output_white", "hue_shift", "saturation", "lightness"] {
             if eff.get_param_property(name).is_some() {
+                seen.insert(name);
                 out.push((
                     format!("effect:{}:{name}", eff.id),
                     format!("{} · {}", eff.name, name),
                 ));
             }
+        }
+        // Stock plug-ins enumerate from the descriptor (covers every param
+        // without a hardcoded list; already-seen names are skipped).
+        for (name, label, _v, _step) in eff.stock_scalar_params() {
+            if seen.contains(name) {
+                continue;
+            }
+            out.push((
+                format!("effect:{}:{name}", eff.id),
+                format!("{} · {label}", eff.name),
+            ));
         }
     }
     out
@@ -494,10 +488,7 @@ fn with_graph_scalar<R>(
     path: &str,
     f: impl FnOnce(&mut Property<f32>) -> R,
 ) -> Option<R> {
-    match graph_prop_mut(layer, path)? {
-        GraphPropMut::F32(p) => Some(f(p)),
-        GraphPropMut::Vec2Comp(_, _) => None,
-    }
+    graph_prop_mut(layer, path).map(f)
 }
 
 impl EditorState {
@@ -2632,6 +2623,8 @@ impl EditorState {
             .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
         if effect.set_color_value(field, color) {
             Ok(())
+        } else if effect.set_stock_color(field, color) {
+            Ok(())
         } else {
             Err(format!("Color field {field} not found on effect {effect_id}"))
         }
@@ -3988,13 +3981,139 @@ impl EditorState {
     }
 
     /// Set parent layer ID on the specified layer.
-    pub fn set_layer_parent(&mut self, layer_id: &str, parent_id: Option<String>) {
+    ///
+    /// After Effects semantics: any layer can parent any other layer, and
+    /// (un)parenting preserves the child's world transform — the layer does
+    /// not jump. The child's local position/rotation/scale are recomputed
+    /// from `new_parent_world^-1 * child_world` (anchor unchanged).
+    /// Rejects self-parenting, missing parents, and parent cycles.
+    /// Returns true when the parenting changed.
+    pub fn set_layer_parent(&mut self, layer_id: &str, parent_id: Option<String>) -> bool {
+        // --- Read-only phase: validate + resolve matrices. ---
+        let current_tc = self.clock.timecode();
+        let (child_world, anchor) = match self.active_composition() {
+            Some(comp) => match comp.get_layer(layer_id) {
+                Some(layer) => {
+                    let a = layer.transform.anchor_point.evaluate_at(&current_tc);
+                    match self.layer_world_matrix_fast(layer_id) {
+                        Some(w) => (w, a),
+                        None => return false,
+                    }
+                }
+                None => return false,
+            },
+            None => return false,
+        };
+        if let Some(ref pid) = parent_id {
+            if pid == layer_id {
+                return false;
+            }
+            // Parent must exist; its ancestor chain must not contain the
+            // child (otherwise parenting would create a cycle).
+            let comp = match self.active_composition() {
+                Some(c) => c,
+                None => return false,
+            };
+            if comp.get_layer(pid).is_none() {
+                return false;
+            }
+            let mut cursor: Option<&str> = Some(pid);
+            let mut depth = 0;
+            while let Some(id) = cursor {
+                if id == layer_id {
+                    return false;
+                }
+                depth += 1;
+                if depth > 1024 {
+                    return false;
+                }
+                cursor = comp.get_layer(id).and_then(|l| l.parent_id.as_deref());
+            }
+        }
+        // New parent world (identity when unparenting). Safe to resolve
+        // against the current graph: cycle rejection above guarantees the
+        // new parent's chain does not include the child.
+        let parent_world = match parent_id.as_deref() {
+            Some(pid) => match self.layer_world_matrix_fast(pid) {
+                Some(w) => w,
+                None => return false,
+            },
+            None => AffineTransform2D::IDENTITY,
+        };
+        let new_local = match parent_world.inverse() {
+            Some(inv) => inv * child_world,
+            None => return false,
+        };
+        let (pos, scale, rot) = match AffineTransform2D::decompose_components(new_local, anchor) {
+            Some(v) => v,
+            None => return false,
+        };
+        // No-op when nothing changes.
+        if let Some(comp) = self.active_composition() {
+            if let Some(layer) = comp.get_layer(layer_id) {
+                if layer.parent_id == parent_id {
+                    return false;
+                }
+            }
+        }
+        // --- Mutation phase (single undo step). ---
         self.checkpoint();
         if let Some(comp) = self.active_composition_mut() {
             if let Some(layer) = comp.get_layer_mut(layer_id) {
+                layer.transform.position.set_value(pos);
+                if layer.transform.position.is_animated() {
+                    layer.transform.position.add_keyframe(Keyframe::new(current_tc, pos));
+                }
+                layer.transform.scale.set_value(scale);
+                if layer.transform.scale.is_animated() {
+                    layer.transform.scale.add_keyframe(Keyframe::new(current_tc, scale));
+                }
+                layer.transform.rotation.set_value(rot);
+                if layer.transform.rotation.is_animated() {
+                    layer.transform.rotation.add_keyframe(Keyframe::new(current_tc, rot));
+                }
                 layer.set_parent(parent_id);
             }
         }
+        true
+    }
+
+    /// Cheap current world matrix for a layer (property reads + matrix
+    /// multiplies only — no scene-graph evaluation). Used by gizmo drags so
+    /// every mousemove does not pay a full `evaluate_current_frame`.
+    /// Returns None on missing layers or parent cycles.
+    pub fn layer_world_matrix_fast(&self, layer_id: &str) -> Option<AffineTransform2D> {
+        let comp = self.active_composition()?;
+        let tc = self.clock.timecode();
+        let mut chain: Vec<(Vec2, Vec2, Vec2, f32)> = Vec::new();
+        let mut seen: Vec<String> = Vec::new();
+        let mut cursor: Option<&str> = Some(layer_id);
+        while let Some(id) = cursor {
+            if seen.iter().any(|s| s == id) {
+                return None;
+            }
+            seen.push(id.to_string());
+            let layer = comp.get_layer(id)?;
+            chain.push(layer.transform.evaluate_at(&tc));
+            cursor = layer.parent_id.as_deref();
+        }
+        let mut world = AffineTransform2D::IDENTITY;
+        for (anchor, pos, scale, rot) in chain.iter().rev() {
+            let local =
+                AffineTransform2D::from_transform_components(*pos, *scale, *rot, *anchor);
+            world = world * local;
+        }
+        Some(world)
+    }
+
+    /// Current world matrix + anchor for gizmo drag mapping.
+    /// Same cheap path as [`Self::layer_world_matrix_fast`].
+    pub fn layer_drag_frame(&self, layer_id: &str) -> Option<(AffineTransform2D, Vec2)> {
+        let comp = self.active_composition()?;
+        let tc = self.clock.timecode();
+        let layer = comp.get_layer(layer_id)?;
+        let anchor = layer.transform.anchor_point.evaluate_at(&tc);
+        Some((self.layer_world_matrix_fast(layer_id)?, anchor))
     }
 
     /// Toggle lock state on the specified layer.

@@ -2,6 +2,7 @@ use compositor::EvaluatedEffectType;
 use project::Color;
 use super::buffer::FloatBuf;
 use super::pixel::Px;
+use super::stock::apply_stock;
 
 // Effect application on pixmaps
 // ---------------------------------------------------------------------------
@@ -121,9 +122,21 @@ pub fn apply_effect_pixels(
         EvaluatedEffectType::Perspective { .. } => {
             // Perspective skew folds into the blit map (affine).
         }
-        EvaluatedEffectType::NoiseGenerator { .. }
-        | EvaluatedEffectType::GlslShader { .. }
-        | EvaluatedEffectType::DisplacementMap { .. }
+        EvaluatedEffectType::DisplacementMap { max_horizontal, max_vertical } => {
+            apply_displacement(buf, *max_horizontal, *max_vertical);
+        }
+        EvaluatedEffectType::NoiseGenerator { amount, monochrome } => {
+            // Time-seeded per frame so grain crawls during playback
+            // (the `process_color` twin is the static fallback).
+            apply_animated_noise(buf, *amount, *monochrome, ctx.frame);
+        }
+        EvaluatedEffectType::Sharpen { amount, radius } => {
+            apply_sharpen(buf, *amount, *radius);
+        }
+        EvaluatedEffectType::Vignette { amount, softness } => {
+            apply_vignette(buf, *amount, *softness);
+        }
+        EvaluatedEffectType::GlslShader { .. }
         | EvaluatedEffectType::GaussianBlur { .. }
         | EvaluatedEffectType::BrightnessContrast { .. }
         | EvaluatedEffectType::Tint { .. }
@@ -133,6 +146,8 @@ pub fn apply_effect_pixels(
         | EvaluatedEffectType::LumaKey { .. }
         | EvaluatedEffectType::Bloom { .. }
         | EvaluatedEffectType::Exposure { .. }
+        | EvaluatedEffectType::Levels { .. }
+        | EvaluatedEffectType::HueSaturation { .. }
         | EvaluatedEffectType::Vibrance { .. } => {
             // Per-pixel color math shared with the CPU pipeline
             // (premultiplied out, so keying alpha applies).
@@ -212,11 +227,133 @@ pub fn apply_effect_pixels(
         EvaluatedEffectType::TextOutline { .. } | EvaluatedEffectType::TextBevel { .. } => {
             // Resolved inside the text rasterizer.
         }
+        EvaluatedEffectType::Stock { plugin, params, colors } => {
+            apply_stock(buf, *plugin, params, colors, ctx);
+        }
     }
 }
 
 fn fx_process_pixel(fx: &EvaluatedEffectType, c: Color) -> Color {
     fx.process_color(c)
+}
+
+/// Film-style animated grain in place, seeded per frame so it crawls
+/// during playback instead of sitting static.
+pub fn apply_animated_noise(buf: &mut FloatBuf, amount: f32, monochrome: bool, frame: i64) {
+    let k = (amount / 100.0).clamp(0.0, 1.0);
+    if k <= 0.001 {
+        return;
+    }
+    let seed = (frame as f32 + 1.0) * 0.6180339;
+    for y in 0..buf.h {
+        for x in 0..buf.w {
+            let idx = (y * buf.w + x) as usize;
+            let p = &mut buf.px[idx];
+            if p.a <= 0.0 {
+                continue;
+            }
+            // Deterministic per-pixel, per-frame hash in [0, 1).
+            let h1 = ((x as f32 * 12.9898 + y as f32 * 78.233 + seed * 45.164).sin() * 43758.5453).fract();
+            if monochrome {
+                let n = (h1 - 0.5) * k;
+                p.r = (p.r + n).clamp(0.0, 1.0);
+                p.g = (p.g + n).clamp(0.0, 1.0);
+                p.b = (p.b + n).clamp(0.0, 1.0);
+            } else {
+                let h2 = ((x as f32 * 39.346 + y as f32 * 11.135 + seed * 93.422).sin() * 24634.6345).fract();
+                let h3 = ((x as f32 * 73.156 + y as f32 * 5.317 + seed * 17.123).sin() * 56445.2345).fract();
+                p.r = (p.r + (h1 - 0.5) * k).clamp(0.0, 1.0);
+                p.g = (p.g + (h2 - 0.5) * k).clamp(0.0, 1.0);
+                p.b = (p.b + (h3 - 0.5) * k).clamp(0.0, 1.0);
+            }
+        }
+    }
+}
+
+/// Luminance-driven displacement in place: each pixel is resampled from
+/// `(x - (luma - 0.5) * max_h, y - (luma - 0.5) * max_v)` with bilinear
+/// filtering, so bright areas push one way and dark areas the other
+/// (self-map mode; a dedicated map layer is a future input).
+pub fn apply_displacement(buf: &mut FloatBuf, max_horizontal: f32, max_vertical: f32) {
+    if max_horizontal.abs() < 0.05 && max_vertical.abs() < 0.05 {
+        return;
+    }
+    let src = buf.px.clone();
+    let snap = FloatBuf { w: buf.w, h: buf.h, px: src.clone() };
+    for y in 0..buf.h {
+        for x in 0..buf.w {
+            let idx = (y * buf.w + x) as usize;
+            let p = src[idx];
+            if p.a <= 0.0 {
+                continue;
+            }
+            let ia = 1.0 / p.a.max(1e-6);
+            let lum = (0.299 * p.r + 0.587 * p.g + 0.114 * p.b) * ia;
+            let ox = (lum - 0.5) * max_horizontal;
+            let oy = (lum - 0.5) * max_vertical;
+            buf.px[idx] = snap.sample(x as f32 - ox, y as f32 - oy);
+        }
+    }
+}
+
+/// Unsharp-mask sharpen in place: `out = orig + amount * (orig - blurred)`.
+/// `amount` is 0..200 (% of the high-frequency detail added back),
+/// `radius` the blur sigma in buffer px (capped by `blur_buffer`).
+pub fn apply_sharpen(buf: &mut FloatBuf, amount: f32, radius: f32) {
+    use super::buffer::blur_buffer;
+    let k = (amount / 100.0).clamp(0.0, 2.0);
+    if k <= 0.01 {
+        return;
+    }
+    let mut blurred = FloatBuf { w: buf.w, h: buf.h, px: buf.px.clone() };
+    blur_buffer(&mut blurred, radius.max(0.5));
+    for (dst, avg) in buf.px.iter_mut().zip(blurred.px.iter()) {
+        if dst.a <= 0.0 {
+            continue;
+        }
+        // Work on straight (un-premultiplied) color so dark fringes stay clean.
+        let ia = 1.0 / dst.a.max(1e-6);
+        let ib = 1.0 / avg.a.max(1e-6);
+        let sharpen = |x: f32, y: f32| (x + (x - y) * k).clamp(0.0, 1.0) * dst.a;
+        dst.r = sharpen(dst.r * ia, avg.r * ib);
+        dst.g = sharpen(dst.g * ia, avg.g * ib);
+        dst.b = sharpen(dst.b * ia, avg.b * ib);
+    }
+}
+
+/// Edge vignette in place: darkens toward the frame corners.
+/// `amount` 0..100 scales the falloff, `softness` 0..100 widens the
+/// transition band (100 = feathered to the center).
+pub fn apply_vignette(buf: &mut FloatBuf, amount: f32, softness: f32) {
+    let k = (amount / 100.0).clamp(0.0, 1.0);
+    if k <= 0.001 || buf.w == 0 || buf.h == 0 {
+        return;
+    }
+    let soft = (softness / 100.0).clamp(0.0, 1.0);
+    // Inner radius shrinks as softness grows: hard edge vs long feather.
+    let inner = 0.5 * (1.0 - soft * 0.85);
+    let outer = 0.5 + 0.28 * (1.0 - soft * 0.4);
+    let span = (outer - inner).max(1e-3);
+    for y in 0..buf.h {
+        for x in 0..buf.w {
+            let idx = (y * buf.w + x) as usize;
+            if buf.px[idx].a <= 0.0 {
+                continue;
+            }
+            let nx = (x as f32 + 0.5) / buf.w as f32 * 2.0 - 1.0;
+            let ny = (y as f32 + 0.5) / buf.h as f32 * 2.0 - 1.0;
+            // Elliptical distance so wide frames fall off evenly.
+            let d = (nx * nx + ny * ny).sqrt() / std::f32::consts::SQRT_2;
+            let t = ((d - inner) / span).clamp(0.0, 1.0);
+            // Smoothstep the band to avoid ringing.
+            let s = t * t * (3.0 - 2.0 * t);
+            let m = 1.0 - k * s;
+            let p = &mut buf.px[idx];
+            p.r *= m;
+            p.g *= m;
+            p.b *= m;
+        }
+    }
 }
 
 

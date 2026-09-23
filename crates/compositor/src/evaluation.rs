@@ -1,14 +1,44 @@
 use crate::error::SceneGraphError;
+use crate::fx::{is_spatial_stock, process_color_stock};
 use crate::graph::SceneGraph;
 use crate::node::SceneNode;
 use crate::transform::{AffineTransform2D, BoundingBox2D, EvaluatedTransform, TransformResolver};
 use project::{
-    BlendMode, Color, Composition, EffectType, LayerSource, LoopMode, Project, TimeCode,
-    TrackMatteMode, Vec2,
+    BlendMode, Color, Composition, EffectType, LayerSource, LoopMode, Project, StockPlugin,
+    TimeCode, TrackMatteMode, Vec2,
 };
 use project::shader_interp::{self, PreviewEnv};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
+
+/// Process-wide ShaderLab parse cache keyed by source hash. Effect
+/// evaluation runs per frame and per interaction tick; re-parsing GLSL on
+/// every pass made gizmo drags and effect scrubs stutter whenever a
+/// Shader Lab layer was present. Only successful parses are cached;
+/// broken sources retry (they surface a compile error in the panel).
+static SHADER_PROG_CACHE: OnceLock<Mutex<HashMap<u64, shader_interp::ParsedProg>>> =
+    OnceLock::new();
+
+fn parsed_prog_cached(
+    source: &str,
+    source_hash: u64,
+) -> Option<shader_interp::ParsedProg> {
+    let cache = SHADER_PROG_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(guard) = cache.lock() {
+        if let Some(prog) = guard.get(&source_hash) {
+            return Some(prog.clone());
+        }
+    }
+    let prog = shader_interp::parse_program(source).ok()?;
+    if let Ok(mut guard) = cache.lock() {
+        if guard.len() > 64 {
+            guard.clear();
+        }
+        guard.insert(source_hash, prog.clone());
+    }
+    Some(prog)
+}
 
 /// The evaluated state and frame context of an inner composition nested inside a layer.
 #[derive(Debug, Clone, PartialEq)]
@@ -155,6 +185,50 @@ pub struct RenderPassDescriptor {
     pub layer_ids: Vec<String>,
 }
 
+/// RGB (0..1) to HSL (h 0..1, s 0..1, l 0..1). Shared by the Hue/Saturation
+/// CPU kernel and its WGSL twin (same branch order, same math).
+fn rgb_to_hsl(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+    let mx = r.max(g).max(b);
+    let mn = r.min(g).min(b);
+    let l = (mx + mn) * 0.5;
+    if (mx - mn).abs() < 1e-6 {
+        return (0.0, 0.0, l);
+    }
+    let d = mx - mn;
+    let s = if l > 0.5 { d / (2.0 - mx - mn).max(1e-6) } else { d / (mx + mn).max(1e-6) };
+    let h = if (mx - r).abs() < 1e-6 {
+        (g - b) / d + if g < b { 6.0 } else { 0.0 }
+    } else if (mx - g).abs() < 1e-6 {
+        (b - r) / d + 2.0
+    } else {
+        (r - g) / d + 4.0
+    };
+    (h / 6.0, s.clamp(0.0, 1.0), l)
+}
+
+/// HSL (h 0..1, s 0..1, l 0..1) to RGB (0..1).
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
+    if s.abs() < 1e-6 {
+        return (l, l, l);
+    }
+    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let p = 2.0 * l - q;
+    let hk = h.rem_euclid(1.0);
+    let tc = |t: f32| {
+        let t = t.rem_euclid(1.0);
+        if t < 1.0 / 6.0 {
+            p + (q - p) * 6.0 * t
+        } else if t < 0.5 {
+            q
+        } else if t < 2.0 / 3.0 {
+            p + (q - p) * (2.0 / 3.0 - t) * 6.0
+        } else {
+            p
+        }
+    };
+    (tc(hk + 1.0 / 3.0), tc(hk), tc(hk - 1.0 / 3.0))
+}
+
 /// Evaluated parameter values for an effect at a specific timecode.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -257,10 +331,37 @@ pub enum EvaluatedEffectType {
     Vibrance {
         vibrance: f32,
     },
+    Levels {
+        input_black: f32,
+        input_white: f32,
+        gamma: f32,
+        output_black: f32,
+        output_white: f32,
+    },
+    HueSaturation {
+        hue_shift: f32,
+        saturation: f32,
+        lightness: f32,
+    },
+    Sharpen {
+        amount: f32,
+        radius: f32,
+    },
+    Vignette {
+        amount: f32,
+        softness: f32,
+    },
+    /// Modular stock plug-in: evaluated scalar params in descriptor order
+    /// plus resolved color slots.
+    Stock {
+        plugin: StockPlugin,
+        params: Vec<f32>,
+        colors: Vec<Color>,
+    },
 }
 
 impl EvaluatedEffectType {
-    pub const fn type_name(&self) -> &'static str {
+    pub fn type_name(&self) -> &'static str {
         match self {
             Self::GaussianBlur { .. } => "Gaussian Blur",
             Self::BrightnessContrast { .. } => "Brightness & Contrast",
@@ -283,27 +384,70 @@ impl EvaluatedEffectType {
             Self::Warp { .. } => "Warp",
             Self::Exposure { .. } => "Exposure",
             Self::Vibrance { .. } => "Vibrance",
+            Self::Levels { .. } => "Levels",
+            Self::HueSaturation { .. } => "Hue / Saturation",
+            Self::Sharpen { .. } => "Sharpen",
+            Self::Vignette { .. } => "Vignette",
+            Self::Stock { plugin, .. } => plugin.descriptor().label,
+        }
+    }
+
+    /// Stable OpenFX-style plug-in id (mirrors `project::EffectType::ofx_plugin_id`).
+    pub fn ofx_plugin_id(&self) -> &'static str {
+        match self {
+            Self::GaussianBlur { .. } => "net.sf.openfx.blur",
+            Self::BrightnessContrast { .. } => "net.sf.openfx.brightness_contrast",
+            Self::Tint { .. } => "net.sf.openfx.tint",
+            Self::Invert { .. } => "net.sf.openfx.invert",
+            Self::DropShadow { .. } => "net.sf.openfx.drop_shadow",
+            Self::GlslShader { .. } => "net.sf.openfx.custom.glsl",
+            Self::DisplacementMap { .. } => "net.sf.openfx.displacement",
+            Self::ChromaKey { .. } => "net.sf.openfx.chroma_key",
+            Self::LumaKey { .. } => "net.sf.openfx.luma_key",
+            Self::NoiseGenerator { .. } => "net.sf.openfx.noise",
+            Self::ShaderLab { .. } => "net.sf.openfx.custom.shader_lab",
+            Self::Checkerboard { .. } => "net.sf.openfx.checkerboard",
+            Self::GradientRamp { .. } => "net.sf.openfx.gradient_ramp",
+            Self::Perspective { .. } => "net.sf.openfx.perspective",
+            Self::TextOutline { .. } => "net.sf.openfx.text_outline",
+            Self::TextBevel { .. } => "net.sf.openfx.text_bevel",
+            Self::Bloom { .. } => "net.sf.openfx.bloom",
+            Self::Tiler { .. } => "net.sf.openfx.tiler",
+            Self::Warp { .. } => "net.sf.openfx.warp",
+            Self::Exposure { .. } => "net.sf.openfx.exposure",
+            Self::Vibrance { .. } => "net.sf.openfx.vibrance",
+            Self::Levels { .. } => "net.sf.openfx.levels",
+            Self::HueSaturation { .. } => "net.sf.openfx.hue_saturation",
+            Self::Sharpen { .. } => "net.sf.openfx.sharpen",
+            Self::Vignette { .. } => "net.sf.openfx.vignette",
+            Self::Stock { plugin, .. } => plugin.plugin_id(),
         }
     }
 
     /// True for effects that need neighboring pixels or pixel position
-    /// (currently Gaussian blur, Shader Lab probes, and geometric /
+    /// (blur / sharpen / displacement / Shader Lab probes, geometric /
     /// generator effects). Such effects are the identity in
     /// [`Self::process_color`] and must be resolved by the rasterizer /
     /// preview renderer instead.
-    pub const fn is_spatial(&self) -> bool {
-        matches!(
-            self,
-            Self::GaussianBlur { .. }
-                | Self::ShaderLab { .. }
-                | Self::Checkerboard { .. }
-                | Self::GradientRamp { .. }
-                | Self::Perspective { .. }
-                | Self::TextOutline { .. }
-                | Self::TextBevel { .. }
-                | Self::Tiler { .. }
-                | Self::Warp { .. }
-        )
+    pub fn is_spatial(&self) -> bool {
+        match self {
+            Self::Stock { plugin, .. } => is_spatial_stock(*plugin),
+            _ => matches!(
+                self,
+                Self::GaussianBlur { .. }
+                    | Self::DisplacementMap { .. }
+                    | Self::ShaderLab { .. }
+                    | Self::Checkerboard { .. }
+                    | Self::GradientRamp { .. }
+                    | Self::Perspective { .. }
+                    | Self::TextOutline { .. }
+                    | Self::TextBevel { .. }
+                    | Self::Tiler { .. }
+                    | Self::Warp { .. }
+                    | Self::Sharpen { .. }
+                    | Self::Vignette { .. }
+            ),
+        }
     }
 
     /// Blur radius in pixels when this is a Gaussian blur, otherwise `None`.
@@ -372,16 +516,7 @@ impl EvaluatedEffectType {
                     (c.a * mod_alpha).clamp(0.0, 1.0),
                 )
             }
-            Self::DisplacementMap { max_horizontal, max_vertical } => {
-                let shift_r = *max_horizontal * 0.002;
-                let shift_b = *max_vertical * 0.002;
-                Color::rgba(
-                    (c.r * (1.0 + shift_r)).clamp(0.0, 1.0),
-                    c.g,
-                    (c.b * (1.0 - shift_b)).clamp(0.0, 1.0),
-                    c.a,
-                )
-            }
+            Self::DisplacementMap { .. } => c,
             Self::ChromaKey { key_color, tolerance, feather } => {
                 let dr = c.r - key_color.r;
                 let dg = c.g - key_color.g;
@@ -502,6 +637,36 @@ impl EvaluatedEffectType {
                     c.a,
                 )
             }
+            Self::Levels { input_black, input_white, gamma, output_black, output_white } => {
+                let in_b = (*input_black / 255.0).clamp(0.0, 1.0);
+                let in_w = (*input_white / 255.0).clamp(0.0, 1.0);
+                let out_b = (*output_black / 255.0).clamp(0.0, 1.0);
+                let out_w = (*output_white / 255.0).clamp(0.0, 1.0);
+                let g = gamma.clamp(0.1, 9.9);
+                let grade = |x: f32| {
+                    let span = in_w - in_b;
+                    let t = if span.abs() < 1e-5 {
+                        if x > in_b { 1.0 } else { 0.0 }
+                    } else {
+                        ((x - in_b) / span).clamp(0.0, 1.0)
+                    };
+                    (out_b + t.powf(1.0 / g) * (out_w - out_b)).clamp(0.0, 1.0)
+                };
+                Color::rgba(grade(c.r), grade(c.g), grade(c.b), c.a)
+            }
+            Self::HueSaturation { hue_shift, saturation, lightness } => {
+                let (h, s, l) = rgb_to_hsl(c.r, c.g, c.b);
+                let h2 = (h + hue_shift / 360.0).rem_euclid(1.0);
+                let s2 = (s * (1.0 + saturation / 100.0)).clamp(0.0, 1.0);
+                let l2 = (l + lightness / 100.0).clamp(0.0, 1.0);
+                let (r, g, b) = hsl_to_rgb(h2, s2, l2);
+                Color::rgba(r, g, b, c.a)
+            }
+            // Sharpen (unsharp mask) and Vignette need neighbours / pixel
+            // position: identity here, resolved by the rasterizer.
+            Self::Sharpen { .. } | Self::Vignette { .. } => c,
+            // Stock per-pixel kernels; spatial stock is identity here.
+            Self::Stock { plugin, params, .. } => process_color_stock(*plugin, params, c),
         }
     }
 }
@@ -1347,10 +1512,12 @@ impl LayerStackEvaluator {
                                     )
                                 })
                                 .collect();
-                            // Pre-parse for the viewport CPU probe; sources
+                            // Pre-parse for the viewport CPU probe (cached by
+                            // source hash — parsing on every frame/mousemove
+                            // was a major interaction lag source); sources
                             // using unsupported constructs preview as
                             // identity (GPU export still validates).
-                            let prog = shader_interp::parse_program(source).ok();
+                            let prog = parsed_prog_cached(source, source_hash);
                             EvaluatedEffectType::ShaderLab {
                                 source_hash,
                                 values: resolved,
@@ -1417,6 +1584,41 @@ impl LayerStackEvaluator {
                                 vibrance: vibrance.evaluate_at(time),
                             }
                         }
+                        EffectType::Levels { input_black, input_white, gamma, output_black, output_white } => {
+                            EvaluatedEffectType::Levels {
+                                input_black: input_black.evaluate_at(time),
+                                input_white: input_white.evaluate_at(time),
+                                gamma: gamma.evaluate_at(time),
+                                output_black: output_black.evaluate_at(time),
+                                output_white: output_white.evaluate_at(time),
+                            }
+                        }
+                        EffectType::HueSaturation { hue_shift, saturation, lightness } => {
+                            EvaluatedEffectType::HueSaturation {
+                                hue_shift: hue_shift.evaluate_at(time),
+                                saturation: saturation.evaluate_at(time),
+                                lightness: lightness.evaluate_at(time),
+                            }
+                        }
+                        EffectType::Sharpen { amount, radius } => {
+                            EvaluatedEffectType::Sharpen {
+                                amount: amount.evaluate_at(time),
+                                radius: radius.evaluate_at(time),
+                            }
+                        }
+                        EffectType::Vignette { amount, softness } => {
+                            EvaluatedEffectType::Vignette {
+                                amount: amount.evaluate_at(time),
+                                softness: softness.evaluate_at(time),
+                            }
+                        }
+                        EffectType::Stock { plugin, params, colors } => {
+                            EvaluatedEffectType::Stock {
+                                plugin: *plugin,
+                                params: params.iter().map(|p| p.evaluate_at(time)).collect(),
+                                colors: colors.clone(),
+                            }
+                        }
                     };
                     evaluated_effects.push(EvaluatedEffect {
                         id: eff.id.clone(),
@@ -1476,5 +1678,81 @@ impl LayerStackEvaluator {
             evaluated_layers,
             render_list,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use project::Color;
+
+    fn gray(v: f32) -> Color {
+        Color::rgba(v, v, v, 1.0)
+    }
+
+    #[test]
+    fn hsl_roundtrips_primaries() {
+        for (r, g, b) in [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0), (0.25, 0.5, 0.75)] {
+            let (h, s, l) = rgb_to_hsl(r, g, b);
+            let (r2, g2, b2) = hsl_to_rgb(h, s, l);
+            assert!((r - r2).abs() < 1e-5, "r {r} -> {r2}");
+            assert!((g - g2).abs() < 1e-5, "g {g} -> {g2}");
+            assert!((b - b2).abs() < 1e-5, "b {b} -> {b2}");
+        }
+    }
+
+    #[test]
+    fn levels_identity_at_defaults() {
+        let fx = EvaluatedEffectType::Levels {
+            input_black: 0.0,
+            input_white: 255.0,
+            gamma: 1.0,
+            output_black: 0.0,
+            output_white: 255.0,
+        };
+        let c = Color::rgba(0.2, 0.5, 0.8, 1.0);
+        let o = fx.process_color(c);
+        assert!((o.r - c.r).abs() < 1e-5 && (o.g - c.g).abs() < 1e-5 && (o.b - c.b).abs() < 1e-5);
+        // Full input-black crush removes the mid gray.
+        let crush = EvaluatedEffectType::Levels {
+            input_black: 255.0,
+            input_white: 255.0,
+            gamma: 1.0,
+            output_black: 0.0,
+            output_white: 255.0,
+        };
+        assert_eq!(crush.process_color(gray(0.5)).r, 0.0);
+    }
+
+    #[test]
+    fn hue_shift_rotates_red_to_green() {
+        let fx = EvaluatedEffectType::HueSaturation {
+            hue_shift: 120.0,
+            saturation: 0.0,
+            lightness: 0.0,
+        };
+        let o = fx.process_color(Color::rgba(1.0, 0.0, 0.0, 1.0));
+        assert!(o.g > 0.9 && o.r < 0.1 && o.b < 0.1, "got {o:?}");
+        // Desaturate fully -> neutral gray, alpha kept.
+        let desat = EvaluatedEffectType::HueSaturation {
+            hue_shift: 0.0,
+            saturation: -100.0,
+            lightness: 0.0,
+        };
+        let o = desat.process_color(Color::rgba(0.8, 0.2, 0.2, 0.7));
+        assert!((o.r - o.g).abs() < 1e-5 && (o.g - o.b).abs() < 1e-5);
+        assert!((o.a - 0.7).abs() < 1e-6);
+    }
+
+    #[test]
+    fn spatial_twins_are_identity_in_process_color() {
+        let c = Color::rgba(0.3, 0.6, 0.9, 0.8);
+        let sh = EvaluatedEffectType::Sharpen { amount: 100.0, radius: 2.0 };
+        let vg = EvaluatedEffectType::Vignette { amount: 80.0, softness: 20.0 };
+        assert_eq!(sh.process_color(c), c);
+        assert_eq!(vg.process_color(c), c);
+        assert!(sh.is_spatial() && vg.is_spatial());
+        assert_eq!(sh.ofx_plugin_id(), "net.sf.openfx.sharpen");
+        assert_eq!(vg.ofx_plugin_id(), "net.sf.openfx.vignette");
     }
 }

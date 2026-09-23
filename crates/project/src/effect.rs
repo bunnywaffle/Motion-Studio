@@ -1,6 +1,7 @@
 use crate::color::Color;
 use crate::property::Property;
 use crate::shader::{parse_shader_params, ShaderParam, ShaderParamValue};
+use crate::stock::{stock_default_color, StockPlugin};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -121,11 +122,50 @@ pub enum EffectType {
     Vibrance {
         vibrance: Property<f32>,
     },
+    /// Levels: input range remap + gamma + output range (per-pixel).
+    /// OFX plug-in `net.sf.openfx.levels`.
+    Levels {
+        input_black: Property<f32>,
+        input_white: Property<f32>,
+        gamma: Property<f32>,
+        output_black: Property<f32>,
+        output_white: Property<f32>,
+    },
+    /// Hue / Saturation / Lightness grade (per-pixel).
+    /// OFX plug-in `net.sf.openfx.hue_saturation`.
+    HueSaturation {
+        hue_shift: Property<f32>,
+        saturation: Property<f32>,
+        lightness: Property<f32>,
+    },
+    /// Unsharp-mask sharpen (spatial: needs neighbours).
+    /// OFX plug-in `net.sf.openfx.sharpen`.
+    Sharpen {
+        amount: Property<f32>,
+        radius: Property<f32>,
+    },
+    /// Edge vignette darkening (spatial: needs pixel position).
+    /// OFX plug-in `net.sf.openfx.vignette`.
+    Vignette {
+        amount: Property<f32>,
+        softness: Property<f32>,
+    },
+    /// Modular stock plug-in (see `crate::stock::StockPlugin`): scalar
+    /// params are built from the plug-in descriptor, so every stock effect
+    /// is keyframable with zero per-effect plumbing. `colors` holds the
+    /// non-animatable color slots in `stock_color_slots` order.
+    Stock {
+        plugin: StockPlugin,
+        #[serde(default)]
+        params: Vec<Property<f32>>,
+        #[serde(default)]
+        colors: Vec<Color>,
+    },
 }
 
 impl EffectType {
     /// Return the canonical display name of the effect type.
-    pub const fn type_name(&self) -> &'static str {
+    pub fn type_name(&self) -> &'static str {
         match self {
             Self::GaussianBlur { .. } => "Gaussian Blur",
             Self::BrightnessContrast { .. } => "Brightness & Contrast",
@@ -148,6 +188,11 @@ impl EffectType {
             Self::Warp { .. } => "Warp",
             Self::Exposure { .. } => "Exposure",
             Self::Vibrance { .. } => "Vibrance",
+            Self::Levels { .. } => "Levels",
+            Self::HueSaturation { .. } => "Hue / Saturation",
+            Self::Sharpen { .. } => "Sharpen",
+            Self::Vignette { .. } => "Vignette",
+            Self::Stock { plugin, .. } => plugin.descriptor().label,
         }
     }
 
@@ -335,6 +380,95 @@ impl EffectType {
             vibrance: Property::new("Vibrance", vibrance.clamp(-100.0, 100.0)),
         }
     }
+
+    /// Construct a Levels effect type (0-255 ranges, gamma).
+    pub fn levels(
+        input_black: f32,
+        input_white: f32,
+        gamma: f32,
+        output_black: f32,
+        output_white: f32,
+    ) -> Self {
+        Self::Levels {
+            input_black: Property::new("Input Black", input_black.clamp(0.0, 255.0)),
+            input_white: Property::new("Input White", input_white.clamp(0.0, 255.0)),
+            gamma: Property::new("Gamma", gamma.clamp(0.1, 9.9)),
+            output_black: Property::new("Output Black", output_black.clamp(0.0, 255.0)),
+            output_white: Property::new("Output White", output_white.clamp(0.0, 255.0)),
+        }
+    }
+
+    /// Construct a Hue / Saturation effect type.
+    pub fn hue_saturation(hue_shift: f32, saturation: f32, lightness: f32) -> Self {
+        Self::HueSaturation {
+            hue_shift: Property::new("Hue Shift", hue_shift.clamp(-180.0, 180.0)),
+            saturation: Property::new("Saturation", saturation.clamp(-100.0, 100.0)),
+            lightness: Property::new("Lightness", lightness.clamp(-100.0, 100.0)),
+        }
+    }
+
+    /// Construct a Sharpen (unsharp mask) effect type.
+    pub fn sharpen(amount: f32, radius: f32) -> Self {
+        Self::Sharpen {
+            amount: Property::new("Amount", amount.clamp(0.0, 200.0)),
+            radius: Property::new("Radius", radius.clamp(0.0, 20.0)),
+        }
+    }
+
+    /// Construct a Vignette effect type.
+    pub fn vignette(amount: f32, softness: f32) -> Self {
+        Self::Vignette {
+            amount: Property::new("Amount", amount.clamp(0.0, 100.0)),
+            softness: Property::new("Softness", softness.clamp(0.0, 100.0)),
+        }
+    }
+
+    /// Stable OpenFX-style plug-in id for this effect type
+    /// (`net.sf.openfx.*`, see [`crate::ofx::OFX_SUITE`]).
+    pub const fn ofx_plugin_id(&self) -> &'static str {
+        match self {
+            Self::GaussianBlur { .. } => "net.sf.openfx.blur",
+            Self::BrightnessContrast { .. } => "net.sf.openfx.brightness_contrast",
+            Self::Tint { .. } => "net.sf.openfx.tint",
+            Self::Invert { .. } => "net.sf.openfx.invert",
+            Self::DropShadow { .. } => "net.sf.openfx.drop_shadow",
+            Self::GlslShader { .. } => "net.sf.openfx.custom.glsl",
+            Self::ShaderLab { .. } => "net.sf.openfx.custom.shader_lab",
+            Self::DisplacementMap { .. } => "net.sf.openfx.displacement",
+            Self::ChromaKey { .. } => "net.sf.openfx.chroma_key",
+            Self::LumaKey { .. } => "net.sf.openfx.luma_key",
+            Self::NoiseGenerator { .. } => "net.sf.openfx.noise",
+            Self::Checkerboard { .. } => "net.sf.openfx.checkerboard",
+            Self::GradientRamp { .. } => "net.sf.openfx.gradient_ramp",
+            Self::Perspective { .. } => "net.sf.openfx.perspective",
+            Self::TextOutline { .. } => "net.sf.openfx.text_outline",
+            Self::TextBevel { .. } => "net.sf.openfx.text_bevel",
+            Self::Bloom { .. } => "net.sf.openfx.bloom",
+            Self::Tiler { .. } => "net.sf.openfx.tiler",
+            Self::Warp { .. } => "net.sf.openfx.warp",
+            Self::Exposure { .. } => "net.sf.openfx.exposure",
+            Self::Vibrance { .. } => "net.sf.openfx.vibrance",
+            Self::Levels { .. } => "net.sf.openfx.levels",
+            Self::HueSaturation { .. } => "net.sf.openfx.hue_saturation",
+            Self::Sharpen { .. } => "net.sf.openfx.sharpen",
+            Self::Vignette { .. } => "net.sf.openfx.vignette",
+            Self::Stock { plugin, .. } => plugin.plugin_id(),
+        }
+    }
+
+    /// Build stock scalar params from the plug-in descriptor
+    /// (defaults become both value and default value).
+    pub fn stock_params(plugin: StockPlugin) -> Vec<Property<f32>> {
+        crate::stock::stock_default_params(plugin)
+    }
+
+    /// Build stock color slots from the plug-in descriptor.
+    pub fn stock_colors(plugin: StockPlugin) -> Vec<Color> {
+        crate::stock::stock_color_slots(plugin)
+            .iter()
+            .map(|slot| stock_default_color(plugin, slot))
+            .collect()
+    }
 }
 
 /// A layer effect applied sequentially in the layer's post-processing stack.
@@ -475,6 +609,62 @@ impl Effect {
     /// Factory for creating a Vibrance effect.
     pub fn vibrance(id: impl Into<String>, vibrance: f32) -> Self {
         Self::new(id, "Vibrance", EffectType::vibrance(vibrance))
+    }
+
+    /// Factory for creating a Levels effect.
+    pub fn levels(
+        id: impl Into<String>,
+        input_black: f32,
+        input_white: f32,
+        gamma: f32,
+        output_black: f32,
+        output_white: f32,
+    ) -> Self {
+        Self::new(
+            id,
+            "Levels",
+            EffectType::levels(input_black, input_white, gamma, output_black, output_white),
+        )
+    }
+
+    /// Factory for creating a Hue / Saturation effect.
+    pub fn hue_saturation(
+        id: impl Into<String>,
+        hue_shift: f32,
+        saturation: f32,
+        lightness: f32,
+    ) -> Self {
+        Self::new(
+            id,
+            "Hue / Saturation",
+            EffectType::hue_saturation(hue_shift, saturation, lightness),
+        )
+    }
+
+    /// Factory for creating a Sharpen effect.
+    pub fn sharpen(id: impl Into<String>, amount: f32, radius: f32) -> Self {
+        Self::new(id, "Sharpen", EffectType::sharpen(amount, radius))
+    }
+
+    /// Factory for creating a Vignette effect.
+    pub fn vignette(id: impl Into<String>, amount: f32, softness: f32) -> Self {
+        Self::new(id, "Vignette", EffectType::vignette(amount, softness))
+    }
+
+    /// Factory for creating a modular stock plug-in effect. Scalar params
+    /// and color slots come from the plug-in descriptor; the display name
+    /// is the plug-in label.
+    pub fn stock(id: impl Into<String>, plugin: StockPlugin) -> Self {
+        let label = plugin.descriptor().label;
+        Self::new(
+            id,
+            label,
+            EffectType::Stock {
+                params: EffectType::stock_params(plugin),
+                colors: EffectType::stock_colors(plugin),
+                plugin,
+            },
+        )
     }
 
     /// Factory for creating a Shader Lab runtime-shader effect.
@@ -696,7 +886,7 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
     }
 
     /// Return the canonical type name of this effect.
-    pub const fn type_name(&self) -> &'static str {
+    pub fn type_name(&self) -> &'static str {
         self.effect_type.type_name()
     }
 
@@ -890,6 +1080,65 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 if param_name.eq_ignore_ascii_case("vibrance") {
                     vibrance.set_value((vibrance.value + delta).clamp(-100.0, 100.0));
                     return true;
+                }
+            }
+            EffectType::Levels { input_black, input_white, gamma, output_black, output_white } => {
+                if param_name.eq_ignore_ascii_case("input_black") {
+                    input_black.set_value((input_black.value + delta).clamp(0.0, 255.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("input_white") {
+                    input_white.set_value((input_white.value + delta).clamp(0.0, 255.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("gamma") {
+                    gamma.set_value((gamma.value + delta).clamp(0.1, 9.9));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("output_black") {
+                    output_black.set_value((output_black.value + delta).clamp(0.0, 255.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("output_white") {
+                    output_white.set_value((output_white.value + delta).clamp(0.0, 255.0));
+                    return true;
+                }
+            }
+            EffectType::HueSaturation { hue_shift, saturation, lightness } => {
+                if param_name.eq_ignore_ascii_case("hue_shift") || param_name.eq_ignore_ascii_case("hue") {
+                    hue_shift.set_value((hue_shift.value + delta).clamp(-180.0, 180.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("saturation") || param_name.eq_ignore_ascii_case("sat") {
+                    saturation.set_value((saturation.value + delta).clamp(-100.0, 100.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("lightness") || param_name.eq_ignore_ascii_case("light") {
+                    lightness.set_value((lightness.value + delta).clamp(-100.0, 100.0));
+                    return true;
+                }
+            }
+            EffectType::Sharpen { amount, radius } => {
+                if param_name.eq_ignore_ascii_case("amount") {
+                    amount.set_value((amount.value + delta).clamp(0.0, 200.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("radius") {
+                    radius.set_value((radius.value + delta).clamp(0.0, 20.0));
+                    return true;
+                }
+            }
+            EffectType::Vignette { amount, softness } => {
+                if param_name.eq_ignore_ascii_case("amount") {
+                    amount.set_value((amount.value + delta).clamp(0.0, 100.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("softness") {
+                    softness.set_value((softness.value + delta).clamp(0.0, 100.0));
+                    return true;
+                }
+            }
+            EffectType::Stock { plugin, params, .. } => {
+                let desc = plugin.descriptor();
+                for (i, p) in desc.params.iter().enumerate() {
+                    if param_name.eq_ignore_ascii_case(p.name) {
+                        if let Some(prop) = params.get_mut(i) {
+                            prop.set_value((prop.value + delta).clamp(p.min, p.max));
+                            return true;
+                        }
+                    }
                 }
             }
             // Shader Lab values are dynamic (see nudge_shader_value).
@@ -1086,6 +1335,58 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     None
                 }
             }
+            EffectType::Levels { input_black, input_white, gamma, output_black, output_white } => {
+                if param_name.eq_ignore_ascii_case("input_black") {
+                    Some(input_black)
+                } else if param_name.eq_ignore_ascii_case("input_white") {
+                    Some(input_white)
+                } else if param_name.eq_ignore_ascii_case("gamma") {
+                    Some(gamma)
+                } else if param_name.eq_ignore_ascii_case("output_black") {
+                    Some(output_black)
+                } else if param_name.eq_ignore_ascii_case("output_white") {
+                    Some(output_white)
+                } else {
+                    None
+                }
+            }
+            EffectType::HueSaturation { hue_shift, saturation, lightness } => {
+                if param_name.eq_ignore_ascii_case("hue_shift") || param_name.eq_ignore_ascii_case("hue") {
+                    Some(hue_shift)
+                } else if param_name.eq_ignore_ascii_case("saturation") || param_name.eq_ignore_ascii_case("sat") {
+                    Some(saturation)
+                } else if param_name.eq_ignore_ascii_case("lightness") || param_name.eq_ignore_ascii_case("light") {
+                    Some(lightness)
+                } else {
+                    None
+                }
+            }
+            EffectType::Sharpen { amount, radius } => {
+                if param_name.eq_ignore_ascii_case("amount") {
+                    Some(amount)
+                } else if param_name.eq_ignore_ascii_case("radius") {
+                    Some(radius)
+                } else {
+                    None
+                }
+            }
+            EffectType::Vignette { amount, softness } => {
+                if param_name.eq_ignore_ascii_case("amount") {
+                    Some(amount)
+                } else if param_name.eq_ignore_ascii_case("softness") {
+                    Some(softness)
+                } else {
+                    None
+                }
+            }
+            EffectType::Stock { plugin, params, .. } => {
+                let idx = plugin
+                    .descriptor()
+                    .params
+                    .iter()
+                    .position(|p| param_name.eq_ignore_ascii_case(p.name))?;
+                params.get(idx)
+            }
             // Shader Lab values are dynamic, not `Property<f32>` tracks.
             EffectType::ShaderLab { .. } => None,
         }
@@ -1279,8 +1580,133 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     None
                 }
             }
+            EffectType::Levels { input_black, input_white, gamma, output_black, output_white } => {
+                if param_name.eq_ignore_ascii_case("input_black") {
+                    Some(input_black)
+                } else if param_name.eq_ignore_ascii_case("input_white") {
+                    Some(input_white)
+                } else if param_name.eq_ignore_ascii_case("gamma") {
+                    Some(gamma)
+                } else if param_name.eq_ignore_ascii_case("output_black") {
+                    Some(output_black)
+                } else if param_name.eq_ignore_ascii_case("output_white") {
+                    Some(output_white)
+                } else {
+                    None
+                }
+            }
+            EffectType::HueSaturation { hue_shift, saturation, lightness } => {
+                if param_name.eq_ignore_ascii_case("hue_shift") || param_name.eq_ignore_ascii_case("hue") {
+                    Some(hue_shift)
+                } else if param_name.eq_ignore_ascii_case("saturation") || param_name.eq_ignore_ascii_case("sat") {
+                    Some(saturation)
+                } else if param_name.eq_ignore_ascii_case("lightness") || param_name.eq_ignore_ascii_case("light") {
+                    Some(lightness)
+                } else {
+                    None
+                }
+            }
+            EffectType::Sharpen { amount, radius } => {
+                if param_name.eq_ignore_ascii_case("amount") {
+                    Some(amount)
+                } else if param_name.eq_ignore_ascii_case("radius") {
+                    Some(radius)
+                } else {
+                    None
+                }
+            }
+            EffectType::Vignette { amount, softness } => {
+                if param_name.eq_ignore_ascii_case("amount") {
+                    Some(amount)
+                } else if param_name.eq_ignore_ascii_case("softness") {
+                    Some(softness)
+                } else {
+                    None
+                }
+            }
+            EffectType::Stock { plugin, params, .. } => {
+                let idx = plugin
+                    .descriptor()
+                    .params
+                    .iter()
+                    .position(|p| param_name.eq_ignore_ascii_case(p.name))?;
+                params.get_mut(idx)
+            }
             // Shader Lab values are dynamic, not `Property<f32>` tracks.
             EffectType::ShaderLab { .. } => None,
+        }
+    }
+
+    /// Names of the non-animatable color slots on this effect, if any.
+    pub fn color_slots(&self) -> Vec<&'static str> {
+        match &self.effect_type {
+            EffectType::Stock { plugin, colors, .. } => {
+                crate::stock::stock_color_slots(*plugin)
+                    .iter()
+                    .take(colors.len())
+                    .copied()
+                    .collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Read a stock color slot by name.
+    pub fn stock_color(&self, slot: &str) -> Option<Color> {
+        match &self.effect_type {
+            EffectType::Stock { plugin, colors, .. } => {
+                let idx = crate::stock::stock_color_slots(*plugin)
+                    .iter()
+                    .position(|s| s.eq_ignore_ascii_case(slot))?;
+                colors.get(idx).copied()
+            }
+            _ => None,
+        }
+    }
+
+    /// Write a stock color slot by name.
+    pub fn set_stock_color(&mut self, slot: &str, next: Color) -> bool {
+        match &mut self.effect_type {
+            EffectType::Stock { plugin, colors, .. } => {
+                let slots = crate::stock::stock_color_slots(*plugin);
+                match slots.iter().position(|s| s.eq_ignore_ascii_case(slot)) {
+                    Some(idx) if idx < colors.len() => {
+                        colors[idx] = next;
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            _ => self.set_color_value(slot, next),
+        }
+    }
+
+    /// All scalar params as `(name, label, value, step)` for generic UI
+    /// (Properties rows, timeline lanes, spline legend). Only meaningful
+    /// for stock plug-ins; legacy variants keep their bespoke editors.
+    pub fn stock_scalar_params(&self) -> Vec<(&'static str, &'static str, f32, f32)> {
+        match &self.effect_type {
+            EffectType::Stock { plugin, params, .. } => {
+                let desc = plugin.descriptor();
+                desc.params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| {
+                        let v = params.get(i).map(|q| q.value).unwrap_or(p.default);
+                        let step = ((p.max - p.min) / 40.0).clamp(0.01, 10.0);
+                        (p.name, p.label, v, step)
+                    })
+                    .collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Stock plug-in of this effect, if it is one.
+    pub fn stock_plugin(&self) -> Option<StockPlugin> {
+        match &self.effect_type {
+            EffectType::Stock { plugin, .. } => Some(*plugin),
+            _ => None,
         }
     }
 }
