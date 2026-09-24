@@ -136,6 +136,8 @@ pub struct EditorState {
     pub is_playing: bool,
     pub active_tool: EditorTool,
     pub timeline_full_width: bool,
+    /// Viewport snapping toggle (top toolbar magnet).
+    pub snapping: bool,
     /// Scrub key currently open for After Effects-style keyboard entry.
     pub value_edit_key: Option<String>,
     /// Live single-line editor for `value_edit_key` (created on demand).
@@ -648,6 +650,7 @@ impl EditorState {
             is_playing: false,
             active_tool: EditorTool::Move,
             timeline_full_width: false,
+            snapping: true,
             value_edit_key: None,
             value_editor: None,
             value_editor_sub: None,
@@ -746,6 +749,11 @@ impl EditorState {
     /// Toggle whether the timeline spans the full width of the application.
     pub fn toggle_timeline_full_width(&mut self) {
         self.timeline_full_width = !self.timeline_full_width;
+    }
+
+    /// Toggle viewport snapping (top toolbar magnet).
+    pub fn toggle_snapping(&mut self) {
+        self.snapping = !self.snapping;
     }
 
     /// Nudge a Shader Lab parameter on the selected layer's effect.

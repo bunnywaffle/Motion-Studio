@@ -18,6 +18,83 @@ fn icon_box(icon: IconName) -> Div {
     div().w(px(14.)).h(px(14.)).flex().items_center().justify_center().child(icon)
 }
 
+/// After Effects workspace palette (dark flat chrome sampled from the AE
+/// reference mockup). Used for panel chrome so every surface matches even
+/// though the base kit theme stays untouched.
+pub mod ae {
+    use super::*;
+
+    /// Deepest app background (timeline lanes, canvas letterbox).
+    pub fn bg() -> Rgba {
+        rgb(0x1b1b1b)
+    }
+    /// Raised panel surfaces (cards, headers, side rails).
+    pub fn panel() -> Rgba {
+        rgb(0x232323)
+    }
+    /// Controls / pills / wells.
+    pub fn control() -> Rgba {
+        rgb(0x2e2e2e)
+    }
+    /// Hover highlight.
+    pub fn hover() -> Rgba {
+        rgb(0x3a3a3a)
+    }
+    /// Hairline borders.
+    pub fn border() -> Rgba {
+        rgb(0x101010)
+    }
+    /// Primary text.
+    pub fn text() -> Rgba {
+        rgb(0xd7d7d7)
+    }
+    /// Secondary / header text.
+    pub fn dim() -> Rgba {
+        rgb(0x9a9a9a)
+    }
+    /// AE selection blue (active tools, spans, toggles).
+    pub fn accent() -> Rgba {
+        rgb(0x2f7cf6)
+    }
+    /// Timeline layer span blue.
+    pub fn span() -> Rgba {
+        rgb(0x2b6cb0)
+    }
+    /// Parent badge / success green.
+    pub fn green() -> Rgba {
+        rgb(0x2f9e44)
+    }
+    /// Timecode readout blue.
+    pub fn timecode() -> Rgba {
+        rgb(0x4da3ff)
+    }
+
+    /// Small-caps dim section header: `▾ TITLE ......... count`.
+    pub fn section_header(title: &str, count: Option<usize>) -> Div {
+        let mut row = h_flex()
+            .px_2()
+            .py_1()
+            .mt_1()
+            .items_center()
+            .gap_1p5()
+            .text_xs()
+            .font_semibold()
+            .text_color(dim());
+        row = row.child(div().child("▾")).child(title.to_string());
+        if let Some(n) = count {
+            row = row.child(
+                div()
+                    .px_1p5()
+                    .rounded_sm()
+                    .bg(control())
+                    .text_color(dim())
+                    .child(format!("{n}")),
+            );
+        }
+        row
+    }
+}
+
 fn step_button<F>(label: &'static str, cx: &App, on_click: F) -> impl IntoElement
 where
     F: Fn(&mut App) + 'static,
@@ -545,35 +622,7 @@ impl Render for ProjectPanel {
         if let Some(comp) = comp_opt {
             // --- Section 1: Compositions ---
             if active_filter == ProjectFilterType::All || active_filter == ProjectFilterType::Compositions {
-                bin_items.push(
-                    h_flex()
-                        .px_2()
-                        .py_1()
-                        .mt_1()
-                        .bg(cx.theme().secondary)
-                        .rounded_sm()
-                        .items_center()
-                        .justify_between()
-                        .text_xs()
-                        .font_semibold()
-                        .text_color(cx.theme().foreground)
-                        .child(
-                            h_flex()
-                                .gap_1p5()
-                                .items_center()
-                                .child(icon_box(IconName::Folder))
-                                .child("COMPOSITIONS"),
-                        )
-                        .child(
-                            div()
-                                .px_1p5()
-                                .rounded_sm()
-                                .bg(cx.theme().muted)
-                                .text_color(cx.theme().muted_foreground)
-                                .child("1"),
-                        )
-                        .into_any_element(),
-                );
+                bin_items.push(ae::section_header("COMPOSITIONS", Some(1)).into_any_element());
 
                 // Active comp card
                 bin_items.push(
@@ -634,32 +683,7 @@ impl Render for ProjectPanel {
             // --- Section 2: Project Media & Bins ---
             if active_filter == ProjectFilterType::All || active_filter == ProjectFilterType::Footage {
                 bin_items.push(
-                    h_flex()
-                        .px_2()
-                        .py_1()
-                        .mt_2()
-                        .bg(cx.theme().secondary)
-                        .rounded_sm()
-                        .items_center()
-                        .justify_between()
-                        .text_xs()
-                        .font_semibold()
-                        .text_color(cx.theme().foreground)
-                        .child(
-                            h_flex()
-                                .gap_1p5()
-                                .items_center()
-                                .child(icon_box(IconName::FolderOpen))
-                                .child("PROJECT MEDIA"),
-                        )
-                        .child(
-                            div()
-                                .px_1p5()
-                                .rounded_sm()
-                                .bg(cx.theme().muted)
-                                .text_color(cx.theme().muted_foreground)
-                                .child(format!("{}", state.project.assets.len())),
-                        )
+                    ae::section_header("PROJECT MEDIA", Some(state.project.assets.len()))
                         .into_any_element(),
                 );
 
@@ -1642,7 +1666,7 @@ impl Render for CompositionViewerPanel {
         let comp_name = comp_opt.map(|c| c.name.clone()).unwrap_or_else(|| "No Comp".to_string());
         let comp_res = comp_opt.map(|c| format!("{} x {} (1.00)", c.width, c.height)).unwrap_or_default();
         let comp_fps = comp_opt.map(|c| format!("{:.2} fps", c.frame_rate)).unwrap_or_default();
-        let current_tc = format!("{}", state.clock.timecode());
+        let _current_tc = format!("{}", state.clock.timecode());
         let current_frame = state.clock.current_frame();
 
         let bg_color = comp_opt
@@ -2527,7 +2551,7 @@ impl Render for CompositionViewerPanel {
         };
         let active_tool = state.active_tool;
         let s_side = self.state.clone();
-        let tool_btn = |tool: EditorTool, icon: IconName, label: &'static str, cx: &App| {
+        let tool_btn = |tool: EditorTool, icon: IconName, label: &'static str, _cx: &App| {
             let is_active = active_tool == tool;
             let s_click = s_side.clone();
             div()
@@ -2540,9 +2564,9 @@ impl Render for CompositionViewerPanel {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(if is_active { cx.theme().primary } else { cx.theme().muted })
-                .text_color(if is_active { cx.theme().primary_foreground } else { cx.theme().foreground })
-                .hover(|s| if !is_active { s.bg(cx.theme().accent) } else { s })
+                .bg(if is_active { ae::accent() } else { ae::control() })
+                .text_color(if is_active { rgb(0xffffff) } else { ae::text() })
+                .hover(|s| if !is_active { s.bg(ae::hover()) } else { s })
                 .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                     s_click.update(cx, |s, cx| {
                         s.set_tool(tool);
@@ -2567,14 +2591,16 @@ impl Render for CompositionViewerPanel {
         let shape_is_active = matches!(active_tool, EditorTool::ShapeRect | EditorTool::ShapeEllipse);
 
         let side_toolbar = v_flex()
+            .id("viewer_tool_strip")
+            .test_support()
             .w(px(36.))
             .h_full()
             .py_2()
             .gap_1p5()
             .items_center()
             .border_r_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().secondary)
+            .border_color(ae::border())
+            .bg(ae::panel())
             .child(tool_btn(EditorTool::Move, IconName::Move, "move", cx))
             .child(tool_btn(EditorTool::Hand, IconName::Hand, "hand", cx))
             .child(tool_btn(EditorTool::Rotate, IconName::RotateCw, "rotate", cx))
@@ -2592,9 +2618,9 @@ impl Render for CompositionViewerPanel {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .bg(if shape_is_active { cx.theme().primary } else { cx.theme().muted })
-                    .text_color(if shape_is_active { cx.theme().primary_foreground } else { cx.theme().foreground })
-                    .hover(|s| if !shape_is_active { s.bg(cx.theme().accent) } else { s })
+                    .bg(if shape_is_active { ae::accent() } else { ae::control() })
+                    .text_color(if shape_is_active { rgb(0xffffff) } else { ae::text() })
+                    .hover(|s| if !shape_is_active { s.bg(ae::hover()) } else { s })
                     .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                         p_shape.update(cx, |this, cx| {
                             // Clicking the grouped tool selects it; clicking
@@ -2614,7 +2640,7 @@ impl Render for CompositionViewerPanel {
                     })
                     .child(icon_box(shape_icon))
             })
-            .child(div().w(px(20.)).h(px(1.)).bg(cx.theme().border).my_1())
+            .child(div().w(px(20.)).h(px(1.)).bg(ae::border()).my_1())
             // Single contextual action: creates a layer of the active tool
             // type at the viewport center (click the canvas to place freely).
             .child(
@@ -2628,8 +2654,8 @@ impl Render for CompositionViewerPanel {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .bg(cx.theme().muted)
-                    .hover(|s| s.bg(cx.theme().accent))
+                    .bg(ae::control())
+                    .hover(|s| s.bg(ae::hover()))
                     .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                         s_add.update(cx, |s, cx| {
                             match s.active_tool {
@@ -2932,75 +2958,49 @@ impl Render for CompositionViewerPanel {
                     cx.notify();
                 });
             }))
-            // Viewport header / controls
+            // Viewport header / controls (AE comp viewer chrome).
             .child(
                 h_flex()
                     .px_3()
                     .py_1()
                     .border_b_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().secondary)
+                    .border_color(ae::border())
+                    .bg(ae::panel())
                     .items_center()
                     .justify_between()
                     .overflow_hidden()
                     .text_xs()
+                    .text_color(ae::text())
                     .child(
                         h_flex()
                             .gap_3()
                             .items_center()
                             .min_w_0()
                             .flex_1()
-                            .child(div().font_bold().truncate().child(comp_name))
+                            .child(div().font_bold().truncate().child(format!("{comp_name} / Active Camera")))
                             .child(
                                 div()
-                                    .text_color(cx.theme().muted_foreground)
+                                    .text_color(ae::dim())
                                     .flex_none()
                                     .child(comp_res),
                             )
                             .child(
                                 div()
-                                    .text_color(cx.theme().muted_foreground)
+                                    .text_color(ae::dim())
                                     .flex_none()
                                     .child(comp_fps),
                             ),
                     )
                     .child(
                         h_flex()
-                            .gap_2()
+                            .gap_3()
                             .items_center()
                             .flex_none()
-                            .child(
-                                div()
-                                    .px_2()
-                                    .py_0p5()
-                                    .rounded_sm()
-                                    .bg(cx.theme().muted)
-                                    .child("100% (Fit)"),
-                            )
-                            .child(
-                                div()
-                                    .px_2()
-                                    .py_0p5()
-                                    .rounded_sm()
-                                    .bg(cx.theme().muted)
-                                    .child("Full Res"),
-                            )
-                            .child(
-                                div()
-                                    .px_2()
-                                    .py_0p5()
-                                    .rounded_sm()
-                                    .bg(cx.theme().muted)
-                                    .child("Active Camera"),
-                            )
-                            .child(
-                                div()
-                                    .px_2()
-                                    .py_0p5()
-                                    .rounded_sm()
-                                    .bg(cx.theme().muted)
-                                    .child("RGB"),
-                            ),
+                            .text_color(ae::dim())
+                            .child(div().child("100% (Fit)"))
+                            .child(div().child("Full Res (1:1)"))
+                            .child(div().child("RGB Channel"))
+                            .child(div().font_bold().child("+")),
                     ),
             )
             // Composition Canvas area with vertical side toolbar
@@ -3017,6 +3017,7 @@ impl Render for CompositionViewerPanel {
                             .test_support()
                             .flex_1()
                             .size_full()
+                            .bg(ae::bg())
                             .items_center()
                             .justify_center()
                             .p_4()
@@ -3345,12 +3346,25 @@ impl Render for CompositionViewerPanel {
                             })
                     )
             )
-            // Status bar
+            // Status bar (AE comp viewer footer chrome).
             .child({
                 self.last_frame_ms = render_t0.elapsed().as_secs_f32() * 1000.0;
                 let ms = self.last_frame_ms;
                 let layer_count = comp_opt.map(|c| c.layers.len()).unwrap_or(0);
+                let solids_count = comp_opt
+                    .map(|c| c.layers.iter().filter(|l| matches!(&l.source, LayerSource::Solid { .. })).count())
+                    .unwrap_or(0);
+                let audio_count = comp_opt
+                    .map(|c| c.layers.iter().filter(|l| matches!(&l.source, LayerSource::Video { .. })).count())
+                    .unwrap_or(0);
                 let quality = state.preview_quality.label();
+                let sel_name = state
+                    .selected_layer_id
+                    .as_ref()
+                    .and_then(|id| comp_opt.and_then(|c| c.get_layer(id)))
+                    .map(|l| l.name.clone())
+                    .unwrap_or_else(|| "None".to_string());
+                let fps_label = comp_opt.map(|c| format!("{:.2}", c.frame_rate)).unwrap_or_else(|| "—.——".to_string());
                 // Pen target hint so routing never surprises.
                 let pen_hint = if state.active_tool == EditorTool::Pen {
                     match state.active_mask_edit.clone() {
@@ -3372,15 +3386,18 @@ impl Render for CompositionViewerPanel {
                     .px_3()
                     .py_1()
                     .border_t_1()
-                    .border_color(cx.theme().border)
+                    .border_color(ae::border())
+                    .bg(ae::panel())
                     .text_xs()
-                    .text_color(cx.theme().muted_foreground)
+                    .text_color(ae::dim())
                     .justify_between()
-                    .child(div().child(format!("Time: {} (Frame {})", current_tc, current_frame)))
+                    .child(div().child(format!("Comp {layer_count} Solids {solids_count} Audio {audio_count}")))
                     .child(div().child(format!(
-                        "{pen_hint}{layer_count} layers · {quality} preview · {ms:.1} ms"
+                        "{pen_hint}Layer: {sel_name}  FPS: {fps_label} (Realtime)"
                     )))
-                    .child(div().child("Scroll to Zoom • Space to Play/Pause"))
+                    .child(div().child(format!(
+                        "{quality} · {ms:.1} ms · GPU Acceleration: ACTIVE"
+                    )))
             })
     }
 }
@@ -4708,7 +4725,7 @@ fn prop_section<F>(
     icon: IconName,
     expanded: bool,
     on_toggle: F,
-    cx: &App,
+    _cx: &App,
     body: Option<AnyElement>,
 ) -> AnyElement
 where
@@ -4716,10 +4733,10 @@ where
 {
     let mut card = v_flex()
         .p_2p5()
-        .rounded_md()
-        .border_1()
-        .border_color(cx.theme().border)
-        .bg(cx.theme().secondary)
+        .rounded_sm()
+        .border_b_1()
+        .border_color(ae::border())
+        .bg(ae::panel())
         .gap_2()
         .child(
             h_flex()
@@ -4729,14 +4746,14 @@ where
                 .items_center()
                 .font_semibold()
                 .text_xs()
-                .text_color(cx.theme().foreground)
+                .text_color(ae::dim())
                 .cursor_pointer()
                 .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                     on_toggle(cx);
                 })
-                .child(icon_box(if expanded { IconName::ChevronDown } else { IconName::ChevronRight }))
+                .child(div().w(px(10.)).child(if expanded { "▾" } else { "▸" }))
                 .child(icon_box(icon))
-                .child(title),
+                .child(title.to_uppercase()),
         );
     if let Some(content) = body {
         if expanded {
@@ -7891,7 +7908,12 @@ impl Render for PropertiesPanel {
                     LayerSource::Adjustment => "Adjustment Layer",
                     _ => "2D Layer",
                 };
-                (format!("Selected: {}", l.name), type_str.to_string())
+                let idx = state
+                    .active_composition()
+                    .and_then(|c| c.layers.iter().position(|x| x.id == l.id))
+                    .map(|i| i + 1)
+                    .unwrap_or(1);
+                (format!("{} (Layer {})", l.name, idx), type_str.to_string())
             }
             None => ("No Layer Selected".to_string(), "-".to_string()),
         };
@@ -8014,14 +8036,14 @@ impl Render for PropertiesPanel {
                     cx.notify();
                 });
             }))
-            // Header
+            // Header (AE inspector chrome: layer dot + name + type).
             .child(
                 h_flex()
                     .px_3()
                     .py_2()
                     .border_b_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().secondary)
+                    .border_color(ae::border())
+                    .bg(ae::panel())
                     .items_center()
                     .justify_between()
                     .child(
@@ -8029,7 +8051,7 @@ impl Render for PropertiesPanel {
                             .gap_1p5()
                             .items_center()
                             .child(icon_box(IconName::Layers))
-                            .child(div().font_semibold().text_xs().child(header_title)),
+                            .child(div().font_semibold().text_xs().text_color(ae::text()).child(header_title)),
                     )
                     .child(header_actions),
             )
@@ -8157,6 +8179,7 @@ impl Render for PropertiesPanel {
                                                 h_flex()
                                                     .gap_2()
                                                     .items_center()
+                                                    .child(div().text_color(ae::dim()).child("Hex Color:"))
                                                     .child(
                                                         div()
                                                             .id("solid_color_swatch")
@@ -8166,22 +8189,17 @@ impl Render for PropertiesPanel {
                                                             .rounded_sm()
                                                             .bg(Rgba { r: c.r, g: c.g, b: c.b, a: 1.0 })
                                                             .border_1()
-                                                            .border_color(cx.theme().border),
+                                                            .border_color(ae::border()),
                                                     )
                                                     .child(
                                                         div()
                                                             .id("solid_color_hex")
                                                             .test_support()
                                                             .font_semibold()
+                                                            .text_color(ae::text())
                                                             .child(hex_code),
                                                     )
                                                     .child(div().id("solid_color_wheel").test_support().child(ColorPicker::new(&inspector_color.read(cx).state).label("Color")))
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(cx.theme().muted_foreground)
-                                                    .child("Color wheel / swatches"),
                                             )
                                     )
                                     .child(
@@ -8189,7 +8207,20 @@ impl Render for PropertiesPanel {
                                             .items_center()
                                             .justify_between()
                                             .text_xs()
-                                            .child(div().text_color(cx.theme().muted_foreground).child("Presets"))
+                                            .child(div().text_color(ae::dim()).child("Native Size:"))
+                                            .child(
+                                                div()
+                                                    .font_medium()
+                                                    .text_color(ae::text())
+                                                    .child(format!("{w} × {h} px")),
+                                            ),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .text_xs()
+                                            .child(div().text_color(ae::dim()).child("Presets:"))
                                             .child(palette_row),
                                     )
                                     .child(
@@ -8197,7 +8228,7 @@ impl Render for PropertiesPanel {
                                             .items_center()
                                             .justify_between()
                                             .text_xs()
-                                            .child(div().text_color(cx.theme().muted_foreground).child("Dimensions"))
+                                            .child(div().text_color(ae::dim()).child("Dimensions:"))
                                             .child(
                                                 h_flex()
                                                     .gap_1()
@@ -11187,8 +11218,8 @@ impl Render for TimelinePanel {
 
                 if is_selected {
                     left_col = left_col
-                        .bg(cx.theme().accent)
-                        .text_color(cx.theme().accent_foreground);
+                        .bg(ae::span())
+                        .text_color(rgb(0xffffff));
                 } else {
                     left_col = left_col
                         .bg(cx.theme().background)
@@ -11391,6 +11422,7 @@ impl Render for TimelinePanel {
                             // child's world transform.
                             .child({
                                 let p_pick = panel_entity.clone();
+                                let has_parent = layer.parent_id.is_some();
                                 div()
                                     .id(SharedString::from(format!("parent_picker_{}", layer.id)))
                                     .test_support()
@@ -11398,9 +11430,9 @@ impl Render for TimelinePanel {
                                     .px_1p5()
                                     .py_0p5()
                                     .rounded_sm()
-                                    .bg(cx.theme().secondary)
-                                    .text_color(cx.theme().muted_foreground)
-                                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                    .bg(if has_parent { ae::green() } else { ae::control() })
+                                    .text_color(if has_parent { rgb(0xffffff) } else { ae::dim() })
+                                    .hover(|s| s.bg(ae::hover()))
                                     .text_xs()
                                     .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                                         let lid = lid_parent.clone();
@@ -12475,14 +12507,14 @@ impl Render for TimelinePanel {
                     cx.notify();
                 });
             })
-            // Header / Timecode & Transport
+            // Header / Timecode & Transport (AE timeline toolbar chrome).
             .child(
                 h_flex()
                     .px_3()
                     .py_1()
                     .border_b_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().secondary)
+                    .border_color(ae::border())
+                    .bg(ae::panel())
                     .items_center()
                     .justify_between()
                     // Timecode display
@@ -12492,23 +12524,33 @@ impl Render for TimelinePanel {
                             .gap_2()
                             .child(
                                 div()
+                                    .text_xs()
+                                    .font_semibold()
+                                    .text_color(ae::text())
+                                    .child(format!(
+                                        "Timeline: {}",
+                                        comp_opt.map(|c| c.name.clone()).unwrap_or_else(|| "No Comp".to_string())
+                                    )),
+                            )
+                            .child(
+                                div()
                                     .id("timecode_display")
                                     .test_support()
                                     .px_2()
                                     .py_0p5()
-                                    .bg(cx.theme().muted)
+                                    .bg(rgb(0x101010))
                                     .rounded_sm()
                                     .border_1()
-                                    .border_color(cx.theme().border)
+                                    .border_color(ae::border())
                                     .font_bold()
                                     .text_sm()
-                                    .text_color(cx.theme().primary)
+                                    .text_color(ae::timecode())
                                     .child(format!("{current_tc}")),
                             )
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
+                                    .text_color(ae::dim())
                                     .child(format!("Frame {current_frame} / {total_frames}")),
                             ),
                     )
@@ -12562,10 +12604,10 @@ impl Render for TimelinePanel {
                                     .px_3()
                                     .py_0p5()
                                     .rounded_sm()
-                                    .bg(cx.theme().primary)
+                                    .bg(ae::accent())
                                     .hover(|s| s.opacity(0.9))
                                     .cursor_pointer()
-                                    .text_color(cx.theme().primary_foreground)
+                                    .text_color(rgb(0xffffff))
                                     .text_xs()
                                     .font_bold()
                                     .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
@@ -12731,17 +12773,17 @@ impl Render for TimelinePanel {
                 h_flex()
                     .h(px(22.))
                     .border_b_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().secondary)
+                    .border_color(ae::border())
+                    .bg(ae::panel())
                     .text_xs()
-                    .text_color(cx.theme().muted_foreground)
+                    .text_color(ae::dim())
                     .child(
                         div()
                             .w(px(380.))
                             .px_3()
                             .border_r_1()
-                            .border_color(cx.theme().border)
-                            .child("Layer Name / Switches / Properties"),
+                            .border_color(ae::border())
+                            .child("Layer Name / Switches · Parent & Link"),
                     )
                     .child({
                         let p_ruler_down = panel_entity.clone();

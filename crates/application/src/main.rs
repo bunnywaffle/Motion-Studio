@@ -910,32 +910,42 @@ fn render_menubar(
     .into_any_element()
 }
 
-fn render_toolbar(state: &Entity<EditorState>, cx: &App) -> impl IntoElement {    let s_read = state.read(cx);
+fn render_toolbar(state: &Entity<EditorState>, cx: &App) -> impl IntoElement {
+    use crate::state::EditorTool;
+    let s_read = state.read(cx);
     let active_tool = s_read.active_tool;
-    let s_full = state.clone();
+    let (tool_name, tool_key) = match active_tool {
+        EditorTool::Move => ("Selection", "V"),
+        EditorTool::Hand => ("Hand", "H"),
+        EditorTool::Rotate => ("Rotate", "W"),
+        EditorTool::Pen => ("Pen", "G"),
+        EditorTool::Text => ("Text", "T"),
+        EditorTool::ShapeRect => ("Rectangle", "Q"),
+        EditorTool::ShapeEllipse => ("Ellipse", "Q"),
+    };
+    let next_tool = match active_tool {
+        EditorTool::Move => EditorTool::Hand,
+        EditorTool::Hand => EditorTool::Rotate,
+        EditorTool::Rotate => EditorTool::Pen,
+        EditorTool::Pen => EditorTool::Text,
+        EditorTool::Text => EditorTool::ShapeRect,
+        EditorTool::ShapeRect => EditorTool::ShapeEllipse,
+        EditorTool::ShapeEllipse => EditorTool::Move,
+    };
+    let fill = s_read.tool_solid_color;
+    let fill_hex = fill.to_hex_rgb();
+    let snapping = s_read.snapping;
     let is_full_width = s_read.timeline_full_width;
-    let full_width_btn = div()
-        .id("toggle_timeline_full_width_button")
-        .test_support()
-        .cursor_pointer()
-        .px_2()
-        .py_1()
-        .rounded_sm()
-        .flex()
-        .items_center()
-        .gap_1()
-        .text_xs()
-        .bg(if is_full_width { cx.theme().primary } else { cx.theme().muted })
-        .text_color(if is_full_width { cx.theme().primary_foreground } else { cx.theme().foreground })
-        .hover(|s| s.opacity(0.85))
-        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-            s_full.update(cx, |s, cx| {
-                s.toggle_timeline_full_width();
-                cx.notify();
-            });
-        })
-        .child(div().w(px(14.)).h(px(14.)).flex().items_center().justify_center().child(if is_full_width { gpui_kit::assets::IconName::Minimize2 } else { gpui_kit::assets::IconName::Maximize2 }))
-        .child(if is_full_width { "Timeline: Full Width" } else { "Timeline: Docked" });
+    let s_tool = state.clone();
+    let s_snap = state.clone();
+    let s_full = state.clone();
+    // AE chrome tokens (match panels::ae).
+    let bar = rgb(0x232323);
+    let ctl = rgb(0x2e2e2e);
+    let hov = rgb(0x3a3a3a);
+    let txt = rgb(0xd7d7d7);
+    let dim = rgb(0x9a9a9a);
+    let acc = rgb(0x2f7cf6);
 
     h_flex()
         .id("top_toolbar")
@@ -943,38 +953,105 @@ fn render_toolbar(state: &Entity<EditorState>, cx: &App) -> impl IntoElement {  
         .w_full()
         .h(px(36.))
         .px_3()
+        .gap_3()
         .border_b_1()
-        .border_color(cx.theme().border)
-        .bg(cx.theme().secondary)
+        .border_color(rgb(0x101010))
+        .bg(bar)
         .items_center()
         .justify_between()
+        .text_xs()
+        .text_color(txt)
         .child(
             h_flex()
                 .gap_2()
                 .items_center()
-                .child(
-                    h_flex()
-                        .gap_1p5()
-                        .items_center()
-                        .min_w_0()
-                        .font_bold()
-                        .text_xs()
-                        .child(div().w(px(16.)).h(px(16.)).flex().items_center().justify_center().child(gpui_kit::assets::IconName::Film))
-                        .child(div().truncate().child(format!("Motion Studio — {}", s_read.project_display_name()))),
-                )
-                .child(div().w(px(1.)).h(px(16.)).bg(cx.theme().border).mx_1())
+                // Active tool cycler.
                 .child(
                     div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(format!("Tool: {active_tool:?}")),
+                        .id("active_tool_pill")
+                        .test_support()
+                        .cursor_pointer()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(ctl)
+                        .hover(|s| s.bg(hov))
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            s_tool.update(cx, |s, cx| {
+                                s.set_tool(next_tool);
+                                cx.notify();
+                            });
+                        })
+                        .child(format!("Active Tool: {tool_name} ({tool_key})")),
+                )
+                // Fill / Stroke wells.
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .items_center()
+                        .text_color(dim)
+                        .child(div().child("Fill:"))
+                        .child(div().w(px(12.)).h(px(12.)).rounded_sm().bg(Rgba { r: fill.r, g: fill.g, b: fill.b, a: 1.0 }))
+                        .child(div().font_medium().text_color(txt).child(fill_hex)),
+                )
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .items_center()
+                        .text_color(dim)
+                        .child(div().child("Stroke:"))
+                        .child(div().child("None")),
                 ),
         )
         .child(
             h_flex()
                 .gap_2()
                 .items_center()
-                .child(full_width_btn),
+                // Snapping magnet.
+                .child(
+                    div()
+                        .id("snapping_toggle")
+                        .test_support()
+                        .cursor_pointer()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(if snapping { acc } else { ctl })
+                        .hover(|s| s.bg(hov))
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            s_snap.update(cx, |s, cx| {
+                                s.toggle_snapping();
+                                cx.notify();
+                            });
+                        })
+                        .child("Snapping"),
+                )
+                .child(div().text_color(dim).child("100% (Fit)"))
+                .child(div().text_color(dim).child("Full Res (1:1)"))
+                .child(div().text_color(dim).child("RGB Channel"))
+                .child(div().text_color(dim).child("+"))
+                .child(
+                    div()
+                        .id("toggle_timeline_full_width_button")
+                        .test_support()
+                        .cursor_pointer()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .bg(if is_full_width { acc } else { ctl })
+                        .hover(|s| s.opacity(0.85))
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            s_full.update(cx, |s, cx| {
+                                s.toggle_timeline_full_width();
+                                cx.notify();
+                            });
+                        })
+                        .child(div().w(px(14.)).h(px(14.)).flex().items_center().justify_center().child(if is_full_width { gpui_kit::assets::IconName::Minimize2 } else { gpui_kit::assets::IconName::Maximize2 }))
+                        .child(if is_full_width { "Timeline: Full Width" } else { "Timeline: Docked" }),
+                ),
         )
 }
 
@@ -3437,6 +3514,46 @@ mod tests {
             panels.viewer.read_with(cx, |panel, _| panel.pick_top_at(-900.0, -500.0))
         });
         assert_eq!(picked_bg.as_deref(), Some("layer_bg"));
+    }
+
+    #[gpui_kit::test]
+    fn test_ae_chrome_visible(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.select_layer(Some("layer_accent".to_string()));
+                cx.notify();
+            });
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            // AE top bar.
+            assert!(window.find("active_tool_pill").visible());
+            assert!(window.find("snapping_toggle").visible());
+            assert!(window.find("toggle_timeline_full_width_button").visible());
+            // Viewer strip + transport.
+            assert!(window.find("viewer_tool_strip").visible());
+            assert!(window.find("timecode_display").visible());
+            assert!(window.find("transport_play").visible());
+        })
+        .expect("update_window failed");
+        // Snapping toggle persists through state (toolbar wiring).
+        assert!(app_view.read_with(cx, |view, cx| view.state().read(cx).snapping));
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.toggle_snapping();
+                cx.notify();
+            });
+        });
+        assert!(!app_view.read_with(cx, |view, cx| view.state().read(cx).snapping));
     }
 
     #[gpui_kit::test]
