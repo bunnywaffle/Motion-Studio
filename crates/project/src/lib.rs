@@ -19,6 +19,7 @@ pub mod shader;
 pub mod shader_interp;
 pub mod stock;
 pub mod timecode;
+pub mod trace;
 pub mod transform;
 pub mod vec2;
 
@@ -39,10 +40,11 @@ pub use keyframe::{
 };
 pub use layer::{Layer, LayerSource, ShapeType, TextAlign};
 pub use marker::Marker;
-pub use mask::{Mask, MaskMode};
+pub use mask::{Mask, MaskMode, MaskShapeKind};
 pub use matte::TrackMatteMode;
 pub use ofx::{ofx_in_category, ofx_lookup, OfxCategory, OfxEffectDescriptor, OfxParamDescriptor, OFX_SUITE};
 pub use path::{Path, PathBooleanOp, PathPoint, PathPointKind};
+pub use trace::{AutoTraceOptions, TraceChannel, TraceRange, TracedContour};
 pub use project::{Project, ProjectSettings, CURRENT_FORMAT_VERSION};
 pub use property::Property;
 pub use shader::{

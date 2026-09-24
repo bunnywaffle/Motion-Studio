@@ -3425,6 +3425,63 @@ pub struct PropertiesPanel {
     /// the opened effect or its source hash changes so Apply refreshes it).
     pub shader_editor: Option<Entity<TextareaState>>,
     pub shader_editor_key: Option<(String, u64)>,
+    /// Mask Shape dialog target `(layer_id, mask_id)` (`None` = closed).
+    pub mask_shape_open: Option<(String, String)>,
+    /// Live numeric editors for the Mask Shape dialog (created on open).
+    pub mask_shape_editors: Option<MaskShapeEditors>,
+    /// Mask being renamed + its live editor (`None` = not renaming).
+    pub mask_rename_editor: Option<MaskRenameEditor>,
+    /// Auto-trace options disclosure in the Masks card.
+    pub trace_open: bool,
+    /// Pending Auto-trace options (mirrors the AE dialog; Run applies).
+    pub trace_opts: project::AutoTraceOptions,
+    /// Last auto-trace error shown under the Trace block.
+    pub trace_error: Option<String>,
+    /// Armed shape-clipboard source layer for cross-layer Shape→Mask.
+    pub shape_clipboard: Option<String>,
+}
+
+/// Live rename editor for one mask (Enter commits, blur/Esc cancels).
+pub struct MaskRenameEditor {
+    pub target: (String, String),
+    pub editor: Entity<InputState>,
+    pub _sub: Subscription,
+}
+
+/// Live numeric editors for the Mask Shape dialog (X/Y/W/H + kind pill).
+/// Texts are cached on every keystroke (Change events) so Apply never has
+/// to read entities from inside event handlers.
+pub struct MaskShapeEditors {
+    pub target: (String, String),
+    pub kind: project::MaskShapeKind,
+    pub x: Entity<InputState>,
+    pub y: Entity<InputState>,
+    pub w: Entity<InputState>,
+    pub h: Entity<InputState>,
+    pub x_text: String,
+    pub y_text: String,
+    pub w_text: String,
+    pub h_text: String,
+    pub _subs: Vec<Subscription>,
+}
+
+/// Cloneable render snapshot of the open Mask Shape dialog (the live
+/// struct holds Subscriptions, so the section gets entities only).
+#[derive(Clone)]
+pub struct MaskShapeView {
+    pub target: (String, String),
+    pub kind: project::MaskShapeKind,
+    pub x: Entity<InputState>,
+    pub y: Entity<InputState>,
+    pub w: Entity<InputState>,
+    pub h: Entity<InputState>,
+}
+
+/// Cloneable render snapshot of the active mask rename editor.
+#[derive(Clone)]
+pub struct MaskRenameView {
+    pub target: (String, String),
+    pub editor: Entity<InputState>,
 }
 
 struct TextInspectorInputs {
@@ -3460,6 +3517,13 @@ impl PropertiesPanel {
             shader_editor_open: None,
             shader_editor: None,
             shader_editor_key: None,
+            mask_shape_open: None,
+            mask_shape_editors: None,
+            mask_rename_editor: None,
+            trace_open: false,
+            trace_opts: project::AutoTraceOptions::default(),
+            trace_error: None,
+            shape_clipboard: None,
         }
     }
 
@@ -3639,6 +3703,130 @@ impl PropertiesPanel {
                 cx.notify();
             }
         });
+    }
+
+    /// Open the Mask Shape dialog for one mask (numeric Rectangle/Ellipse
+    /// bounding box, After Effects: Layer > Mask > Mask Shape). Editors are
+    /// prefilled from the mask's current bounds.
+    pub fn open_mask_shape_dialog(
+        &mut self,
+        lid: &str,
+        mid: &str,
+        kind: project::MaskShapeKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (x, y, w, h) = self
+            .state
+            .read(cx)
+            .active_composition()
+            .and_then(|c| c.get_layer(lid))
+            .and_then(|l| l.get_mask(mid))
+            .and_then(|m| m.path.value.bounds())
+            .map(|(mn, mx)| (mn.x, mn.y, mx.x - mn.x, mx.y - mn.y))
+            .unwrap_or((0.0, 0.0, 200.0, 200.0));
+        let fmt = |v: f32| {
+            if (v - v.round()).abs() < 1e-4 {
+                format!("{}", v.round() as i64)
+            } else {
+                format!("{v:.1}")
+            }
+        };
+        let mk = |slot: u8, v: String, window: &mut Window, cx: &mut Context<Self>| -> (Entity<InputState>, Subscription) {
+            let editor = cx.new(|cx| {
+                let mut st = InputState::new(window, cx);
+                st.set_value(v, window, cx);
+                st
+            });
+            let sub = cx.subscribe(
+                &editor,
+                move |this: &mut Self, input: Entity<InputState>, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        let text = input.read(cx).value().to_string();
+                        if let Some(ed) = this.mask_shape_editors.as_mut() {
+                            match slot {
+                                0 => ed.x_text = text,
+                                1 => ed.y_text = text,
+                                2 => ed.w_text = text,
+                                _ => ed.h_text = text,
+                            }
+                        }
+                        cx.notify();
+                    }
+                },
+            );
+            (editor, sub)
+        };
+        let (x, y, w, h) = (fmt(x), fmt(y), fmt(w), fmt(h));
+        let (xe, xs) = mk(0, x.clone(), window, cx);
+        let (ye, ys) = mk(1, y.clone(), window, cx);
+        let (we, ws) = mk(2, w.clone(), window, cx);
+        let (he, hs) = mk(3, h.clone(), window, cx);
+        self.mask_shape_editors = Some(MaskShapeEditors {
+            target: (lid.to_string(), mid.to_string()),
+            kind,
+            x: xe,
+            y: ye,
+            w: we,
+            h: he,
+            x_text: x,
+            y_text: y,
+            w_text: w,
+            h_text: h,
+            _subs: vec![xs, ys, ws, hs],
+        });
+        if let Some(ed) = self.mask_shape_editors.as_ref().map(|e| e.x.clone()) {
+            let handle = ed.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        }
+        cx.notify();
+    }
+
+    /// Begin renaming one mask (Enter commits, blur cancels).
+    pub fn begin_mask_rename(
+        &mut self,
+        lid: &str,
+        mid: &str,
+        initial: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let editor = cx.new(|cx| {
+            let mut st = InputState::new(window, cx);
+            st.set_value(initial, window, cx);
+            st
+        });
+        let st = self.state.clone();
+        let (lid_s, mid_s) = (lid.to_string(), mid.to_string());
+        let sub = cx.subscribe(
+            &editor,
+            move |this: &mut Self, input: Entity<InputState>, event: &InputEvent, cx| {
+                match event {
+                    InputEvent::PressEnter { .. } => {
+                        let text = input.read(cx).value().trim().to_string();
+                        st.update(cx, |s, cx| {
+                            let _ = s.rename_mask(&lid_s, &mid_s, &text);
+                            cx.notify();
+                        });
+                        this.mask_rename_editor = None;
+                        cx.notify();
+                    }
+                    InputEvent::Blur => {
+                        this.mask_rename_editor = None;
+                        cx.notify();
+                    }
+                    _ => {}
+                }
+            },
+        );
+        self.mask_rename_editor = Some(MaskRenameEditor {
+            target: (lid.to_string(), mid.to_string()),
+            editor: editor.clone(),
+            _sub: sub,
+        });
+        let handle = editor.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
     }
 }
 
@@ -4628,12 +4816,20 @@ fn mask_param_row(
         .into_any_element()
 }
 
-/// Masks card body for the Properties panel: per-mask enable, combine
-/// mode, invert, edit target, path keyframe nav, scalar rows, delete.
+/// Masks card body for the Properties panel: creation toolbar (AE parity:
+/// numeric shapes, full-layer, shape/motion/text/trace sources), per-mask
+/// enable, lock, rename, combine mode, invert, edit target, path keyframe
+/// nav, scalar rows, shape dialog, delete.
 fn render_masks_section(
     state: &Entity<EditorState>,
     layer: &project::Layer,
     panel_entity: &Entity<PropertiesPanel>,
+    shape_view: Option<MaskShapeView>,
+    rename_view: Option<MaskRenameView>,
+    trace_open: bool,
+    trace_opts: &project::AutoTraceOptions,
+    trace_error: Option<String>,
+    shape_clipboard: Option<String>,
     cx: &App,
 ) -> AnyElement {
     let lid = layer.id.clone();
@@ -4645,6 +4841,518 @@ fn render_masks_section(
                 .text_color(cx.theme().muted_foreground)
                 .child("No masks. Add one, then edit its nodes in the viewport Path Editor."),
         );
+    }
+    let is_shape_layer = matches!(&layer.source, project::LayerSource::Shape { .. });
+    let is_text_layer = matches!(&layer.source, project::LayerSource::Text { .. });
+
+    // --- Creation toolbar (AE parity: Layer > Mask creation methods) ---
+    {
+        let s_mask = state.clone();
+        let s_rect = state.clone();
+        let s_ellipse = state.clone();
+        let s_full = state.clone();
+        let lid_mask = lid.clone();
+        let lid_rect = lid.clone();
+        let lid_ellipse = lid.clone();
+        let lid_full = lid.clone();
+        let p_rect = panel_entity.clone();
+        let p_ellipse = panel_entity.clone();
+        col = col.child(
+            h_flex()
+                .gap_1()
+                .items_center()
+                .text_xs()
+                .child(
+                    div()
+                        .id("mask_add_button")
+                        .test_support()
+                        .cursor_pointer()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .bg(cx.theme().muted)
+                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            s_mask.update(cx, |s, cx| {
+                                if let Ok(mid) = s.add_mask_to_layer(&lid_mask) {
+                                    s.set_active_mask_edit(Some((lid_mask.clone(), mid)));
+                                }
+                                cx.notify();
+                            });
+                        })
+                        .child("+ Mask"),
+                )
+                .child(
+                    div()
+                        .id("mask_add_rect")
+                        .test_support()
+                        .cursor_pointer()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .bg(cx.theme().muted)
+                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                        .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                            let mid = s_rect.update(cx, |s, cx| {
+                                let mid = s.add_shaped_mask(&lid_rect, project::MaskShapeKind::Rectangle).ok();
+                                if let Some(ref m) = mid {
+                                    s.set_active_mask_edit(Some((lid_rect.clone(), m.clone())));
+                                }
+                                cx.notify();
+                                mid
+                            });
+                            if let Some(m) = mid {
+                                p_rect.update(cx, |this, cx| {
+                                    this.open_mask_shape_dialog(&lid_rect, &m, project::MaskShapeKind::Rectangle, window, cx);
+                                });
+                            }
+                        })
+                        .child("+ Rect"),
+                )
+                .child(
+                    div()
+                        .id("mask_add_ellipse")
+                        .test_support()
+                        .cursor_pointer()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .bg(cx.theme().muted)
+                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                        .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                            let mid = s_ellipse.update(cx, |s, cx| {
+                                let mid = s.add_shaped_mask(&lid_ellipse, project::MaskShapeKind::Ellipse).ok();
+                                if let Some(ref m) = mid {
+                                    s.set_active_mask_edit(Some((lid_ellipse.clone(), m.clone())));
+                                }
+                                cx.notify();
+                                mid
+                            });
+                            if let Some(m) = mid {
+                                p_ellipse.update(cx, |this, cx| {
+                                    this.open_mask_shape_dialog(&lid_ellipse, &m, project::MaskShapeKind::Ellipse, window, cx);
+                                });
+                            }
+                        })
+                        .child("+ Ellipse"),
+                )
+                .child(
+                    div()
+                        .id("mask_add_full")
+                        .test_support()
+                        .cursor_pointer()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .bg(cx.theme().muted)
+                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            s_full.update(cx, |s, cx| {
+                                if let Ok(mid) = s.add_layer_sized_mask(&lid_full) {
+                                    s.set_active_mask_edit(Some((lid_full.clone(), mid)));
+                                }
+                                cx.notify();
+                            });
+                        })
+                        .child("+ Full"),
+                ),
+        );
+    }
+    // --- Source toolbar: shape / motion / text / trace (AE parity) ---
+    {
+        let s_paste = state.clone();
+        let s_motion = state.clone();
+        let s_text = state.clone();
+        let lid_paste = lid.clone();
+        let lid_motion = lid.clone();
+        let lid_text = lid.clone();
+        let lid_copy = lid.clone();
+        let p_trace = panel_entity.clone();
+        let p_copy = panel_entity.clone();
+        let clipboard_src = shape_clipboard.clone();
+        let mut row = h_flex().gap_1().items_center().text_xs();
+        // Cross-layer shape copy: arm on a shape layer, paste anywhere.
+        if is_shape_layer {
+            let armed = clipboard_src.as_deref() == Some(lid_copy.as_str());
+            row = row.child(
+                div()
+                    .id("mask_copy_shape")
+                    .test_support()
+                    .cursor_pointer()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .bg(if armed { cx.theme().primary } else { cx.theme().muted })
+                    .text_color(if armed { cx.theme().primary_foreground } else { cx.theme().foreground })
+                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        p_copy.update(cx, |this, cx| {
+                            this.shape_clipboard = if armed { None } else { Some(lid_copy.clone()) };
+                            cx.notify();
+                        });
+                    })
+                    .child(if armed { "Shape Armed (Clear)" } else { "Copy Shape" }),
+            );
+        }
+        if let Some(src) = clipboard_src {
+            if src != lid {
+                row = row.child(
+                    div()
+                        .id("mask_paste_shape")
+                        .test_support()
+                        .cursor_pointer()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .bg(cx.theme().muted)
+                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            s_paste.update(cx, |s, cx| {
+                                if let Ok(mid) = s.shape_path_to_mask(&src, &lid_paste) {
+                                    s.set_active_mask_edit(Some((lid_paste.clone(), mid)));
+                                }
+                                cx.notify();
+                            });
+                        })
+                        .child("Paste Shape→Mask"),
+                );
+            }
+        }
+        row = row
+            .child(
+                div()
+                    .id("mask_from_motion")
+                    .test_support()
+                    .cursor_pointer()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .bg(cx.theme().muted)
+                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        s_motion.update(cx, |s, cx| {
+                            if let Ok(mid) = s.motion_path_to_mask(&lid_motion, &lid_motion) {
+                                s.set_active_mask_edit(Some((lid_motion.clone(), mid)));
+                            }
+                            cx.notify();
+                        });
+                    })
+                    .child("Motion→Mask"),
+            )
+            .child(
+                div()
+                    .id("mask_trace_toggle")
+                    .test_support()
+                    .cursor_pointer()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .bg(if trace_open { cx.theme().primary } else { cx.theme().muted })
+                    .text_color(if trace_open { cx.theme().primary_foreground } else { cx.theme().foreground })
+                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        p_trace.update(cx, |this, cx| {
+                            this.trace_open = !this.trace_open;
+                            cx.notify();
+                        });
+                    })
+                    .child("Trace…"),
+            );
+        if is_text_layer {
+            row = row.child(
+                div()
+                    .id("mask_from_text")
+                    .test_support()
+                    .cursor_pointer()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .bg(cx.theme().muted)
+                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        s_text.update(cx, |s, cx| {
+                            let _ = s.create_masks_from_text(&lid_text);
+                            cx.notify();
+                        });
+                    })
+                    .child("Text→Masks"),
+            );
+        }
+        col = col.child(row);
+    }
+    // --- Auto-trace block (AE Layer > Auto-trace dialog parity) ---
+    if trace_open {
+        let p_chan = panel_entity.clone();
+        let p_thr_m = panel_entity.clone();
+        let p_thr_p = panel_entity.clone();
+        let p_tol_m = panel_entity.clone();
+        let p_tol_p = panel_entity.clone();
+        let p_area_m = panel_entity.clone();
+        let p_area_p = panel_entity.clone();
+        let p_rnd_m = panel_entity.clone();
+        let p_rnd_p = panel_entity.clone();
+        let p_inv = panel_entity.clone();
+        let p_new = panel_entity.clone();
+        let p_range = panel_entity.clone();
+        let p_run = panel_entity.clone();
+        let s_run = state.clone();
+        let lid_run = lid.clone();
+        let opts_run = trace_opts.clone();
+        // Small -/value/+ stepper (mutates panel.trace_opts directly).
+        fn trace_stepper(
+            _id_prefix: &str,
+            label: &str,
+            value: String,
+            minus: Entity<PropertiesPanel>,
+            plus: Entity<PropertiesPanel>,
+            apply: fn(&mut project::AutoTraceOptions, f32),
+            step: f32,
+            cx: &App,
+        ) -> AnyElement {
+            let m = minus.clone();
+            let p = plus.clone();
+            h_flex()
+                .gap_1()
+                .items_center()
+                .child(
+                    div()
+                        .text_xs()
+                        .w(px(78.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(label.to_string()),
+                )
+                .child(
+                    div()
+                        .cursor_pointer()
+                        .px_1p5()
+                        .rounded_sm()
+                        .bg(cx.theme().muted)
+                        .hover(|s| s.bg(cx.theme().accent))
+                        .text_xs()
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            m.update(cx, |this, cx| {
+                                apply(&mut this.trace_opts, -step);
+                                cx.notify();
+                            });
+                        })
+                        .child("−"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .min_w(px(52.))
+                        .items_center()
+                        .justify_center()
+                        .flex()
+                        .child(value),
+                )
+                .child(
+                    div()
+                        .cursor_pointer()
+                        .px_1p5()
+                        .rounded_sm()
+                        .bg(cx.theme().muted)
+                        .hover(|s| s.bg(cx.theme().accent))
+                        .text_xs()
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            p.update(cx, |this, cx| {
+                                apply(&mut this.trace_opts, step);
+                                cx.notify();
+                            });
+                        })
+                        .child("+"),
+                )
+                .into_any_element()
+        }
+        let mut tcol = v_flex()
+            .id("mask_trace_block")
+            .test_support()
+            .p_2()
+            .gap_1()
+            .rounded_sm()
+            .bg(cx.theme().secondary);
+        tcol = tcol.child(
+            h_flex()
+                .gap_1()
+                .items_center()
+                .text_xs()
+                .child(
+                    div()
+                        .text_xs()
+                        .w(px(78.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Channel"),
+                )
+                .child(
+                    div()
+                        .id("mask_trace_channel")
+                        .test_support()
+                        .cursor_pointer()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(cx.theme().muted)
+                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            p_chan.update(cx, |this, cx| {
+                                this.trace_opts.channel = this.trace_opts.channel.cycle();
+                                cx.notify();
+                            });
+                        })
+                        .child(trace_opts.channel.label().to_string()),
+                )
+                .child(
+                    div()
+                        .cursor_pointer()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(cx.theme().muted)
+                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            p_range.update(cx, |this, cx| {
+                                this.trace_opts.range = match this.trace_opts.range {
+                                    project::TraceRange::CurrentFrame => project::TraceRange::WorkArea,
+                                    project::TraceRange::WorkArea => project::TraceRange::CurrentFrame,
+                                };
+                                cx.notify();
+                            });
+                        })
+                        .child(trace_opts.range.label().to_string()),
+                ),
+        );
+        tcol = tcol
+            .child(trace_stepper(
+                "thr",
+                "Threshold",
+                format!("{:.0}%", trace_opts.threshold_pct),
+                p_thr_m,
+                p_thr_p,
+                |o, d| o.threshold_pct = (o.threshold_pct + d).clamp(0.0, 100.0),
+                5.0,
+                cx,
+            ))
+            .child(trace_stepper(
+                "tol",
+                "Tolerance",
+                format!("{:.1} px", trace_opts.tolerance_px),
+                p_tol_m,
+                p_tol_p,
+                |o, d| o.tolerance_px = (o.tolerance_px + d).max(0.0),
+                0.5,
+                cx,
+            ))
+            .child(trace_stepper(
+                "area",
+                "Min Area",
+                format!("{:.0} px", trace_opts.min_area_px),
+                p_area_m,
+                p_area_p,
+                |o, d| o.min_area_px = (o.min_area_px + d).max(0.0),
+                4.0,
+                cx,
+            ))
+            .child(trace_stepper(
+                "rnd",
+                "Roundness",
+                format!("{:.0}%", trace_opts.corner_roundness),
+                p_rnd_m,
+                p_rnd_p,
+                |o, d| o.corner_roundness = (o.corner_roundness + d).clamp(0.0, 100.0),
+                10.0,
+                cx,
+            ));
+        tcol = tcol.child(
+            h_flex()
+                .gap_1()
+                .items_center()
+                .text_xs()
+                .child(
+                    div()
+                        .cursor_pointer()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(if trace_opts.invert { cx.theme().primary } else { cx.theme().muted })
+                        .text_color(if trace_opts.invert { cx.theme().primary_foreground } else { cx.theme().foreground })
+                        .hover(|s| s.bg(cx.theme().accent))
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            p_inv.update(cx, |this, cx| {
+                                this.trace_opts.invert = !this.trace_opts.invert;
+                                cx.notify();
+                            });
+                        })
+                        .child(if trace_opts.invert { "Inverted" } else { "Invert" }),
+                )
+                .child(
+                    div()
+                        .cursor_pointer()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(if trace_opts.apply_to_new_layer { cx.theme().primary } else { cx.theme().muted })
+                        .text_color(if trace_opts.apply_to_new_layer { cx.theme().primary_foreground } else { cx.theme().foreground })
+                        .hover(|s| s.bg(cx.theme().accent))
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            p_new.update(cx, |this, cx| {
+                                this.trace_opts.apply_to_new_layer = !this.trace_opts.apply_to_new_layer;
+                                cx.notify();
+                            });
+                        })
+                        .child(if trace_opts.apply_to_new_layer { "New Layer: On" } else { "New Layer: Off" }),
+                )
+                .child(
+                    div()
+                        .id("mask_trace_run")
+                        .test_support()
+                        .cursor_pointer()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(cx.theme().primary)
+                        .text_color(cx.theme().primary_foreground)
+                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            let res = s_run.update(cx, |s, cx| {
+                                let r = s.auto_trace_masks(&lid_run, &opts_run);
+                                cx.notify();
+                                r
+                            });
+                            match res {
+                                Ok(ids) => {
+                                    if let Some(first) = ids.first() {
+                                        let lid_a = lid_run.clone();
+                                        let mid_a = first.clone();
+                                        s_run.update(cx, |s, cx| {
+                                            s.set_active_mask_edit(Some((lid_a, mid_a)));
+                                            cx.notify();
+                                        });
+                                    }
+                                    p_run.update(cx, |this, cx| {
+                                        this.trace_error = None;
+                                        cx.notify();
+                                    });
+                                }
+                                Err(e) => {
+                                    p_run.update(cx, |this, cx| {
+                                        this.trace_error = Some(e);
+                                        cx.notify();
+                                    });
+                                }
+                            }
+                        })
+                        .child("Run Trace"),
+                ),
+        );
+        if let Some(err) = trace_error {
+            tcol = tcol.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0xef4444))
+                    .child(err),
+            );
+        }
+        col = col.child(tcol);
     }
     for mask in &layer.masks {
         let mid = mask.id.clone();
@@ -4659,6 +5367,7 @@ fn render_masks_section(
         let s_k = state.clone();
         let s_p = state.clone();
         let s_n = state.clone();
+        let s_lock = state.clone();
         let lid_t = lid.clone();
         let mid_t = mid.clone();
         let lid_m = lid.clone();
@@ -4677,6 +5386,14 @@ fn render_masks_section(
         let mid_n = mid.clone();
         let lid_c = lid.clone();
         let mid_c = mid.clone();
+        let lid_l = lid.clone();
+        let mid_l = mid.clone();
+        let locked_now = mask.locked;
+        let lid_r = lid.clone();
+        let mid_r = mid.clone();
+        let p_r = panel_entity.clone();
+        let mask_name_now = mask.name.clone();
+        let renaming_here = rename_view.as_ref().map(|v| v.target.clone()) == Some((lid.clone(), mid.clone()));
 
         let current_tc = state.read(cx).current_timecode();
         let path_kf = mask.path.has_keyframe_at(&current_tc);
@@ -4726,15 +5443,37 @@ fn render_masks_section(
                                 })
                                 .child(if mask.enabled { icon_box(IconName::Eye) } else { icon_box(IconName::EyeOff) }),
                         )
-                        .child(
-                            div()
+                        .child(match rename_view.clone() {
+                            Some(v) if v.target == (lid.clone(), mid.clone()) => {
+                                Input::new(&v.editor).w(px(110.)).into_any_element()
+                            }
+                            _ => div()
                                 .font_semibold()
                                 .text_color(if mask.enabled {
                                     cx.theme().foreground
                                 } else {
                                     cx.theme().muted_foreground
                                 })
-                                .child(format!("{} · {} pts{}", mask.name, node_count, if is_closed { " · closed" } else { "" })),
+                                .child(format!("{} · {} pts{}{}", mask.name, node_count, if is_closed { " · closed" } else { "" }, if mask.locked { " · locked" } else { "" }))
+                                .into_any_element(),
+                        })
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("mask_rename_{mid}")))
+                                .test_support()
+                                .cursor_pointer()
+                                .px_1p5()
+                                .py_0p5()
+                                .rounded_sm()
+                                .bg(cx.theme().muted)
+                                .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                .text_xs()
+                                .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                                    p_r.update(cx, |this, cx| {
+                                        this.begin_mask_rename(&lid_r, &mid_r, mask_name_now.clone(), window, cx);
+                                    });
+                                })
+                                .child(if renaming_here { "Renaming…" } else { "Rename" }),
                         ),
                 )
                 .child(
@@ -4758,6 +5497,25 @@ fn render_masks_section(
                                     });
                                 })
                                 .child(mask.mode.label()),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("mask_lock_{mid}")))
+                                .test_support()
+                                .cursor_pointer()
+                                .px_1p5()
+                                .py_0p5()
+                                .rounded_sm()
+                                .bg(if mask.locked { cx.theme().primary } else { cx.theme().muted })
+                                .text_color(if mask.locked { cx.theme().primary_foreground } else { cx.theme().foreground })
+                                .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                    s_lock.update(cx, |s, cx| {
+                                        let _ = s.set_mask_locked(&lid_l, &mid_l, !locked_now);
+                                        cx.notify();
+                                    });
+                                })
+                                .child(if mask.locked { "Locked" } else { "Lock" }),
                         )
                         .child(
                             div()
@@ -4853,6 +5611,55 @@ fn render_masks_section(
                                 })
                         .child(if is_editing { "Editing…" } else { "Edit Nodes" }),
                 )
+                .child({
+                    let s_shape = state.clone();
+                    let p_shape = panel_entity.clone();
+                    let lid_s = lid.clone();
+                    let mid_s = mid.clone();
+                    let dialog_open = shape_view.as_ref().map(|v| v.target.clone()) == Some((lid.clone(), mid.clone()));
+                    div()
+                        .id(SharedString::from(format!("mask_shape_{mid}")))
+                        .test_support()
+                        .cursor_pointer()
+                        .px_1p5()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(if dialog_open { cx.theme().primary } else { cx.theme().muted })
+                        .text_color(if dialog_open { cx.theme().primary_foreground } else { cx.theme().foreground })
+                        .hover(|s| s.bg(cx.theme().accent))
+                        .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                            if dialog_open {
+                                p_shape.update(cx, |this, cx| {
+                                    this.mask_shape_editors = None;
+                                    cx.notify();
+                                });
+                            } else {
+                                // Guess the primitive from the current path.
+                                let kind = s_shape.update(cx, |s, _| {
+                                    s.active_composition()
+                                        .and_then(|c| c.get_layer(&lid_s))
+                                        .and_then(|l| l.get_mask(&mid_s))
+                                        .map(|m| {
+                                            let pts = &m.path.value.points;
+                                            if pts.len() == 4
+                                                && pts.iter().all(|p| {
+                                                    p.kind == project::PathPointKind::Smooth
+                                                })
+                                            {
+                                                project::MaskShapeKind::Ellipse
+                                            } else {
+                                                project::MaskShapeKind::Rectangle
+                                            }
+                                        })
+                                        .unwrap_or(project::MaskShapeKind::Rectangle)
+                                });
+                                p_shape.update(cx, |this, cx| {
+                                    this.open_mask_shape_dialog(&lid_s, &mid_s, kind, window, cx);
+                                });
+                            }
+                        })
+                        .child("Shape…")
+                })
                 .child(
                     h_flex()
                         .gap_0p5()
@@ -4912,38 +5719,141 @@ fn render_masks_section(
             .child(mask_param_row(state, panel_entity, &lid, &mid, "feather", "Feather", format!("{:.1} px", mask.feather.value), 0.5, cx))
             .child(mask_param_row(state, panel_entity, &lid, &mid, "expansion", "Expansion", format!("{:+.1} px", mask.expansion.value), 0.5, cx));
 
+        // Mask Shape dialog (numeric bounding box, AE parity).
+        if let Some(view) = shape_view.clone() {
+            if view.target == (lid.clone(), mid.clone()) {
+                let p_apply = panel_entity.clone();
+                let p_kind = panel_entity.clone();
+                let p_close = panel_entity.clone();
+                let lid_a = lid.clone();
+                let mid_a = mid.clone();
+                let field = |label: &str, ed: &Entity<InputState>| {
+                    h_flex()
+                        .gap_1()
+                        .items_center()
+                        .child(
+                            div()
+                                .text_xs()
+                                .w(px(14.))
+                                .text_color(cx.theme().muted_foreground)
+                                .child(label.to_string()),
+                        )
+                        .child(Input::new(ed).w(px(64.)))
+                };
+                box_el = box_el.child(
+                    v_flex()
+                        .id(SharedString::from(format!("mask_shape_dialog_{mid}")))
+                        .test_support()
+                        .p_2()
+                        .gap_1()
+                        .rounded_sm()
+                        .bg(cx.theme().muted)
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .items_center()
+                                .text_xs()
+                                .child(
+                                    div()
+                                        .cursor_pointer()
+                                        .px_2()
+                                        .py_0p5()
+                                        .rounded_sm()
+                                        .bg(cx.theme().secondary)
+                                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                            p_kind.update(cx, |this, cx| {
+                                                if let Some(ed) = this.mask_shape_editors.as_mut() {
+                                                    ed.kind = ed.kind.cycle();
+                                                }
+                                                cx.notify();
+                                            });
+                                        })
+                                        .child(view.kind.label().to_string()),
+                                )
+                                .child(field("X", &view.x))
+                                .child(field("Y", &view.y)),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .items_center()
+                                .text_xs()
+                                .child(field("W", &view.w))
+                                .child(field("H", &view.h)),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .items_center()
+                                .text_xs()
+                                .child(
+                                    div()
+                                        .cursor_pointer()
+                                        .px_2()
+                                        .py_0p5()
+                                        .rounded_sm()
+                                        .bg(cx.theme().primary)
+                                        .text_color(cx.theme().primary_foreground)
+                                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                            p_apply.update(cx, |this, cx| {
+                                                if let Some(ed) = this.mask_shape_editors.as_ref() {
+                                                    let kind = ed.kind;
+                                                    let parse = |t: &str, fb: f32| {
+                                                        t.trim().parse::<f32>().unwrap_or(fb)
+                                                    };
+                                                    // Fall back to the live bounds per field.
+                                                    let (bx, by, bw, bh) = this
+                                                        .state
+                                                        .read(cx)
+                                                        .active_composition()
+                                                        .and_then(|c| c.get_layer(&lid_a))
+                                                        .and_then(|l| l.get_mask(&mid_a))
+                                                        .and_then(|m| m.path.value.bounds())
+                                                        .map(|(mn, mx)| (mn.x, mn.y, mx.x - mn.x, mx.y - mn.y))
+                                                        .unwrap_or((0.0, 0.0, 200.0, 200.0));
+                                                    let (x, y, w, h) = (
+                                                        parse(&ed.x_text, bx),
+                                                        parse(&ed.y_text, by),
+                                                        parse(&ed.w_text, bw),
+                                                        parse(&ed.h_text, bh),
+                                                    );
+                                                    this.state.update(cx, |s, cx| {
+                                                        let _ = s.set_mask_shape_numeric(&lid_a, &mid_a, kind, x, y, w, h);
+                                                        cx.notify();
+                                                    });
+                                                    this.mask_shape_editors = None;
+                                                }
+                                                cx.notify();
+                                            });
+                                        })
+                                        .child("Apply"),
+                                )
+                                .child(
+                                    div()
+                                        .cursor_pointer()
+                                        .px_2()
+                                        .py_0p5()
+                                        .rounded_sm()
+                                        .bg(cx.theme().secondary)
+                                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                            p_close.update(cx, |this, cx| {
+                                                this.mask_shape_editors = None;
+                                                cx.notify();
+                                            });
+                                        })
+                                        .child("Close"),
+                                ),
+                        ),
+                );
+            }
+        }
+
         col = col.child(box_el);
     }
 
-    // Add-mask row.
-    {
-        let s_add = state.clone();
-        let lid_add = lid.clone();
-        col = col.child(
-            div()
-                .id("mask_add_button")
-                .test_support()
-                .cursor_pointer()
-                .px_2()
-                .py_1()
-                .rounded_sm()
-                .bg(cx.theme().muted)
-                .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-                .text_xs()
-                .items_center()
-                .justify_center()
-                .flex()
-                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                    s_add.update(cx, |s, cx| {
-                        if let Ok(mid) = s.add_mask_to_layer(&lid_add) {
-                            s.set_active_mask_edit(Some((lid_add.clone(), mid)));
-                        }
-                        cx.notify();
-                    });
-                })
-                .child("+ Add Mask (then Pen-click to draw, drag nodes to edit)"),
-        );
-    }
     col.into_any_element()
 }
 
@@ -8725,7 +9635,30 @@ impl Render for PropertiesPanel {
                         // --- Masks Card (first-class vector masks) ---
                         {
                             let p_masks = panel_entity.clone();
-                            let masks_list = render_masks_section(&self.state, layer, &panel_entity, cx);
+                            let shape_view = self.mask_shape_editors.as_ref().map(|e| MaskShapeView {
+                                target: e.target.clone(),
+                                kind: e.kind,
+                                x: e.x.clone(),
+                                y: e.y.clone(),
+                                w: e.w.clone(),
+                                h: e.h.clone(),
+                            });
+                            let rename_view = self.mask_rename_editor.as_ref().map(|e| MaskRenameView {
+                                target: e.target.clone(),
+                                editor: e.editor.clone(),
+                            });
+                            let masks_list = render_masks_section(
+                                &self.state,
+                                layer,
+                                &panel_entity,
+                                shape_view,
+                                rename_view,
+                                self.trace_open,
+                                &self.trace_opts,
+                                self.trace_error.clone(),
+                                self.shape_clipboard.clone(),
+                                cx,
+                            );
                             let masks_card = prop_section(
                                 "masks",
                                 format!("Masks ({})", layer.masks.len()),

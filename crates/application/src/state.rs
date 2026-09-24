@@ -2,9 +2,10 @@ use compositor::{AffineTransform2D, EvaluatedStack, LayerStackEvaluator, SceneGr
 use gpui_kit::component::input::InputState;
 use gpui_kit::{Entity, Subscription};
 use project::{
-    Asset, BlendMode, Color, Composition, Effect, EffectType, Keyframe, KeyframeInterpolation,
-    KeyframeTangent, Layer, LayerSource, Mask, Path, PathPointKind, PlaybackClock, Project,
-    Property, ShapeType, TimeCode, TrackMatteMode, Vec2,
+    Asset, AutoTraceOptions, BlendMode, Color, Composition, Effect, EffectType, Keyframe,
+    KeyframeInterpolation,     KeyframeTangent, Layer, LayerSource, Mask, MaskShapeKind, Path,
+    PathPointKind, PlaybackClock, Project, Property, ShapeType, TimeCode, TraceRange,
+    TrackMatteMode, Vec2,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -1862,6 +1863,9 @@ impl EditorState {
         let mask = layer
             .get_mask_mut(mask_id)
             .ok_or_else(|| format!("Mask {mask_id} not found on layer"))?;
+        if mask.locked {
+            return Err(format!("Mask {mask_id} is locked"));
+        }
         mask.mode = mask.mode.cycle();
         Ok(())
     }
@@ -1878,6 +1882,9 @@ impl EditorState {
         let mask = layer
             .get_mask_mut(mask_id)
             .ok_or_else(|| format!("Mask {mask_id} not found on layer"))?;
+        if mask.locked {
+            return Err(format!("Mask {mask_id} is locked"));
+        }
         mask.invert = !mask.invert;
         Ok(())
     }
@@ -1900,6 +1907,9 @@ impl EditorState {
         let mask = layer
             .get_mask_mut(mask_id)
             .ok_or_else(|| format!("Mask {mask_id} not found on layer"))?;
+        if mask.locked {
+            return Err(format!("Mask {mask_id} is locked"));
+        }
         if mask.nudge_param(param_name, delta) {
             Ok(())
         } else {
@@ -2001,6 +2011,9 @@ impl EditorState {
             .points
             .get_mut(index)
             .ok_or_else(|| format!("Mask node {index} out of range"))?;
+        if mask.locked {
+            return Err(format!("Mask {mask_id} is locked"));
+        }
         node.move_to(pos);
         if mask.path.is_animated() {
             let snapshot = mask.path.value.clone();
@@ -2047,6 +2060,9 @@ impl EditorState {
             .points
             .get_mut(index)
             .ok_or_else(|| format!("Mask node {index} out of range"))?;
+        if mask.locked {
+            return Err(format!("Mask {mask_id} is locked"));
+        }
         if is_in {
             node.set_in_abs(tip);
         } else {
@@ -2077,6 +2093,9 @@ impl EditorState {
         let mask = layer
             .get_mask_mut(mask_id)
             .ok_or_else(|| format!("Mask {mask_id} not found on layer"))?;
+        if mask.locked {
+            return Err(format!("Mask {mask_id} is locked"));
+        }
         mask.path.value.remove_point(index).ok_or_else(|| {
             format!("Mask node {index} out of range")
         })?;
@@ -2105,6 +2124,9 @@ impl EditorState {
         let mask = layer
             .get_mask_mut(mask_id)
             .ok_or_else(|| format!("Mask {mask_id} not found on layer"))?;
+        if mask.locked {
+            return Err(format!("Mask {mask_id} is locked"));
+        }
         mask.path.value.line_to(pos);
         if mask.path.is_animated() {
             let snapshot = mask.path.value.clone();
@@ -2137,6 +2159,9 @@ impl EditorState {
             .points
             .get_mut(index)
             .ok_or_else(|| format!("Mask node {index} out of range"))?;
+        if mask.locked {
+            return Err(format!("Mask {mask_id} is locked"));
+        }
         node.convert_to(match node.kind {
             PathPointKind::Corner => PathPointKind::Smooth,
             PathPointKind::Smooth => PathPointKind::Symmetric,
@@ -2167,6 +2192,9 @@ impl EditorState {
         let mask = layer
             .get_mask_mut(mask_id)
             .ok_or_else(|| format!("Mask {mask_id} not found on layer"))?;
+        if mask.locked {
+            return Err(format!("Mask {mask_id} is locked"));
+        }
         mask.path.value.closed = closed;
         Ok(())
     }
@@ -2190,6 +2218,9 @@ impl EditorState {
         let mask = layer
             .get_mask_mut(mask_id)
             .ok_or_else(|| format!("Mask {mask_id} not found on layer"))?;
+        if mask.locked {
+            return Err(format!("Mask {mask_id} is locked"));
+        }
         let prop = mask
             .get_param_property_mut(param_name)
             .ok_or_else(|| format!("Unknown mask param {param_name}"))?;
@@ -2205,6 +2236,630 @@ impl EditorState {
     /// Set the viewport Path Editor target (None exits edit mode).
     pub fn set_active_mask_edit(&mut self, target: Option<(String, String)>) {
         self.active_mask_edit = target;
+    }
+
+    // --- Mask creation methods (After Effects parity) ---------------------
+
+    /// Rename a mask (blank names fall back to "Mask").
+    pub fn rename_mask(
+        &mut self,
+        layer_id: &str,
+        mask_id: &str,
+        name: &str,
+    ) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let mask = layer
+            .get_mask_mut(mask_id)
+            .ok_or_else(|| format!("Mask {mask_id} not found on layer"))?;
+        mask.rename(name);
+        Ok(())
+    }
+
+    /// Lock / unlock a mask (locked masks reject every mutation except
+    /// enable/rename/delete).
+    pub fn set_mask_locked(
+        &mut self,
+        layer_id: &str,
+        mask_id: &str,
+        locked: bool,
+    ) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let mask = layer
+            .get_mask_mut(mask_id)
+            .ok_or_else(|| format!("Mask {mask_id} not found on layer"))?;
+        mask.locked = locked;
+        Ok(())
+    }
+
+    /// Rewrite a mask path from a numeric bounding box (the Mask Shape
+    /// dialog: Rectangle / Ellipse + explicit x/y/w/h in layer-local px).
+    /// Snapshots a keyframe when the path is animated.
+    pub fn set_mask_shape_numeric(
+        &mut self,
+        layer_id: &str,
+        mask_id: &str,
+        kind: MaskShapeKind,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> Result<(), String> {
+        self.checkpoint();
+        let current_tc = self.clock.timecode();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let mask = layer
+            .get_mask_mut(mask_id)
+            .ok_or_else(|| format!("Mask {mask_id} not found on layer"))?;
+        if mask.locked {
+            return Err(format!("Mask {mask_id} is locked"));
+        }
+        mask.path.set_value(kind.path(x, y, w, h));
+        if mask.path.is_animated() {
+            let snapshot = mask.path.value.clone();
+            mask.path.add_keyframe(Keyframe::new(current_tc, snapshot));
+        }
+        Ok(())
+    }
+
+    /// Add a rectangular mask exactly covering the layer's content box
+    /// (After Effects: double-click a shape tool → mask the size of the
+    /// layer).
+    pub fn add_layer_sized_mask(&mut self, layer_id: &str) -> Result<String, String> {
+        let (w, h) = {
+            let comp = self
+                .active_composition()
+                .ok_or_else(|| "No active composition".to_string())?;
+            let layer = comp
+                .get_layer(layer_id)
+                .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+            self.layer_content_dims(layer)
+        };
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let id = next_mask_id(layer);
+        let name = format!("Mask {}", layer.masks.len() + 1);
+        layer
+            .masks
+            .push(Mask::with_path(&id, name, Path::rectangle(0.0, 0.0, w, h)));
+        Ok(id)
+    }
+
+    /// Add a centered rectangle/ellipse mask (Mask Shape dialog primer:
+    /// callers open the numeric dialog right after for exact numbers).
+    pub fn add_shaped_mask(
+        &mut self,
+        layer_id: &str,
+        kind: MaskShapeKind,
+    ) -> Result<String, String> {
+        let (w, h) = {
+            let comp = self
+                .active_composition()
+                .ok_or_else(|| "No active composition".to_string())?;
+            let layer = comp
+                .get_layer(layer_id)
+                .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+            self.layer_content_dims(layer)
+        };
+        let (bw, bh) = (w.min(400.0).max(8.0), h.min(300.0).max(8.0));
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let id = next_mask_id(layer);
+        let name = format!("Mask {}", layer.masks.len() + 1);
+        let path = kind.path((w - bw) / 2.0, (h - bh) / 2.0, bw, bh);
+        layer.masks.push(Mask::with_path(&id, name, path));
+        Ok(id)
+    }
+
+    /// Content-box dims for a layer in layer-local px (mirrors the raster
+    /// estimates so full-size masks line up with pixels).
+    fn layer_content_dims(&self, layer: &Layer) -> (f32, f32) {
+        match &layer.source {
+            LayerSource::Solid { width, height, .. } => (*width as f32, *height as f32),
+            LayerSource::Image { asset_id } => self
+                .project
+                .get_asset(asset_id)
+                .and_then(|a| image::image_dimensions(&a.path).ok())
+                .map(|(w, h)| (w as f32, h as f32))
+                .unwrap_or((1920.0, 1080.0)),
+            LayerSource::Video { .. } => (1920.0, 1080.0),
+            LayerSource::Text { text, font_size, .. } => {
+                let len = text.value.chars().count().max(1) as f32;
+                let fs = font_size.value;
+                ((len * fs * 0.6 + 40.0).max(100.0), (fs * 1.4 + 20.0).max(40.0))
+            }
+            LayerSource::Shape { shape_type } => match shape_type {
+                ShapeType::Rectangle { width, height, .. } => (width.value, height.value),
+                ShapeType::Ellipse { radius_x, radius_y, .. } => {
+                    (radius_x.value * 2.0, radius_y.value * 2.0)
+                }
+                ShapeType::Path { path_data, .. } => {
+                    match Path::from_svg(path_data).frame(8.0) {
+                        Some((_, size)) => (size.x, size.y),
+                        None => (400.0, 300.0),
+                    }
+                }
+            },
+            LayerSource::NestedComposition { composition_id } => self
+                .project
+                .get_composition(composition_id)
+                .map(|c| (c.width as f32, c.height as f32))
+                .unwrap_or((1920.0, 1080.0)),
+            _ => self
+                .active_composition()
+                .map(|c| (c.width as f32, c.height as f32))
+                .unwrap_or((1920.0, 1080.0)),
+        }
+    }
+
+    /// Copy a shape layer's path into a mask on `dst_layer_id` (After
+    /// Effects: convert a shape path to a mask path). Coordinates transfer
+    /// raw (source-local); reposition afterwards when the layers differ —
+    /// the same offset caveat AE documents for path pasting.
+    pub fn shape_path_to_mask(
+        &mut self,
+        src_layer_id: &str,
+        dst_layer_id: &str,
+    ) -> Result<String, String> {
+        let path = {
+            let comp = self
+                .active_composition()
+                .ok_or_else(|| "No active composition".to_string())?;
+            let src = comp
+                .get_layer(src_layer_id)
+                .ok_or_else(|| format!("Layer {src_layer_id} not found"))?;
+            match &src.source {
+                LayerSource::Shape { shape_type } => match shape_type {
+                    ShapeType::Rectangle { width, height, .. } => {
+                        Path::rectangle(0.0, 0.0, width.value, height.value)
+                    }
+                    ShapeType::Ellipse { radius_x, radius_y, .. } => Path::ellipse(
+                        radius_x.value,
+                        radius_y.value,
+                        radius_x.value,
+                        radius_y.value,
+                    ),
+                    ShapeType::Path { path_data, .. } => Path::from_svg(path_data),
+                },
+                _ => return Err(format!("Layer {src_layer_id} is not a shape layer")),
+            }
+        };
+        self.add_mask_path_to_layer(dst_layer_id, "Shape Path", path)
+    }
+
+    /// Paste a layer's Position keyframes into a new mask path on
+    /// `dst_layer_id` (After Effects: motion path → mask path). Each
+    /// position sample is mapped from composition space into the
+    /// destination's layer space at its own keyframe time.
+    pub fn motion_path_to_mask(
+        &mut self,
+        src_layer_id: &str,
+        dst_layer_id: &str,
+    ) -> Result<String, String> {
+        let current_tc = self.clock.timecode();
+        // Snapshot source samples (read-only first for clean borrows).
+        let samples: Vec<(TimeCode, Vec2)> = {
+            let comp = self
+                .active_composition()
+                .ok_or_else(|| "No active composition".to_string())?;
+            let src = comp
+                .get_layer(src_layer_id)
+                .ok_or_else(|| format!("Layer {src_layer_id} not found"))?;
+            let keys = src.transform.position.keyframes();
+            if keys.is_empty() {
+                vec![(current_tc.clone(), src.transform.position.value)]
+            } else {
+                keys.iter().map(|k| (k.time.clone(), k.value)).collect()
+            }
+        };
+        if samples.len() < 2 {
+            return Err("Need at least 2 position samples for a motion path".to_string());
+        }
+        // Map into the destination's layer space (per-sample time).
+        let mut pts = Vec::with_capacity(samples.len());
+        for (tc, comp_pos) in &samples {
+            let local = self
+                .layer_world_matrix_at(dst_layer_id, tc)
+                .and_then(|w| w.inverse())
+                .map(|inv| inv.transform_point(*comp_pos))
+                .ok_or_else(|| format!("Cannot map into layer {dst_layer_id}"))?;
+            pts.push(local);
+        }
+        let mut path = Path::new();
+        for p in pts {
+            path.line_to(p);
+        }
+        // One mask-path keyframe per motion keyframe (all holding the full
+        // trajectory shape, exactly like AE's paste result).
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(dst_layer_id)
+            .ok_or_else(|| format!("Layer {dst_layer_id} not found"))?;
+        let id = next_mask_id(layer);
+        let mut mask = Mask::with_path(&id, "Motion Path", path);
+        mask.path.set_animated(true);
+        for (tc, _) in &samples {
+            mask.path.add_keyframe(Keyframe::new(tc.clone(), mask.path.value.clone()));
+        }
+        layer.masks.push(mask);
+        Ok(id)
+    }
+
+    // --- Auto-trace + Create Masks From Text ------------------------------
+    //
+    // After Effects parity: Layer > Auto-trace converts a channel into
+    // Bézier masks (current frame or work-area keyframes, same layer or a
+    // new solid); Layer > Create Masks From Text rasterizes the text and
+    // traces it (holes become Subtract masks).
+
+    /// Evaluate the active composition at an explicit timecode.
+    fn evaluate_at(&self, tc: &TimeCode) -> Result<compositor::EvaluatedStack, String> {
+        let graph = SceneGraph::from_project(&self.project, &self.active_comp_id)
+            .map_err(|e| format!("Scene graph error: {e:?}"))?;
+        Ok(self.evaluator.evaluate(&graph, tc))
+    }
+
+    /// Decode an image asset for tracing (native resolution; the tracer
+    /// downsamples internally and scales contours back up).
+    fn decoded_image_native(&self, asset_id: &str) -> Option<std::sync::Arc<image::RgbaImage>> {
+        let asset = self.project.get_asset(asset_id)?;
+        Some(std::sync::Arc::new(image::open(&asset.path).ok()?.to_rgba8()))
+    }
+
+    /// Build the 0..1 trace field for an evaluated layer's local content.
+    fn trace_field_for(
+        &self,
+        layer: &compositor::EvaluatedLayer,
+        comp_w: f32,
+        comp_h: f32,
+        channel: project::TraceChannel,
+    ) -> Option<(Vec<f32>, u32, u32, Vec2)> {
+        use crate::raster::layer::{layer_base_dims, path_frame, raster_layer_content};
+        let mut assets = std::collections::HashMap::new();
+        if let LayerSource::Image { asset_id } = &layer.source {
+            assets.insert(asset_id.clone(), self.decoded_image_native(asset_id)?);
+        }
+        let (base_w, base_h) = layer_base_dims(layer, comp_w, comp_h, &assets);
+        let content = raster_layer_content(layer, base_w, base_h, &assets)?;
+        // Content origin in layer-local coords (path shapes are framed).
+        let (ox, oy) = match &layer.source {
+            LayerSource::Shape { shape_type: ShapeType::Path { path_data, .. } } => {
+                let (o, _, _) = path_frame(path_data);
+                (o.x, o.y)
+            }
+            _ => (0.0, 0.0),
+        };
+        let mut field = Vec::with_capacity((content.w * content.h) as usize);
+        for p in &content.px {
+            let a = p.a.max(1e-6);
+            field.push(match channel {
+                project::TraceChannel::Alpha => p.a,
+                project::TraceChannel::Luminance => {
+                    ((0.299 * p.r + 0.587 * p.g + 0.114 * p.b) / a).clamp(0.0, 1.0)
+                }
+                project::TraceChannel::Red => (p.r / a).clamp(0.0, 1.0),
+                project::TraceChannel::Green => (p.g / a).clamp(0.0, 1.0),
+                project::TraceChannel::Blue => (p.b / a).clamp(0.0, 1.0),
+            });
+        }
+        Some((field, content.w, content.h, Vec2::new(ox, oy)))
+    }
+
+    /// Downsample a field past the pixel budget, returning the field, its
+    /// size, and the upsample factor for traced points.
+    fn fit_trace_budget(field: Vec<f32>, w: u32, h: u32) -> (Vec<f32>, u32, u32, f32) {
+        const BUDGET: u64 = 1_500_000;
+        let (mut field, mut w, mut h, mut up) = (field, w, h, 1.0f32);
+        while (w as u64) * (h as u64) > BUDGET && w > 32 && h > 32 {
+            let (nw, nh) = (w / 2, h / 2);
+            let mut small = vec![0.0f32; (nw * nh) as usize];
+            for y in 0..nh {
+                for x in 0..nw {
+                    let mut sum = 0.0f32;
+                    for oy in 0..2 {
+                        for ox in 0..2 {
+                            sum += field[((y * 2 + oy) * w + x * 2 + ox) as usize];
+                        }
+                    }
+                    small[(y * nw + x) as usize] = sum * 0.25;
+                }
+            }
+            field = small;
+            (w, h) = (nw, nh);
+            up *= 2.0;
+        }
+        (field, w, h, up)
+    }
+
+    /// Trace one frame's content into mask-local paths (origin applied,
+    /// budget-scaled back up).
+    fn trace_frame_paths(
+        &self,
+        layer: &compositor::EvaluatedLayer,
+        comp_w: f32,
+        comp_h: f32,
+        opts: &AutoTraceOptions,
+    ) -> Option<Vec<(Path, bool)>> {
+        let (field, w, h, origin) = self.trace_field_for(layer, comp_w, comp_h, opts.channel)?;
+        let (field, w, h, up) = Self::fit_trace_budget(field, w, h);
+        let contours = project::trace::trace_field(w, h, &field, opts);
+        let mut out = Vec::with_capacity(contours.len());
+        for c in contours {
+            let mut path = c.to_path();
+            for pt in path.points.iter_mut() {
+                pt.pos = (pt.pos * up) + origin;
+            }
+            out.push((path, c.is_hole));
+        }
+        Some(out)
+    }
+
+    /// Auto-trace a layer's channel into masks (Layer > Auto-trace).
+    /// Returns the created mask ids (islands as Add, holes as Subtract).
+    pub fn auto_trace_masks(
+        &mut self,
+        layer_id: &str,
+        opts: &AutoTraceOptions,
+    ) -> Result<Vec<String>, String> {
+        let frame_rate: f64;
+        let comp_w: f32;
+        let comp_h: f32;
+        let frames: Vec<TimeCode> = {
+            let comp = self
+                .active_composition()
+                .ok_or_else(|| "No active composition".to_string())?;
+            frame_rate = comp.frame_rate;
+            comp_w = comp.width as f32;
+            comp_h = comp.height as f32;
+            match opts.range {
+                TraceRange::CurrentFrame => vec![self.clock.timecode()],
+                TraceRange::WorkArea => {
+                    let (a, b) = (
+                        self.clock.work_area_in().frames(),
+                        self.clock.work_area_out().frames(),
+                    );
+                    let (lo, hi) = (a.min(b), a.max(b));
+                    // Cap: a full shot at 30fps would bury the project.
+                    const MAX_TRACE_FRAMES: i64 = 120;
+                    (lo..=hi.min(lo + MAX_TRACE_FRAMES - 1))
+                        .map(|f| TimeCode::from_frames(f, frame_rate))
+                        .collect()
+                }
+            }
+        };
+        if frames.is_empty() {
+            return Err("Empty trace range".to_string());
+        }
+        // Trace every frame first (read-only).
+        let mut per_frame: Vec<Vec<(Path, bool)>> = Vec::with_capacity(frames.len());
+        for tc in &frames {
+            let stack = self.evaluate_at(tc)?;
+            let layer = stack
+                .get_layer(layer_id)
+                .ok_or_else(|| format!("Layer {layer_id} not found"))?
+                .clone();
+            let paths = self
+                .trace_frame_paths(&layer, comp_w, comp_h, opts)
+                .unwrap_or_default();
+            per_frame.push(paths);
+        }
+        if per_frame.iter().all(|p| p.is_empty()) {
+            return Err("Auto-trace found no edges (try a lower Threshold)".to_string());
+        }
+        // Target layer: same layer, or a fresh solid sized to the content.
+        let target_id = if opts.apply_to_new_layer {
+            let (src_transform, (w, h)) = {
+                let stack = self.evaluate_at(&frames[0])?;
+                let layer = stack
+                    .get_layer(layer_id)
+                    .ok_or_else(|| format!("Layer {layer_id} not found"))?
+                    .clone();
+                let mut assets = std::collections::HashMap::new();
+                if let LayerSource::Image { asset_id } = &layer.source {
+                    if let Some(img) = self.decoded_image_native(asset_id) {
+                        assets.insert(asset_id.clone(), img);
+                    }
+                }
+                let (bw, bh) = crate::raster::layer::layer_base_dims(&layer, comp_w, comp_h, &assets);
+                let src_transform = self
+                    .active_composition()
+                    .and_then(|c| c.get_layer(layer_id))
+                    .map(|l| l.transform.clone())
+                    .unwrap_or_default();
+                (src_transform, (bw.ceil().max(8.0), bh.ceil().max(8.0)))
+            };
+            self.checkpoint();
+            let comp = self
+                .active_composition_mut()
+                .ok_or_else(|| "No active composition".to_string())?;
+            let mut counter = comp.layers.len() + 1;
+            let mut id = format!("layer_traced_{counter}");
+            while comp.get_layer(&id).is_some() {
+                counter += 1;
+                id = format!("layer_traced_{counter}");
+            }
+            let tc0 = TimeCode::zero(frame_rate);
+            let dur = comp.duration.clone();
+            let mut solid = Layer::solid(&id, "Traced Masks", Color::WHITE, w as u32, h as u32, tc0, dur);
+            // Match the source transform so traced coords line up.
+            solid.transform = src_transform;
+            comp.insert_layer(0, solid)
+                .map_err(|e| format!("Cannot add layer: {e:?}"))?;
+            id
+        } else {
+            layer_id.to_string()
+        };
+        // Create one mask per first-frame contour; keyframe the rest when
+        // the topology matches (count + hole flags), else hold.
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(&target_id)
+            .ok_or_else(|| format!("Layer {target_id} not found"))?;
+        let first = &per_frame[0];
+        let mut ids = Vec::with_capacity(first.len());
+        for (i, (path, is_hole)) in first.iter().enumerate() {
+            let id = next_mask_id(layer);
+            let name = format!("Trace {}", i + 1);
+            let mut mask = Mask::with_path(&id, name, path.clone());
+            if *is_hole {
+                mask.mode = project::MaskMode::Subtract;
+            }
+            if frames.len() > 1 {
+                mask.path.set_animated(true);
+                for (tc, frame_paths) in frames.iter().zip(per_frame.iter()) {
+                    let same_shape = frame_paths.len() == first.len()
+                        && frame_paths.iter().zip(first.iter()).all(|((_, h1), (_, h2))| h1 == h2);
+                    // Index-matched keyframes while the topology holds;
+                    // frames with different topology simply hold.
+                    if same_shape {
+                        if let Some((fp, _)) = frame_paths.get(i) {
+                            mask.path.add_keyframe(Keyframe::new(tc.clone(), fp.clone()));
+                        }
+                    }
+                }
+                // Guarantee the playhead frame holds.
+                if !mask.path.has_keyframe_at(&frames[0]) {
+                    mask.path.add_keyframe(Keyframe::new(frames[0].clone(), path.clone()));
+                }
+            } else {
+                mask.path.set_animated(true);
+                mask.path.add_keyframe(Keyframe::new(frames[0].clone(), path.clone()));
+            }
+            ids.push(id.clone());
+            layer.masks.push(mask);
+        }
+        Ok(ids)
+    }
+
+    /// Create masks from a text layer's characters (Layer > Create Masks
+    /// From Text): the text is rasterized, auto-traced, and the outlines
+    /// land as masks on a new solid (compound characters get Subtract
+    /// holes). The text layer itself is hidden, like AE's Video switch.
+    /// Returns `(solid_id, mask_ids)`.
+    pub fn create_masks_from_text(
+        &mut self,
+        layer_id: &str,
+    ) -> Result<(String, Vec<String>), String> {
+        let current_tc = self.clock.timecode();
+        let frame_rate: f64;
+        let comp_w: f32;
+        let comp_h: f32;
+        let (src_transform, src_name, base_w, base_h, traced): (
+            project::Transform,
+            String,
+            f32,
+            f32,
+            Vec<(Path, bool)>,
+        ) = {
+            let comp = self
+                .active_composition()
+                .ok_or_else(|| "No active composition".to_string())?;
+            frame_rate = comp.frame_rate;
+            comp_w = comp.width as f32;
+            comp_h = comp.height as f32;
+            let src = comp
+                .get_layer(layer_id)
+                .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+            if !matches!(&src.source, LayerSource::Text { .. }) {
+                return Err(format!("Layer {layer_id} is not a text layer"));
+            }
+            let stack = self.evaluate_at(&current_tc)?;
+            let elayer = stack
+                .get_layer(layer_id)
+                .ok_or_else(|| format!("Layer {layer_id} not found"))?
+                .clone();
+            let assets = std::collections::HashMap::new();
+            let (bw, bh) =
+                crate::raster::layer::layer_base_dims(&elayer, comp_w, comp_h, &assets);
+            // Text needs a lower threshold to keep soft glyph edges.
+            let mut opts = AutoTraceOptions::default();
+            opts.threshold_pct = 20.0;
+            opts.min_area_px = 4.0;
+            opts.tolerance_px = 0.75;
+            let traced = self
+                .trace_frame_paths(&elayer, comp_w, comp_h, &opts)
+                .unwrap_or_default();
+            (src.transform.clone(), src.name.clone(), bw, bh, traced)
+        };
+        if traced.is_empty() {
+            return Err("Text has no traceable outlines".to_string());
+        }
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        // Hide the source text (AE turns its Video switch off).
+        if let Some(src) = comp.get_layer_mut(layer_id) {
+            src.visible = false;
+        }
+        let mut counter = comp.layers.len() + 1;
+        let mut solid_id = format!("layer_text_masks_{counter}");
+        while comp.get_layer(&solid_id).is_some() {
+            counter += 1;
+            solid_id = format!("layer_text_masks_{counter}");
+        }
+        let (w, h) = (base_w.ceil().max(8.0) as u32, base_h.ceil().max(8.0) as u32);
+        let mut solid = Layer::solid(
+            &solid_id,
+            format!("{src_name} Masks"),
+            Color::WHITE,
+            w,
+            h,
+            TimeCode::zero(frame_rate),
+            comp.duration.clone(),
+        );
+        solid.transform = src_transform;
+        comp.insert_layer(0, solid)
+            .map_err(|e| format!("Cannot add layer: {e:?}"))?;
+        let layer = comp
+            .get_layer_mut(&solid_id)
+            .ok_or_else(|| "Layer vanished".to_string())?;
+        let mut ids = Vec::with_capacity(traced.len());
+        for (i, (path, is_hole)) in traced.iter().enumerate() {
+            let id = next_mask_id(layer);
+            let mut mask = Mask::with_path(&id, format!("Char {}", i + 1), path.clone());
+            if *is_hole {
+                mask.mode = project::MaskMode::Subtract;
+            }
+            mask.path.set_animated(true);
+            mask.path.add_keyframe(Keyframe::new(current_tc.clone(), path.clone()));
+            ids.push(id.clone());
+            layer.masks.push(mask);
+        }
+        self.selected_layer_id = Some(solid_id.clone());
+        Ok((solid_id, ids))
     }
 
     /// Clear a text layer's baseline path (straight layout resumes).
@@ -4657,8 +5312,17 @@ impl EditorState {
     /// every mousemove does not pay a full `evaluate_current_frame`.
     /// Returns None on missing layers or parent cycles.
     pub fn layer_world_matrix_fast(&self, layer_id: &str) -> Option<AffineTransform2D> {
-        let comp = self.active_composition()?;
         let tc = self.clock.timecode();
+        self.layer_world_matrix_at(layer_id, &tc)
+    }
+
+    /// Same cheap path at an explicit timecode (motion-path conversion).
+    pub fn layer_world_matrix_at(
+        &self,
+        layer_id: &str,
+        tc: &TimeCode,
+    ) -> Option<AffineTransform2D> {
+        let comp = self.active_composition()?;
         let mut chain: Vec<(Vec2, Vec2, Vec2, f32)> = Vec::new();
         let mut seen: Vec<String> = Vec::new();
         let mut cursor: Option<&str> = Some(layer_id);
@@ -4668,7 +5332,7 @@ impl EditorState {
             }
             seen.push(id.to_string());
             let layer = comp.get_layer(id)?;
-            chain.push(layer.transform.evaluate_at(&tc));
+            chain.push(layer.transform.evaluate_at(tc));
             cursor = layer.parent_id.as_deref();
         }
         let mut world = AffineTransform2D::IDENTITY;

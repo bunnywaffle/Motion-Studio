@@ -3611,6 +3611,98 @@ mod tests {
     }
 
     #[test]
+    fn test_mask_shape_numeric_and_full_size() {
+        use crate::state::EditorState;
+        use project::MaskShapeKind;
+
+        let mut state = EditorState::new();
+        let mid = state.add_mask_to_layer("layer_accent").unwrap();
+        // Numeric rectangle.
+        state.set_mask_shape_numeric("layer_accent", &mid, MaskShapeKind::Rectangle, 10.0, 20.0, 100.0, 50.0).unwrap();
+        let path = state.active_composition().unwrap().get_layer("layer_accent").unwrap().get_mask(&mid).unwrap().path.value.clone();
+        let (mn, mx) = path.bounds().unwrap();
+        assert!((mn.x - 10.0).abs() < 1e-3 && (mn.y - 20.0).abs() < 1e-3);
+        assert!((mx.x - 110.0).abs() < 1e-3 && (mx.y - 70.0).abs() < 1e-3);
+        // Numeric ellipse in the same box.
+        state.set_mask_shape_numeric("layer_accent", &mid, MaskShapeKind::Ellipse, 10.0, 20.0, 100.0, 50.0).unwrap();
+        let path = state.active_composition().unwrap().get_layer("layer_accent").unwrap().get_mask(&mid).unwrap().path.value.clone();
+        let (mn, mx) = path.bounds().unwrap();
+        assert!((mn.x - 10.0).abs() < 1.0 && (mx.x - 110.0).abs() < 1.0);
+        assert!((mn.y - 20.0).abs() < 1.0 && (mx.y - 70.0).abs() < 1.0);
+        // Full-layer mask on the 300x300 accent solid.
+        let full = state.add_layer_sized_mask("layer_accent").unwrap();
+        let path = state.active_composition().unwrap().get_layer("layer_accent").unwrap().get_mask(&full).unwrap().path.value.clone();
+        let (mn, mx) = path.bounds().unwrap();
+        assert!((mx.x - mn.x - 300.0).abs() < 1e-3 && (mx.y - mn.y - 300.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_mask_rename_and_lock() {
+        use crate::state::EditorState;
+
+        let mut state = EditorState::new();
+        let mid = state.add_mask_to_layer("layer_accent").unwrap();
+        state.rename_mask("layer_accent", &mid, "Hero Window").unwrap();
+        assert_eq!(state.active_composition().unwrap().get_layer("layer_accent").unwrap().get_mask(&mid).unwrap().name, "Hero Window");
+        state.rename_mask("layer_accent", &mid, "   ").unwrap();
+        assert_eq!(state.active_composition().unwrap().get_layer("layer_accent").unwrap().get_mask(&mid).unwrap().name, "Mask");
+        // Locked masks reject geometry edits but allow enable toggles.
+        state.set_mask_locked("layer_accent", &mid, true).unwrap();
+        assert!(state.move_mask_point_live("layer_accent", &mid, 0, project::Vec2::new(1.0, 1.0)).is_err());
+        assert!(state.append_mask_point("layer_accent", &mid, project::Vec2::new(1.0, 1.0)).is_err());
+        assert!(state.cycle_mask_mode("layer_accent", &mid).is_err());
+        assert!(state.toggle_mask_enabled("layer_accent", &mid).is_ok());
+        state.set_mask_locked("layer_accent", &mid, false).unwrap();
+        assert!(state.cycle_mask_mode("layer_accent", &mid).is_ok());
+    }
+
+    #[test]
+    fn test_shape_and_motion_path_to_mask() {
+        use crate::state::EditorState;
+
+        let mut state = EditorState::new();
+        // Shape path (200x100 rect) becomes a mask path with equal bounds.
+        let rect = state.add_rectangle_shape_layer(200.0, 100.0, None).unwrap();
+        let mid = state.shape_path_to_mask(&rect, &rect).unwrap();
+        let path = state.active_composition().unwrap().get_layer(&rect).unwrap().get_mask(&mid).unwrap().path.value.clone();
+        let (mn, mx) = path.bounds().unwrap();
+        assert!((mx.x - mn.x - 200.0).abs() < 1e-3 && (mx.y - mn.y - 100.0).abs() < 1e-3);
+        assert!(!state.shape_path_to_mask("layer_bg", &rect).is_ok());
+        // Accent position keys (3 bezier keys) become motion-mask keys.
+        let mmid = state.motion_path_to_mask("layer_accent", "layer_accent").unwrap();
+        let mask = state.active_composition().unwrap().get_layer("layer_accent").unwrap().get_mask(&mmid).unwrap().clone();
+        assert!(mask.path.is_animated());
+        assert_eq!(mask.path.keyframes().len(), 3);
+        assert_eq!(mask.path.value.points.len(), 3);
+    }
+
+    #[test]
+    fn test_auto_trace_solid_and_text_to_masks() {
+        use crate::state::EditorState;
+        use project::{AutoTraceOptions, TraceRange};
+
+        let mut state = EditorState::new();
+        // Solid accent (full-bleed alpha) traces to exactly one island.
+        let ids = state.auto_trace_masks("layer_accent", &AutoTraceOptions::default()).unwrap();
+        assert_eq!(ids.len(), 1);
+        let mask = state.active_composition().unwrap().get_layer("layer_accent").unwrap().get_mask(&ids[0]).unwrap().clone();
+        assert_eq!(mask.mode, project::MaskMode::Add);
+        assert!(mask.path.is_animated());
+        // Work-area range also works (capped internally).
+        let mut wa = AutoTraceOptions::default();
+        wa.range = TraceRange::WorkArea;
+        assert!(!state.auto_trace_masks("layer_accent", &wa).unwrap().is_empty());
+        // Text layer becomes a masked solid; source hides.
+        let text = state.add_text_layer("Hi", None).unwrap();
+        let (solid, tmasks) = state.create_masks_from_text(&text).unwrap();
+        assert!(!tmasks.is_empty());
+        let comp = state.active_composition().unwrap();
+        assert!(!comp.get_layer(&text).unwrap().visible);
+        assert!(comp.get_layer(&solid).unwrap().get_mask(&tmasks[0]).is_some());
+        assert_eq!(state.selected_layer_id.as_deref(), Some(solid.as_str()));
+    }
+
+    #[test]
     fn test_mask_lifecycle_and_path_animation() {
         use crate::state::EditorState;
         use project::{MaskMode, Vec2};

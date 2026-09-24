@@ -88,6 +88,42 @@ pub fn combine_mask_coverage(mode: MaskMode, acc: f32, cov: f32, has: bool) -> (
     }
 }
 
+/// Numeric mask-shape primitive for the Mask Shape dialog
+/// (After Effects: Layer > Mask > Mask Shape → Rectangle / Ellipse with an
+/// explicit bounding box).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaskShapeKind {
+    #[default]
+    Rectangle,
+    Ellipse,
+}
+
+impl MaskShapeKind {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Rectangle => "Rectangle",
+            Self::Ellipse => "Ellipse",
+        }
+    }
+
+    pub const fn cycle(self) -> Self {
+        match self {
+            Self::Rectangle => Self::Ellipse,
+            Self::Ellipse => Self::Rectangle,
+        }
+    }
+
+    /// Closed path for the `x, y, w, h` bounding box (layer-local coords).
+    pub fn path(self, x: f32, y: f32, w: f32, h: f32) -> Path {
+        let (w, h) = (w.max(1.0), h.max(1.0));
+        match self {
+            Self::Rectangle => Path::rectangle(x, y, w, h),
+            Self::Ellipse => Path::ellipse(x + w / 2.0, y + h / 2.0, w / 2.0, h / 2.0),
+        }
+    }
+}
+
 /// A single mask on a layer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Mask {
@@ -95,6 +131,10 @@ pub struct Mask {
     pub name: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Locked masks reject every mutation except enable/rename/delete
+    /// (After Effects: locked masks cannot be changed).
+    #[serde(default)]
+    pub locked: bool,
     /// Animatable Bézier path in layer-local coords (morphs when every
     /// keyframe shares topology, steps otherwise).
     pub path: Property<Path>,
@@ -123,6 +163,7 @@ impl Mask {
             id: id.into(),
             name: name.into(),
             enabled: true,
+            locked: false,
             path: Property::new("Mask Path", Path::rectangle(-100.0, -100.0, 200.0, 200.0)),
             mode: MaskMode::Add,
             opacity: Property::new("Mask Opacity", 100.0),
@@ -143,6 +184,17 @@ impl Mask {
     /// Toggle enabled / bypassed.
     pub fn toggle_enabled(&mut self) {
         self.enabled = !self.enabled;
+    }
+
+    /// Toggle the edit lock.
+    pub fn toggle_locked(&mut self) {
+        self.locked = !self.locked;
+    }
+
+    /// Rename (blank names fall back to "Mask").
+    pub fn rename(&mut self, name: &str) {
+        let clean = name.trim();
+        self.name = if clean.is_empty() { "Mask".to_string() } else { clean.to_string() };
     }
 
     /// Retrieve a scalar param property by name for keyframing/scrubbing.
