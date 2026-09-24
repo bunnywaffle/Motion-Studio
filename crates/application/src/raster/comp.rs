@@ -6,6 +6,7 @@ use std::sync::Arc;
 use super::affine::{Aff, aff_mul, fold_transform, skew_about};
 use super::buffer::{FloatBuf, blur_buffer};
 use super::effects::RasterFx;use super::layer::{apply_adjustment, apply_bloom, apply_layer_fx, blit_affine, layer_base_dims, raster_layer_content};
+use super::mask::apply_masks;
 use super::pixel::Px;
 
 /// Full composition raster at `out_w` x `out_h` (canvas px).
@@ -130,6 +131,8 @@ pub fn rasterize_comp(
         // shader/colors...).
         {
             let mut work = content;
+            // Masks shape alpha before effects (AE order).
+            apply_masks(&mut work, &layer.masks);
             apply_layer_fx(&mut work, base_w, base_h, &layer.effects, &fx);
             // Blur + bloom radius (convolution on the content pixmap).
             let mut blur_total = 0.0f32;

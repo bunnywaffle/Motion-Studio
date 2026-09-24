@@ -25,6 +25,7 @@ pub mod buffer;
 pub mod comp;
 pub mod effects;
 pub mod layer;
+pub mod mask;
 pub mod pixel;
 pub mod shapes;
 pub mod stock;
@@ -35,6 +36,7 @@ pub use buffer::{FloatBuf, blur_buffer};
 pub use comp::rasterize_comp;
 pub use effects::{RasterFx, apply_effect_pixels};
 pub use layer::{RasterEntry, decoded_asset, layer_cache_key, rasterize_layer};
+pub use mask::apply_masks;
 pub use pixel::Px;
 pub use stock::apply_stock;
 pub use text::{TextSpec, raster_text};
@@ -164,5 +166,37 @@ mod tests {
         apply_effect_pixels(&mut buf, 32.0, 1.0, &fx, &ctx);
         assert!(buf.px[0].r < 0.1);
         assert!(buf.px[31].r > 0.9);
+    }
+
+    #[test]
+    fn text_on_path_places_ink_along_curve() {
+        use crate::raster::text::{TextSpec, raster_text_on_path};
+        let spec = TextSpec {
+            text: "Hi",
+            family: "Arial",
+            size: 48.0,
+            fill: Px { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+            weight: 400,
+            italic: false,
+            tracking: 0.0,
+            leading: 0.0,
+            align: TextAlign::Center,
+            all_caps: false,
+            stroke_w: 0.0,
+            stroke_col: Px::clear(),
+            baseline_shift: 0.0,
+            box_w: 0.0,
+            bevel: None,
+        };
+        // Horizontal baseline: ink sits near y=0, spread along x.
+        let mut straight = project::Path::new();
+        straight.line_to(project::Vec2::new(-100.0, 0.0));
+        straight.line_to(project::Vec2::new(100.0, 0.0));
+        let (buf, ink, _origin) = raster_text_on_path(&spec, &straight);
+        assert!(ink.2 > ink.0 + 20.0, "text spreads horizontally: {ink:?}");
+        // Ink y-range stays within a line height of the baseline.
+        assert!((ink.3 - ink.1).abs() < 80.0, "{ink:?}");
+        let inked: usize = buf.px.iter().filter(|p| p.a > 0.05).count();
+        assert!(inked > 50, "glyphs rasterized: {inked}");
     }
 }

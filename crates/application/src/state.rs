@@ -3,8 +3,8 @@ use gpui_kit::component::input::InputState;
 use gpui_kit::{Entity, Subscription};
 use project::{
     Asset, BlendMode, Color, Composition, Effect, EffectType, Keyframe, KeyframeInterpolation,
-    KeyframeTangent, Layer, LayerSource, PlaybackClock, Project, Property, ShapeType, TimeCode,
-    TrackMatteMode, Vec2,
+    KeyframeTangent, Layer, LayerSource, Mask, Path, PathPointKind, PlaybackClock, Project,
+    Property, ShapeType, TimeCode, TrackMatteMode, Vec2,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -169,6 +169,9 @@ pub struct EditorState {
     pub spline_editor_open: bool,
     /// Property path currently targeted in the Spline Editor (e.g. "transform.position.y").
     pub spline_prop_path: String,
+    /// Mask node-edit target `(layer_id, mask_id)` for the viewport Path
+    /// Editor. Pen clicks append to it while set (UI state, not undoable).
+    pub active_mask_edit: Option<(String, String)>,
 }
 
 /// One undo/redo snapshot: the whole project plus UI context.
@@ -512,6 +515,17 @@ const GRAPH_COLORS: [(f32, f32, f32); 8] = [
     (0.9, 0.9, 0.9),
 ];
 
+/// Unique `mask_N` id within a layer.
+fn next_mask_id(layer: &Layer) -> String {
+    let mut counter = layer.masks.len() + 1;
+    let mut id = format!("mask_{counter}");
+    while layer.get_mask(&id).is_some() {
+        counter += 1;
+        id = format!("mask_{counter}");
+    }
+    id
+}
+
 /// All plottable (animated) series for a layer.
 fn with_graph_scalar<R>(
     layer: &mut Layer,
@@ -650,6 +664,7 @@ impl EditorState {
             redo_stack: Vec::new(),
             spline_editor_open: false,
             spline_prop_path: "transform.position".to_string(),
+            active_mask_edit: None,
         }
     }
 
@@ -1631,6 +1646,23 @@ impl EditorState {
             .map_err(|e| format!("{e:?}"))
     }
 
+    /// Drag-and-drop reorder: move a layer to the hovered row's slot (one
+    /// undo step). No-op when the target equals the current index.
+    pub fn move_layer_to(&mut self, layer_id: &str, index: usize) -> Result<(), String> {
+        let current = {
+            let comp = self
+                .active_composition()
+                .ok_or_else(|| "No active composition".to_string())?;
+            comp.layer_index(layer_id)
+                .ok_or_else(|| format!("Layer {layer_id} not found"))?
+        };
+        if current == index {
+            return Ok(());
+        }
+        self.checkpoint();
+        self.reorder_layer(layer_id, index)
+    }
+
     /// Delete an asset from project by its asset ID.
     pub fn delete_asset(&mut self, asset_id: &str) -> Result<(), String> {
         let idx = self
@@ -1745,6 +1777,471 @@ impl EditorState {
             .clone()
             .ok_or_else(|| "No layer selected".to_string())?;
         self.toggle_layer_effect_enabled(&selected_id, effect_id)
+    }
+
+    // --- Masks (first-class vector masks on the shared Path model) ---
+
+    /// Add a mask with a default centered rectangle path.
+    pub fn add_mask_to_layer(&mut self, layer_id: &str) -> Result<String, String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let id = next_mask_id(layer);
+        let name = format!("Mask {}", layer.masks.len() + 1);
+        layer.masks.push(Mask::new(&id, name));
+        Ok(id)
+    }
+
+    /// Add a mask wrapping an explicit path (pen / shape interop).
+    pub fn add_mask_path_to_layer(
+        &mut self,
+        layer_id: &str,
+        name: &str,
+        path: Path,
+    ) -> Result<String, String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let id = next_mask_id(layer);
+        layer.masks.push(Mask::with_path(&id, name, path));
+        Ok(id)
+    }
+
+    /// Remove a mask from a layer.
+    pub fn remove_layer_mask(&mut self, layer_id: &str, mask_id: &str) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        layer
+            .remove_mask(mask_id)
+            .ok_or_else(|| format!("Mask {mask_id} not found on layer"))?;
+        if self.active_mask_edit.as_ref().map(|(_, m)| m == mask_id).unwrap_or(false) {
+            self.active_mask_edit = None;
+        }
+        Ok(())
+    }
+
+    /// Toggle a mask's enabled state.
+    pub fn toggle_mask_enabled(&mut self, layer_id: &str, mask_id: &str) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let mask = layer
+            .get_mask_mut(mask_id)
+            .ok_or_else(|| format!("Mask {mask_id} not found on layer"))?;
+        mask.toggle_enabled();
+        Ok(())
+    }
+
+    /// Cycle a mask's combine mode (Add → Subtract → Intersect →
+    /// Difference → None).
+    pub fn cycle_mask_mode(&mut self, layer_id: &str, mask_id: &str) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let mask = layer
+            .get_mask_mut(mask_id)
+            .ok_or_else(|| format!("Mask {mask_id} not found on layer"))?;
+        mask.mode = mask.mode.cycle();
+        Ok(())
+    }
+
+    /// Toggle a mask's invert flag.
+    pub fn toggle_mask_invert(&mut self, layer_id: &str, mask_id: &str) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let mask = layer
+            .get_mask_mut(mask_id)
+            .ok_or_else(|| format!("Mask {mask_id} not found on layer"))?;
+        mask.invert = !mask.invert;
+        Ok(())
+    }
+
+    /// Nudge a mask scalar param (opacity / feather / expansion).
+    pub fn nudge_mask_param(
+        &mut self,
+        layer_id: &str,
+        mask_id: &str,
+        param_name: &str,
+        delta: f32,
+    ) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let mask = layer
+            .get_mask_mut(mask_id)
+            .ok_or_else(|| format!("Mask {mask_id} not found on layer"))?;
+        if mask.nudge_param(param_name, delta) {
+            Ok(())
+        } else {
+            Err(format!("Unknown mask param {param_name}"))
+        }
+    }
+
+    /// Toggle a mask-path keyframe at the playhead (diamond behavior: adds
+    /// the evaluated path, or removes the keyframe sitting at the playhead).
+    /// Returns true when a keyframe now exists at the playhead.
+    pub fn toggle_mask_path_keyframe_at_current_time(
+        &mut self,
+        layer_id: &str,
+        mask_id: &str,
+    ) -> Result<bool, String> {
+        self.checkpoint();
+        let current_tc = self.clock.timecode();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let mask = layer
+            .get_mask_mut(mask_id)
+            .ok_or_else(|| format!("Mask {mask_id} not found on layer"))?;
+        Ok(mask.path.toggle_keyframe(current_tc, mask.path.evaluate_at(&current_tc)))
+    }
+
+    /// Seek the playhead to the neighbouring mask-path keyframe.
+    /// `dir < 0` seeks previous, `dir > 0` seeks next. Returns false when
+    /// there is no keyframe in that direction.
+    pub fn seek_mask_path_keyframe(
+        &mut self,
+        layer_id: &str,
+        mask_id: &str,
+        dir: i8,
+    ) -> Result<bool, String> {
+        let current_tc = self.clock.timecode();
+        let next = {
+            let comp = self
+                .active_composition()
+                .ok_or_else(|| "No active composition".to_string())?;
+            let layer = comp
+                .get_layer(layer_id)
+                .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+            let mask = layer
+                .get_mask(mask_id)
+                .ok_or_else(|| format!("Mask {mask_id} not found on layer"))?;
+            if dir < 0 {
+                mask.path.previous_keyframe_time(&current_tc)
+            } else {
+                mask.path.next_keyframe_time(&current_tc)
+            }
+        };
+        match next {
+            Some(tc) => {
+                self.clock.seek(tc);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Rewrite one mask node (checkpointed discrete edit).
+    pub fn set_mask_point(
+        &mut self,
+        layer_id: &str,
+        mask_id: &str,
+        index: usize,
+        pos: Vec2,
+    ) -> Result<(), String> {
+        self.checkpoint();
+        self.move_mask_point_live(layer_id, mask_id, index, pos)
+    }
+
+    /// Rewrite one mask node without checkpointing (node drags; the drag
+    /// start checkpoints once, same-time keyframes collapse).
+    pub fn move_mask_point_live(
+        &mut self,
+        layer_id: &str,
+        mask_id: &str,
+        index: usize,
+        pos: Vec2,
+    ) -> Result<(), String> {
+        let current_tc = self.clock.timecode();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let mask = layer
+            .get_mask_mut(mask_id)
+            .ok_or_else(|| format!("Mask {mask_id} not found on layer"))?;
+        let node = mask
+            .path
+            .value
+            .points
+            .get_mut(index)
+            .ok_or_else(|| format!("Mask node {index} out of range"))?;
+        node.move_to(pos);
+        if mask.path.is_animated() {
+            let snapshot = mask.path.value.clone();
+            mask.path.add_keyframe(Keyframe::new(current_tc, snapshot));
+        }
+        Ok(())
+    }
+
+    /// Rewrite one mask tangent handle from an absolute tip (checkpointed).
+    pub fn set_mask_handle(
+        &mut self,
+        layer_id: &str,
+        mask_id: &str,
+        index: usize,
+        is_in: bool,
+        tip: Vec2,
+    ) -> Result<(), String> {
+        self.checkpoint();
+        self.move_mask_handle_live(layer_id, mask_id, index, is_in, tip)
+    }
+
+    /// Rewrite one mask tangent handle without checkpointing (drag path).
+    pub fn move_mask_handle_live(
+        &mut self,
+        layer_id: &str,
+        mask_id: &str,
+        index: usize,
+        is_in: bool,
+        tip: Vec2,
+    ) -> Result<(), String> {
+        let current_tc = self.clock.timecode();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let mask = layer
+            .get_mask_mut(mask_id)
+            .ok_or_else(|| format!("Mask {mask_id} not found on layer"))?;
+        let node = mask
+            .path
+            .value
+            .points
+            .get_mut(index)
+            .ok_or_else(|| format!("Mask node {index} out of range"))?;
+        if is_in {
+            node.set_in_abs(tip);
+        } else {
+            node.set_out_abs(tip);
+        }
+        if mask.path.is_animated() {
+            let snapshot = mask.path.value.clone();
+            mask.path.add_keyframe(Keyframe::new(current_tc, snapshot));
+        }
+        Ok(())
+    }
+
+    /// Delete a mask node (keeps ≥... allows emptying to a moveless path).
+    pub fn delete_mask_point(
+        &mut self,
+        layer_id: &str,
+        mask_id: &str,
+        index: usize,
+    ) -> Result<(), String> {
+        self.checkpoint();
+        let current_tc = self.clock.timecode();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let mask = layer
+            .get_mask_mut(mask_id)
+            .ok_or_else(|| format!("Mask {mask_id} not found on layer"))?;
+        mask.path.value.remove_point(index).ok_or_else(|| {
+            format!("Mask node {index} out of range")
+        })?;
+        if mask.path.is_animated() {
+            let snapshot = mask.path.value.clone();
+            mask.path.add_keyframe(Keyframe::new(current_tc, snapshot));
+        }
+        Ok(())
+    }
+
+    /// Append a corner node to a mask path.
+    pub fn append_mask_point(
+        &mut self,
+        layer_id: &str,
+        mask_id: &str,
+        pos: Vec2,
+    ) -> Result<(), String> {
+        self.checkpoint();
+        let current_tc = self.clock.timecode();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let mask = layer
+            .get_mask_mut(mask_id)
+            .ok_or_else(|| format!("Mask {mask_id} not found on layer"))?;
+        mask.path.value.line_to(pos);
+        if mask.path.is_animated() {
+            let snapshot = mask.path.value.clone();
+            mask.path.add_keyframe(Keyframe::new(current_tc, snapshot));
+        }
+        Ok(())
+    }
+
+    /// Cycle a mask node's kind (Corner → Smooth → Symmetric → Auto).
+    pub fn cycle_mask_point_kind(
+        &mut self,
+        layer_id: &str,
+        mask_id: &str,
+        index: usize,
+    ) -> Result<(), String> {
+        self.checkpoint();
+        let current_tc = self.clock.timecode();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let mask = layer
+            .get_mask_mut(mask_id)
+            .ok_or_else(|| format!("Mask {mask_id} not found on layer"))?;
+        let node = mask
+            .path
+            .value
+            .points
+            .get_mut(index)
+            .ok_or_else(|| format!("Mask node {index} out of range"))?;
+        node.convert_to(match node.kind {
+            PathPointKind::Corner => PathPointKind::Smooth,
+            PathPointKind::Smooth => PathPointKind::Symmetric,
+            PathPointKind::Symmetric => PathPointKind::Auto,
+            PathPointKind::Auto => PathPointKind::Corner,
+        });
+        if mask.path.is_animated() {
+            let snapshot = mask.path.value.clone();
+            mask.path.add_keyframe(Keyframe::new(current_tc, snapshot));
+        }
+        Ok(())
+    }
+
+    /// Close / open a mask path.
+    pub fn set_mask_closed(
+        &mut self,
+        layer_id: &str,
+        mask_id: &str,
+        closed: bool,
+    ) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let mask = layer
+            .get_mask_mut(mask_id)
+            .ok_or_else(|| format!("Mask {mask_id} not found on layer"))?;
+        mask.path.value.closed = closed;
+        Ok(())
+    }
+
+    /// Toggle keyframe animation for a mask scalar param: enables with a
+    /// keyframe at the playhead, or clears all keyframes when animated.
+    pub fn toggle_mask_param_animation(
+        &mut self,
+        layer_id: &str,
+        mask_id: &str,
+        param_name: &str,
+    ) -> Result<(), String> {
+        self.checkpoint();
+        let current_tc = self.clock.timecode();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let mask = layer
+            .get_mask_mut(mask_id)
+            .ok_or_else(|| format!("Mask {mask_id} not found on layer"))?;
+        let prop = mask
+            .get_param_property_mut(param_name)
+            .ok_or_else(|| format!("Unknown mask param {param_name}"))?;
+        if prop.is_animated() {
+            prop.clear_keyframes();
+        } else {
+            let val = prop.value;
+            prop.add_keyframe(Keyframe::new(current_tc, val));
+        }
+        Ok(())
+    }
+
+    /// Set the viewport Path Editor target (None exits edit mode).
+    pub fn set_active_mask_edit(&mut self, target: Option<(String, String)>) {
+        self.active_mask_edit = target;
+    }
+
+    /// Clear a text layer's baseline path (straight layout resumes).
+    pub fn clear_text_path(&mut self, layer_id: &str) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        match &mut layer.source {
+            LayerSource::Text { text_path, .. } => {
+                *text_path = None;
+                Ok(())
+            }
+            _ => Err(format!("Layer {layer_id} is not a Text layer")),
+        }
+    }
+
+    /// Append a point to a text layer's baseline path (pen integration).
+    pub fn append_text_path_point(&mut self, layer_id: &str, pos: Vec2) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        match &mut layer.source {
+            LayerSource::Text { text_path, .. } => {
+                let path = text_path.get_or_insert_with(Path::new);
+                path.line_to(pos);
+                Ok(())
+            }
+            _ => Err(format!("Layer {layer_id} is not a Text layer")),
+        }
     }
 
     /// Nudge an effect parameter on a specified layer.
@@ -2432,6 +2929,37 @@ impl EditorState {
                         return self
                             .nudge_layer_effect_param(&lid, parts[0], parts[1], v - cur)
                             .is_ok();
+                    }
+                }
+                if let Some(rest) = key.strip_prefix("mask:") {
+                    // mask:<layer>:<mask>:<param> (absolute set via delta).
+                    let parts: Vec<&str> = rest.split(':').collect();
+                    if parts.len() >= 3 {
+                        let (lid, mid, param) = (parts[0], parts[1], parts[2]);
+                        let cur = {
+                            let comp = match self.active_composition() {
+                                Some(c) => c,
+                                None => return false,
+                            };
+                            let layer = match comp.get_layer(lid) {
+                                Some(l) => l,
+                                None => return false,
+                            };
+                            let mask = match layer.get_mask(mid) {
+                                Some(m) => m,
+                                None => return false,
+                            };
+                            let prop = match mask.get_param_property(param) {
+                                Some(p) => p,
+                                None => return false,
+                            };
+                            if prop.is_animated() {
+                                prop.evaluate_at(&current_tc)
+                            } else {
+                                prop.value
+                            }
+                        };
+                        return self.nudge_mask_param(lid, mid, param, v - cur).is_ok();
                     }
                 }
                 false
@@ -4162,6 +4690,15 @@ impl EditorState {
         Some((self.layer_world_matrix_fast(layer_id)?, anchor))
     }
 
+    /// Map a composition-space point into a layer's local coords (mask and
+    /// text-path editing). Returns None for missing layers / cycles /
+    /// singular matrices.
+    pub fn comp_to_layer_local(&self, layer_id: &str, p: Vec2) -> Option<Vec2> {
+        self.layer_world_matrix_fast(layer_id)?
+            .inverse()
+            .map(|inv| inv.transform_point(p))
+    }
+
     /// Toggle lock state on the specified layer.
     pub fn toggle_layer_lock(&mut self, layer_id: &str) {
         if let Some(comp) = self.active_composition_mut() {
@@ -4383,10 +4920,130 @@ impl EditorState {
         Ok(layer_id)
     }
 
+    /// Pen press at a composition-space point with the topmost picked
+    /// layer (if any). Deterministic routing that does not depend on prior
+    /// selection or sibling hit-test order:
+    /// 1. active mask edit target → append (layer-local),
+    /// 2. picked Path shape → select + append (layer-local),
+    /// 3. picked Text layer → select + baseline point (layer-local),
+    /// 4. otherwise → new Path layer.
+    /// Returns the affected layer id.
+    pub fn pen_press_at(
+        &mut self,
+        point: Vec2,
+        picked: Option<String>,
+    ) -> Result<String, String> {
+        // 1. Mask editing wins while armed and valid.
+        if let Some((lid, mid)) = self.active_mask_edit.clone() {
+            let valid = self
+                .active_composition()
+                .and_then(|c| c.get_layer(&lid))
+                .and_then(|l| l.get_mask(&mid))
+                .is_some();
+            if valid {
+                if let Some(local) = self.comp_to_layer_local(&lid, point) {
+                    self.checkpoint();
+                    self.append_mask_point(&lid, &mid, local)?;
+                    return Ok(lid);
+                }
+            } else {
+                self.active_mask_edit = None;
+            }
+        }
+        // 2/3. Route by what is actually under the cursor.
+        if let Some(pid) = picked {
+            let kind = self
+                .active_composition()
+                .and_then(|c| c.get_layer(&pid))
+                .map(|l| match &l.source {
+                    LayerSource::Shape { shape_type: ShapeType::Path { .. } } => 1,
+                    LayerSource::Text { .. } => 2,
+                    _ => 0,
+                })
+                .unwrap_or(0);
+            if kind == 1 {
+                self.checkpoint();
+                self.select_layer(Some(pid.clone()));
+                if let Some(local) = self.comp_to_layer_local(&pid, point) {
+                    let comp = self
+                        .active_composition_mut()
+                        .ok_or_else(|| "No active composition".to_string())?;
+                    let layer = comp
+                        .get_layer_mut(&pid)
+                        .ok_or_else(|| format!("Layer {pid} not found"))?;
+                    if let LayerSource::Shape {
+                        shape_type: ShapeType::Path { path_data, .. },
+                    } = &mut layer.source
+                    {
+                        let mut path = Path::from_svg(path_data);
+                        path.line_to(local);
+                        *path_data = path.to_svg();
+                        return Ok(pid);
+                    }
+                }
+                return Ok(pid);
+            } else if kind == 2 {
+                self.checkpoint();
+                self.select_layer(Some(pid.clone()));
+                if let Some(local) = self.comp_to_layer_local(&pid, point) {
+                    self.append_text_path_point(&pid, local)?;
+                }
+                return Ok(pid);
+            }
+        }
+        // 4. Fresh path layer (delegates to the legacy creator, which also
+        // selects it).
+        self.add_pen_point(point)
+    }
+
+    /// Text-tool press: select the topmost text layer under the cursor for
+    /// in-Properties editing, else create a new text layer at the point.
+    pub fn text_press_at(
+        &mut self,
+        point: Vec2,
+        picked: Option<String>,
+    ) -> Result<String, String> {
+        if let Some(pid) = picked {
+            let is_text = self
+                .active_composition()
+                .and_then(|c| c.get_layer(&pid))
+                .map(|l| matches!(l.source, LayerSource::Text { .. }))
+                .unwrap_or(false);
+            if is_text {
+                self.checkpoint();
+                self.select_layer(Some(pid.clone()));
+                return Ok(pid);
+            }
+        }
+        self.add_text_layer("New Text Layer", Some(point))
+    }
+
     /// Add a vector path point using the Pen tool. If the currently selected layer is a Path shape,
     /// appends the vertex; otherwise creates a new vector Path layer starting at `point`.
     pub fn add_pen_point(&mut self, point: Vec2) -> Result<String, String> {
         self.checkpoint();
+        // 1. Active mask edit target: pen appends to the mask path (the
+        // click arrives in comp coords; mask paths live in layer-local).
+        if let Some((lid, mid)) = self.active_mask_edit.clone() {
+            if let Some(local) = self.comp_to_layer_local(&lid, point) {
+                self.append_mask_point(&lid, &mid, local)?;
+                return Ok(lid);
+            }
+        }
+        // 2. Selected text layer: pen draws its baseline (text-on-path).
+        if let Some(sel) = self.selected_layer_id.clone() {
+            let is_text = self
+                .active_composition()
+                .and_then(|c| c.get_layer(&sel))
+                .map(|l| matches!(l.source, LayerSource::Text { .. }))
+                .unwrap_or(false);
+            if is_text {
+                if let Some(local) = self.comp_to_layer_local(&sel, point) {
+                    self.append_text_path_point(&sel, local)?;
+                    return Ok(sel);
+                }
+            }
+        }
         // Check if selected layer is a Path shape
         let sel_id = self.selected_layer_id.clone();
         if let Some(id) = sel_id {

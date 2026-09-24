@@ -1,5 +1,6 @@
 use project::{
-    BlendMode, Effect, Layer, LayerSource, LoopMode, Property, TimeCode, TrackMatteMode, Transform,
+    BlendMode, Effect, Layer, LayerSource, LoopMode, Mask, Property, TimeCode, TrackMatteMode,
+    Transform,
 };
 
 /// A node in the compositor scene graph, representing a layer with its transform, visual properties,
@@ -27,6 +28,7 @@ pub struct SceneNode {
     pub time_remapping: Option<Property<f64>>,
     pub loop_mode: LoopMode,
     pub effects: Vec<Effect>,
+    pub masks: Vec<Mask>,
 }
 
 impl SceneNode {
@@ -54,6 +56,7 @@ impl SceneNode {
             time_remapping: layer.time_remapping.clone(),
             loop_mode: layer.loop_mode,
             effects: layer.effects.clone(),
+            masks: layer.masks.clone(),
         }
     }
 

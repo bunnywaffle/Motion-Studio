@@ -113,6 +113,10 @@ pub enum LayerSource {
         /// Wrap width in px (0 = point text, no wrap).
         #[serde(default)]
         box_width: Property<f32>,
+        /// Optional baseline path: glyphs flow along it (pen on a text
+        /// layer appends here). None = straight horizontal layout.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text_path: Option<crate::path::Path>,
     },
     Shape {
         shape_type: ShapeType,
@@ -177,6 +181,10 @@ pub struct Layer {
     pub loop_mode: LoopMode,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effects: Vec<Effect>,
+    /// First-class vector masks, applied bottom-to-top in vec order
+    /// (Path → Coverage → Feather/Expansion → Combination → Alpha).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub masks: Vec<crate::mask::Mask>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label_color: Option<Color>,
 }
@@ -211,6 +219,7 @@ impl Layer {
             time_remapping: None,
             loop_mode: LoopMode::default(),
             effects: Vec::new(),
+            masks: Vec::new(),
             label_color: None,
         }
     }
@@ -326,6 +335,7 @@ impl Layer {
                 stroke_color: default_stroke_color(),
                 baseline_shift: Property::new("Baseline Shift", 0.0),
                 box_width: Property::new("Box Width", 0.0),
+                text_path: None,
             },
             in_point,
             out_point,
@@ -642,6 +652,32 @@ impl Layer {
     /// Check if this layer has any effects.
     pub fn has_effects(&self) -> bool {
         !self.effects.is_empty()
+    }
+
+    /// Retrieve a mask on this layer by id.
+    pub fn get_mask(&self, mask_id: &str) -> Option<&crate::mask::Mask> {
+        self.masks.iter().find(|m| m.id == mask_id)
+    }
+
+    /// Retrieve a mutable reference to a mask on this layer.
+    pub fn get_mask_mut(&mut self, mask_id: &str) -> Option<&mut crate::mask::Mask> {
+        self.masks.iter_mut().find(|m| m.id == mask_id)
+    }
+
+    /// Check if this layer has any masks.
+    pub fn has_masks(&self) -> bool {
+        !self.masks.is_empty()
+    }
+
+    /// Check if this layer has any enabled masks.
+    pub fn has_enabled_masks(&self) -> bool {
+        self.masks.iter().any(|m| m.enabled)
+    }
+
+    /// Remove a mask by id. Returns the removed mask, if present.
+    pub fn remove_mask(&mut self, mask_id: &str) -> Option<crate::mask::Mask> {
+        let idx = self.masks.iter().position(|m| m.id == mask_id)?;
+        Some(self.masks.remove(idx))
     }
 
     /// Validate the internal integrity of this layer.

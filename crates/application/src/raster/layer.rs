@@ -8,6 +8,7 @@ use std::sync::Arc;
 use super::affine::{Aff, aff_apply, aff_invert, aff_mul, fold_transform, skew_about};
 use super::buffer::{FloatBuf, blur_buffer};
 use super::effects::{RasterFx, apply_effect_pixels, apply_sharpen, apply_vignette};
+use super::mask::apply_masks;
 use super::stock::apply_stock;
 use super::pixel::Px;
 use super::shapes::{fill_ellipse, fill_rect, stroke_path};
@@ -104,6 +105,7 @@ pub fn raster_content(
             stroke_color,
             baseline_shift,
             box_width,
+            text_path,
         } => {
             // Effective outline: TextOutline effect wins over native stroke.
             let mut sw = stroke_width.value.max(0.0);
@@ -147,6 +149,23 @@ pub fn raster_content(
                 box_w: box_width.value,
                 bevel,
             };
+            // Text-on-path flows glyphs along the shared path (origin-aware
+            // placement); straight text centers ink in the estimate box.
+            if let Some(path) = text_path {
+                let (tbuf, _ink, (pox, poy)) = super::text::raster_text_on_path(&spec, path);
+                let mut out = FloatBuf::clear(base_w.ceil().max(1.0) as u32, base_h.ceil().max(1.0) as u32);
+                // Origin-aware placement (no centering): buffer pixel (i,j)
+                // is layer-local (ox+i, oy+j), so sample at (x-ox, y-oy).
+                for y in 0..out.h {
+                    for x in 0..out.w {
+                        let s = tbuf.sample(x as f32 - pox, y as f32 - poy);
+                        if s.a > 0.003 {
+                            out.px[(y * out.w + x) as usize] = s;
+                        }
+                    }
+                }
+                return Some(out);
+            }
             let (tbuf, ink) = raster_text(&spec);
             // Center the ink in the estimate box (mirrors the old
             // flex-center div layout and the anchor math exactly).
@@ -246,6 +265,7 @@ pub fn layer_cache_key(
             stroke_color,
             baseline_shift,
             box_width,
+            text_path,
         } => {
             3u8.hash(&mut h);
             text.value.hash(&mut h);
@@ -262,6 +282,18 @@ pub fn layer_cache_key(
             color_hash(stroke_color, &mut h);
             baseline_shift.value.to_bits().hash(&mut h);
             box_width.value.to_bits().hash(&mut h);
+            if let Some(path) = text_path {
+                path.closed.hash(&mut h);
+                for pt in &path.points {
+                    pt.pos.x.to_bits().hash(&mut h);
+                    pt.pos.y.to_bits().hash(&mut h);
+                    pt.in_tan.x.to_bits().hash(&mut h);
+                    pt.in_tan.y.to_bits().hash(&mut h);
+                    pt.out_tan.x.to_bits().hash(&mut h);
+                    pt.out_tan.y.to_bits().hash(&mut h);
+                    (pt.kind as u8).hash(&mut h);
+                }
+            }
         }
         LayerSource::Shape { shape_type } => match shape_type {
             ShapeType::Rectangle { width, height, corner_radius, fill } => {
@@ -292,6 +324,34 @@ pub fn layer_cache_key(
         eff.id.hash(&mut h);
         eff.enabled.hash(&mut h);
         effect_hash(&eff.effect_type, &mut h);
+    }
+    // Masks: identity + on/off + path + shaped params + mode + transform.
+    for mask in &layer.masks {
+        mask.id.hash(&mut h);
+        mask.enabled.hash(&mut h);
+        (mask.mode as u8).hash(&mut h);
+        for pt in &mask.path.points {
+            pt.pos.x.to_bits().hash(&mut h);
+            pt.pos.y.to_bits().hash(&mut h);
+            pt.in_tan.x.to_bits().hash(&mut h);
+            pt.in_tan.y.to_bits().hash(&mut h);
+            pt.out_tan.x.to_bits().hash(&mut h);
+            pt.out_tan.y.to_bits().hash(&mut h);
+            (pt.kind as u8).hash(&mut h);
+        }
+        mask.path.closed.hash(&mut h);
+        mask.opacity.to_bits().hash(&mut h);
+        mask.feather.to_bits().hash(&mut h);
+        mask.expansion.to_bits().hash(&mut h);
+        mask.invert.hash(&mut h);
+        let tm = &mask.transform;
+        for v in [tm.position.x, tm.position.y, tm.scale.x, tm.scale.y, tm.rotation, tm.anchor_point.x, tm.anchor_point.y] {
+            v.to_bits().hash(&mut h);
+        }
+        let lm = &mask.transform.local_matrix;
+        for v in [lm.a, lm.b, lm.c, lm.d, lm.tx, lm.ty] {
+            v.to_bits().hash(&mut h);
+        }
     }
     h.finish()
 }
@@ -554,8 +614,10 @@ pub fn rasterize_layer(
     let Some(content) = raster_layer_content(layer, base_w, base_h, assets) else {
         return (out, backdrop, true);
     };
-    // Local effects.
+    // Local effects (masks first — After Effects order: the mask stack
+    // shapes alpha before any effect sees pixels).
     let mut work = content;
+    apply_masks(&mut work, &layer.masks);
     apply_layer_fx(&mut work, base_w, base_h, &layer.effects, &fx);
     let mut blur_total = 0.0f32;
     let mut bloom: Option<(f32, f32)> = None;
@@ -798,7 +860,19 @@ pub(crate) fn layer_base_dims(
             }
         }
         LayerSource::Video { .. } => (1920.0, 1080.0),
-        LayerSource::Text { text, font_size, .. } => {
+        LayerSource::Text { text, font_size, text_path, .. } => {
+            if let Some(path) = text_path {
+                // Size origin-inclusive so the path-placed glyphs (which
+                // span from the local origin) are not clipped.
+                if let Some((mn, mx)) = path.bounds() {
+                    let pad = font_size.value * 1.5 + 16.0;
+                    let x0 = mn.x.min(0.0) - pad;
+                    let y0 = mn.y.min(0.0) - pad;
+                    let x1 = mx.x.max(0.0) + pad;
+                    let y1 = mx.y.max(0.0) + pad;
+                    return ((x1 - x0).max(64.0), (y1 - y0).max(64.0));
+                }
+            }
             let len = text.value.chars().count().max(1) as f32;
             let fs = font_size.value;
             ((len * fs * 0.6 + 40.0).max(100.0), (fs * 1.4 + 20.0).max(40.0))
@@ -808,7 +882,17 @@ pub(crate) fn layer_base_dims(
             ShapeType::Ellipse { radius_x, radius_y, .. } => {
                 (radius_x.value * 2.0, radius_y.value * 2.0)
             }
-            ShapeType::Path { .. } => (400.0, 300.0),
+            ShapeType::Path { path_data, .. } => {
+                // Shared path model drives bounds (was a fixed 400x300).
+                if let Some((mn, mx)) = project::Path::from_svg(path_data).bounds() {
+                    (
+                        ((mx.x - mn.x).abs() + 16.0).max(32.0),
+                        ((mx.y - mn.y).abs() + 16.0).max(32.0),
+                    )
+                } else {
+                    (400.0, 300.0)
+                }
+            }
         },
         _ => (comp_w, comp_h),
     }

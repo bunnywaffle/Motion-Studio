@@ -1477,6 +1477,13 @@ pub struct CompositionViewerPanel {
     pub frame_origin: Option<(f32, f32)>,
     /// Active transform-gizmo drag (rotate / scale / anchor handles).
     pub gizmo_drag: Option<ViewerGizmoDrag>,
+    /// Active mask node/handle drag (viewport Path Editor).
+    pub mask_drag: Option<MaskDrag>,
+    /// Selected mask node index for handle display (viewport Path Editor).
+    pub mask_edit_point: Option<usize>,
+    /// True once the current mask drag moved (click without drag cycles
+    /// the node kind instead).
+    pub mask_down_moved: bool,
     /// Per-layer CPU raster cache (layer id -> last raster).
     pub raster_cache: HashMap<String, crate::raster::RasterEntry>,
     /// Decoded gpui render images by (layer id, raster key). Pointer
@@ -1507,6 +1514,23 @@ pub struct PickBox {
     pub min_y: f32,
     pub max_x: f32,
     pub max_y: f32,
+}
+
+/// What part of a mask node is being dragged in the Path Editor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MaskDragKind {
+    Point,
+    InHandle,
+    OutHandle,
+}
+
+/// Active mask node/handle drag in the viewport Path Editor.
+#[derive(Clone, Debug)]
+pub struct MaskDrag {
+    pub layer_id: String,
+    pub mask_id: String,
+    pub index: usize,
+    pub kind: MaskDragKind,
 }
 
 /// Viewport transform-gizmo drag state (After Effects-style direct
@@ -1553,6 +1577,9 @@ impl CompositionViewerPanel {
             viewport_origin: None,
             frame_origin: None,
             gizmo_drag: None,
+            mask_drag: None,
+            mask_edit_point: None,
+            mask_down_moved: false,
             raster_cache: HashMap::new(),
             img_cache: HashMap::new(),
             asset_cache: HashMap::new(),
@@ -1686,12 +1713,25 @@ impl Render for CompositionViewerPanel {
                             }
                         }
                         LayerSource::Video { .. } => (1920.0, 1080.0),
-                        LayerSource::Text { font_size, text, .. } => {
-                            let len = text.value.chars().count().max(1) as f32;
-                            let fs = font_size.value;
-                            let estimated_w = (len * fs * 0.6 + 40.0).max(100.0);
-                            let estimated_h = (fs * 1.4 + 20.0).max(40.0);
-                            (estimated_w, estimated_h)
+                        LayerSource::Text { font_size, text, text_path, .. } => {
+                            if let Some(path) = text_path {
+                                if let Some((mn, mx)) = path.bounds() {
+                                    let pad = font_size.value * 1.5 + 16.0;
+                                    let x0 = mn.x.min(0.0) - pad;
+                                    let y0 = mn.y.min(0.0) - pad;
+                                    let x1 = mx.x.max(0.0) + pad;
+                                    let y1 = mx.y.max(0.0) + pad;
+                                    ((x1 - x0).max(64.0), (y1 - y0).max(64.0))
+                                } else {
+                                    (400.0, 100.0)
+                                }
+                            } else {
+                                let len = text.value.chars().count().max(1) as f32;
+                                let fs = font_size.value;
+                                let estimated_w = (len * fs * 0.6 + 40.0).max(100.0);
+                                let estimated_h = (fs * 1.4 + 20.0).max(40.0);
+                                (estimated_w, estimated_h)
+                            }
                         }
                         LayerSource::Shape { shape_type } => match shape_type {
                             ShapeType::Rectangle { width, height, .. } => {
@@ -1700,7 +1740,16 @@ impl Render for CompositionViewerPanel {
                             ShapeType::Ellipse { radius_x, radius_y, .. } => {
                                 (radius_x.value * 2.0, radius_y.value * 2.0)
                             }
-                            ShapeType::Path { .. } => (400.0, 300.0),
+                            ShapeType::Path { path_data, .. } => {
+                                if let Some((mn, mx)) = project::Path::from_svg(path_data).bounds() {
+                                    (
+                                        ((mx.x - mn.x).abs() + 16.0).max(32.0),
+                                        ((mx.y - mn.y).abs() + 16.0).max(32.0),
+                                    )
+                                } else {
+                                    (400.0, 300.0)
+                                }
+                            }
                         },
                         LayerSource::Adjustment => (comp_w, comp_h),
                         _ => (400.0, 300.0),
@@ -2215,6 +2264,173 @@ impl Render for CompositionViewerPanel {
                                     }
                                 }).into_any_element());
                         }
+
+                        // --- Mask Path Editor overlay: sampled curves for
+                        // every mask, draggable nodes + tangent handles for
+                        // the active edit target. Shared Path model drives
+                        // masks, pen shapes, motion and text paths alike.
+                        {
+                            let edit_target: Option<(String, String)> =
+                                giz_state.read(cx).active_mask_edit.clone();
+                            for mask in &layer.masks {
+                                let mid = mask.id.clone();
+                                let is_active = edit_target
+                                    == Some((giz_lid.clone(), mid.clone()));
+                                let full =
+                                    layer.world_matrix() * mask.transform.local_matrix;
+                                let m2c = |p: Vec2| {
+                                    let w = full.transform_point(p);
+                                    (
+                                        (w.x + giz_cw / 2.0) * giz_fit,
+                                        (w.y + giz_ch / 2.0) * giz_fit,
+                                    )
+                                };
+                                let dim = if mask.enabled { 1.0 } else { 0.3 };
+                                let curve_col = if is_active {
+                                    Rgba { r: 1.0, g: 0.85, b: 0.25, a: 0.95 * dim }
+                                } else {
+                                    Rgba { r: 1.0, g: 0.85, b: 0.25, a: 0.45 * dim }
+                                };
+                                // Sampled curve dots (bounded count).
+                                let flat = mask.path.flatten(0.75);
+                                let step = (flat.len() / 120).max(1);
+                                for p in flat.iter().step_by(step) {
+                                    let (cxp, cyp) = m2c(*p);
+                                    gizmo_els.push(
+                                        div()
+                                            .absolute()
+                                            .left(px(cxp - 1.5))
+                                            .top(px(cyp - 1.5))
+                                            .w(px(3.))
+                                            .h(px(3.))
+                                            .rounded_full()
+                                            .bg(curve_col)
+                                            .into_any_element(),
+                                    );
+                                }
+                                // Nodes (+ handles for the selected node).
+                                for (idx, node) in mask.path.points.iter().enumerate() {
+                                    let (nx, ny) = m2c(node.pos);
+                                    // NOTE: read panel state from `self`
+                                    // directly — `cx.read()` on our own
+                                    // entity panics inside render.
+                                    let is_sel = is_active
+                                        && self.mask_edit_point == Some(idx);
+                                    let p_h = giz_panel.clone();
+                                    let s_h = giz_state.clone();
+                                    let lid_h = giz_lid.clone();
+                                    let mid_h = mid.clone();
+                                    let s_r = giz_state.clone();
+                                    let lid_r = giz_lid.clone();
+                                    let mid_r = mid.clone();
+                                    let (h_frame, h_fit, h_cw, h_ch) =
+                                        (giz_frame, giz_fit, giz_cw, giz_ch);
+                                    let dot_col = if is_sel {
+                                        Rgba { r: 0.96, g: 0.62, b: 0.04, a: 1.0 }
+                                    } else {
+                                        Rgba { r: 1.0, g: 1.0, b: 1.0, a: 0.9 * dim + 0.1 }
+                                    };
+                                    gizmo_els.push(
+                                        gizmo_dot(
+                                            format!("mask_node_{}_{}", mid, idx),
+                                            nx,
+                                            ny,
+                                            if is_sel { 11.0 } else { 9.0 },
+                                            dot_col,
+                                            accent,
+                                            true,
+                                        )
+                                        .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+                                            let (mx, my) = (event.position.x / px(1.0), event.position.y / px(1.0));
+                                            s_h.update(cx, |s, cx| {
+                                                s.checkpoint();
+                                                s.select_layer(Some(lid_h.clone()));
+                                                s.set_active_mask_edit(Some((lid_h.clone(), mid_h.clone())));
+                                                s.preview_fast = true;
+                                                cx.notify();
+                                            });
+                                            let _ = gizmo_to_comp(mx, my, h_frame, h_fit, h_cw, h_ch);
+                                            p_h.update(cx, |this, cx| {
+                                                this.mask_edit_point = Some(idx);
+                                                this.mask_down_moved = false;
+                                                this.mask_drag = Some(MaskDrag {
+                                                    layer_id: lid_h.clone(),
+                                                    mask_id: mid_h.clone(),
+                                                    index: idx,
+                                                    kind: MaskDragKind::Point,
+                                                });
+                                                cx.notify();
+                                            });
+                                        })
+                                        .on_mouse_down(MouseButton::Right, {
+                                            move |_event, _window, cx| {
+                                                s_r.update(cx, |s, cx| {
+                                                    let _ = s.delete_mask_point(&lid_r, &mid_r, idx);
+                                                    cx.notify();
+                                                });
+                                            }
+                                        })
+                                        .into_any_element(),
+                                    );
+                                    // Tangent handles for the selected node.
+                                    if is_sel {
+                                        for (is_in, tip) in [(true, node.in_abs()), (false, node.out_abs())] {
+                                            let (hx, hy) = m2c(tip);
+                                            let p_hh = giz_panel.clone();
+                                            let s_hh = giz_state.clone();
+                                            let lid_hh = giz_lid.clone();
+                                            let mid_hh = mid.clone();
+                                            let (hh_frame, hh_fit, hh_cw, hh_ch) =
+                                                (giz_frame, giz_fit, giz_cw, giz_ch);
+                                            let _ = (hh_frame, hh_fit, hh_cw, hh_ch);
+                                            gizmo_els.push(
+                                                gizmo_dot(
+                                                    format!(
+                                                        "mask_handle_{}_{}_{}",
+                                                        mid,
+                                                        idx,
+                                                        if is_in { "in" } else { "out" }
+                                                    ),
+                                                    hx,
+                                                    hy,
+                                                    7.0,
+                                                    Rgba { r: 0.35, g: 0.85, b: 1.0, a: 1.0 },
+                                                    white,
+                                                    true,
+                                                )
+                                                .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+                                                    let (mx, my) = (event.position.x / px(1.0), event.position.y / px(1.0));
+                                                    s_hh.update(cx, |s, cx| {
+                                                        s.checkpoint();
+                                                        s.select_layer(Some(lid_hh.clone()));
+                                                        s.set_active_mask_edit(Some((lid_hh.clone(), mid_hh.clone())));
+                                                        s.preview_fast = true;
+                                                        cx.notify();
+                                                    });
+                                                    let _ = gizmo_to_comp(mx, my, hh_frame, hh_fit, hh_cw, hh_ch);
+                                                    p_hh.update(cx, |this, cx| {
+                                                        this.mask_edit_point = Some(idx);
+                                                        this.mask_down_moved = true;
+                                                        this.mask_drag = Some(MaskDrag {
+                                                            layer_id: lid_hh.clone(),
+                                                            mask_id: mid_hh.clone(),
+                                                            index: idx,
+                                                            kind: if is_in {
+                                                                MaskDragKind::InHandle
+                                                            } else {
+                                                                MaskDragKind::OutHandle
+                                                            },
+                                                        });
+                                                        cx.notify();
+                                                    });
+                                                })
+                                                .into_any_element(),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     elements.push(layer_el.into_any_element());
@@ -2384,6 +2600,75 @@ impl Render for CompositionViewerPanel {
                 }
                 let curr_x = event.position.x / px(1.0);
                 let curr_y = event.position.y / px(1.0);
+                // Path Editor mask drags win over everything (nodes map
+                // through the cheap matrix path, no scene eval per move).
+                if let Some(mdrag) = this.mask_drag.clone() {
+                    let frame_org = frame_origin_or_center(
+                        this.frame_origin,
+                        this.viewport_px,
+                        this.viewport_origin,
+                        this.canvas_px,
+                    );
+                    let (fox, foy) = frame_org.unwrap_or((0.0, 0.0));
+                    let (cw, ch) = {
+                        let s = this.state.read(cx);
+                        match s.active_composition() {
+                            Some(c) => (c.width as f32, c.height as f32),
+                            None => (1920.0, 1080.0),
+                        }
+                    };
+                    let fit_here = this
+                        .viewport_px
+                        .map(|(vw, vh)| {
+                            ((vw - 32.0) / cw).min((vh - 32.0) / ch).clamp(0.05, 4.0)
+                        })
+                        .unwrap_or(1.0);
+                    let cmx = (curr_x - fox) / fit_here - cw / 2.0;
+                    let cmy = (curr_y - foy) / fit_here - ch / 2.0;
+                    let st = this.state.clone();
+                    let local = st.read(cx).comp_to_layer_local(&mdrag.layer_id, Vec2::new(cmx, cmy));
+                    if let Some(loc) = local {
+                        let ok = match mdrag.kind {
+                            MaskDragKind::Point => st
+                                .update(cx, |s, cx| {
+                                    let r = s.move_mask_point_live(
+                                        &mdrag.layer_id,
+                                        &mdrag.mask_id,
+                                        mdrag.index,
+                                        loc,
+                                    );
+                                    cx.notify();
+                                    r.is_ok()
+                                }),
+                            MaskDragKind::InHandle => st.update(cx, |s, cx| {
+                                let r = s.move_mask_handle_live(
+                                    &mdrag.layer_id,
+                                    &mdrag.mask_id,
+                                    mdrag.index,
+                                    true,
+                                    loc,
+                                );
+                                cx.notify();
+                                r.is_ok()
+                            }),
+                            MaskDragKind::OutHandle => st.update(cx, |s, cx| {
+                                let r = s.move_mask_handle_live(
+                                    &mdrag.layer_id,
+                                    &mdrag.mask_id,
+                                    mdrag.index,
+                                    false,
+                                    loc,
+                                );
+                                cx.notify();
+                                r.is_ok()
+                            }),
+                        };
+                        if ok {
+                            this.mask_down_moved = true;
+                        }
+                    }
+                    return;
+                }
                 // Transform-gizmo drags win over canvas drags.
                 if let Some(drag) = this.gizmo_drag.clone() {
                     // Window px -> composition px via the measured frame.
@@ -2518,6 +2803,22 @@ impl Render for CompositionViewerPanel {
                 this.last_canvas_mouse = None;
                 this.gizmo_drag = None;
                 this.down_on_layer = false;
+                // Mask node click without drag cycles the node kind
+                // (Corner → Smooth → Symmetric → Auto).
+                if let Some(mdrag) = this.mask_drag.take() {
+                    let moved = std::mem::replace(&mut this.mask_down_moved, false);
+                    if !moved && mdrag.kind == MaskDragKind::Point {
+                        let s = this.state.clone();
+                        s.update(cx, |s, cx| {
+                            let _ = s.cycle_mask_point_kind(
+                                &mdrag.layer_id,
+                                &mdrag.mask_id,
+                                mdrag.index,
+                            );
+                            cx.notify();
+                        });
+                    }
+                }
                 // Empty-canvas click with the Move tool deselects (the Move
                 // tool never drags from empty space).
                 if this.empty_down.take().is_some() {
@@ -2541,6 +2842,8 @@ impl Render for CompositionViewerPanel {
                 this.is_dragging_canvas = false;
                 this.last_canvas_mouse = None;
                 this.gizmo_drag = None;
+                this.mask_drag = None;
+                this.mask_down_moved = false;
                 this.down_on_layer = false;
                 this.empty_down = None;
                 let s = this.state.clone();
@@ -2750,8 +3053,13 @@ impl Render for CompositionViewerPanel {
                                             });
                                             match active_tool {
                                                 EditorTool::Text => {
+                                                    // Select the topmost text
+                                                    // layer under the cursor
+                                                    // for editing; only empty
+                                                    // space creates a layer.
+                                                    let pick = p_drag.read(cx).pick_top_at(comp_x, comp_y);
                                                     s_tool.update(cx, |s, cx| {
-                                                        let _ = s.add_text_layer("New Text Layer", Some(Vec2::new(comp_x, comp_y)));
+                                                        let _ = s.text_press_at(Vec2::new(comp_x, comp_y), pick);
                                                         cx.notify();
                                                     });
                                                 }
@@ -2768,8 +3076,14 @@ impl Render for CompositionViewerPanel {
                                                     });
                                                 }
                                                 EditorTool::Pen => {
+                                                    // Explicit topmost routing
+                                                    // (mask target, path/text
+                                                    // under cursor, else new):
+                                                    // never depends on stale
+                                                    // selection.
+                                                    let pick = p_drag.read(cx).pick_top_at(comp_x, comp_y);
                                                     s_tool.update(cx, |s, cx| {
-                                                        let _ = s.add_pen_point(Vec2::new(comp_x, comp_y));
+                                                        let _ = s.pen_press_at(Vec2::new(comp_x, comp_y), pick);
                                                         cx.notify();
                                                     });
                                                 }
@@ -2957,6 +3271,23 @@ impl Render for CompositionViewerPanel {
                 let ms = self.last_frame_ms;
                 let layer_count = comp_opt.map(|c| c.layers.len()).unwrap_or(0);
                 let quality = state.preview_quality.label();
+                // Pen target hint so routing never surprises.
+                let pen_hint = if state.active_tool == EditorTool::Pen {
+                    match state.active_mask_edit.clone() {
+                        Some((lid, mid)) => {
+                            let name = state
+                                .active_composition()
+                                .and_then(|c| c.get_layer(&lid))
+                                .and_then(|l| l.get_mask(&mid))
+                                .map(|m| m.name.clone())
+                                .unwrap_or(mid);
+                            format!("Pen → mask '{name}' (Esc exits) · ")
+                        }
+                        None => String::new(),
+                    }
+                } else {
+                    String::new()
+                };
                 h_flex()
                     .px_3()
                     .py_1()
@@ -2967,7 +3298,7 @@ impl Render for CompositionViewerPanel {
                     .justify_between()
                     .child(div().child(format!("Time: {} (Frame {})", current_tc, current_frame)))
                     .child(div().child(format!(
-                        "{layer_count} layers · {quality} preview · {ms:.1} ms"
+                        "{pen_hint}{layer_count} layers · {quality} preview · {ms:.1} ms"
                     )))
                     .child(div().child("Scroll to Zoom • Space to Play/Pause"))
             })
@@ -3006,6 +3337,7 @@ pub struct PropertiesPanel {
     pub transform_expanded: bool,
     pub switches_expanded: bool,
     pub effects_expanded: bool,
+    pub masks_expanded: bool,
     pub tools_expanded: bool,
     /// Effect ID with the Shader Lab source editor open (`None` = closed).
     pub shader_editor_open: Option<String>,
@@ -3043,6 +3375,7 @@ impl PropertiesPanel {
             transform_expanded: true,
             switches_expanded: false,
             effects_expanded: true,
+            masks_expanded: true,
             tools_expanded: false,
             shader_editor_open: None,
             shader_editor: None,
@@ -3135,6 +3468,13 @@ impl PropertiesPanel {
                             let param = parts[1];
                             let mult = parts.get(2).and_then(|m| m.parse::<f32>().ok()).unwrap_or(50.0) / 100.0;
                             let _ = s.nudge_effect_param(eff_id, param, dx * mult);
+                        }
+                    } else if let Some(rest) = other.strip_prefix("mask:") {
+                        // mask:<layer>:<mask>:<param>[:<mult100>]
+                        let parts: Vec<&str> = rest.split(':').collect();
+                        if parts.len() >= 3 {
+                            let mult = parts.get(3).and_then(|m| m.parse::<f32>().ok()).unwrap_or(50.0) / 100.0;
+                            let _ = s.nudge_mask_param(parts[0], parts[1], parts[2], dx * mult);
                         }
                     }
                 }
@@ -3325,6 +3665,12 @@ where
                                     let parts: Vec<&str> = rest.split(':').collect();
                                     if parts.len() >= 2 {
                                         let _ = s.nudge_effect_param(parts[0], parts[1], step * 2.0);
+                                    }
+                                } else if let Some(rest) = other.strip_prefix("mask:") {
+                                    // mask:<layer>:<mask>:<param>
+                                    let parts: Vec<&str> = rest.split(':').collect();
+                                    if parts.len() >= 3 {
+                                        let _ = s.nudge_mask_param(parts[0], parts[1], parts[2], step);
                                     }
                                 }
                             }
@@ -4102,6 +4448,395 @@ where
         }
     }
     card.into_any_element()
+}
+
+/// Compact scalar row for mask params: stopwatch, label, drag/wheel/type
+/// scrub field. Param keys route through the `mask:` scrub prefix.
+#[allow(clippy::too_many_arguments)]
+fn mask_param_row(
+    state: &Entity<EditorState>,
+    panel_entity: &Entity<PropertiesPanel>,
+    layer_id: &str,
+    mask_id: &str,
+    param_name: &'static str,
+    label: &str,
+    display: String,
+    step: f32,
+    cx: &App,
+) -> AnyElement {
+    let animated = state
+        .read(cx)
+        .active_composition()
+        .and_then(|c| c.get_layer(layer_id))
+        .and_then(|l| l.get_mask(mask_id))
+        .and_then(|m| m.get_param_property(param_name))
+        .map(|p| p.is_animated())
+        .unwrap_or(false);
+    let s_t = state.clone();
+    let lid_t = layer_id.to_string();
+    let mid_t = mask_id.to_string();
+    let mult = (step * 100.0).round().max(1.0) as i64;
+    h_flex()
+        .items_center()
+        .justify_between()
+        .text_xs()
+        .child(
+            h_flex()
+                .gap_1()
+                .items_center()
+                .child(
+                    div()
+                        .cursor_pointer()
+                        .p_0p5()
+                        .rounded_sm()
+                        .hover(|s| s.bg(cx.theme().muted))
+                        .text_color(if animated {
+                            cx.theme().primary
+                        } else {
+                            cx.theme().muted_foreground
+                        })
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            s_t.update(cx, |s, cx| {
+                                let _ = s.toggle_mask_param_animation(&lid_t, &mid_t, param_name);
+                                cx.notify();
+                            });
+                        })
+                        .child(icon_box(IconName::Timer)),
+                )
+                .child(div().text_color(cx.theme().muted_foreground).child(label.to_string())),
+        )
+        .child(scrub_field(
+            SharedString::from(format!("param_mask_{param_name}_{mask_id}")),
+            format!("mask:{layer_id}:{mask_id}:{param_name}:{mult}"),
+            display,
+            None,
+            None,
+            state,
+            panel_entity,
+            cx,
+            move |_| {},
+            move |_| {},
+        ))
+        .into_any_element()
+}
+
+/// Masks card body for the Properties panel: per-mask enable, combine
+/// mode, invert, edit target, path keyframe nav, scalar rows, delete.
+fn render_masks_section(
+    state: &Entity<EditorState>,
+    layer: &project::Layer,
+    panel_entity: &Entity<PropertiesPanel>,
+    cx: &App,
+) -> AnyElement {
+    let lid = layer.id.clone();
+    let mut col = v_flex().gap_2();
+    if layer.masks.is_empty() {
+        col = col.child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child("No masks. Add one, then edit its nodes in the viewport Path Editor."),
+        );
+    }
+    for mask in &layer.masks {
+        let mid = mask.id.clone();
+        let is_editing = state.read(cx).active_mask_edit
+            == Some((lid.clone(), mid.clone()));
+        let s_toggle = state.clone();
+        let s_mode = state.clone();
+        let s_inv = state.clone();
+        let s_del = state.clone();
+        let s_edit = state.clone();
+        let s_add = state.clone();
+        let s_k = state.clone();
+        let s_p = state.clone();
+        let s_n = state.clone();
+        let lid_t = lid.clone();
+        let mid_t = mid.clone();
+        let lid_m = lid.clone();
+        let mid_m = mid.clone();
+        let lid_i = lid.clone();
+        let mid_i = mid.clone();
+        let lid_d = lid.clone();
+        let mid_d = mid.clone();
+        let lid_e = lid.clone();
+        let mid_e = mid.clone();
+        let lid_k = lid.clone();
+        let mid_k = mid.clone();
+        let lid_p = lid.clone();
+        let mid_p = mid.clone();
+        let lid_n = lid.clone();
+        let mid_n = mid.clone();
+        let lid_c = lid.clone();
+        let mid_c = mid.clone();
+
+        let current_tc = state.read(cx).current_timecode();
+        let path_kf = mask.path.has_keyframe_at(&current_tc);
+        let path_prev = mask.path.previous_keyframe_time(&current_tc).is_some();
+        let path_next = mask.path.next_keyframe_time(&current_tc).is_some();
+        let node_count = mask.path.value.points.len();
+        let is_closed = mask.path.value.closed;
+
+        let mut box_el = v_flex()
+            .id(SharedString::from(format!("mask_box_{mid}")))
+            .test_support()
+            .p_2()
+            .rounded_sm()
+            .bg(cx.theme().secondary)
+            .gap_1p5();
+
+        // Header: enable, name, mode pill, invert, edit, delete.
+        box_el = box_el.child(
+            h_flex()
+                .items_center()
+                .justify_between()
+                .text_xs()
+                .child(
+                    h_flex()
+                        .gap_1p5()
+                        .items_center()
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("mask_toggle_{mid}")))
+                                .test_support()
+                                .cursor_pointer()
+                                .w(px(14.))
+                                .h(px(14.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_color(if mask.enabled {
+                                    cx.theme().foreground
+                                } else {
+                                    cx.theme().muted_foreground
+                                })
+                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                    s_toggle.update(cx, |s, cx| {
+                                        let _ = s.toggle_mask_enabled(&lid_t, &mid_t);
+                                        cx.notify();
+                                    });
+                                })
+                                .child(if mask.enabled { icon_box(IconName::Eye) } else { icon_box(IconName::EyeOff) }),
+                        )
+                        .child(
+                            div()
+                                .font_semibold()
+                                .text_color(if mask.enabled {
+                                    cx.theme().foreground
+                                } else {
+                                    cx.theme().muted_foreground
+                                })
+                                .child(format!("{} · {} pts{}", mask.name, node_count, if is_closed { " · closed" } else { "" })),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .items_center()
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("mask_mode_{mid}")))
+                                .test_support()
+                                .cursor_pointer()
+                                .px_1p5()
+                                .py_0p5()
+                                .rounded_sm()
+                                .bg(cx.theme().muted)
+                                .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                    s_mode.update(cx, |s, cx| {
+                                        let _ = s.cycle_mask_mode(&lid_m, &mid_m);
+                                        cx.notify();
+                                    });
+                                })
+                                .child(mask.mode.label()),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("mask_delete_{mid}")))
+                                .test_support()
+                                .cursor_pointer()
+                                .w(px(14.))
+                                .h(px(14.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_color(cx.theme().muted_foreground)
+                                .hover(|s| s.text_color(rgb(0xef4444)))
+                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                    s_del.update(cx, |s, cx| {
+                                        let _ = s.remove_layer_mask(&lid_d, &mid_d);
+                                        cx.notify();
+                                    });
+                                })
+                                .child(icon_box(IconName::Trash)),
+                        ),
+                ),
+        );
+
+        // Second row: invert, path open/close, edit target, path keys.
+        box_el = box_el.child(
+            h_flex()
+                .gap_1()
+                .items_center()
+                .text_xs()
+                .child(
+                    div()
+                        .cursor_pointer()
+                        .px_1p5()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(if mask.invert { cx.theme().primary } else { cx.theme().muted })
+                        .text_color(if mask.invert { cx.theme().primary_foreground } else { cx.theme().foreground })
+                        .hover(|s| s.bg(cx.theme().accent))
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            s_inv.update(cx, |s, cx| {
+                                let _ = s.toggle_mask_invert(&lid_i, &mid_i);
+                                cx.notify();
+                            });
+                        })
+                        .child(if mask.invert { "Inverted" } else { "Invert" }),
+                )
+                .child(
+                    div()
+                        .cursor_pointer()
+                        .px_1p5()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(cx.theme().muted)
+                        .hover(|s| s.bg(cx.theme().accent))
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            s_add.update(cx, |s, cx| {
+                                let cur = s
+                                    .active_composition()
+                                    .and_then(|c| c.get_layer(&lid_c))
+                                    .and_then(|l| l.get_mask(&mid_c))
+                                    .map(|m| m.path.value.closed)
+                                    .unwrap_or(false);
+                                let _ = s.set_mask_closed(&lid_c, &mid_c, !cur);
+                                cx.notify();
+                            });
+                        })
+                        .child(if is_closed { "Open Path" } else { "Close Path" }),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("mask_edit_{mid}")))
+                        .test_support()
+                        .cursor_pointer()
+                        .px_1p5()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(if is_editing { cx.theme().primary } else { cx.theme().muted })
+                        .text_color(if is_editing { cx.theme().primary_foreground } else { cx.theme().foreground })
+                        .hover(|s| s.bg(cx.theme().accent))
+                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                    s_edit.update(cx, |s, cx| {
+                                        // Entering edit mode also selects the
+                                        // layer so the overlay is visible.
+                                        s.select_layer(Some(lid_e.clone()));
+                                        if s.active_mask_edit == Some((lid_e.clone(), mid_e.clone())) {
+                                            s.set_active_mask_edit(None);
+                                        } else {
+                                            s.set_active_mask_edit(Some((lid_e.clone(), mid_e.clone())));
+                                        }
+                                        cx.notify();
+                                    });
+                                })
+                        .child(if is_editing { "Editing…" } else { "Edit Nodes" }),
+                )
+                .child(
+                    h_flex()
+                        .gap_0p5()
+                        .items_center()
+                        .child(
+                            div()
+                                .cursor_pointer()
+                                .px_0p5()
+                                .text_color(if path_prev { cx.theme().foreground } else { cx.theme().muted_foreground.opacity(0.3) })
+                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                    if path_prev {
+                                        s_k.update(cx, |s, cx| {
+                                            let _ = s.seek_mask_path_keyframe(&lid_k, &mid_k, -1);
+                                            cx.notify();
+                                        });
+                                    }
+                                })
+                                .child("◂"),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("mask_pathkf_{mid}")))
+                                .test_support()
+                                .cursor_pointer()
+                                .px_0p5()
+                                .text_color(if path_kf { rgb(0xf59e0b).into() } else { cx.theme().muted_foreground })
+                                .hover(|s| s.text_color(rgb(0xffffff)))
+                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                    s_p.update(cx, |s, cx| {
+                                        let _ = s.toggle_mask_path_keyframe_at_current_time(&lid_p, &mid_p);
+                                        cx.notify();
+                                    });
+                                })
+                                .child("◆"),
+                        )
+                        .child(
+                            div()
+                                .cursor_pointer()
+                                .px_0p5()
+                                .text_color(if path_next { cx.theme().foreground } else { cx.theme().muted_foreground.opacity(0.3) })
+                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                    if path_next {
+                                        s_n.update(cx, |s, cx| {
+                                            let _ = s.seek_mask_path_keyframe(&lid_n, &mid_n, 1);
+                                            cx.notify();
+                                        });
+                                    }
+                                })
+                                .child("▸"),
+                        ),
+                ),
+        );
+
+        // Scalar rows: opacity / feather / expansion.
+        box_el = box_el
+            .child(mask_param_row(state, panel_entity, &lid, &mid, "opacity", "Opacity", format!("{:.0}%", mask.opacity.value), 1.0, cx))
+            .child(mask_param_row(state, panel_entity, &lid, &mid, "feather", "Feather", format!("{:.1} px", mask.feather.value), 0.5, cx))
+            .child(mask_param_row(state, panel_entity, &lid, &mid, "expansion", "Expansion", format!("{:+.1} px", mask.expansion.value), 0.5, cx));
+
+        col = col.child(box_el);
+    }
+
+    // Add-mask row.
+    {
+        let s_add = state.clone();
+        let lid_add = lid.clone();
+        col = col.child(
+            div()
+                .id("mask_add_button")
+                .test_support()
+                .cursor_pointer()
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .bg(cx.theme().muted)
+                .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                .text_xs()
+                .items_center()
+                .justify_center()
+                .flex()
+                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    s_add.update(cx, |s, cx| {
+                        if let Ok(mid) = s.add_mask_to_layer(&lid_add) {
+                            s.set_active_mask_edit(Some((lid_add.clone(), mid)));
+                        }
+                        cx.notify();
+                    });
+                })
+                .child("+ Add Mask (then Pen-click to draw, drag nodes to edit)"),
+        );
+    }
+    col.into_any_element()
 }
 
 fn render_applied_effects(
@@ -6420,7 +7155,7 @@ impl Render for PropertiesPanel {
                                     Some(solid_body.into_any_element()),
                                 ));
                             }
-                            LayerSource::Text { text, font_family, font_size, fill_color, weight, italic, tracking, leading, align, all_caps, stroke_width, stroke_color, baseline_shift, box_width } => {
+                            LayerSource::Text { text, font_family, font_size, fill_color, weight, italic, tracking, leading, align, all_caps, stroke_width, stroke_color, baseline_shift, box_width, text_path } => {
                                 let lid_t = layer.id.clone();
                                 let s_text = self.state.clone();
                                 let s_fs = self.state.clone();
@@ -6915,6 +7650,41 @@ impl Render for PropertiesPanel {
                                                 .child(box_row)
                                                 .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Baseline shift (px)"))
                                                 .child(base_row)
+                                                .child({
+                                                    let s_tp = self.state.clone();
+                                                    let lid_tp = lid_t.clone();
+                                                    let has_path = text_path.is_some();
+                                                    let count = text_path.as_ref().map(|p| p.points.len()).unwrap_or(0);
+                                                    h_flex()
+                                                        .gap_1()
+                                                        .items_center()
+                                                        .child(div().text_xs().text_color(cx.theme().muted_foreground).child(
+                                                            if has_path {
+                                                                format!("Text path: {count} pts (Pen adds points)")
+                                                            } else {
+                                                                "Text path: none (select + Pen clicks to draw)".to_string()
+                                                            },
+                                                        ))
+                                                        .child(
+                                                            div()
+                                                                .id("text_path_clear")
+                                                                .test_support()
+                                                                .cursor_pointer()
+                                                                .px_1p5()
+                                                                .py_0p5()
+                                                                .rounded_sm()
+                                                                .bg(cx.theme().muted)
+                                                                .hover(|s| s.bg(rgb(0xef4444)).text_color(rgb(0xffffff)))
+                                                                .text_xs()
+                                                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                                    s_tp.update(cx, |s, cx| {
+                                                                        let _ = s.clear_text_path(&lid_tp);
+                                                                        cx.notify();
+                                                                    });
+                                                                })
+                                                                .child("Clear"),
+                                                        )
+                                                })
                                         })
                                         .child(
                                             h_flex()
@@ -7773,6 +8543,26 @@ impl Render for PropertiesPanel {
                         props_items.push(transform_card.into_any_element());
                         props_items.push(switches_card);
                         props_items.push(effects_card);
+                        // --- Masks Card (first-class vector masks) ---
+                        {
+                            let p_masks = panel_entity.clone();
+                            let masks_list = render_masks_section(&self.state, layer, &panel_entity, cx);
+                            let masks_card = prop_section(
+                                "masks",
+                                format!("Masks ({})", layer.masks.len()),
+                                IconName::Scissors,
+                                self.masks_expanded,
+                                move |cx| {
+                                    p_masks.update(cx, |this, cx| {
+                                        this.masks_expanded = !this.masks_expanded;
+                                        cx.notify();
+                                    });
+                                },
+                                cx,
+                                Some(masks_list),
+                            );
+                            props_items.push(masks_card);
+                        }
 
                         props_items
                     } else {
@@ -8537,6 +9327,12 @@ pub struct TimelinePanel {
     pub scrub_factor: f32,
     /// Active spline/graph keyframe drag (time + value).
     pub graph_drag: Option<GraphKeyDrag>,
+    /// Timeline layer reorder drag: (layer id, from-index).
+    pub reorder_drag: Option<(String, usize)>,
+    /// Hovered row index as drop target while reordering.
+    pub reorder_hover: Option<usize>,
+    /// Window-y where the reorder press started (threshold gate).
+    pub reorder_start_y: f32,
 }
 
 /// Describes what kind of drag the user is performing on the timeline layer strip.
@@ -9066,6 +9862,9 @@ impl TimelinePanel {
             scrub_moved: false,
             scrub_factor: 1.0,
             graph_drag: None,
+            reorder_drag: None,
+            reorder_hover: None,
+            reorder_start_y: 0.0,
         }
     }
 
@@ -9293,11 +10092,44 @@ impl Render for TimelinePanel {
 
                 let p_layer_ctx = panel_entity.clone();
                 let lid_layer_ctx = layer.id.clone();
+                let p_reorder = panel_entity.clone();
+                let p_reorder_hover = panel_entity.clone();
+                let lid_reorder = layer.id.clone();
+                let row_idx = idx;
+                // Drop indicator: accent line above the hovered row.
+                if self.reorder_hover == Some(idx) && self.reorder_drag.as_ref().map(|(id, _)| id != &layer.id).unwrap_or(false) {
+                    left_col = left_col
+                        .border_t_2()
+                        .border_color(rgb(0x38bdf8));
+                }
                 let left_col = left_col
-                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+                        let start_y = event.position.y / px(1.0);
                         sel_state.update(cx, |s, cx| {
                             s.select_layer(Some(lid.clone()));
                             cx.notify();
+                        });
+                        // Arm a potential reorder drag (commits on mouseup
+                        // over another row; plain clicks just select).
+                        p_reorder.update(cx, |this, cx| {
+                            this.reorder_drag = Some((lid_reorder.clone(), row_idx));
+                            this.reorder_hover = None;
+                            this.reorder_start_y = start_y;
+                            cx.notify();
+                        });
+                    })
+                    .on_mouse_move(move |event, _window, cx| {
+                        // Another row hovered mid-drag → drop target.
+                        let y = event.position.y / px(1.0);
+                        p_reorder_hover.update(cx, |this, cx| {
+                            if let Some((_, from)) = this.reorder_drag.clone() {
+                                if (y - this.reorder_start_y).abs() > 4.0 && from != row_idx {
+                                    if this.reorder_hover != Some(row_idx) {
+                                        this.reorder_hover = Some(row_idx);
+                                        cx.notify();
+                                    }
+                                }
+                            }
                         });
                     })
                     .on_mouse_down(MouseButton::Right, move |event, _window, cx| {
@@ -10519,6 +11351,21 @@ impl Render for TimelinePanel {
                     this.scrub_moved = false;
                     cx.notify();
                 });
+                // Commit a layer reorder drop (dragged onto another row).
+                if let (Some((drag_id, _)), Some(target)) = (
+                    p_root_up.read(cx).reorder_drag.clone(),
+                    p_root_up.read(cx).reorder_hover,
+                ) {
+                    s_root_up.update(cx, |s, cx| {
+                        let _ = s.move_layer_to(&drag_id, target);
+                        cx.notify();
+                    });
+                }
+                p_root_up.update(cx, |this, cx| {
+                    this.reorder_drag = None;
+                    this.reorder_hover = None;
+                    cx.notify();
+                });
                 s_root_up.update(cx, |s, cx| {
                     s.preview_fast = false;
                     cx.notify();
@@ -10538,6 +11385,8 @@ impl Render for TimelinePanel {
                     this.scrub_key = None;
                     this.scrub_last_x = None;
                     this.scrub_moved = false;
+                    this.reorder_drag = None;
+                    this.reorder_hover = None;
                     cx.notify();
                 });
                 s_root_up_out.update(cx, |s, cx| {

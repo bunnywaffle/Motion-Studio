@@ -60,59 +60,25 @@ pub(crate) fn fill_ellipse(buf: &mut FloatBuf, rx: f32, ry: f32, col: Px) {
     }
 }
 
-/// Stroke a polyline path (`M x y L x y ...`) with round-ish 2px nib.
+/// Stroke a path through the shared path model (curves flatten to the
+/// polyline, then a round-ish nib walks it). Closed paths join up.
 pub(crate) fn stroke_path(buf: &mut FloatBuf, path_data: &str, nib: f32, col: Px) {
-    let pts = parse_path_points(path_data);
+    let path = project::Path::from_svg(path_data);
+    let mut pts = path.flatten(0.5);
+    if pts.is_empty() {
+        return;
+    }
+    if path.closed {
+        pts.push(pts[0]);
+    }
     if pts.len() < 2 {
         // Single point: draw a dot.
-        if let Some(&(x, y)) = pts.first() {
-            dot(buf, x, y, nib, col);
-        }
+        dot(buf, pts[0].x, pts[0].y, nib, col);
         return;
     }
     for w in pts.windows(2) {
-        stroke_segment(buf, w[0], w[1], nib, col);
+        stroke_segment(buf, (w[0].x, w[0].y), (w[1].x, w[1].y), nib, col);
     }
-}
-
-fn parse_path_points(path_data: &str) -> Vec<(f32, f32)> {
-    let tokens: Vec<&str> = path_data.split_whitespace().collect();
-    let mut pts = Vec::new();
-    let mut i = 0;
-    while i < tokens.len() {
-        match tokens[i] {
-            "M" | "L" => {
-                if i + 2 < tokens.len() {
-                    if let (Ok(x), Ok(y)) =
-                        (tokens[i + 1].parse::<f32>(), tokens[i + 2].parse::<f32>())
-                    {
-                        pts.push((x, y));
-                    }
-                    i += 3;
-                } else {
-                    break;
-                }
-            }
-            "Z" | "z" => {
-                if let Some(&first) = pts.first() {
-                    pts.push(first);
-                }
-                i += 1;
-            }
-            _ => {
-                // Bare coordinate pair.
-                if i + 1 < tokens.len() {
-                    if let (Ok(x), Ok(y)) = (tokens[i].parse::<f32>(), tokens[i + 1].parse::<f32>()) {
-                        pts.push((x, y));
-                        i += 2;
-                        continue;
-                    }
-                }
-                i += 1;
-            }
-        }
-    }
-    pts
 }
 
 fn dot(buf: &mut FloatBuf, x: f32, y: f32, r: f32, col: Px) {

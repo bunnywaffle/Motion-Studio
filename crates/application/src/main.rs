@@ -1769,6 +1769,11 @@ impl Render for AppView {
                         this.show_project_manager = false;
                         cx.notify();
                     });
+                    state_key.update(cx, |s, cx| {
+                        // Esc also exits mask node-edit mode.
+                        s.set_active_mask_edit(None);
+                        cx.notify();
+                    });
                     return;
                 }
                 if key == "space" || key == " " {
@@ -3496,6 +3501,181 @@ mod tests {
         // Remove effect directly
         state.remove_layer_effect(layer_id, &fx_id).expect("effect removed");
         assert!(!state.active_composition().unwrap().get_layer(layer_id).unwrap().has_effects());
+    }
+
+    #[test]
+    fn test_mask_lifecycle_and_path_animation() {
+        use crate::state::EditorState;
+        use project::{MaskMode, Vec2};
+
+        let mut state = EditorState::new();
+        let layer_id = "layer_accent";
+
+        // Add + configure.
+        let mid = state.add_mask_to_layer(layer_id).expect("mask added");
+        assert!(state.active_composition().unwrap().get_layer(layer_id).unwrap().has_masks());
+        state.cycle_mask_mode(layer_id, &mid).expect("mode cycled");
+        assert_eq!(
+            state.active_composition().unwrap().get_layer(layer_id).unwrap().get_mask(&mid).unwrap().mode,
+            MaskMode::Subtract
+        );
+        state.toggle_mask_invert(layer_id, &mid).expect("invert toggled");
+        assert!(state.active_composition().unwrap().get_layer(layer_id).unwrap().get_mask(&mid).unwrap().invert);
+        assert!(state.nudge_mask_param(layer_id, &mid, "feather", 6.0).is_ok());
+        assert!(!state.nudge_mask_param(layer_id, &mid, "nope", 1.0).is_ok());
+
+        // Node edits.
+        let before = state.active_composition().unwrap().get_layer(layer_id).unwrap().get_mask(&mid).unwrap().path.value.points.len();
+        state.append_mask_point(layer_id, &mid, Vec2::new(10.0, 20.0)).expect("append");
+        state.move_mask_point_live(layer_id, &mid, 0, Vec2::new(-90.0, -90.0)).expect("move");
+        state.move_mask_handle_live(layer_id, &mid, 0, false, Vec2::new(-70.0, -90.0)).expect("handle");
+        state.cycle_mask_point_kind(layer_id, &mid, 0).expect("kind");
+        {
+            let layer = state.active_composition().unwrap().get_layer(layer_id).unwrap().clone();
+            let mask = layer.get_mask(&mid).unwrap();
+            assert_eq!(mask.path.value.points.len(), before + 1);
+            assert_eq!(mask.path.value.points[0].pos, Vec2::new(-90.0, -90.0));
+        }
+        state.delete_mask_point(layer_id, &mid, 0).expect("delete");
+        assert_eq!(
+            state.active_composition().unwrap().get_layer(layer_id).unwrap().get_mask(&mid).unwrap().path.value.points.len(),
+            before
+        );
+
+        // Path keyframes morph (same topology interpolates point-wise).
+        state.seek(0.0);
+        assert!(state.toggle_mask_path_keyframe_at_current_time(layer_id, &mid).expect("key"));
+        state.seek(1.0);
+        state.move_mask_point_live(layer_id, &mid, 0, Vec2::new(0.0, 0.0)).expect("move at t=1");
+        // Mid-way evaluation morphs node 0 between (100,-100) and (0,0).
+        state.seek(0.5);
+        let eval = state.evaluate_current_frame().unwrap();
+        let eval_layer = eval.get_layer(layer_id).unwrap();
+        let emask = eval_layer.masks.iter().find(|m| m.id == mid).unwrap();
+        assert_eq!(emask.path.points.len(), 4);
+        let mid_pos = emask.path.points[0].pos;
+        assert!((mid_pos.x - 50.0).abs() < 2.0 && (mid_pos.y + 50.0).abs() < 2.0, "{mid_pos:?}");
+        // Topology change holds instead of morphing: 5 static nodes vs 4-pt
+        // keys evaluate to the last key past its time.
+        state.append_mask_point(layer_id, &mid, Vec2::new(300.0, 300.0)).expect("append2");
+        state.seek(2.0);
+        let eval2 = state.evaluate_current_frame().unwrap();
+        let emask2 = eval2.get_layer(layer_id).unwrap().masks.iter().find(|m| m.id == mid).unwrap();
+        assert_eq!(emask2.path.points.len(), 4);
+        // Back at frame 0 the diamond is lit; seeking back finds keys.
+        state.seek(0.0);
+        assert!(state.active_composition().unwrap().get_layer(layer_id).unwrap().get_mask(&mid).unwrap().path.has_keyframe_at(&state.clock.timecode()));
+        state.seek(2.0);
+        assert!(state.seek_mask_path_keyframe(layer_id, &mid, -1).expect("seek prev"));
+        assert_eq!(state.clock.current_frame(), 30);
+
+        // World-space pen point lands in layer-local coords.
+        state.set_active_mask_edit(Some((layer_id.to_string(), mid.clone())));
+        state.add_pen_point(Vec2::new(0.0, 0.0)).expect("pen to mask");
+        assert_eq!(
+            state.active_composition().unwrap().get_layer(layer_id).unwrap().get_mask(&mid).unwrap().path.value.points.len(),
+            before + 2
+        );
+
+        // Cleanup.
+        state.remove_layer_mask(layer_id, &mid).expect("mask removed");
+        assert!(!state.active_composition().unwrap().get_layer(layer_id).unwrap().has_masks());
+        assert!(state.active_mask_edit.is_none());
+    }
+
+    #[test]
+    fn test_text_path_pen_and_clear() {        use crate::state::EditorState;
+        use project::{LayerSource, Vec2};
+
+        let mut state = EditorState::new();
+        // Badge layer is a solid; make a text layer instead via existing API.
+        state.select_layer(Some("layer_badge".to_string()));
+        // Pen on a text layer draws its baseline path.
+        state.add_text_layer("Hello", None).expect("text layer");
+        let tid = state.selected_layer_id.clone().unwrap();
+        state.add_pen_point(Vec2::new(-50.0, 0.0)).expect("pen1");
+        state.add_pen_point(Vec2::new(50.0, -20.0)).expect("pen2");
+        let has_path = match &state.active_composition().unwrap().get_layer(&tid).unwrap().source {
+            LayerSource::Text { text_path, .. } => text_path.as_ref().map(|p| p.points.len()),
+            _ => None,
+        };
+        assert_eq!(has_path, Some(2));
+        state.clear_text_path(&tid).expect("clear");
+        assert!(matches!(
+            &state.active_composition().unwrap().get_layer(&tid).unwrap().source,
+            LayerSource::Text { text_path: None, .. }
+        ));
+    }
+
+    #[test]
+    fn test_pen_press_routing() {
+        use crate::state::EditorState;
+        use project::{LayerSource, ShapeType, Vec2};
+
+        let mut state = EditorState::new();
+        // Empty pick creates a fresh path layer.
+        let id1 = state.pen_press_at(Vec2::new(10.0, 10.0), None).expect("create");
+        // Picking the new path layer appends instead of creating.
+        let id2 = state
+            .pen_press_at(Vec2::new(20.0, 20.0), Some(id1.clone()))
+            .expect("append");
+        assert_eq!(id1, id2);
+        let count = match &state.active_composition().unwrap().get_layer(&id1).unwrap().source {
+            LayerSource::Shape { shape_type: ShapeType::Path { path_data, .. } } => {
+                project::Path::from_svg(path_data).points.len()
+            }
+            _ => 0,
+        };
+        assert_eq!(count, 2);
+        // Picking a text layer selects it and draws its baseline.
+        let tid = state.add_text_layer("Hi", None).expect("text");
+        let picked = state.pen_press_at(Vec2::new(5.0, 5.0), Some(tid.clone())).expect("text pen");
+        assert_eq!(picked, tid);
+        assert_eq!(state.selected_layer_id.as_deref(), Some(tid.as_str()));
+        // Text tool press selects existing text, creates on empty space.
+        let same = state.text_press_at(Vec2::ZERO, Some(tid.clone())).expect("select text");
+        assert_eq!(same, tid);
+        let fresh = state.text_press_at(Vec2::new(300.0, 300.0), None).expect("new text");
+        assert_ne!(fresh, tid);
+    }
+
+    #[test]
+    fn test_layer_drag_reorder() {
+        use crate::state::EditorState;
+
+        let mut state = EditorState::new();
+        let before: Vec<String> = state
+            .active_composition()
+            .unwrap()
+            .layers
+            .iter()
+            .map(|l| l.id.clone())
+            .collect();
+        assert!(before.len() >= 3);
+        // Drag the top layer onto the bottom slot.
+        let top = before[0].clone();
+        let bottom_idx = before.len() - 1;
+        state.move_layer_to(&top, bottom_idx).expect("reorder");
+        let after: Vec<String> = state
+            .active_composition()
+            .unwrap()
+            .layers
+            .iter()
+            .map(|l| l.id.clone())
+            .collect();
+        assert_eq!(after[bottom_idx], top);
+        // No-op reorder pushes no undo step: one undo after [real + noop]
+        // must restore the original order exactly.
+        state.move_layer_to(&top, bottom_idx).expect("noop");
+        assert!(state.undo());
+        let restored: Vec<String> = state
+            .active_composition()
+            .unwrap()
+            .layers
+            .iter()
+            .map(|l| l.id.clone())
+            .collect();
+        assert_eq!(restored, before);
     }
 
     #[test]

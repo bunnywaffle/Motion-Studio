@@ -4,8 +4,8 @@ use crate::graph::SceneGraph;
 use crate::node::SceneNode;
 use crate::transform::{AffineTransform2D, BoundingBox2D, EvaluatedTransform, TransformResolver};
 use project::{
-    BlendMode, Color, Composition, EffectType, LayerSource, LoopMode, Project, StockPlugin,
-    TimeCode, TrackMatteMode, Vec2,
+    BlendMode, Color, Composition, EffectType, LayerSource, LoopMode, MaskMode, Path, Project,
+    StockPlugin, TimeCode, TrackMatteMode, Vec2,
 };
 use project::shader_interp::{self, PreviewEnv};
 use serde::{Deserialize, Serialize};
@@ -679,7 +679,6 @@ pub struct EvaluatedEffect {
     pub enabled: bool,
     pub effect_type: EvaluatedEffectType,
 }
-
 impl EvaluatedEffect {
     /// Process a color through this evaluated effect if enabled.
     pub fn process_color(&self, color: Color) -> Color {
@@ -688,6 +687,23 @@ impl EvaluatedEffect {
         }
         self.effect_type.process_color(color)
     }
+}
+
+/// The evaluated state of one layer mask at a target timecode: resolved
+/// Bézier path (morphed when keyframed), combine mode, shaped scalars,
+/// and the mask-local transform (applied to path points at raster time).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvaluatedMask {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub path: Path,
+    pub mode: MaskMode,
+    pub opacity: f32,
+    pub feather: f32,
+    pub expansion: f32,
+    pub invert: bool,
+    pub transform: EvaluatedTransform,
 }
 
 /// The evaluated state of a single layer at a specific timeline position.
@@ -712,6 +728,7 @@ pub struct EvaluatedLayer {
     pub transform: EvaluatedTransform,
     pub nested_composition: Option<Box<NestedCompositionEvaluation>>,
     pub effects: Vec<EvaluatedEffect>,
+    pub masks: Vec<EvaluatedMask>,
 }
 
 impl EvaluatedLayer {
@@ -1649,6 +1666,28 @@ impl LayerStackEvaluator {
                 transform,
                 nested_composition,
                 effects: evaluated_effects,
+                masks: {
+                    let mut evaluated_masks = Vec::with_capacity(node.masks.len());
+                    for mask in &node.masks {
+                        let (m_anchor, m_pos, m_scale, m_rot) =
+                            mask.transform.evaluate_at(time);
+                        evaluated_masks.push(EvaluatedMask {
+                            id: mask.id.clone(),
+                            name: mask.name.clone(),
+                            enabled: mask.enabled,
+                            path: mask.path.evaluate_at(time),
+                            mode: mask.mode,
+                            opacity: mask.opacity.evaluate_at(time),
+                            feather: mask.feather.evaluate_at(time),
+                            expansion: mask.expansion.evaluate_at(time),
+                            invert: mask.invert,
+                            transform: EvaluatedTransform::from_components(
+                                m_pos, m_scale, m_rot, m_anchor, None,
+                            ),
+                        });
+                    }
+                    evaluated_masks
+                },
             });
         }
 

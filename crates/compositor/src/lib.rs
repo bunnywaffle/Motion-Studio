@@ -7,8 +7,9 @@ pub mod transform;
 
 pub use error::SceneGraphError;
 pub use evaluation::{
-    resolve_nested_time, EvaluatedEffect, EvaluatedEffectType, EvaluatedLayer, EvaluatedStack,
-    FlattenedRenderLayer, LayerStackEvaluator, NestedCompositionEvaluation, RenderPassDescriptor,
+    resolve_nested_time, EvaluatedEffect, EvaluatedEffectType, EvaluatedLayer, EvaluatedMask,
+    EvaluatedStack, FlattenedRenderLayer, LayerStackEvaluator, NestedCompositionEvaluation,
+    RenderPassDescriptor,
 };
 pub use graph::SceneGraph;
 pub use node::SceneNode;

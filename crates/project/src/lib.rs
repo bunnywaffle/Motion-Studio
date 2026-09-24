@@ -9,8 +9,10 @@ pub mod frame_rate;
 pub mod keyframe;
 pub mod layer;
 pub mod marker;
+pub mod mask;
 pub mod matte;
 pub mod ofx;
+pub mod path;
 pub mod project;
 pub mod property;
 pub mod shader;
@@ -37,8 +39,10 @@ pub use keyframe::{
 };
 pub use layer::{Layer, LayerSource, ShapeType, TextAlign};
 pub use marker::Marker;
+pub use mask::{Mask, MaskMode};
 pub use matte::TrackMatteMode;
 pub use ofx::{ofx_in_category, ofx_lookup, OfxCategory, OfxEffectDescriptor, OfxParamDescriptor, OFX_SUITE};
+pub use path::{Path, PathBooleanOp, PathPoint, PathPointKind};
 pub use project::{Project, ProjectSettings, CURRENT_FORMAT_VERSION};
 pub use property::Property;
 pub use shader::{
