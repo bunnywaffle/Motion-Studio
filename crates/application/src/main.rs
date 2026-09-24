@@ -1,6 +1,7 @@
-mod panels;
+pub(crate) mod panels;
 pub mod raster;
 pub mod state;
+pub mod widgets;
 use state::EditorState;
 
 use std::rc::Rc;
@@ -3643,6 +3644,181 @@ mod tests {
         assert!(after.1 < before.1, "downward drag lowers the value, y-axis up");
     }
 
+    #[test]
+    fn test_widget_state_commits() {
+        use crate::state::EditorState;
+        use project::{EffectType, ShaderParam, ShaderParamType, ShaderParamValue};
+        use std::collections::HashMap;
+
+        let mut state = EditorState::new();
+        state.select_layer(Some("layer_accent".to_string()));
+        // ShaderLab with a Vec2 + an Enum param (constructed directly).
+        let fx = state
+            .add_effect_to_selected_layer(EffectType::ShaderLab {
+                source: String::new(),
+                params: vec![
+                    ShaderParam {
+                        name: "offset".to_string(),
+                        label: "Offset".to_string(),
+                        param_type: ShaderParamType::Vec2,
+                        default: ShaderParamValue::Vec2([1.0, 2.0]),
+                        min: None,
+                        max: None,
+                        step: None,
+                        group: None,
+                    },
+                    ShaderParam {
+                        name: "mode".to_string(),
+                        label: "Mode".to_string(),
+                        param_type: ShaderParamType::Enum {
+                            options: vec!["Soft".to_string(), "Hard".to_string()],
+                        },
+                        default: ShaderParamValue::Int(0),
+                        min: None,
+                        max: None,
+                        step: None,
+                        group: None,
+                    },
+                ],
+                values: HashMap::new(),
+                compile_error: None,
+            })
+            .unwrap();
+        // Linked nudge moves every component together (step 0.05).
+        state.nudge_shaderlab_linked(&fx, "offset", 1.0).unwrap();
+        // Linked typed entry sets every component at once.
+        state.set_shaderlab_all_components(&fx, "offset", 5.0).unwrap();
+        {
+            let comp = state.active_composition().unwrap();
+            let eff = comp.get_layer("layer_accent").unwrap().get_effect(&fx).unwrap();
+            let resolved: HashMap<_, _> = eff.resolved_shader_values().into_iter().collect();
+            assert_eq!(resolved["offset"], ShaderParamValue::Vec2([5.0, 5.0]));
+        }
+        // Enum declaration + commit by index.
+        {
+            let comp = state.active_composition().unwrap();
+            let eff = comp.get_layer("layer_accent").unwrap().get_effect(&fx).unwrap();
+            let p = eff.shader_params().unwrap().iter().find(|p| p.name == "mode").unwrap();
+            assert_eq!(p.param_type.widget_kind(), project::WidgetKind::Dropdown);
+        }
+        state.set_shaderlab_param(&fx, "mode", 1.0).unwrap();
+        {
+            let comp = state.active_composition().unwrap();
+            let eff = comp.get_layer("layer_accent").unwrap().get_effect(&fx).unwrap();
+            let resolved: HashMap<_, _> = eff.resolved_shader_values().into_iter().collect();
+            assert_eq!(resolved["mode"], ShaderParamValue::Int(1));
+        }
+        // Gradient pair commit is a single call (reverse + presets).
+        let ramp = state
+            .add_effect_to_selected_layer(EffectType::gradient_ramp(
+                project::Color::BLACK,
+                project::Color::WHITE,
+                90.0,
+            ))
+            .unwrap();
+        state
+            .set_effect_color_pair(
+                "layer_accent",
+                &ramp,
+                &[("color_a", project::Color::RED), ("color_b", project::Color::BLUE)],
+            )
+            .unwrap();
+        {
+            let comp = state.active_composition().unwrap();
+            let eff = comp.get_layer("layer_accent").unwrap().get_effect(&ramp).unwrap();
+            assert_eq!(eff.stock_color("color_a"), None);
+            match &eff.effect_type {
+                EffectType::GradientRamp { color_a, color_b, .. } => {
+                    assert_eq!(*color_a, project::Color::RED);
+                    assert_eq!(*color_b, project::Color::BLUE);
+                }
+                other => panic!("expected ramp, got {other:?}"),
+            }
+        }
+        // Checkbox commit path.
+        let noise = state
+            .add_effect_to_selected_layer(EffectType::noise_generator(50.0, false))
+            .unwrap();
+        state.toggle_noise_monochrome(&noise).unwrap();
+        assert!(matches!(
+            &state
+                .active_composition()
+                .unwrap()
+                .get_layer("layer_accent")
+                .unwrap()
+                .get_effect(&noise)
+                .unwrap()
+                .effect_type,
+            EffectType::NoiseGenerator { monochrome: true, .. }
+        ));
+    }
+
+    #[gpui_kit::test]
+    fn test_graph_tangent_drag_reshapes(cx: &mut TestAppContext) {
+        use gpui_kit::point;
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.select_layer(Some("layer_accent".to_string()));
+                if !s.spline_editor_open {
+                    s.toggle_spline_editor();
+                }
+                cx.notify();
+            });
+        });
+        let before: (f32, f32) = app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            let kfs = &s
+                .active_composition()
+                .unwrap()
+                .get_layer("layer_accent")
+                .unwrap()
+                .transform
+                .position
+                .keyframes();
+            let k = kfs.iter().find(|k| (k.time.seconds() - 2.0).abs() < 1e-6).unwrap();
+            let out = k.out_tangent.unwrap();
+            (out.x, out.y)
+        });
+        // Drag the out-handle right: time influence must grow.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let snap = window.find("graph_tan_layer_accent_transform_position_x_2000_out");
+            assert!(snap.visible());
+            let from = snap.bounds().center();
+            window.drag(from, from + point(px(40.0), px(0.0)), cx);
+        })
+        .expect("update_window failed");
+        app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            let kfs = &s
+                .active_composition()
+                .unwrap()
+                .get_layer("layer_accent")
+                .unwrap()
+                .transform
+                .position
+                .keyframes();
+            assert_eq!(kfs.len(), 3, "handle drag must not add/remove keys");
+            let k = kfs.iter().find(|k| (k.time.seconds() - 2.0).abs() < 1e-6).unwrap();
+            let out = k.out_tangent.unwrap();
+            assert!(out.x > before.0, "rightward handle drag grows influence");
+            assert_eq!(k.interpolation, project::KeyframeInterpolation::Bezier);
+            // Key time/value untouched by a pure tangent drag.
+            assert!((k.value.x - 200.0).abs() < 1e-3);
+        });
+    }
+
     #[gpui_kit::test]
     fn test_graph_editor_ae_chrome(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
@@ -3675,9 +3851,166 @@ mod tests {
             assert!(window.find("graph_toggle_grid").visible());
             assert!(window.find("graph_toggle_keys").visible());
             assert!(window.find("graph_isolate_toggle").visible());
-            // Legend + ruler + key diamonds.
+            // Legend + ruler + key diamonds + tangent handles.
             assert!(window.find("graph_legend").visible());
             assert!(window.find("graph_ruler").visible());
+            assert!(window
+                .find("graph_key_layer_accent_transform_position_x_2000")
+                .visible());
+            assert!(window
+                .find("graph_tan_layer_accent_transform_position_x_2000_in")
+                .visible());
+            assert!(window
+                .find("graph_tan_layer_accent_transform_position_x_2000_out")
+                .visible());
+        })
+        .expect("update_window failed");
+    }
+
+    #[gpui_kit::test]
+    fn test_widget_dropdown_open_pick(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+        use project::{EffectType, ShaderParam, ShaderParamType, ShaderParamValue};
+        use std::collections::HashMap;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        let eff = app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, _| {
+                s.select_layer(Some("layer_accent".to_string()));
+                s.add_effect_to_selected_layer(EffectType::ShaderLab {
+                    source: String::new(),
+                    params: vec![
+                        ShaderParam {
+                            name: "offset".to_string(),
+                            label: "Offset".to_string(),
+                            param_type: ShaderParamType::Vec2,
+                            default: ShaderParamValue::Vec2([1.0, 2.0]),
+                            min: None,
+                            max: None,
+                            step: None,
+                            group: None,
+                        },
+                        ShaderParam {
+                            name: "mode".to_string(),
+                            label: "Mode".to_string(),
+                            param_type: ShaderParamType::Enum {
+                                options: vec!["Soft".to_string(), "Hard".to_string(), "Glow".to_string()],
+                            },
+                            default: ShaderParamValue::Int(0),
+                            min: None,
+                            max: None,
+                            step: None,
+                            group: None,
+                        },
+                    ],
+                    values: HashMap::new(),
+                    compile_error: None,
+                })
+                .unwrap()
+            })
+        });
+        // Collapse the other inspector cards so the effect rows sit
+        // on-screen (off-viewport elements can't take test clicks).
+        app_view.update(cx, |view, cx| {
+            view.panels().properties.update(cx, |this, cx| {
+                this.source_expanded = false;
+                this.transform_expanded = false;
+                this.switches_expanded = false;
+                this.tools_expanded = false;
+                cx.notify();
+            });
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            // Vec widget: link pill + per-component rows.
+            assert!(window.find(SharedString::from(format!("vec_link_{eff}_offset"))).visible());
+            assert!(window.find(SharedString::from(format!("shader_param_{eff}_offset_0"))).visible());
+            // Dropdown: closed pill first, options after opening.
+            let closed = SharedString::from(format!("shader_enum_{eff}_mode"));
+            assert!(window.find(closed.clone()).visible());
+            window.click(closed.clone(), cx);
+            let opt = SharedString::from(format!("shader_enum_opt_{eff}_mode_2"));
+            assert!(window.find(opt.clone()).visible());
+            window.click(opt, cx);
+        })
+        .expect("update_window failed");
+        // Dropdown must have closed (proves the pick handler ran).
+        let dd = app_view.read_with(cx, |view, cx| {
+            view.panels().properties.read_with(cx, |p, _| p.prop_dropdown.clone())
+        });
+        assert_eq!(dd, None);
+        // Pick committed Glow (index 2).
+        app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            let eff_ref = s
+                .active_composition()
+                .unwrap()
+                .get_layer("layer_accent")
+                .unwrap()
+                .get_effect(&eff)
+                .unwrap();
+            let resolved: HashMap<_, _> = eff_ref.resolved_shader_values().into_iter().collect();
+            assert_eq!(resolved["mode"], ShaderParamValue::Int(2));
+        });
+    }
+
+    #[gpui_kit::test]
+    fn test_widget_gradient_and_checkbox(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        let (ramp, noise) = app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, _| {
+                s.select_layer(Some("layer_accent".to_string()));
+                let ramp = s
+                    .add_effect_to_selected_layer(project::EffectType::gradient_ramp(
+                        project::Color::BLACK,
+                        project::Color::WHITE,
+                        90.0,
+                    ))
+                    .unwrap();
+                let noise = s
+                    .add_effect_to_selected_layer(project::EffectType::noise_generator(50.0, false))
+                    .unwrap();
+                (ramp, noise)
+            })
+        });
+        // Collapse the other inspector cards so the effect rows sit
+        // on-screen (off-viewport elements can't take test clicks).
+        app_view.update(cx, |view, cx| {
+            view.panels().properties.update(cx, |this, cx| {
+                this.source_expanded = false;
+                this.transform_expanded = false;
+                this.switches_expanded = false;
+                this.tools_expanded = false;
+                cx.notify();
+            });
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            // Gradient editor: stops, reverse, selected-stop wheel.
+            assert!(window.find(SharedString::from(format!("gradient_stop0_{ramp}"))).visible());
+            assert!(window.find(SharedString::from(format!("gradient_stop1_{ramp}"))).visible());
+            assert!(window.find(SharedString::from(format!("gradient_reverse_{ramp}"))).visible());
+            assert!(window.find(SharedString::from(format!("fx_wheel_btn_color_a_{ramp}"))).visible());
+            // Checkbox for the boolean.
+            assert!(window.find(SharedString::from(format!("fx_bool_monochrome_{noise}"))).visible());
         })
         .expect("update_window failed");
     }

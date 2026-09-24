@@ -42,6 +42,23 @@ impl ShaderParamType {
             Self::Vec4 | Self::Color => 4,
         }
     }
+
+    /// Declared internal widget for this type (the property states its UI;
+    /// the application auto-creates it — no per-param UI code).
+    pub const fn widget_kind(&self) -> crate::widget::WidgetKind {
+        use crate::widget::WidgetKind;
+        match self {
+            Self::Float => WidgetKind::Slider,
+            Self::Int => WidgetKind::Integer,
+            Self::Bool => WidgetKind::Checkbox,
+            Self::Vec2 => WidgetKind::Vec2,
+            Self::Vec3 => WidgetKind::Vec3,
+            Self::Vec4 => WidgetKind::Vec4,
+            Self::Color => WidgetKind::Color,
+            Self::Angle => WidgetKind::Angle,
+            Self::Enum { .. } => WidgetKind::Dropdown,
+        }
+    }
 }
 
 /// A runtime value for a [`ShaderParam`].

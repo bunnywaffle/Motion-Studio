@@ -881,6 +881,116 @@ impl EditorState {
         }
     }
 
+    /// Nudge every component of a vector/color Shader Lab parameter
+    /// together (linked-vector scrub from the vector widget).
+    pub fn nudge_shaderlab_linked(
+        &mut self,
+        effect_id: &str,
+        param_name: &str,
+        delta: f32,
+    ) -> Result<(), String> {
+        let selected_id = self
+            .selected_layer_id
+            .clone()
+            .ok_or_else(|| "No layer selected".to_string())?;
+        let count = {
+            let comp = self
+                .active_composition()
+                .ok_or_else(|| "No active composition".to_string())?;
+            let layer = comp
+                .get_layer(&selected_id)
+                .ok_or_else(|| format!("Layer {selected_id} not found"))?;
+            let effect = layer
+                .get_effect(effect_id)
+                .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
+            let params = effect.shader_params().ok_or_else(|| "Not a Shader Lab effect".to_string())?.to_vec();
+            let param = params
+                .iter()
+                .find(|p| p.name == param_name)
+                .ok_or_else(|| format!("Shader parameter {param_name} not found"))?;
+            param.param_type.components()
+        };
+        for i in 0..count {
+            let _ = self.nudge_shaderlab_component(effect_id, param_name, i, delta);
+        }
+        Ok(())
+    }
+
+    /// Set every component of a vector/color Shader Lab parameter to one
+    /// value (linked-vector typed entry), in a single undo step.
+    pub fn set_shaderlab_all_components(
+        &mut self,
+        effect_id: &str,
+        param_name: &str,
+        v: f32,
+    ) -> Result<(), String> {
+        self.checkpoint();
+        let selected_id = self
+            .selected_layer_id
+            .clone()
+            .ok_or_else(|| "No layer selected".to_string())?;
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(&selected_id)
+            .ok_or_else(|| format!("Layer {selected_id} not found"))?;
+        let effect = layer
+            .get_effect_mut(effect_id)
+            .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
+        let params = effect.shader_params().ok_or_else(|| "Not a Shader Lab effect".to_string())?.to_vec();
+        let param = params
+            .iter()
+            .find(|p| p.name == param_name)
+            .ok_or_else(|| format!("Shader parameter {param_name} not found"))?;
+        let lo = param.min.unwrap_or(f32::NEG_INFINITY);
+        let hi = param.max.unwrap_or(f32::INFINITY);
+        let v = v.clamp(lo, hi);
+        let next = match param.param_type {
+            project::ShaderParamType::Vec2 => project::ShaderParamValue::Vec2([v, v]),
+            project::ShaderParamType::Vec3 => project::ShaderParamValue::Vec3([v, v, v]),
+            project::ShaderParamType::Vec4 => project::ShaderParamValue::Vec4([v, v, v, v]),
+            project::ShaderParamType::Color => project::ShaderParamValue::Color(Color::rgba(
+                v.clamp(0.0, 1.0),
+                v.clamp(0.0, 1.0),
+                v.clamp(0.0, 1.0),
+                1.0,
+            )),
+            _ => param.coerce_float(v),
+        };
+        if effect.set_shader_value(param_name, next) {
+            Ok(())
+        } else {
+            Err(format!("Shader parameter {param_name} not found"))
+        }
+    }
+
+    /// Set several color fields on one effect atomically (gradient editor
+    /// presets / stop reversal = one undo step).
+    pub fn set_effect_color_pair(
+        &mut self,
+        layer_id: &str,
+        effect_id: &str,
+        pairs: &[(&str, Color)],
+    ) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let effect = layer
+            .get_effect_mut(effect_id)
+            .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
+        for (field, color) in pairs {
+            if !(effect.set_color_value(field, *color) || effect.set_stock_color(field, *color)) {
+                return Err(format!("Color field {field} not found on effect {effect_id}"));
+            }
+        }
+        Ok(())
+    }
+
     /// Validate and apply new Shader Lab source on the selected layer.
     /// Success swaps in the source (UI regenerates); failure keeps the
     /// last-good source running and records the error for the panel.
@@ -3538,6 +3648,17 @@ impl EditorState {
                 }
             }
             _ => {
+                if let Some(rest) = key.strip_prefix("slcl:") {
+                    // slcl:<effect>:<param> (linked typed entry: one value
+                    // for every component).
+                    let parts: Vec<&str> = rest.split(':').collect();
+                    if parts.len() >= 2 {
+                        return self
+                            .set_shaderlab_all_components(parts[0], parts[1], v)
+                            .is_ok();
+                    }
+                    return false;
+                }
                 if let Some(rest) = key.strip_prefix("slc:") {
                     // slc:<effect>:<param>:<index>
                     let parts: Vec<&str> = rest.split(':').collect();
@@ -4390,6 +4511,7 @@ impl EditorState {
     }
 
     /// Set bezier tangents on a keyframe (forces Bezier interpolation).
+    /// One undo step.
     pub fn set_graph_key_tangents(
         &mut self,
         layer_id: &str,
@@ -4399,6 +4521,19 @@ impl EditorState {
         out_tan: Option<(f32, f32)>,
     ) -> bool {
         self.checkpoint();
+        self.set_graph_key_tangents_live(layer_id, path, at_s, in_tan, out_tan)
+    }
+
+    /// Live tangent write without a checkpoint (handle drags; the caller
+    /// checkpoints once on drag start).
+    pub fn set_graph_key_tangents_live(
+        &mut self,
+        layer_id: &str,
+        path: &str,
+        at_s: f64,
+        in_tan: Option<(f32, f32)>,
+        out_tan: Option<(f32, f32)>,
+    ) -> bool {
         let fps = match self.active_composition() {
             Some(c) => c.frame_rate,
             None => return false,

@@ -3460,6 +3460,12 @@ pub struct PropertiesPanel {
     pub trace_error: Option<String>,
     /// Armed shape-clipboard source layer for cross-layer Shape→Mask.
     pub shape_clipboard: Option<String>,
+    /// Open enum dropdown (`effect_id:param`) in applied effects.
+    pub prop_dropdown: Option<String>,
+    /// Linked vector widgets (`effect_id:param` present = linked).
+    pub vec_link: HashSet<String>,
+    /// Selected gradient-editor stop per effect id.
+    pub gradient_stop: HashMap<String, usize>,
 }
 
 /// Live rename editor for one mask (Enter commits, blur/Esc cancels).
@@ -3505,6 +3511,18 @@ pub struct MaskRenameView {
     pub editor: Entity<InputState>,
 }
 
+/// Render snapshot for the automatic effect widgets (the panel is
+/// borrowed by render, so dropdown/link/stop state crosses by clone).
+#[derive(Clone, Default)]
+pub struct PropUi {
+    /// Open enum dropdown (`effect_id:param`).
+    pub dropdown_open: Option<String>,
+    /// Linked vector widgets (`effect_id:param` present = linked).
+    pub vec_link: HashSet<String>,
+    /// Selected gradient-editor stop per effect id.
+    pub gradient_stop: HashMap<String, usize>,
+}
+
 struct TextInspectorInputs {
     text: Entity<InputState>,
     font_family: Entity<InputState>,
@@ -3512,7 +3530,7 @@ struct TextInspectorInputs {
     _subscriptions: Vec<Subscription>,
 }
 
-struct InspectorColorPicker {
+pub(crate) struct InspectorColorPicker {
     state: Entity<ColorPickerState>,
     _subscription: Subscription,
 }
@@ -3545,6 +3563,9 @@ impl PropertiesPanel {
             trace_opts: project::AutoTraceOptions::default(),
             trace_error: None,
             shape_clipboard: None,
+            prop_dropdown: None,
+            vec_link: HashSet::new(),
+            gradient_stop: HashMap::new(),
         }
     }
 
@@ -3610,7 +3631,16 @@ impl PropertiesPanel {
                     }
                 }
                 other => {
-                    if let Some(rest) = other.strip_prefix("slc:") {
+                    if let Some(rest) = other.strip_prefix("slcl:") {
+                        // Linked vector scrub: slcl:<eff>:<name> (all
+                        // components together; see the vector widget).
+                        let parts: Vec<&str> = rest.split(':').collect();
+                        if parts.len() >= 2 {
+                            if let (Some(eff), Some(name)) = (parts.first(), parts.get(1)) {
+                                let _ = s.nudge_shaderlab_linked(eff, name, dx * 0.25);
+                            }
+                        }
+                    } else if let Some(rest) = other.strip_prefix("slc:") {
                         // Shader Lab vector/color component: slc:<eff>:<name>:<idx>
                         let parts: Vec<&str> = rest.split(':').collect();
                         if parts.len() >= 3 {
@@ -3852,7 +3882,7 @@ impl PropertiesPanel {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn scrub_field<FMinus, FPlus>(
+pub(crate) fn scrub_field<FMinus, FPlus>(
     id: impl Into<ElementId>,
     prop_key: String,
     label: String,
@@ -4210,11 +4240,11 @@ fn property_stopwatch(
     property_keyframe_controls(state, layer_id, property, animated, cx)
 }
 
-fn effect_param_keyframe_controls(
+pub(crate) fn effect_param_keyframe_controls(
     state: &Entity<EditorState>,
     layer_id: &str,
     eff_id: &str,
-    param_name: &'static str,
+    param_name: &str,
     animated: bool,
     cx: &App,
 ) -> AnyElement {
@@ -4328,69 +4358,6 @@ fn effect_param_keyframe_controls(
         .into_any_element()
 }
 
-#[allow(clippy::too_many_arguments)]
-/// Compact scalar row for effect params: stopwatch + keyframe nav, label,
-/// drag/wheel/type scrub field. Used by the newer effect arms.
-#[allow(clippy::too_many_arguments)]
-fn fx_scrub_row(
-    state: &Entity<EditorState>,
-    panel_entity: &Entity<PropertiesPanel>,
-    layer_id: &str,
-    eff_id: &str,
-    param_name: &'static str,
-    label: &str,
-    display: String,
-    step: f32,
-    cx: &App,
-) -> AnyElement {
-    let s_m = state.clone();
-    let s_p = state.clone();
-    let id_m = eff_id.to_string();
-    let id_p = eff_id.to_string();
-    let animated = state
-        .read(cx)
-        .active_composition()
-        .and_then(|c| c.get_layer(layer_id))
-        .and_then(|l| l.get_effect(eff_id))
-        .and_then(|e| e.get_param_property(param_name))
-        .map(|p| p.is_animated())
-        .unwrap_or(false);
-    h_flex()
-        .items_center()
-        .justify_between()
-        .text_xs()
-        .child(
-            h_flex()
-                .gap_1()
-                .items_center()
-                .child(effect_param_keyframe_controls(state, layer_id, eff_id, param_name, animated, cx))
-                .child(div().text_color(cx.theme().muted_foreground).child(label.to_string())),
-        )
-        .child(scrub_field(
-            SharedString::from(format!("param_{param_name}_{eff_id}")),
-            format!("fx:{eff_id}:{param_name}:100"),
-            display,
-            None,
-            None,
-            state,
-            panel_entity,
-            cx,
-            move |cx| {
-                s_m.update(cx, |s, cx| {
-                    let _ = s.nudge_effect_param(&id_m, param_name, -step);
-                    cx.notify();
-                })
-            },
-            move |cx| {
-                s_p.update(cx, |s, cx| {
-                    let _ = s.nudge_effect_param(&id_p, param_name, step);
-                    cx.notify();
-                })
-            },
-        ))
-        .into_any_element()
-}
-
 /// Compact color-swatch row for effect color fields (`color_a` / `color_b`
 /// / `color`): preset swatches + current hex. Used by checker, gradient,
 /// and outline arms (no extra ColorPicker plumbing).
@@ -4409,16 +4376,17 @@ fn fx_color_fields(effect: &project::Effect) -> Vec<&'static str> {
     }
 }
 
-fn fx_swatch_row(
+pub(crate) fn fx_swatch_row(
     state: &Entity<EditorState>,
     layer_id: &str,
     eff_id: &str,
-    field: &'static str,
+    field: &str,
     label: &str,
     current: Color,
     wheel: Option<&Entity<InspectorColorPicker>>,
     cx: &App,
 ) -> AnyElement {
+    let field_owned = field.to_string();
     let mut row = h_flex().gap_1().items_center();
     for (hex_str, col_val) in [
         ("#FFFFFF", Color::WHITE),
@@ -4433,6 +4401,7 @@ fn fx_swatch_row(
         let s_p = state.clone();
         let lid_p = layer_id.to_string();
         let eid_p = eff_id.to_string();
+        let fld = field_owned.clone();
         let is_sel = (current.r - col_val.r).abs() < 0.01
             && (current.g - col_val.g).abs() < 0.01
             && (current.b - col_val.b).abs() < 0.01;
@@ -4449,7 +4418,7 @@ fn fx_swatch_row(
                 .border_color(if is_sel { cx.theme().primary } else { cx.theme().border })
                 .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                     s_p.update(cx, |s, cx| {
-                        let _ = s.set_effect_color(&lid_p, &eid_p, field, col_val);
+                        let _ = s.set_effect_color(&lid_p, &eid_p, &fld, col_val);
                         cx.notify();
                     });
                 }),
@@ -4465,11 +4434,7 @@ fn fx_swatch_row(
     // solid/text inspectors). The keyed picker state is created by the
     // Properties render before the state read-guard (see fx wheels).
     let wheel_el: AnyElement = match wheel {
-        Some(picker) => div()
-            .id(SharedString::from(format!("fx_wheel_btn_{field}_{eff_id}")))
-            .test_support()
-            .child(ColorPicker::new(&picker.read(cx).state).label("Pick"))
-            .into_any_element(),
+        Some(picker) => fx_wheel_el(field, eff_id, picker, cx),
         None => div().into_any_element(),
     };
     h_flex()
@@ -4494,6 +4459,21 @@ fn fx_swatch_row(
                 .child(wheel_el),
         )
         .child(row)
+        .into_any_element()
+}
+
+/// Effect color wheel element (shared by swatch rows and the gradient
+/// editor): full color wheel with the stable `fx_wheel_btn_` id.
+pub(crate) fn fx_wheel_el(
+    field: &str,
+    eff_id: &str,
+    picker: &Entity<InspectorColorPicker>,
+    cx: &App,
+) -> AnyElement {
+    div()
+        .id(SharedString::from(format!("fx_wheel_btn_{field}_{eff_id}")))
+        .test_support()
+        .child(ColorPicker::new(&picker.read(cx).state).label("Pick"))
         .into_any_element()
 }
 
@@ -5889,6 +5869,7 @@ fn render_applied_effects(
     shader_editor_open: Option<String>,
     shader_editor: Option<Entity<TextareaState>>,
     wheels: &HashMap<(String, String), Entity<InspectorColorPicker>>,
+    ui: &PropUi,
     cx: &App,
 ) -> AnyElement {    if layer.effects.is_empty() {
         div()
@@ -5984,113 +5965,21 @@ fn render_applied_effects(
             effect_box = effect_box.child(header_row);
 
             match &effect.effect_type {
-                EffectType::GaussianBlur { radius } => {
-                    let r = radius.value;
-                    let s_m = state.clone();
-                    let s_p = state.clone();
-                    let id_m = eff_id.clone();
-                    let id_p = eff_id.clone();
-                    effect_box = effect_box.child(
-                        h_flex()
-                            .items_center()
-                            .justify_between()
-                            .text_xs()
-                            .child(
-                                h_flex()
-                                    .gap_1()
-                                    .items_center()
-                                    .child(effect_param_keyframe_controls(state, &layer.id, &eff_id, "radius", radius.is_animated(), cx))
-                                    .child(div().text_color(cx.theme().muted_foreground).child("Radius")),
-                            )
-                            .child(scrub_field(
-                                SharedString::from(format!("param_radius_{}", eff_id)),
-                                format!("fx:{}:radius:100", eff_id),
-                                format!("{:.1} px", r),
-                                Some(ElementId::from(SharedString::from(format!("param_radius_minus_{}", eff_id)))),
-                                Some(ElementId::from(SharedString::from(format!("param_radius_plus_{}", eff_id)))),
-                                state,
-                                panel_entity,
-                                cx,
-                                move |cx| s_m.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_m, "radius", -5.0); cx.notify(); }),
-                                move |cx| s_p.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p, "radius", 5.0); cx.notify(); }),
-                            )),
-                    );
+                // Fully declarative arms: every parameter renders from its
+                // declaration (no per-effect UI). Custom arms below keep
+                // only their bespoke parts (pickers, editors, gradients).
+                EffectType::GaussianBlur { .. } | EffectType::BrightnessContrast { .. } => {
+                    for decl in effect.declarations() {
+                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, cx));
+                    }
                 }
-                EffectType::BrightnessContrast { brightness, contrast } => {
-                    let b = brightness.value;
-                    let c = contrast.value;
-                    let s_bm = state.clone();
-                    let s_bp = state.clone();
-                    let s_cm = state.clone();
-                    let s_cp = state.clone();
-                    let id_bm = eff_id.clone();
-                    let id_bp = eff_id.clone();
-                    let id_cm = eff_id.clone();
-                    let id_cp = eff_id.clone();
-                    effect_box = effect_box
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .justify_between()
-                                .text_xs()
-                                .child(
-                                    h_flex()
-                                        .gap_1()
-                                        .items_center()
-                                        .child(effect_param_keyframe_controls(state, &layer.id, &eff_id, "brightness", brightness.is_animated(), cx))
-                                        .child(div().text_color(cx.theme().muted_foreground).child("Brightness")),
-                                )
-                                .child(scrub_field(
-                                    SharedString::from(format!("param_brightness_{}", eff_id)),
-                                    format!("fx:{}:brightness:100", eff_id),
-                                    format!("{:.1}", b),
-                                    None,
-                                    None,
-                                    state,
-                                    panel_entity,
-                                    cx,
-                                    move |cx| s_bm.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_bm, "brightness", -5.0); cx.notify(); }),
-                                    move |cx| s_bp.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_bp, "brightness", 5.0); cx.notify(); }),
-                                )),
-                        )
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .justify_between()
-                                .text_xs()
-                                .child(
-                                    h_flex()
-                                        .gap_1()
-                                        .items_center()
-                                        .child(effect_param_keyframe_controls(state, &layer.id, &eff_id, "contrast", contrast.is_animated(), cx))
-                                        .child(div().text_color(cx.theme().muted_foreground).child("Contrast")),
-                                )
-                                .child(scrub_field(
-                                    SharedString::from(format!("param_contrast_{}", eff_id)),
-                                    format!("fx:{}:contrast:100", eff_id),
-                                    format!("{:.1}", c),
-                                    None,
-                                    None,
-                                    state,
-                                    panel_entity,
-                                    cx,
-                                    move |cx| s_cm.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_cm, "contrast", -5.0); cx.notify(); }),
-                                    move |cx| s_cp.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_cp, "contrast", 5.0); cx.notify(); }),
-                                )),
-                        );
-                }
-                EffectType::Tint { map_black, map_white, amount } => {
-                    let a = amount.value;
+                EffectType::Tint { map_black, map_white, .. } => {
                     let mb = *map_black;
                     let mw = *map_white;
                     let mb_hex = format!("#{:02X}{:02X}{:02X}", (mb.r * 255.0) as u8, (mb.g * 255.0) as u8, (mb.b * 255.0) as u8);
                     let mw_hex = format!("#{:02X}{:02X}{:02X}", (mw.r * 255.0) as u8, (mw.g * 255.0) as u8, (mw.b * 255.0) as u8);
-                    let s_m = state.clone();
-                    let s_p = state.clone();
                     let s_tb = state.clone();
                     let s_tw = state.clone();
-                    let id_m = eff_id.clone();
-                    let id_p = eff_id.clone();
                     let id_tb = eff_id.clone();
                     let id_tw = eff_id.clone();
 
@@ -6216,89 +6105,26 @@ fn render_applied_effects(
                                         ),
                                 )
                                 .child(white_swatches),
-                        )
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .justify_between()
-                                .text_xs()
-                                .child(
-                                    h_flex()
-                                        .gap_1()
-                                        .items_center()
-                                        .child(effect_param_keyframe_controls(state, &layer.id, &eff_id, "amount", amount.is_animated(), cx))
-                                        .child(div().text_color(cx.theme().muted_foreground).child("Amount")),
-                                )
-                                .child(scrub_field(
-                                    SharedString::from(format!("param_amount_{}", eff_id)),
-                                    format!("fx:{}:amount:100", eff_id),
-                                    format!("{:.0} %", a),
-                                    None,
-                                    None,
-                                    state,
-                                    panel_entity,
-                                    cx,
-                                    move |cx| s_m.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_m, "amount", -10.0); cx.notify(); }),
-                                    move |cx| s_p.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p, "amount", 10.0); cx.notify(); }),
-                                )),
                         );
+                    // Amount rides the declaration (scalar widget); the
+                    // bespoke rows above keep the fixed Black/White pickers.
+                    for decl in effect.declarations() {
+                        if decl.is_scalar() {
+                            effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, cx));
+                        }
+                    }
                 }
-                EffectType::Invert { amount } => {
-                    let a = amount.value;
-                    let s_m = state.clone();
-                    let s_p = state.clone();
-                    let id_m = eff_id.clone();
-                    let id_p = eff_id.clone();
-                    effect_box = effect_box.child(
-                        h_flex()
-                            .items_center()
-                            .justify_between()
-                            .text_xs()
-                            .child(
-                                h_flex()
-                                    .gap_1()
-                                    .items_center()
-                                    .child(effect_param_keyframe_controls(state, &layer.id, &eff_id, "amount", amount.is_animated(), cx))
-                                    .child(div().text_color(cx.theme().muted_foreground).child("Amount")),
-                            )
-                            .child(scrub_field(
-                                SharedString::from(format!("param_amount_{}", eff_id)),
-                                format!("fx:{}:amount:100", eff_id),
-                                format!("{:.0} %", a),
-                                None,
-                                None,
-                                state,
-                                panel_entity,
-                                cx,
-                                move |cx| s_m.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_m, "amount", -10.0); cx.notify(); }),
-                                move |cx| s_p.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p, "amount", 10.0); cx.notify(); }),
-                            )),
-                    );
+                EffectType::Invert { .. } => {
+                    // Fully declarative: the amount row renders from its
+                    // declaration (scalar widget).
+                    for decl in effect.declarations() {
+                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, cx));
+                    }
                 }
-                EffectType::DropShadow { distance, angle, softness, opacity, color } => {
-                    let d = distance.value;
-                    let ang = angle.value;
-                    let s_val = softness.value;
-                    let o = opacity.value;
+                EffectType::DropShadow { color, .. } => {
                     let sc = *color;
                     let sc_hex = format!("#{:02X}{:02X}{:02X}", (sc.r * 255.0) as u8, (sc.g * 255.0) as u8, (sc.b * 255.0) as u8);
-                    let s_dm = state.clone();
-                    let s_dp = state.clone();
-                    let s_ang_m = state.clone();
-                    let s_ang_p = state.clone();
-                    let s_sm = state.clone();
-                    let s_sp = state.clone();
-                    let s_om = state.clone();
-                    let s_op = state.clone();
                     let s_sc = state.clone();
-                    let id_dm = eff_id.clone();
-                    let id_dp = eff_id.clone();
-                    let id_ang_m = eff_id.clone();
-                    let id_ang_p = eff_id.clone();
-                    let id_sm = eff_id.clone();
-                    let id_sp = eff_id.clone();
-                    let id_om = eff_id.clone();
-                    let id_op = eff_id.clone();
                     let id_sc = eff_id.clone();
 
                     let shadow_presets = [
@@ -6363,129 +6189,17 @@ fn render_applied_effects(
                                         ),
                                 )
                                 .child(shadow_swatches),
-                        )
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .justify_between()
-                                .text_xs()
-                                .child(
-                                    h_flex()
-                                        .gap_1()
-                                        .items_center()
-                                        .child(effect_param_keyframe_controls(state, &layer.id, &eff_id, "distance", distance.is_animated(), cx))
-                                        .child(div().text_color(cx.theme().muted_foreground).child("Distance")),
-                                )
-                                .child(scrub_field(
-                                    SharedString::from(format!("param_distance_{}", eff_id)),
-                                    format!("fx:{}:distance:50", eff_id),
-                                    format!("{:.1} px", d),
-                                    None,
-                                    None,
-                                    state,
-                                    panel_entity,
-                                    cx,
-                                    move |cx| s_dm.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_dm, "distance", -2.0); cx.notify(); }),
-                                    move |cx| s_dp.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_dp, "distance", 2.0); cx.notify(); }),
-                                )),
-                        )
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .justify_between()
-                                .text_xs()
-                                .child(
-                                    h_flex()
-                                        .gap_1()
-                                        .items_center()
-                                        .child(effect_param_keyframe_controls(state, &layer.id, &eff_id, "angle", angle.is_animated(), cx))
-                                        .child(div().text_color(cx.theme().muted_foreground).child("Angle")),
-                                )
-                                .child(scrub_field(
-                                    SharedString::from(format!("param_angle_{}", eff_id)),
-                                    format!("fx:{}:angle:360", eff_id),
-                                    format!("{:.1}°", ang),
-                                    None,
-                                    None,
-                                    state,
-                                    panel_entity,
-                                    cx,
-                                    move |cx| s_ang_m.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_ang_m, "angle", -15.0); cx.notify(); }),
-                                    move |cx| s_ang_p.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_ang_p, "angle", 15.0); cx.notify(); }),
-                                )),
-                        )
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .justify_between()
-                                .text_xs()
-                                .child(
-                                    h_flex()
-                                        .gap_1()
-                                        .items_center()
-                                        .child(effect_param_keyframe_controls(state, &layer.id, &eff_id, "softness", softness.is_animated(), cx))
-                                        .child(div().text_color(cx.theme().muted_foreground).child("Softness")),
-                                )
-                                .child(scrub_field(
-                                    SharedString::from(format!("param_softness_{}", eff_id)),
-                                    format!("fx:{}:softness:50", eff_id),
-                                    format!("{:.1} px", s_val),
-                                    None,
-                                    None,
-                                    state,
-                                    panel_entity,
-                                    cx,
-                                    move |cx| s_sm.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_sm, "softness", -2.0); cx.notify(); }),
-                                    move |cx| s_sp.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_sp, "softness", 2.0); cx.notify(); }),
-                                )),
-                        )
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .justify_between()
-                                .text_xs()
-                                .child(
-                                    h_flex()
-                                        .gap_1()
-                                        .items_center()
-                                        .child(effect_param_keyframe_controls(state, &layer.id, &eff_id, "opacity", opacity.is_animated(), cx))
-                                        .child(div().text_color(cx.theme().muted_foreground).child("Opacity")),
-                                )
-                                .child(scrub_field(
-                                    SharedString::from(format!("param_opacity_{}", eff_id)),
-                                    format!("fx:{}:opacity:100", eff_id),
-                                    format!("{:.0} %", o),
-                                    None,
-                                    None,
-                                    state,
-                                    panel_entity,
-                                    cx,
-                                    move |cx| s_om.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_om, "opacity", -10.0); cx.notify(); }),
-                                    move |cx| s_op.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_op, "opacity", 10.0); cx.notify(); }),
-                                )),
                         );
+                    // Distance / Angle / Softness / Opacity ride their
+                    // declarations (scalar widgets); the bespoke Color row
+                    // above keeps the fixed shadow picker.
+                    for decl in effect.declarations() {
+                        if decl.is_scalar() {
+                            effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, cx));
+                        }
+                    }
                 }
-                EffectType::GlslShader { param1, param2, param3, param4, code } => {
-                    let p1 = param1.value;
-                    let p2 = param2.value;
-                    let p3 = param3.value;
-                    let p4 = param4.value;
-                    let s_p1m = state.clone();
-                    let s_p1p = state.clone();
-                    let s_p2m = state.clone();
-                    let s_p2p = state.clone();
-                    let s_p3m = state.clone();
-                    let s_p3p = state.clone();
-                    let s_p4m = state.clone();
-                    let s_p4p = state.clone();
-                    let id_p1m = eff_id.clone();
-                    let id_p1p = eff_id.clone();
-                    let id_p2m = eff_id.clone();
-                    let id_p2p = eff_id.clone();
-                    let id_p3m = eff_id.clone();
-                    let id_p3p = eff_id.clone();
-                    let id_p4m = eff_id.clone();
-                    let id_p4p = eff_id.clone();
+                EffectType::GlslShader { code, .. } => {
                     let code_preview = if code.len() > 60 {
                         format!("{}...", &code[..60])
                     } else {
@@ -6519,107 +6233,12 @@ fn render_applied_effects(
                         );
                     }
 
+                    // P1..P4 ride their declarations (scalar widgets); the
+                    // code editor below stays bespoke.
+                    for decl in effect.declarations() {
+                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, cx));
+                    }
                     effect_box = effect_box
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .justify_between()
-                                .text_xs()
-                                .child(
-                                    h_flex()
-                                        .gap_1()
-                                        .items_center()
-                                        .child(effect_param_keyframe_controls(state, &layer.id, &eff_id, "param1", param1.is_animated(), cx))
-                                        .child(div().text_color(cx.theme().muted_foreground).child("P1 (Speed)")),
-                                )
-                                .child(scrub_field(
-                                    SharedString::from(format!("param_p1_{}", eff_id)),
-                                    format!("fx:{}:param1:10", eff_id),
-                                    format!("{:.2}", p1),
-                                    None,
-                                    None,
-                                    state,
-                                    panel_entity,
-                                    cx,
-                                    move |cx| s_p1m.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p1m, "param1", -0.5); cx.notify(); }),
-                                    move |cx| s_p1p.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p1p, "param1", 0.5); cx.notify(); }),
-                                )),
-                        )
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .justify_between()
-                                .text_xs()
-                                .child(
-                                    h_flex()
-                                        .gap_1()
-                                        .items_center()
-                                        .child(effect_param_keyframe_controls(state, &layer.id, &eff_id, "param2", param2.is_animated(), cx))
-                                        .child(div().text_color(cx.theme().muted_foreground).child("P2 (Intensity)")),
-                                )
-                                .child(scrub_field(
-                                    SharedString::from(format!("param_p2_{}", eff_id)),
-                                    format!("fx:{}:param2:100", eff_id),
-                                    format!("{:.1}", p2),
-                                    None,
-                                    None,
-                                    state,
-                                    panel_entity,
-                                    cx,
-                                    move |cx| s_p2m.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p2m, "param2", -5.0); cx.notify(); }),
-                                    move |cx| s_p2p.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p2p, "param2", 5.0); cx.notify(); }),
-                                )),
-                        )
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .justify_between()
-                                .text_xs()
-                                .child(
-                                    h_flex()
-                                        .gap_1()
-                                        .items_center()
-                                        .child(effect_param_keyframe_controls(state, &layer.id, &eff_id, "param3", param3.is_animated(), cx))
-                                        .child(div().text_color(cx.theme().muted_foreground).child("P3 (Scale)")),
-                                )
-                                .child(scrub_field(
-                                    SharedString::from(format!("param_p3_{}", eff_id)),
-                                    format!("fx:{}:param3:10", eff_id),
-                                    format!("{:.2}", p3),
-                                    None,
-                                    None,
-                                    state,
-                                    panel_entity,
-                                    cx,
-                                    move |cx| s_p3m.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p3m, "param3", -0.5); cx.notify(); }),
-                                    move |cx| s_p3p.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p3p, "param3", 0.5); cx.notify(); }),
-                                )),
-                        )
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .justify_between()
-                                .text_xs()
-                                .child(
-                                    h_flex()
-                                        .gap_1()
-                                        .items_center()
-                                        .child(effect_param_keyframe_controls(state, &layer.id, &eff_id, "param4", param4.is_animated(), cx))
-                                        .child(div().text_color(cx.theme().muted_foreground).child("P4 (Opacity)")),
-                                )
-                                .child(scrub_field(
-                                    SharedString::from(format!("param_p4_{}", eff_id)),
-                                    format!("fx:{}:param4:100", eff_id),
-                                    format!("{:.1}", p4),
-                                    None,
-                                    None,
-                                    state,
-                                    panel_entity,
-                                    cx,
-                                    move |cx| s_p4m.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p4m, "param4", -5.0); cx.notify(); }),
-                                    move |cx| s_p4p.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_p4p, "param4", 5.0); cx.notify(); }),
-                                )),
-                        )
                         .child(
                             v_flex()
                                 .gap_1()
@@ -6698,10 +6317,10 @@ fn render_applied_effects(
                         let pname = param.name.clone();
                         let plabel = param.label.clone();
                         let eff_key = eff_id.clone();
-                        match &param.param_type {
-                            project::shader::ShaderParamType::Float
-                            | project::shader::ShaderParamType::Angle
-                            | project::shader::ShaderParamType::Int => {
+                        match param.param_type.widget_kind() {
+                            project::widget::WidgetKind::Slider
+                            | project::widget::WidgetKind::Integer
+                            | project::widget::WidgetKind::Angle => {
                                 let cur = match resolved.get(pname.as_str()) {
                                     Some(ShaderParamValue::Int(v)) => format!("{v}"),
                                     Some(v) => v.display(),
@@ -6712,31 +6331,22 @@ fn render_applied_effects(
                                 } else {
                                     ""
                                 };
-                                effect_box = effect_box.child(
-                                    h_flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .text_xs()
-                                        .child(
-                                            div()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(format!("{plabel}{unit}")),
-                                        )
-                                        .child(scrub_field(
-                                            SharedString::from(format!("shader_param_{eff_key}_{pname}")),
-                                            format!("sl:{eff_key}:{pname}"),
-                                            cur,
-                                            None,
-                                            None,
-                                            state,
-                                            panel_entity,
-                                            cx,
-                                            move |_| {},
-                                            move |_| {},
-                                        )),
-                                );
+                                effect_box = effect_box.child(crate::widgets::widget_scalar(
+                                    state,
+                                    panel_entity,
+                                    &layer.id,
+                                    &eff_key,
+                                    &pname,
+                                    &format!("{plabel}{unit}"),
+                                    cur,
+                                    param.step.unwrap_or(0.05),
+                                    100.0,
+                                    false,
+                                    crate::widgets::ScalarCommit::ShaderLab,
+                                    cx,
+                                ));
                             }
-                            project::shader::ShaderParamType::Bool => {
+                            project::widget::WidgetKind::Checkbox => {
                                 let on = matches!(
                                     resolved.get(pname.as_str()),
                                     Some(ShaderParamValue::Bool(true))
@@ -6744,97 +6354,56 @@ fn render_applied_effects(
                                 let s_t = state.clone();
                                 let eid = eff_key.clone();
                                 let pn = pname.clone();
-                                effect_box = effect_box.child(
-                                    h_flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .text_xs()
-                                        .child(
-                                            div()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(plabel),
-                                        )
-                                        .child(
-                                            div()
-                                                .cursor_pointer()
-                                                .px_2()
-                                                .py_0p5()
-                                                .rounded_sm()
-                                                .bg(if on { cx.theme().primary } else { cx.theme().muted })
-                                                .text_color(if on {
-                                                    cx.theme().primary_foreground
-                                                } else {
-                                                    cx.theme().foreground
-                                                })
-                                                .hover(|s| s.opacity(0.85))
-                                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                    s_t.update(cx, |s, cx| {
-                                                        let _ = s.set_shaderlab_param(&eid, &pn, if on { 0.0 } else { 1.0 });
-                                                        cx.notify();
-                                                    });
-                                                })
-                                                .child(if on { "On" } else { "Off" }),
-                                        ),
-                                );
+                                effect_box = effect_box.child(crate::widgets::widget_bool(
+                                    &plabel,
+                                    on,
+                                    format!("shader_bool_{eff_key}_{pname}"),
+                                    move |cx: &mut App| {
+                                        let (eid, pn) = (eid.clone(), pn.clone());
+                                        s_t.update(cx, |s, cx| {
+                                            let _ = s.set_shaderlab_param(&eid, &pn, if on { 0.0 } else { 1.0 });
+                                            cx.notify();
+                                        });
+                                    },
+                                    cx,
+                                ));
                             }
-                            project::shader::ShaderParamType::Enum { options } => {
-                                let idx = match resolved.get(pname.as_str()) {
-                                    Some(ShaderParamValue::Int(v)) => (*v).clamp(0, options.len().saturating_sub(1) as i32) as usize,
-                                    _ => 0,
+                            project::widget::WidgetKind::Dropdown => {
+                                let (options, idx) = match &param.param_type {
+                                    project::shader::ShaderParamType::Enum { options } => {
+                                        let idx = match resolved.get(pname.as_str()) {
+                                            Some(ShaderParamValue::Int(v)) => (*v).clamp(0, options.len().saturating_sub(1) as i32) as usize,
+                                            _ => 0,
+                                        };
+                                        (options.clone(), idx)
+                                    }
+                                    _ => (Vec::new(), 0),
                                 };
-                                let cur_label = options.get(idx).cloned().unwrap_or_else(|| format!("{idx}"));
-                                let s_c = state.clone();
-                                let eid = eff_key.clone();
-                                let pn = pname.clone();
-                                let n_opts = options.len().max(1) as f32;
-                                effect_box = effect_box.child(
-                                    h_flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .text_xs()
-                                        .child(
-                                            div()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(plabel),
-                                        )
-                                        .child(
-                                            div()
-                                                .cursor_pointer()
-                                                .px_2()
-                                                .py_0p5()
-                                                .rounded_sm()
-                                                .bg(cx.theme().muted)
-                                                .text_color(cx.theme().foreground)
-                                                .hover(|s| s.bg(cx.theme().accent))
-                                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                    s_c.update(cx, |s, cx| {
-                                                        let next = (idx as f32 + 1.0) % n_opts;
-                                                        let _ = s.set_shaderlab_param(&eid, &pn, next);
-                                                        cx.notify();
-                                                    });
-                                                })
-                                                .child(format!("◂ {cur_label} ▸")),
-                                        ),
-                                );
+                                effect_box = effect_box.child(crate::widgets::widget_dropdown(
+                                    state,
+                                    panel_entity,
+                                    &eff_key,
+                                    &pname,
+                                    &plabel,
+                                    &options,
+                                    idx,
+                                    ui.dropdown_open.as_deref() == Some(&format!("{eff_key}:{pname}")),
+                                    cx,
+                                ));
                             }
-                            project::shader::ShaderParamType::Vec2
-                            | project::shader::ShaderParamType::Vec3
-                            | project::shader::ShaderParamType::Vec4
-                            | project::shader::ShaderParamType::Color => {
-                                let (count, tags): (usize, &[&str]) = match param.param_type {
+                            project::widget::WidgetKind::Vec2
+                            | project::widget::WidgetKind::Vec3
+                            | project::widget::WidgetKind::Vec4
+                            | project::widget::WidgetKind::Color => {
+                                let (count, tags): (usize, &[&str]) = match &param.param_type {
                                     project::shader::ShaderParamType::Vec2 => (2, &["X", "Y"]),
                                     project::shader::ShaderParamType::Vec3 => (3, &["X", "Y", "Z"]),
                                     project::shader::ShaderParamType::Vec4 => (4, &["X", "Y", "Z", "W"]),
                                     _ => (4, &["R", "G", "B", "A"]),
                                 };
-                                effect_box = effect_box.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(plabel),
-                                );
+                                let mut values = vec![0.0f32; count];
                                 for i in 0..count {
-                                    let comp_val = match resolved.get(pname.as_str()) {
+                                    values[i] = match resolved.get(pname.as_str()) {
                                         Some(ShaderParamValue::Vec2(a)) => a.get(i).copied().unwrap_or(0.0),
                                         Some(ShaderParamValue::Vec3(a)) => a.get(i).copied().unwrap_or(0.0),
                                         Some(ShaderParamValue::Vec4(a)) => a.get(i).copied().unwrap_or(0.0),
@@ -6844,34 +6413,22 @@ fn render_applied_effects(
                                         Some(ShaderParamValue::Float(v)) => *v,
                                         _ => 0.0,
                                     };
-                                    effect_box = effect_box.child(
-                                        h_flex()
-                                            .items_center()
-                                            .justify_between()
-                                            .text_xs()
-                                            .child(
-                                                div()
-                                                    .w(px(52.))
-                                                    .text_color(cx.theme().muted_foreground)
-                                                    .child(format!("  {}", tags[i])),
-                                            )
-                                            .child(scrub_field(
-                                                SharedString::from(format!(
-                                                    "shader_param_{eff_key}_{pname}_{i}"
-                                                )),
-                                                format!("slc:{eff_key}:{pname}:{i}"),
-                                                format!("{comp_val:.3}"),
-                                                None,
-                                                None,
-                                                state,
-                                                panel_entity,
-                                                cx,
-                                                move |_| {},
-                                                move |_| {},
-                                            )),
-                                    );
                                 }
+                                effect_box = effect_box.child(crate::widgets::widget_vec(
+                                    state,
+                                    panel_entity,
+                                    &eff_key,
+                                    &pname,
+                                    &plabel,
+                                    tags,
+                                    &values,
+                                    ui.vec_link.contains(&format!("{eff_key}:{pname}")),
+                                    cx,
+                                ));
                             }
+                            // Slider-family fallthrough is handled above;
+                            // unmapped kinds render nothing.
+                            _ => {}
                         }
                     }
 
@@ -7079,81 +6636,13 @@ fn render_applied_effects(
                         }
                     }
                 }
-                EffectType::DisplacementMap { max_horizontal, max_vertical } => {
-                    let mh = max_horizontal.value;
-                    let mv = max_vertical.value;
-                    let s_hm = state.clone();
-                    let s_hp = state.clone();
-                    let s_vm = state.clone();
-                    let s_vp = state.clone();
-                    let id_hm = eff_id.clone();
-                    let id_hp = eff_id.clone();
-                    let id_vm = eff_id.clone();
-                    let id_vp = eff_id.clone();
-                    effect_box = effect_box
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .justify_between()
-                                .text_xs()
-                                .child(
-                                    h_flex()
-                                        .gap_1()
-                                        .items_center()
-                                        .child(effect_param_keyframe_controls(state, &layer.id, &eff_id, "max_horizontal", max_horizontal.is_animated(), cx))
-                                        .child(div().text_color(cx.theme().muted_foreground).child("Max Horizontal")),
-                                )
-                                .child(scrub_field(
-                                    SharedString::from(format!("param_maxh_{}", eff_id)),
-                                    format!("fx:{}:max_horizontal:100", eff_id),
-                                    format!("{:.1} px", mh),
-                                    None,
-                                    None,
-                                    state,
-                                    panel_entity,
-                                    cx,
-                                    move |cx| s_hm.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_hm, "max_horizontal", -5.0); cx.notify(); }),
-                                    move |cx| s_hp.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_hp, "max_horizontal", 5.0); cx.notify(); }),
-                                )),
-                        )
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .justify_between()
-                                .text_xs()
-                                .child(
-                                    h_flex()
-                                        .gap_1()
-                                        .items_center()
-                                        .child(effect_param_keyframe_controls(state, &layer.id, &eff_id, "max_vertical", max_vertical.is_animated(), cx))
-                                        .child(div().text_color(cx.theme().muted_foreground).child("Max Vertical")),
-                                )
-                                .child(scrub_field(
-                                    SharedString::from(format!("param_maxv_{}", eff_id)),
-                                    format!("fx:{}:max_vertical:100", eff_id),
-                                    format!("{:.1} px", mv),
-                                    None,
-                                    None,
-                                    state,
-                                    panel_entity,
-                                    cx,
-                                    move |cx| s_vm.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_vm, "max_vertical", -5.0); cx.notify(); }),
-                                    move |cx| s_vp.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_vp, "max_vertical", 5.0); cx.notify(); }),
-                                )),
-                        );
+                EffectType::DisplacementMap { .. } => {
+                    for decl in effect.declarations() {
+                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, cx));
+                    }
                 }
-                EffectType::ChromaKey { key_color, tolerance, feather } => {
-                    let tol = tolerance.value;
-                    let fth = feather.value;
-                    let s_tm = state.clone();
-                    let s_tp = state.clone();
-                    let s_fm = state.clone();
-                    let s_fp = state.clone();
+                EffectType::ChromaKey { key_color, .. } => {
                     let s_ck = state.clone();
-                    let id_tm = eff_id.clone();
-                    let id_tp = eff_id.clone();
-                    let id_fm = eff_id.clone();
-                    let id_fp = eff_id.clone();
                     let id_ck = eff_id.clone();
                     let kc = *key_color;
                     let ck_hex = format!("#{:02X}{:02X}{:02X}", (kc.r * 255.0) as u8, (kc.g * 255.0) as u8, (kc.b * 255.0) as u8);
@@ -7228,308 +6717,81 @@ fn render_applied_effects(
                                         ),
                                 )
                                 .child(ck_swatches),
-                        )
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .justify_between()
-                                .text_xs()
-                                .child(
-                                    h_flex()
-                                        .gap_1()
-                                        .items_center()
-                                        .child(effect_param_keyframe_controls(state, &layer.id, &eff_id, "tolerance", tolerance.is_animated(), cx))
-                                        .child(div().text_color(cx.theme().muted_foreground).child("Tolerance")),
-                                )
-                                .child(scrub_field(
-                                    SharedString::from(format!("param_tol_{}", eff_id)),
-                                    format!("fx:{}:tolerance:100", eff_id),
-                                    format!("{:.1}", tol),
-                                    None,
-                                    None,
-                                    state,
-                                    panel_entity,
-                                    cx,
-                                    move |cx| s_tm.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_tm, "tolerance", -5.0); cx.notify(); }),
-                                    move |cx| s_tp.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_tp, "tolerance", 5.0); cx.notify(); }),
-                                )),
-                        )
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .justify_between()
-                                .text_xs()
-                                .child(
-                                    h_flex()
-                                        .gap_1()
-                                        .items_center()
-                                        .child(effect_param_keyframe_controls(state, &layer.id, &eff_id, "feather", feather.is_animated(), cx))
-                                        .child(div().text_color(cx.theme().muted_foreground).child("Feather")),
-                                )
-                                .child(scrub_field(
-                                    SharedString::from(format!("param_fth_{}", eff_id)),
-                                    format!("fx:{}:feather:100", eff_id),
-                                    format!("{:.1}", fth),
-                                    None,
-                                    None,
-                                    state,
-                                    panel_entity,
-                                    cx,
-                                    move |cx| s_fm.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_fm, "feather", -2.0); cx.notify(); }),
-                                    move |cx| s_fp.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_fp, "feather", 2.0); cx.notify(); }),
-                                )),
                         );
+                    // Tolerance / Feather ride their declarations (scalar
+                    // widgets); the bespoke Key Color row above keeps the
+                    // fixed chroma picker.
+                    for decl in effect.declarations() {
+                        if decl.is_scalar() {
+                            effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, cx));
+                        }
+                    }
                 }
-                EffectType::LumaKey { threshold, feather } => {
-                    let thr = threshold.value;
-                    let fth = feather.value;
-                    let s_tm = state.clone();
-                    let s_tp = state.clone();
-                    let s_fm = state.clone();
-                    let s_fp = state.clone();
-                    let id_tm = eff_id.clone();
-                    let id_tp = eff_id.clone();
-                    let id_fm = eff_id.clone();
-                    let id_fp = eff_id.clone();
-                    effect_box = effect_box
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .justify_between()
-                                .text_xs()
-                                .child(
-                                    h_flex()
-                                        .gap_1()
-                                        .items_center()
-                                        .child(effect_param_keyframe_controls(state, &layer.id, &eff_id, "threshold", threshold.is_animated(), cx))
-                                        .child(div().text_color(cx.theme().muted_foreground).child("Threshold")),
-                                )
-                                .child(scrub_field(
-                                    SharedString::from(format!("param_luma_thr_{}", eff_id)),
-                                    format!("fx:{}:threshold:100", eff_id),
-                                    format!("{:.1}", thr),
-                                    None,
-                                    None,
-                                    state,
-                                    panel_entity,
-                                    cx,
-                                    move |cx| s_tm.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_tm, "threshold", -5.0); cx.notify(); }),
-                                    move |cx| s_tp.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_tp, "threshold", 5.0); cx.notify(); }),
-                                )),
-                        )
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .justify_between()
-                                .text_xs()
-                                .child(
-                                    h_flex()
-                                        .gap_1()
-                                        .items_center()
-                                        .child(effect_param_keyframe_controls(state, &layer.id, &eff_id, "feather", feather.is_animated(), cx))
-                                        .child(div().text_color(cx.theme().muted_foreground).child("Feather")),
-                                )
-                                .child(scrub_field(
-                                    SharedString::from(format!("param_luma_fth_{}", eff_id)),
-                                    format!("fx:{}:feather:100", eff_id),
-                                    format!("{:.1}", fth),
-                                    None,
-                                    None,
-                                    state,
-                                    panel_entity,
-                                    cx,
-                                    move |cx| s_fm.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_fm, "feather", -2.0); cx.notify(); }),
-                                    move |cx| s_fp.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_fp, "feather", 2.0); cx.notify(); }),
-                                )),
-                        );
+                EffectType::LumaKey { .. } => {
+                    // Fully declarative: both rows render from declarations.
+                    for decl in effect.declarations() {
+                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, cx));
+                    }
                 }
-                EffectType::NoiseGenerator { amount, monochrome } => {
-                    let amt = amount.value;
-                    let mono = *monochrome;
-                    let s_am = state.clone();
-                    let s_ap = state.clone();
-                    let s_mono = state.clone();
-                    let id_am = eff_id.clone();
-                    let id_ap = eff_id.clone();
-                    let id_mono = eff_id.clone();
-                    effect_box = effect_box
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .justify_between()
-                                .text_xs()
-                                .child(
-                                    h_flex()
-                                        .gap_1()
-                                        .items_center()
-                                        .child(effect_param_keyframe_controls(state, &layer.id, &eff_id, "amount", amount.is_animated(), cx))
-                                        .child(div().text_color(cx.theme().muted_foreground).child("Amount")),
-                                )
-                                .child(scrub_field(
-                                    SharedString::from(format!("param_noise_amt_{}", eff_id)),
-                                    format!("fx:{}:amount:100", eff_id),
-                                    format!("{:.1}%", amt),
-                                    None,
-                                    None,
-                                    state,
-                                    panel_entity,
-                                    cx,
-                                    move |cx| s_am.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_am, "amount", -5.0); cx.notify(); }),
-                                    move |cx| s_ap.update(cx, |s, cx| { let _ = s.nudge_effect_param(&id_ap, "amount", 5.0); cx.notify(); }),
-                                )),
-                        )
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .justify_between()
-                                .text_xs()
-                                .py_0p5()
-                                .child(div().text_color(cx.theme().muted_foreground).child("Monochrome"))
-                                .child(
-                                    div()
-                                        .cursor_pointer()
-                                        .px_1p5()
-                                        .py_0p5()
-                                        .rounded_sm()
-                                        .bg(if mono { cx.theme().accent } else { cx.theme().muted })
-                                        .text_color(if mono { cx.theme().accent_foreground } else { cx.theme().muted_foreground })
-                                        .child(if mono { "ON" } else { "OFF" })
-                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                            s_mono.update(cx, |s, cx| {
-                                                let _ = s.toggle_noise_monochrome(&id_mono);
-                                                cx.notify();
-                                            });
-                                        }),
-                                ),
-                        );
+                EffectType::NoiseGenerator { .. } => {
+                    // Amount + monochrome checkbox ride their declarations.
+                    for decl in effect.declarations() {
+                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, cx));
+                    }
                 }
-                EffectType::Checkerboard { size, color_a, color_b } => {
-                    let ca = *color_a;
-                    let cb = *color_b;
-                    effect_box = effect_box
-                        .child(fx_swatch_row(state, &layer.id, &eff_id, "color_a", "Color A", ca, wheels.get(&(eff_id.clone(), "color_a".to_string())), cx))
-                        .child(fx_swatch_row(state, &layer.id, &eff_id, "color_b", "Color B", cb, wheels.get(&(eff_id.clone(), "color_b".to_string())), cx))
-                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "size", "Size", format!("{:.0} px", size.value), 4.0, cx));
+                EffectType::Checkerboard { .. } => {
+                    // Swatches + size ride their declarations.
+                    for decl in effect.declarations() {
+                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, cx));
+                    }
                 }
-                EffectType::GradientRamp { color_a, color_b, angle } => {
-                    let ca = *color_a;
-                    let cb = *color_b;
-                    effect_box = effect_box
-                        .child(fx_swatch_row(state, &layer.id, &eff_id, "color_a", "Start", ca, wheels.get(&(eff_id.clone(), "color_a".to_string())), cx))
-                        .child(fx_swatch_row(state, &layer.id, &eff_id, "color_b", "End", cb, wheels.get(&(eff_id.clone(), "color_b".to_string())), cx))
-                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "angle", "Angle", format!("{:.0}°", angle.value), 5.0, cx));
-                }
-                EffectType::Perspective { skew_x, skew_y } => {
-                    effect_box = effect_box
-                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "skew_x", "Skew X", format!("{:.1}°", skew_x.value), 1.0, cx))
-                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "skew_y", "Skew Y", format!("{:.1}°", skew_y.value), 1.0, cx));
-                }
-                EffectType::TextOutline { width, color } => {
-                    let oc = *color;
-                    effect_box = effect_box
-                        .child(fx_swatch_row(state, &layer.id, &eff_id, "color", "Color", oc, wheels.get(&(eff_id.clone(), "color".to_string())), cx))
-                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "width", "Width", format!("{:.1} px", width.value), 1.0, cx));
-                }
-                EffectType::TextBevel { strength, softness } => {
-                    effect_box = effect_box
-                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "strength", "Strength", format!("{:.0}%", strength.value), 5.0, cx))
-                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "softness", "Softness", format!("{:.0}%", softness.value), 5.0, cx));
-                }
-                EffectType::Bloom { intensity, radius } => {
-                    effect_box = effect_box
-                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "intensity", "Intensity", format!("{:.0}%", intensity.value), 5.0, cx))
-                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "radius", "Radius", format!("{:.1} px", radius.value), 2.0, cx));
-                }
-                EffectType::Tiler { tiles_x, tiles_y } => {
-                    effect_box = effect_box
-                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "tiles_x", "Tiles X", format!("{:.0}", tiles_x.value), 1.0, cx))
-                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "tiles_y", "Tiles Y", format!("{:.0}", tiles_y.value), 1.0, cx));
-                }
-                EffectType::Warp { amount, scale } => {
-                    effect_box = effect_box
-                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "amount", "Amount", format!("{:.0}%", amount.value), 5.0, cx))
-                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "scale", "Scale", format!("{:.1}", scale.value), 0.2, cx));
-                }
-                EffectType::Exposure { exposure } => {
-                    effect_box = effect_box.child(fx_scrub_row(
-                        state,
-                        panel_entity,
-                        &layer.id,
-                        &eff_id,
-                        "exposure",
-                        "Exposure",
-                        format!("{:+.2} EV", exposure.value),
-                        0.25,
-                        cx,
-                    ));
-                }
-                EffectType::Vibrance { vibrance } => {
-                    effect_box = effect_box.child(fx_scrub_row(
-                        state,
-                        panel_entity,
-                        &layer.id,
-                        &eff_id,
-                        "vibrance",
-                        "Vibrance",
-                        format!("{:+.0}", vibrance.value),
-                        5.0,
-                        cx,
-                    ));
-                }
-                EffectType::Levels { input_black, input_white, gamma, output_black, output_white } => {
-                    effect_box = effect_box
-                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "input_black", "Input Black", format!("{:.0}", input_black.value), 5.0, cx))
-                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "input_white", "Input White", format!("{:.0}", input_white.value), 5.0, cx))
-                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "gamma", "Gamma", format!("{:.2}", gamma.value), 0.1, cx))
-                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "output_black", "Output Black", format!("{:.0}", output_black.value), 5.0, cx))
-                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "output_white", "Output White", format!("{:.0}", output_white.value), 5.0, cx));
-                }
-                EffectType::HueSaturation { hue_shift, saturation, lightness } => {
-                    effect_box = effect_box
-                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "hue_shift", "Hue Shift", format!("{:+.0}°", hue_shift.value), 5.0, cx))
-                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "saturation", "Saturation", format!("{:+.0}", saturation.value), 5.0, cx))
-                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "lightness", "Lightness", format!("{:+.0}", lightness.value), 5.0, cx));
-                }
-                EffectType::Sharpen { amount, radius } => {
-                    effect_box = effect_box
-                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "amount", "Amount", format!("{:.0}%", amount.value), 5.0, cx))
-                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "radius", "Radius", format!("{:.1} px", radius.value), 0.5, cx));
-                }
-                EffectType::Vignette { amount, softness } => {
-                    effect_box = effect_box
-                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "amount", "Amount", format!("{:.0}%", amount.value), 5.0, cx))
-                        .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "softness", "Softness", format!("{:.0}%", softness.value), 5.0, cx));
-                }
-                // Modular stock plug-ins render generically from the
-                // descriptor: one scrub row per scalar param plus swatch
-                // rows for color slots. No per-effect UI needed.
-                EffectType::Stock { .. } => {
-                    for (name, label, value, step) in effect.stock_scalar_params() {
-                        effect_box = effect_box.child(fx_scrub_row(
+                EffectType::GradientRamp { .. } => {
+                    // Two-stop gradient editor over the Start/End colors
+                    // (stop bar, wheel, reverse, presets) + angle dial row.
+                    let decls = effect.declarations();
+                    let find = |f: &str| decls.iter().find(|d| d.field == f).cloned();
+                    if let (Some(da), Some(db)) = (find("color_a"), find("color_b")) {
+                        let (ca, cb) = match (&da.value, &db.value) {
+                            (project::PropValue::Color(a), project::PropValue::Color(b)) => (*a, *b),
+                            _ => (Color::BLACK, Color::WHITE),
+                        };
+                        effect_box = effect_box.child(crate::widgets::widget_gradient(
                             state,
                             panel_entity,
                             &layer.id,
                             &eff_id,
-                            name,
-                            label,
-                            format!("{value:.2}"),
-                            step,
+                            ("color_a", da.label.as_str(), ca),
+                            ("color_b", db.label.as_str(), cb),
+                            ui.gradient_stop.get(&eff_id).copied().unwrap_or(0),
+                            wheels,
                             cx,
                         ));
                     }
-                    for slot in effect.color_slots() {
-                        if let Some(col) = effect.stock_color(slot) {
-                            effect_box = effect_box.child(fx_swatch_row(
-                                state,
-                                &layer.id,
-                                &eff_id,
-                                slot,
-                                slot,
-                                col,
-                                wheels.get(&(eff_id.clone(), slot.to_string())),
-                                cx,
-                            ));
-                        }
+                    if let Some(angle) = find("angle") {
+                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &angle, wheels, cx));
+                    }
+                }
+                EffectType::Perspective { .. }
+                | EffectType::TextOutline { .. }
+                | EffectType::TextBevel { .. }
+                | EffectType::Bloom { .. }
+                | EffectType::Tiler { .. }
+                | EffectType::Warp { .. }
+                | EffectType::Exposure { .. }
+                | EffectType::Vibrance { .. }
+                | EffectType::Levels { .. }
+                | EffectType::HueSaturation { .. }
+                | EffectType::Sharpen { .. }
+                | EffectType::Vignette { .. } => {
+                    for decl in effect.declarations() {
+                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, cx));
+                    }
+                }
+                // Modular stock plug-ins render from the same declarations
+                // as every other effect (scalars + color slots).
+                EffectType::Stock { .. } => {
+                    for decl in effect.declarations() {
+                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, cx));
                     }
                 }
             }
@@ -8118,6 +7380,11 @@ impl Render for PropertiesPanel {
                             self.shader_editor_open.clone(),
                             self.shader_editor.clone(),
                             &fx_wheels,
+                            &PropUi {
+                                dropdown_open: self.prop_dropdown.clone(),
+                                vec_link: self.vec_link.clone(),
+                                gradient_stop: self.gradient_stop.clone(),
+                            },
                             cx,
                         );
 
@@ -10474,6 +9741,8 @@ pub struct TimelinePanel {
     pub scrub_factor: f32,
     /// Active spline/graph keyframe drag (time + value).
     pub graph_drag: Option<GraphKeyDrag>,
+    /// Active tangent-handle drag (Bezier curve editing).
+    pub graph_tan_drag: Option<GraphTangentDrag>,
     /// Graph Editor value axis (Value / Speed tabs).
     pub graph_tab: GraphTab,
     /// Isolate: plot only the focused series.
@@ -10535,6 +9804,24 @@ pub struct GraphKeyDrag {
     pub span: f64,
     /// True once the pointer actually moved (a press without movement is a
     /// click: the mousedown checkpoint is undone so clicks leave no undo).
+    pub moved: bool,
+}
+
+/// Active drag of one graph tangent handle (Bezier curve editing).
+#[derive(Clone, Debug)]
+pub struct GraphTangentDrag {
+    pub layer_id: String,
+    pub path: String,
+    pub at_s: f64,
+    pub is_in: bool,
+    pub hx: f32,
+    pub hy: f32,
+    pub seg_t: f64,
+    pub seg_v: f32,
+    pub last_x: f32,
+    pub last_y: f32,
+    pub span: f64,
+    pub vspan: f32,
     pub moved: bool,
 }
 
@@ -11531,6 +10818,123 @@ fn render_graph_view(
         }
     }
 
+    // Bezier tangent handles for the focused series (Value tab): drag to
+    // reshape the curve (Auto/linear defaults show until touched).
+    if show_keys && !speed_tab {
+        if let Some(i) = focus_idx {
+            let se = &series[i];
+            for (ki, k) in se.keys.iter().enumerate() {
+                if k.interp != project::KeyframeInterpolation::Bezier {
+                    continue;
+                }
+                if k.t < view.t0 - half_frame2 || k.t > view.t1 + half_frame2 {
+                    continue;
+                }
+                let kx = x_of(k.t);
+                let ky = y_of(k.v);
+                // (neighbor, is_in, default tangent)
+                let mut handles: Vec<(usize, bool, (f32, f32))> = Vec::new();
+                if ki > 0 {
+                    let p = &se.keys[ki - 1];
+                    if k.t - p.t > 1e-6 {
+                        handles.push((ki - 1, true, k.in_tan.unwrap_or((0.67, 0.67))));
+                    }
+                }
+                if ki + 1 < se.keys.len() {
+                    let n = &se.keys[ki + 1];
+                    if n.t - k.t > 1e-6 {
+                        handles.push((ki + 1, false, k.out_tan.unwrap_or((0.33, 0.33))));
+                    }
+                }
+                for (ni, is_in, (hx, hy)) in handles {
+                    let n = &se.keys[ni];
+                    let seg_t = (n.t - k.t).abs().max(1e-6);
+                    let seg_v = n.v - k.v;
+                    let (ht, hv) = if is_in {
+                        (k.t - hx as f64 * seg_t, k.v - hy * seg_v)
+                    } else {
+                        (k.t + hx as f64 * seg_t, k.v + hy * seg_v)
+                    };
+                    let (hx_r, hy_r) = (x_of(ht), y_of(hv));
+                    // Dotted leader key → handle.
+                    for s in 1..7 {
+                        let f = s as f32 / 7.0;
+                        plot = plot.child(
+                            div()
+                                .absolute()
+                                .left(relative(kx + (hx_r - kx) * f))
+                                .top(relative(1.0 - (ky + (hy_r - ky) * f)))
+                                .w(px(2.))
+                                .h(px(2.))
+                                .ml(px(-1.))
+                                .mt(px(-1.))
+                                .rounded_full()
+                                .bg(ae::amber())
+                                .opacity(0.5),
+                        );
+                    }
+                    let p_tan = panel_entity.clone();
+                    let s_tan = state.clone();
+                    let lid_t = lid_graph.clone();
+                    let path_t = se.path.clone();
+                    let at_s = k.t;
+                    let side = if is_in { "in" } else { "out" };
+                    plot = plot.child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "graph_tan_{}_{}_{}_{}",
+                                lid_graph,
+                                se.path.replace(['.', ':'], "_"),
+                                (k.t * 1000.0).round() as i64,
+                                side
+                            )))
+                            .test_support()
+                            .absolute()
+                            .left(relative(hx_r))
+                            .top(relative(1.0 - hy_r))
+                            .ml(px(-5.))
+                            .mt(px(-5.))
+                            .w(px(10.))
+                            .h(px(10.))
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(ae::amber())
+                            .bg(rgb(0x141414))
+                            .cursor_pointer()
+                            .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+                                let cxp = event.position.x / px(1.0);
+                                let cyp = event.position.y / px(1.0);
+                                s_tan.update(cx, |s, cx| {
+                                    s.checkpoint();
+                                    s.preview_fast = true;
+                                    cx.notify();
+                                });
+                                p_tan.update(cx, |this, cx| {
+                                    this.graph_tan_drag = Some(GraphTangentDrag {
+                                        layer_id: lid_t.clone(),
+                                        path: path_t.clone(),
+                                        at_s,
+                                        is_in,
+                                        hx,
+                                        hy,
+                                        seg_t,
+                                        seg_v,
+                                        last_x: cxp,
+                                        last_y: cyp,
+                                        span: tspan,
+                                        vspan,
+                                        moved: false,
+                                    });
+                                    cx.notify();
+                                });
+                            })
+                            .child(""),
+                    );
+                }
+            }
+        }
+    }
+
     // Tooltip pinned to the selected key (value + speed + influence row).
     if let Some((line1, line2, tx, ty, _spd)) = tooltip.clone() {
         let ty_px = (1.0 - ty) * GRAPH_PLOT_H - 52.0;
@@ -11723,6 +11127,7 @@ impl TimelinePanel {
             scrub_moved: false,
             scrub_factor: 1.0,
             graph_drag: None,
+            graph_tan_drag: None,
             graph_tab: GraphTab::Value,
             graph_isolate: false,
             graph_show_grid: true,
@@ -12851,115 +12256,22 @@ impl Render for TimelinePanel {
                                 );
 
                                 if is_fx_item_exp {
-                                    // Render animatable parameters for this effect
-                                    let mut param_entries: Vec<(&'static str, &'static str, f32, f32)> = Vec::new();
-                                    match &effect.effect_type {
-                                        EffectType::GaussianBlur { radius } => {
-                                            param_entries.push(("radius", "Blur Radius", radius.evaluate_at(&current_tc), 2.0));
+                                    // Animatable parameters render from the
+                                    // effect's widget declarations (the same
+                                    // data as the Properties panel — no
+                                    // per-effect UI in the timeline either).
+                                    let mut param_entries: Vec<(String, String, f32, f32)> = Vec::new();
+                                    for decl in effect.declarations() {
+                                        if !decl.is_scalar() {
+                                            continue;
                                         }
-                                        EffectType::BrightnessContrast { brightness, contrast } => {
-                                            param_entries.push(("brightness", "Brightness", brightness.evaluate_at(&current_tc), 5.0));
-                                            param_entries.push(("contrast", "Contrast", contrast.evaluate_at(&current_tc), 5.0));
-                                        }
-                                        EffectType::Tint { amount, .. } => {
-                                            param_entries.push(("amount", "Amount", amount.evaluate_at(&current_tc), 5.0));
-                                        }
-                                        EffectType::Invert { amount } => {
-                                            param_entries.push(("amount", "Amount", amount.evaluate_at(&current_tc), 5.0));
-                                        }
-                                        EffectType::DropShadow { distance, softness, opacity, .. } => {
-                                            param_entries.push(("distance", "Distance", distance.evaluate_at(&current_tc), 2.0));
-                                            param_entries.push(("softness", "Softness", softness.evaluate_at(&current_tc), 2.0));
-                                            param_entries.push(("opacity", "Opacity", opacity.evaluate_at(&current_tc), 5.0));
-                                        }
-                                        EffectType::GlslShader { param1, param2, param3, param4, .. } => {
-                                            param_entries.push(("param1", "Param 1 (Speed)", param1.evaluate_at(&current_tc), 0.2));
-                                            param_entries.push(("param2", "Param 2 (Boost)", param2.evaluate_at(&current_tc), 5.0));
-                                            param_entries.push(("param3", "Param 3 (Scale)", param3.evaluate_at(&current_tc), 0.2));
-                                            param_entries.push(("param4", "Param 4 (Blend)", param4.evaluate_at(&current_tc), 5.0));
-                                        }
-                                        EffectType::DisplacementMap { max_horizontal, max_vertical } => {
-                                            param_entries.push(("max_horizontal", "Max Horizontal", max_horizontal.evaluate_at(&current_tc), 5.0));
-                                            param_entries.push(("max_vertical", "Max Vertical", max_vertical.evaluate_at(&current_tc), 5.0));
-                                        }
-                                        EffectType::ChromaKey { tolerance, feather, .. } => {
-                                            param_entries.push(("tolerance", "Tolerance", tolerance.evaluate_at(&current_tc), 5.0));
-                                            param_entries.push(("feather", "Feather", feather.evaluate_at(&current_tc), 2.0));
-                                        }
-                                        EffectType::LumaKey { threshold, feather } => {
-                                            param_entries.push(("threshold", "Threshold", threshold.evaluate_at(&current_tc), 5.0));
-                                            param_entries.push(("feather", "Feather", feather.evaluate_at(&current_tc), 2.0));
-                                        }
-                                        EffectType::NoiseGenerator { amount, .. } => {
-                                            param_entries.push(("amount", "Amount", amount.evaluate_at(&current_tc), 5.0));
-                                        }
-                                        EffectType::Checkerboard { size, .. } => {
-                                            param_entries.push(("size", "Size", size.evaluate_at(&current_tc), 4.0));
-                                        }
-                                        EffectType::GradientRamp { angle, .. } => {
-                                            param_entries.push(("angle", "Angle", angle.evaluate_at(&current_tc), 5.0));
-                                        }
-                                        EffectType::Perspective { skew_x, skew_y } => {
-                                            param_entries.push(("skew_x", "Skew X", skew_x.evaluate_at(&current_tc), 1.0));
-                                            param_entries.push(("skew_y", "Skew Y", skew_y.evaluate_at(&current_tc), 1.0));
-                                        }
-                                        EffectType::TextOutline { width, .. } => {
-                                            param_entries.push(("width", "Width", width.evaluate_at(&current_tc), 1.0));
-                                        }
-                                        EffectType::TextBevel { strength, softness } => {
-                                            param_entries.push(("strength", "Strength", strength.evaluate_at(&current_tc), 5.0));
-                                            param_entries.push(("softness", "Softness", softness.evaluate_at(&current_tc), 5.0));
-                                        }
-                                        EffectType::Bloom { intensity, radius } => {
-                                            param_entries.push(("intensity", "Intensity", intensity.evaluate_at(&current_tc), 5.0));
-                                            param_entries.push(("radius", "Radius", radius.evaluate_at(&current_tc), 2.0));
-                                        }
-                                        EffectType::Tiler { tiles_x, tiles_y } => {
-                                            param_entries.push(("tiles_x", "Tiles X", tiles_x.evaluate_at(&current_tc), 1.0));
-                                            param_entries.push(("tiles_y", "Tiles Y", tiles_y.evaluate_at(&current_tc), 1.0));
-                                        }
-                                        EffectType::Warp { amount, scale } => {
-                                            param_entries.push(("amount", "Amount", amount.evaluate_at(&current_tc), 5.0));
-                                            param_entries.push(("scale", "Scale", scale.evaluate_at(&current_tc), 0.2));
-                                        }
-                                        EffectType::Exposure { exposure } => {
-                                            param_entries.push(("exposure", "Exposure", exposure.evaluate_at(&current_tc), 0.25));
-                                        }
-                                        EffectType::Vibrance { vibrance } => {
-                                            param_entries.push(("vibrance", "Vibrance", vibrance.evaluate_at(&current_tc), 5.0));
-                                        }
-                                        EffectType::Levels { input_black, input_white, gamma, output_black, output_white } => {
-                                            param_entries.push(("input_black", "In Black", input_black.evaluate_at(&current_tc), 5.0));
-                                            param_entries.push(("input_white", "In White", input_white.evaluate_at(&current_tc), 5.0));
-                                            param_entries.push(("gamma", "Gamma", gamma.evaluate_at(&current_tc), 0.1));
-                                            param_entries.push(("output_black", "Out Black", output_black.evaluate_at(&current_tc), 5.0));
-                                            param_entries.push(("output_white", "Out White", output_white.evaluate_at(&current_tc), 5.0));
-                                        }
-                                        EffectType::HueSaturation { hue_shift, saturation, lightness } => {
-                                            param_entries.push(("hue_shift", "Hue Shift", hue_shift.evaluate_at(&current_tc), 5.0));
-                                            param_entries.push(("saturation", "Saturation", saturation.evaluate_at(&current_tc), 5.0));
-                                            param_entries.push(("lightness", "Lightness", lightness.evaluate_at(&current_tc), 5.0));
-                                        }
-                                        EffectType::Sharpen { amount, radius } => {
-                                            param_entries.push(("amount", "Amount", amount.evaluate_at(&current_tc), 5.0));
-                                            param_entries.push(("radius", "Radius", radius.evaluate_at(&current_tc), 0.5));
-                                        }
-                                        EffectType::Vignette { amount, softness } => {
-                                            param_entries.push(("amount", "Amount", amount.evaluate_at(&current_tc), 5.0));
-                                            param_entries.push(("softness", "Softness", softness.evaluate_at(&current_tc), 5.0));
-                                        }
-                                        // Shader Lab parameters are edited in the Properties
-                                        // panel (dynamic uniforms have no static keyframe paths).
-                                        EffectType::ShaderLab { .. } => {}
-                                        // Stock plug-ins enumerate from the descriptor.
-                                        EffectType::Stock { .. } => {
-                                            for (name, label, _v, step) in effect.stock_scalar_params() {
-                                                let val = effect
-                                                    .get_param_property(name)
-                                                    .map(|p| p.evaluate_at(&current_tc))
-                                                    .unwrap_or(0.0);
-                                                param_entries.push((name, label, val, step));
-                                            }
+                                        if let Some(prop) = effect.get_param_property(&decl.field) {
+                                            param_entries.push((
+                                                decl.field.clone(),
+                                                decl.label.clone(),
+                                                prop.evaluate_at(&current_tc),
+                                                decl.meta.step,
+                                            ));
                                         }
                                     }
 
@@ -12969,7 +12281,7 @@ impl Render for TimelinePanel {
                                         // exact keyframed property.
                                         let fx_prop_path = format!("effect:{}:{p_slug}", effect.id);
 
-                                        let prop_ref = effect.get_param_property(p_slug);
+                                        let prop_ref = effect.get_param_property(&p_slug);
                                         let is_anim = prop_ref.map(|p| p.is_animated()).unwrap_or(false);
                                         let has_kf = prop_ref.map(|p| p.has_keyframe_at(&current_tc)).unwrap_or(false);
                                         let prev_kf = prop_ref.and_then(|p| p.previous_keyframe_time(&current_tc)).is_some();
@@ -13039,6 +12351,47 @@ impl Render for TimelinePanel {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .on_mouse_move(move |event, window, cx| {
+                // Tangent-handle drag wins over keyframe drags.
+                let ttdrag = p_root_move.read(cx).graph_tan_drag.clone();
+                if let Some(mut td) = ttdrag {
+                    let cur_x = event.position.x / px(1.0);
+                    let cur_y = event.position.y / px(1.0);
+                    let dx = cur_x - td.last_x;
+                    let dy = cur_y - td.last_y;
+                    if dx != 0.0 || dy != 0.0 {
+                        let track_w = (window.bounds().size.width / px(1.0) - 560.0).max(200.0);
+                        let seg_frac = (td.seg_t / td.span.max(1e-6)).max(1e-6);
+                        let nhx = td.hx + ((dx / track_w) as f64 / seg_frac) as f32;
+                        let mut nhy = td.hy;
+                        if td.seg_v.abs() > 1e-6 {
+                            nhy = td.hy + (-dy / GRAPH_PLOT_H * td.vspan) / td.seg_v;
+                        }
+                        let nhx = nhx.clamp(0.0, 1.0);
+                        let nhy = nhy.clamp(-2.0, 2.0);
+                        let (lid, path, at_s, is_in) =
+                            (td.layer_id.clone(), td.path.clone(), td.at_s, td.is_in);
+                        let (it, ot) = if is_in {
+                            (Some((nhx, nhy)), None)
+                        } else {
+                            (None, Some((nhx, nhy)))
+                        };
+                        s_root_move.update(cx, |s, cx| {
+                            s.preview_fast = true;
+                            s.set_graph_key_tangents_live(&lid, &path, at_s, it, ot);
+                            cx.notify();
+                        });
+                        td.hx = nhx;
+                        td.hy = nhy;
+                        td.last_x = cur_x;
+                        td.last_y = cur_y;
+                        td.moved = true;
+                        p_root_move.update(cx, |this, cx| {
+                            this.graph_tan_drag = Some(td);
+                            cx.notify();
+                        });
+                    }
+                    return;
+                }
                 // Spline/graph keyframe drag wins over layer-strip drags.
                 let gdrag = p_root_move.read(cx).graph_drag.clone();
                 if let Some(mut gd) = gdrag {
@@ -13202,10 +12555,17 @@ impl Render for TimelinePanel {
                     .clone()
                     .map(|gd| !gd.moved)
                     .unwrap_or(false);
+                let tan_clicked = p_root_up
+                    .read(cx)
+                    .graph_tan_drag
+                    .clone()
+                    .map(|td| !td.moved)
+                    .unwrap_or(false);
                 p_root_up.update(cx, |this, cx| {
                     this.is_scrubbing_ruler = false;
                     this.drag_action = None;
                     this.graph_drag = None;
+                    this.graph_tan_drag = None;
                     this.scrub_layer = None;
                     this.scrub_key = None;
                     this.scrub_last_x = None;
@@ -13229,7 +12589,7 @@ impl Render for TimelinePanel {
                 });
                 s_root_up.update(cx, |s, cx| {
                     s.preview_fast = false;
-                    if graph_clicked {
+                    if graph_clicked || tan_clicked {
                         s.undo();
                     }
                     cx.notify();
@@ -13245,6 +12605,7 @@ impl Render for TimelinePanel {
                     this.is_scrubbing_ruler = false;
                     this.drag_action = None;
                     this.graph_drag = None;
+                    this.graph_tan_drag = None;
                     this.scrub_layer = None;
                     this.scrub_key = None;
                     this.scrub_last_x = None;

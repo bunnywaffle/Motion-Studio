@@ -1735,6 +1735,186 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
             _ => None,
         }
     }
+
+    /// Declarative widget descriptions for every parameter (the property
+    /// declares its UI; the application auto-creates widgets from these —
+    /// no per-effect UI code). Order matches the historic panel layout.
+    pub fn declarations(&self) -> Vec<crate::widget::PropDecl> {
+        use crate::widget::{ParamMeta, PropDecl, PropValue, WidgetKind};
+        fn scalar(
+            field: &'static str,
+            label: &'static str,
+            widget: WidgetKind,
+            meta: ParamMeta,
+            prop: &Property<f32>,
+        ) -> PropDecl {
+            PropDecl::scalar(field, label, widget, meta, prop.value, prop.is_animated())
+        }
+        let px1 = |min: f32, max: f32, step: f32, mult100: f32| {
+            ParamMeta::slider(min, max, step, 1, "px", mult100)
+        };
+        match &self.effect_type {
+            EffectType::GaussianBlur { radius } => vec![scalar(
+                "radius",
+                "Radius",
+                WidgetKind::Slider,
+                px1(0.0, 200.0, 5.0, 100.0),
+                radius,
+            )],
+            EffectType::BrightnessContrast { brightness, contrast } => vec![
+                scalar("brightness", "Brightness", WidgetKind::Slider, ParamMeta::slider(-100.0, 100.0, 5.0, 1, "", 100.0), brightness),
+                scalar("contrast", "Contrast", WidgetKind::Slider, ParamMeta::slider(-100.0, 100.0, 5.0, 1, "", 100.0), contrast),
+            ],
+            EffectType::Tint { map_black, map_white, amount } => vec![
+                PropDecl::color("map_black", "Map Black", *map_black),
+                PropDecl::color("map_white", "Map White", *map_white),
+                scalar("amount", "Amount", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 10.0, 0, " %", 100.0), amount),
+            ],
+            EffectType::Invert { amount } => vec![scalar(
+                "amount",
+                "Amount",
+                WidgetKind::Percentage,
+                ParamMeta::slider(0.0, 100.0, 10.0, 0, " %", 100.0),
+                amount,
+            )],
+            EffectType::DropShadow { distance, angle, softness, opacity, color } => vec![
+                scalar("distance", "Distance", WidgetKind::Slider, px1(0.0, 200.0, 2.0, 50.0), distance),
+                scalar("angle", "Angle", WidgetKind::Angle, ParamMeta::slider(0.0, 360.0, 15.0, 1, "°", 360.0), angle),
+                scalar("softness", "Softness", WidgetKind::Slider, px1(0.0, 100.0, 2.0, 50.0), softness),
+                scalar("opacity", "Opacity", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 10.0, 0, " %", 100.0), opacity),
+                PropDecl::color("color", "Color", *color),
+            ],
+            EffectType::GlslShader { param1, param2, param3, param4, .. } => vec![
+                scalar("param1", "P1 (Speed)", WidgetKind::Slider, ParamMeta::slider(-100.0, 100.0, 0.5, 2, "", 10.0), param1),
+                scalar("param2", "P2 (Intensity)", WidgetKind::Slider, ParamMeta::slider(-100.0, 100.0, 5.0, 1, "", 100.0), param2),
+                scalar("param3", "P3 (Scale)", WidgetKind::Slider, ParamMeta::slider(-100.0, 100.0, 0.5, 2, "", 10.0), param3),
+                scalar("param4", "P4 (Opacity)", WidgetKind::Slider, ParamMeta::slider(-100.0, 100.0, 5.0, 1, "", 100.0), param4),
+            ],
+            EffectType::ShaderLab { .. } => Vec::new(),
+            EffectType::DisplacementMap { max_horizontal, max_vertical } => vec![
+                scalar("max_horizontal", "Max Horizontal", WidgetKind::Slider, px1(-500.0, 500.0, 5.0, 100.0), max_horizontal),
+                scalar("max_vertical", "Max Vertical", WidgetKind::Slider, px1(-500.0, 500.0, 5.0, 100.0), max_vertical),
+            ],
+            EffectType::ChromaKey { key_color, tolerance, feather } => vec![
+                PropDecl::color("key_color", "Key Color", *key_color),
+                scalar("tolerance", "Tolerance", WidgetKind::Slider, ParamMeta::slider(0.0, 100.0, 5.0, 1, "", 100.0), tolerance),
+                scalar("feather", "Feather", WidgetKind::Slider, ParamMeta::slider(0.0, 100.0, 2.0, 1, "", 100.0), feather),
+            ],
+            EffectType::LumaKey { threshold, feather } => vec![
+                scalar("threshold", "Threshold", WidgetKind::Slider, ParamMeta::slider(0.0, 100.0, 5.0, 1, "", 100.0), threshold),
+                scalar("feather", "Feather", WidgetKind::Slider, ParamMeta::slider(0.0, 100.0, 2.0, 1, "", 100.0), feather),
+            ],
+            EffectType::NoiseGenerator { amount, monochrome } => vec![
+                scalar("amount", "Amount", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 1, "%", 100.0), amount),
+                PropDecl::boolean("monochrome", "Monochrome", *monochrome),
+            ],
+            EffectType::Checkerboard { size, color_a, color_b } => vec![
+                PropDecl::color("color_a", "Color A", *color_a),
+                PropDecl::color("color_b", "Color B", *color_b),
+                scalar("size", "Size", WidgetKind::Slider, ParamMeta::slider(2.0, 512.0, 4.0, 0, "px", 100.0), size),
+            ],
+            EffectType::GradientRamp { color_a, color_b, angle } => vec![
+                PropDecl::color("color_a", "Start", *color_a),
+                PropDecl::color("color_b", "End", *color_b),
+                scalar("angle", "Angle", WidgetKind::Angle, ParamMeta::slider(0.0, 360.0, 5.0, 0, "°", 100.0), angle),
+            ],
+            EffectType::Perspective { skew_x, skew_y } => vec![
+                scalar("skew_x", "Skew X", WidgetKind::Angle, ParamMeta::slider(-60.0, 60.0, 1.0, 1, "°", 100.0), skew_x),
+                scalar("skew_y", "Skew Y", WidgetKind::Angle, ParamMeta::slider(-60.0, 60.0, 1.0, 1, "°", 100.0), skew_y),
+            ],
+            EffectType::TextOutline { width, color } => vec![
+                PropDecl::color("color", "Color", *color),
+                scalar("width", "Width", WidgetKind::Slider, px1(0.0, 64.0, 1.0, 100.0), width),
+            ],
+            EffectType::TextBevel { strength, softness } => vec![
+                scalar("strength", "Strength", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), strength),
+                scalar("softness", "Softness", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), softness),
+            ],
+            EffectType::Bloom { intensity, radius } => vec![
+                scalar("intensity", "Intensity", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), intensity),
+                scalar("radius", "Radius", WidgetKind::Slider, px1(0.0, 128.0, 2.0, 100.0), radius),
+            ],
+            EffectType::Tiler { tiles_x, tiles_y } => vec![
+                scalar("tiles_x", "Tiles X", WidgetKind::Integer, ParamMeta::slider(1.0, 64.0, 1.0, 0, "", 100.0), tiles_x),
+                scalar("tiles_y", "Tiles Y", WidgetKind::Integer, ParamMeta::slider(1.0, 64.0, 1.0, 0, "", 100.0), tiles_y),
+            ],
+            EffectType::Warp { amount, scale } => vec![
+                scalar("amount", "Amount", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), amount),
+                scalar("scale", "Scale", WidgetKind::Slider, ParamMeta::slider(0.1, 32.0, 0.2, 1, "", 100.0), scale),
+            ],
+            EffectType::Exposure { exposure } => vec![PropDecl {
+                field: "exposure".to_string(),
+                label: "Exposure".to_string(),
+                widget: WidgetKind::Slider,
+                meta: ParamMeta { signed: true, unit: " EV".to_string(), ..ParamMeta::slider(-8.0, 8.0, 0.25, 2, "", 100.0) },
+                value: PropValue::Float { value: exposure.value, animated: exposure.is_animated() },
+            }],
+            EffectType::Vibrance { vibrance } => vec![PropDecl {
+                field: "vibrance".to_string(),
+                label: "Vibrance".to_string(),
+                widget: WidgetKind::Slider,
+                meta: ParamMeta { signed: true, ..ParamMeta::slider(-100.0, 100.0, 5.0, 0, "", 100.0) },
+                value: PropValue::Float { value: vibrance.value, animated: vibrance.is_animated() },
+            }],
+            EffectType::Levels { input_black, input_white, gamma, output_black, output_white } => vec![
+                scalar("input_black", "Input Black", WidgetKind::Slider, ParamMeta::slider(0.0, 255.0, 5.0, 0, "", 100.0), input_black),
+                scalar("input_white", "Input White", WidgetKind::Slider, ParamMeta::slider(0.0, 255.0, 5.0, 0, "", 100.0), input_white),
+                scalar("gamma", "Gamma", WidgetKind::Slider, ParamMeta::slider(0.1, 8.0, 0.1, 2, "", 100.0), gamma),
+                scalar("output_black", "Output Black", WidgetKind::Slider, ParamMeta::slider(0.0, 255.0, 5.0, 0, "", 100.0), output_black),
+                scalar("output_white", "Output White", WidgetKind::Slider, ParamMeta::slider(0.0, 255.0, 5.0, 0, "", 100.0), output_white),
+            ],
+            EffectType::HueSaturation { hue_shift, saturation, lightness } => vec![
+                PropDecl {
+                    field: "hue_shift".to_string(),
+                    label: "Hue Shift".to_string(),
+                    widget: WidgetKind::Angle,
+                    meta: ParamMeta { signed: true, ..ParamMeta::slider(-180.0, 180.0, 5.0, 0, "°", 100.0) },
+                    value: PropValue::Float { value: hue_shift.value, animated: hue_shift.is_animated() },
+                },
+                PropDecl {
+                    field: "saturation".to_string(),
+                    label: "Saturation".to_string(),
+                    widget: WidgetKind::Slider,
+                    meta: ParamMeta { signed: true, ..ParamMeta::slider(-100.0, 100.0, 5.0, 0, "", 100.0) },
+                    value: PropValue::Float { value: saturation.value, animated: saturation.is_animated() },
+                },
+                PropDecl {
+                    field: "lightness".to_string(),
+                    label: "Lightness".to_string(),
+                    widget: WidgetKind::Slider,
+                    meta: ParamMeta { signed: true, ..ParamMeta::slider(-100.0, 100.0, 5.0, 0, "", 100.0) },
+                    value: PropValue::Float { value: lightness.value, animated: lightness.is_animated() },
+                },
+            ],
+            EffectType::Sharpen { amount, radius } => vec![
+                scalar("amount", "Amount", WidgetKind::Percentage, ParamMeta::slider(0.0, 200.0, 5.0, 0, "%", 100.0), amount),
+                scalar("radius", "Radius", WidgetKind::Slider, px1(0.0, 32.0, 0.5, 100.0), radius),
+            ],
+            EffectType::Vignette { amount, softness } => vec![
+                scalar("amount", "Amount", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), amount),
+                scalar("softness", "Softness", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), softness),
+            ],
+            EffectType::Stock { .. } => {
+                let mut out = Vec::new();
+                for (name, label, value, step) in self.stock_scalar_params() {
+                    out.push(PropDecl::scalar(
+                        name,
+                        label,
+                        WidgetKind::Slider,
+                        ParamMeta::slider(f32::NEG_INFINITY, f32::INFINITY, step, 2, "", 100.0),
+                        value,
+                        self.get_param_property(name).map(|p| p.is_animated()).unwrap_or(false),
+                    ));
+                }
+                for slot in self.color_slots() {
+                    if let Some(col) = self.stock_color(slot) {
+                        out.push(PropDecl::color(slot, slot, col));
+                    }
+                }
+                out
+            }
+        }
+    }
 }
 
 #[cfg(test)]
