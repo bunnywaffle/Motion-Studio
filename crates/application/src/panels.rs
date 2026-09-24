@@ -1741,13 +1741,11 @@ impl Render for CompositionViewerPanel {
                                 (radius_x.value * 2.0, radius_y.value * 2.0)
                             }
                             ShapeType::Path { path_data, .. } => {
-                                if let Some((mn, mx)) = project::Path::from_svg(path_data).bounds() {
-                                    (
-                                        ((mx.x - mn.x).abs() + 16.0).max(32.0),
-                                        ((mx.y - mn.y).abs() + 16.0).max(32.0),
-                                    )
-                                } else {
-                                    (400.0, 300.0)
+                                // Frame-aware size (see `Path::frame`): pen
+                                // paths live in arbitrary local coords.
+                                match project::Path::from_svg(path_data).frame(8.0) {
+                                    Some((_, size)) => (size.x, size.y),
+                                    None => (400.0, 300.0),
                                 }
                             }
                         },
@@ -1755,7 +1753,20 @@ impl Render for CompositionViewerPanel {
                         _ => (400.0, 300.0),
                     };
 
-                    let bbox = layer.world_bounds(base_w, base_h);
+                    // World box from the layer's local content box. Pen/path
+                    // shapes use their raster frame (arbitrary local coords),
+                    // everything else spans (0, 0, base).
+                    let bbox = match &layer.source {
+                        LayerSource::Shape {
+                            shape_type: ShapeType::Path { path_data, .. },
+                        } => match project::Path::from_svg(path_data).frame(8.0) {
+                            Some((origin, size)) => layer.local_to_world_bbox(
+                                &compositor::BoundingBox2D::from_origin_size(origin, size),
+                            ),
+                            None => layer.world_bounds(base_w, base_h),
+                        },
+                        _ => layer.world_bounds(base_w, base_h),
+                    };
                     let l_x = (bbox.min.x + comp_w / 2.0) * scale_x;
                     let l_y = (bbox.min.y + comp_h / 2.0) * scale_y;
                     let l_w = ((bbox.max.x - bbox.min.x) * scale_x).max(2.0);

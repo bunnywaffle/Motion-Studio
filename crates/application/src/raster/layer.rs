@@ -1,6 +1,8 @@
-use compositor::{EvaluatedEffect, EvaluatedEffectType, EvaluatedLayer};
+use compositor::{
+    AffineTransform2D, BoundingBox2D, EvaluatedEffect, EvaluatedEffectType, EvaluatedLayer,
+};
 use image::RgbaImage;
-use project::{BlendMode, Color, LayerSource, ShapeType, StockPlugin};
+use project::{BlendMode, Color, LayerSource, ShapeType, StockPlugin, Vec2};
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -85,7 +87,14 @@ pub fn raster_content(
                     fill_ellipse(&mut buf, w / 2.0, h / 2.0, Px::from_color(*fill));
                 }
                 ShapeType::Path { path_data, fill } => {
-                    stroke_path(&mut buf, path_data, 2.0, Px::from_color(*fill));
+                    let (origin, _, _) = path_frame(path_data);
+                    stroke_path(
+                        &mut buf,
+                        path_data,
+                        2.0,
+                        Px::from_color(*fill),
+                        origin,
+                    );
                 }
             }
             Some(buf)
@@ -598,7 +607,13 @@ pub fn rasterize_layer(
     // `out / bbox` — NOT `out / comp`. Using comp width here shrank every
     // layer's pixels inside its gizmo (e.g. a 300px solid in a 1920px comp
     // rendered ~6x too small).
-    let bbox = layer.world_bounds(base_w, base_h);
+    // World box from the layer's LOCAL content box. Pen/path shapes live in
+    // arbitrary local coords (see `path_frame`), so the box starts at the
+    // frame origin — not at (0, 0). `frame_ox/oy` re-bases the world map
+    // below so buffer px (0, 0) means local `frame origin`.
+    let local_box = layer_local_box(layer, base_w, base_h);
+    let (frame_ox, frame_oy) = (local_box.min.x, local_box.min.y);
+    let bbox = layer.local_to_world_bbox(&local_box);
     let bw = (bbox.max.x - bbox.min.x).max(1e-3);
     let bh = (bbox.max.y - bbox.min.y).max(1e-3);
     let kx = ow as f32 / bw;
@@ -615,9 +630,25 @@ pub fn rasterize_layer(
         return (out, backdrop, true);
     };
     // Local effects (masks first — After Effects order: the mask stack
-    // shapes alpha before any effect sees pixels).
+    // shapes alpha before any effect sees pixels). On framed (path) layers
+    // the work buffer is frame-relative, so mask paths shift by `-origin`.
     let mut work = content;
-    apply_masks(&mut work, &layer.masks);
+    if frame_ox != 0.0 || frame_oy != 0.0 {
+        let shift = AffineTransform2D::from_translation(Vec2::new(-frame_ox, -frame_oy));
+        let shifted_masks: Vec<compositor::EvaluatedMask> = layer
+            .masks
+            .iter()
+            .map(|m| {
+                let mut m = m.clone();
+                let lm = m.transform.local_matrix;
+                m.transform.local_matrix = shift * lm;
+                m
+            })
+            .collect();
+        apply_masks(&mut work, &shifted_masks);
+    } else {
+        apply_masks(&mut work, &layer.masks);
+    }
     apply_layer_fx(&mut work, base_w, base_h, &layer.effects, &fx);
     let mut blur_total = 0.0f32;
     let mut bloom: Option<(f32, f32)> = None;
@@ -643,15 +674,16 @@ pub fn rasterize_layer(
     if let Some((intensity, radius)) = bloom {
         apply_bloom(&mut work, intensity, radius);
     }
-    // World map (local -> output px of this AABB box).
+    // World map (frame px -> output px of this AABB box). Buffer (0, 0) is
+    // local `frame origin`, so the translation carries `W * origin`.
     let wm = layer.world_matrix();
     let mut pmap = Aff {
         a: wm.a * kx,
         b: wm.b * kx,
         c: wm.c * ky,
         d: wm.d * ky,
-        tx: (wm.tx - bbox.min.x) * kx,
-        ty: (wm.ty - bbox.min.y) * ky,
+        tx: ((wm.a * frame_ox + wm.c * frame_oy + wm.tx) - bbox.min.x) * kx,
+        ty: ((wm.b * frame_ox + wm.d * frame_oy + wm.ty) - bbox.min.y) * ky,
     };
     // Perspective skew folds into the map (same as the full-comp path:
     // the skew runs first in local px, the world map scales after it).
@@ -732,15 +764,19 @@ pub fn rasterize_layer(
             shadow_blurred.as_ref(),
         );
     } else {
-        // Exotic modes blend against the sampled backdrop average, the
-        // same approximation the div compositor used.
-        let mut bg = FloatBuf::clear(ow, oh);
-        let bp = Px::from_color(backdrop);
-        for px in bg.px.iter_mut() {
-            *px = bp;
-        }
+        // Exotic modes blend against the sampled backdrop average (the
+        // viewport stacks isolated per-layer divs, so there is no live
+        // per-pixel backdrop here — the export path in comp.rs does the
+        // exact per-pixel composite). Blit ISOLATED first (transparent
+        // backdrop), then blend each covered pixel once vs the backdrop:
+        // pre-compositing over the backdrop and blending again would feed
+        // `blend(backdrop, src_over_backdrop)` instead of
+        // `blend(backdrop, src)` and wash every exotic mode out.
+        // Uncovered pixels stay transparent so the real layers below show
+        // through the div stack (blending transparent src is identity).
+        let mut tmp = FloatBuf::clear(ow, oh);
         blit_affine(
-            &mut bg,
+            &mut tmp,
             &work,
             shifted,
             layer.effective_opacity.clamp(0.0, 1.0),
@@ -748,16 +784,17 @@ pub fn rasterize_layer(
             shadow,
             shadow_blurred.as_ref(),
         );
-        for (i, p) in bg.px.iter_mut().enumerate() {
-            if p.a <= 0.003 {
+        let mut bg = FloatBuf::clear(ow, oh);
+        for (i, s) in tmp.px.iter().enumerate() {
+            if s.a <= 0.003 {
                 continue;
             }
             // Backdrop blend is positional (dissolve dither stability).
             let x = (i as u32 % bg.w) as i32;
             let y = (i as u32 / bg.w) as i32;
             let mut d = Px::from_color(backdrop);
-            d.blend_over_at(*p, layer.blend_mode, x, y);
-            *p = d;
+            d.blend_over_at(*s, layer.blend_mode, x, y);
+            bg.px[i] = d;
         }
         out = bg;
     }
@@ -832,6 +869,29 @@ pub fn blit_affine(
 }
 
 /// Base content dims (mirror the viewer estimate for pivot consistency).
+/// Raster frame for a pen/path shape layer: `(origin, w, h)` in layer-local
+/// coords. The content buffer spans `origin .. origin + (w, h)` (tight path
+/// bounds plus pad); drawing subtracts `origin` and world boxes are built
+/// from this frame. Non-path layers use `(ZERO, base_w, base_h)`.
+pub(crate) fn path_frame(path_data: &str) -> (Vec2, f32, f32) {
+    match project::Path::from_svg(path_data).frame(8.0) {
+        Some((origin, size)) => (origin, size.x, size.y),
+        None => (Vec2::ZERO, 400.0, 300.0),
+    }
+}
+
+/// Local content box for a layer: path shapes use their raster frame,
+/// everything else spans `(0, 0, base_w, base_h)`.
+pub(crate) fn layer_local_box(layer: &EvaluatedLayer, base_w: f32, base_h: f32) -> BoundingBox2D {
+    match &layer.source {
+        LayerSource::Shape { shape_type: ShapeType::Path { path_data, .. } } => {
+            let (origin, w, h) = path_frame(path_data);
+            BoundingBox2D::from_origin_size(origin, Vec2::new(w, h))
+        }
+        _ => BoundingBox2D::from_origin_size(Vec2::ZERO, Vec2::new(base_w, base_h)),
+    }
+}
+
 pub(crate) fn layer_base_dims(
     layer: &EvaluatedLayer,
     comp_w: f32,
@@ -872,15 +932,10 @@ pub(crate) fn layer_base_dims(
                 (radius_x.value * 2.0, radius_y.value * 2.0)
             }
             ShapeType::Path { path_data, .. } => {
-                // Shared path model drives bounds (was a fixed 400x300).
-                if let Some((mn, mx)) = project::Path::from_svg(path_data).bounds() {
-                    (
-                        ((mx.x - mn.x).abs() + 16.0).max(32.0),
-                        ((mx.y - mn.y).abs() + 16.0).max(32.0),
-                    )
-                } else {
-                    (400.0, 300.0)
-                }
+                // Frame-aware bounds (see `path_frame`): pen paths live in
+                // arbitrary local coords, not inside (0, 0, size).
+                let (_, w, h) = path_frame(path_data);
+                (w, h)
             }
         },
         _ => (comp_w, comp_h),
@@ -1099,5 +1154,103 @@ mod tests {
             eval_first(&project, "c")
         };
         assert_ne!(k1, layer_cache_key(&rotated, 0, 100, 100, false));
+    }
+
+    fn path_project() -> (Project, String) {
+        let mut project = Project::new("p", "P");
+        let mut comp = Composition::hd_1080p_30fps("c", "C", 5.0);
+        let tc = TimeCode::from_frames(0, 30.0);
+        let out = TimeCode::from_frames(150, 30.0);
+        // Pen path in arbitrary local coords (negative + far from origin):
+        // the old (0, 0, size) box clipped everything outside it.
+        let layer = project::Layer::shape(
+            "l1",
+            "Pen",
+            project::ShapeType::Path {
+                path_data: "M -100.0 -50.0 L 100.0 60.0".to_string(),
+                fill: Color::WHITE,
+            },
+            tc,
+            out,
+        );
+        comp.add_layer(layer).unwrap();
+        project.add_composition(comp).unwrap();
+        (project, "c".to_string())
+    }
+
+    #[test]
+    fn path_frame_raster_covers_negative_coords() {
+        use std::collections::HashMap;
+        let (project, comp_id) = path_project();
+        let layer = eval_first(&project, &comp_id);
+        let assets: HashMap<String, std::sync::Arc<image::RgbaImage>> = HashMap::new();
+        let (base_w, base_h) = layer_base_dims(&layer, 1920.0, 1080.0, &assets);
+        // Frame covers the whole stroke plus pad.
+        assert!((base_w - 216.0).abs() < 1e-3, "{base_w}");
+        assert!((base_h - 126.0).abs() < 1e-3, "{base_h}");
+        // World box has real area (no collapse to a clipped sliver).
+        let bbox = layer.local_to_world_bbox(&layer_local_box(&layer, base_w, base_h));
+        assert!(bbox.width() > 200.0 && bbox.height() > 110.0, "{bbox:?}");
+        // And the raster actually holds ink (not an empty/clipped buffer).
+        let (buf, _avg, empty) = rasterize_layer(
+            &layer,
+            base_w,
+            base_h,
+            base_w.ceil() as u32,
+            base_h.ceil() as u32,
+            1920.0,
+            1080.0,
+            Color::BLACK,
+            0.0,
+            0,
+            false,
+            5.0,
+            &assets,
+        );
+        assert!(!empty, "negative-coord pen path must rasterize ink");
+        assert!(buf.px.iter().any(|p| p.a > 0.05));
+    }
+
+    #[test]
+    fn parented_shape_stays_rendered_with_blend() {
+        use project::BlendMode;
+        let mut project = Project::new("p", "P");
+        let mut comp = Composition::hd_1080p_30fps("c", "C", 5.0);
+        let tc = TimeCode::from_frames(0, 30.0);
+        let out = TimeCode::from_frames(150, 30.0);
+        let bg = project::Layer::solid("bg", "BG", Color::WHITE, 1920, 1080, tc, out);
+        comp.add_layer(bg).unwrap();
+        let mut shape = project::Layer::shape(
+            "l1",
+            "Rect",
+            project::ShapeType::Rectangle {
+                width: project::Property::new("W", 200.0),
+                height: project::Property::new("H", 100.0),
+                corner_radius: project::Property::new("R", 0.0),
+                fill: Color::rgb(1.0, 0.0, 0.0),
+            },
+            tc,
+            out,
+        );
+        shape.blend_mode = BlendMode::Multiply;
+        shape.parent_id = Some("bg".to_string());
+        comp.add_layer(shape).unwrap();
+        project.add_composition(comp).unwrap();
+        let graph = SceneGraph::from_project(&project, "c").expect("graph");
+        let evaluator = LayerStackEvaluator::new();
+        let stack = evaluator.evaluate(&graph, &TimeCode::from_frames(0, 30.0));
+        let ids: Vec<&str> = stack.render_layers().iter().map(|l| l.id.as_str()).collect();
+        assert!(ids.contains(&"l1"), "parented shape must stay rendered: {ids:?}");
+        // Multiply red over white is red (single blend application — the old
+        // export path blended twice, vs transparent black first, and came
+        // out black).
+        let mut dst = crate::raster::buffer::FloatBuf::clear(4, 4);
+        for px in dst.px.iter_mut() {
+            *px = crate::raster::pixel::Px { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+        }
+        let src = crate::raster::pixel::Px { r: 1.0, g: 0.0, b: 0.0, a: 1.0 };
+        let mut d = dst.px[0];
+        d.blend_over_at(src, BlendMode::Multiply, 0, 0);
+        assert!((d.r - 1.0).abs() < 1e-4 && d.g.abs() < 1e-4 && d.b.abs() < 1e-4);
     }
 }

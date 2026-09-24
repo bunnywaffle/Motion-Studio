@@ -3577,6 +3577,40 @@ mod tests {
     }
 
     #[test]
+    fn test_parented_pen_path_stays_rendered() {
+        use crate::state::EditorState;
+        use project::Vec2;
+
+        let mut state = EditorState::new();
+        // Pen path in arbitrary comp coords (negative + off-origin).
+        let pid = state.pen_press_at(Vec2::new(-100.0, -50.0), None).unwrap();
+        let sel = state.selected_layer_id.clone().unwrap();
+        state.pen_press_at(Vec2::new(100.0, 60.0), Some(sel)).unwrap();
+        let world_before = state.layer_world_matrix_fast(&pid).unwrap();
+        // Parent to the background: world must not jump, and the layer must
+        // stay in the render list with a real (non-collapsed) world box.
+        assert!(state.set_layer_parent(&pid, Some("layer_bg".to_string())));
+        let world_after = state.layer_world_matrix_fast(&pid).unwrap();
+        for (a, b) in [world_before.a, world_before.b, world_before.c, world_before.d, world_before.tx, world_before.ty]
+            .iter()
+            .zip([world_after.a, world_after.b, world_after.c, world_after.d, world_after.tx, world_after.ty].iter())
+        {
+            assert!((a - b).abs() < 1e-3, "{world_before:?} vs {world_after:?}");
+        }
+        let eval = state.evaluate_current_frame().unwrap();
+        let layer = eval.get_layer(&pid).expect("parented pen layer evaluated");
+        assert!(eval.render_list.contains(&pid), "parented layer must stay rendered");
+        let (origin, size) = project::Path::from_svg(match &layer.source {
+            project::LayerSource::Shape { shape_type: project::ShapeType::Path { path_data, .. } } => path_data,
+            _ => panic!("pen layer must be a path shape"),
+        })
+        .frame(8.0)
+        .unwrap();
+        let bbox = layer.local_to_world_bbox(&compositor::BoundingBox2D::from_origin_size(origin, size));
+        assert!(bbox.width() > 200.0 && bbox.height() > 100.0, "{bbox:?}");
+    }
+
+    #[test]
     fn test_mask_lifecycle_and_path_animation() {
         use crate::state::EditorState;
         use project::{MaskMode, Vec2};

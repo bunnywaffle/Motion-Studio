@@ -62,11 +62,23 @@ pub(crate) fn fill_ellipse(buf: &mut FloatBuf, rx: f32, ry: f32, col: Px) {
 
 /// Stroke a path through the shared path model (curves flatten to the
 /// polyline, then a round-ish nib walks it). Closed paths join up.
-pub(crate) fn stroke_path(buf: &mut FloatBuf, path_data: &str, nib: f32, col: Px) {
+/// `origin` is the content-buffer frame origin in path-local coords
+/// (see `Path::frame`): the path is drawn shifted by `-origin` so buffers
+/// spanning arbitrary local coords are never clipped.
+pub(crate) fn stroke_path(
+    buf: &mut FloatBuf,
+    path_data: &str,
+    nib: f32,
+    col: Px,
+    origin: project::Vec2,
+) {
     let path = project::Path::from_svg(path_data);
     let mut pts = path.flatten(0.5);
     if pts.is_empty() {
         return;
+    }
+    for p in pts.iter_mut() {
+        *p = *p - origin;
     }
     if path.closed {
         pts.push(pts[0]);

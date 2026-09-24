@@ -5044,14 +5044,33 @@ impl EditorState {
                 }
             }
         }
-        // Check if selected layer is a Path shape
+        // Check if selected layer is a Path shape: append in LAYER-LOCAL
+        // coords (the click arrives in comp coords). Appending raw comp
+        // coords corrupts the path as soon as the layer is transformed or
+        // parented (world != local), stretching its bounds off-screen so
+        // the layer seemingly "disappears".
         let sel_id = self.selected_layer_id.clone();
         if let Some(id) = sel_id {
-            if let Some(comp) = self.active_composition_mut() {
-                if let Some(layer) = comp.get_layer_mut(&id) {
-                    if let LayerSource::Shape { shape_type: ShapeType::Path { path_data, .. } } = &mut layer.source {
-                        path_data.push_str(&format!(" L {:.1} {:.1}", point.x, point.y));
-                        return Ok(id);
+            // Resolve local first (read-only borrow), then mutate.
+            let local = self.comp_to_layer_local(&id, point);
+            let is_path = self
+                .active_composition()
+                .and_then(|c| c.get_layer(&id))
+                .map(|l| {
+                    matches!(
+                        &l.source,
+                        LayerSource::Shape { shape_type: ShapeType::Path { .. } }
+                    )
+                })
+                .unwrap_or(false);
+            if is_path {
+                if let Some(comp) = self.active_composition_mut() {
+                    if let Some(layer) = comp.get_layer_mut(&id) {
+                        if let LayerSource::Shape { shape_type: ShapeType::Path { path_data, .. } } = &mut layer.source {
+                            let p = local.unwrap_or(point);
+                            path_data.push_str(&format!(" L {:.1} {:.1}", p.x, p.y));
+                            return Ok(id);
+                        }
                     }
                 }
             }

@@ -414,6 +414,21 @@ impl Path {
         Some((mn, mx))
     }
 
+    /// Raster frame for stroking this path: `(origin, size)` in path-local
+    /// coords. The content buffer spans `origin .. origin + size` (tight
+    /// bounds plus `pad` on every side), so drawing must subtract `origin`
+    /// and the layer's world box must be built from this frame — not from
+    /// `(0, 0, size)`. Paths live in arbitrary local coords (pen points can
+    /// be negative or far from the origin); ignoring the frame clips
+    /// everything outside `(0, 0, size)`. Returns None when empty.
+    pub fn frame(&self, pad: f32) -> Option<(Vec2, Vec2)> {
+        let (mn, mx) = self.bounds()?;
+        let pad = pad.max(0.0);
+        let origin = Vec2::new(mn.x - pad, mn.y - pad);
+        let size = Vec2::new((mx.x - mn.x + pad * 2.0).max(8.0), (mx.y - mn.y + pad * 2.0).max(8.0));
+        Some((origin, size))
+    }
+
     /// Approximate total arc length (flattened).
     pub fn length(&self, tolerance: f32) -> f32 {
         let pts = self.flatten(tolerance);
@@ -1465,5 +1480,25 @@ mod tests {
         let mut single = Path::new();
         single.line_to(Vec2::new(3.0, 4.0));
         assert!(single.tangent_at_ratio(0.5, 0.1).is_none());
+    }
+
+    #[test]
+    fn frame_covers_arbitrary_local_coords() {
+        // Pen paths live anywhere in layer-local coords (negative and far
+        // from the origin included). The raster frame must cover them with
+        // pad on every side — ignoring the origin used to clip everything
+        // outside (0, 0, size).
+        let p = Path::from_svg("M -100 -50 L 100 60");
+        let (origin, size) = p.frame(8.0).unwrap();
+        assert!((origin.x + 108.0).abs() < 1e-3, "{origin:?}");
+        assert!((origin.y + 58.0).abs() < 1e-3, "{origin:?}");
+        assert!((size.x - 216.0).abs() < 1e-3, "{size:?}");
+        assert!((size.y - 126.0).abs() < 1e-3, "{size:?}");
+        // Positive paths keep a zero origin (backwards compatible).
+        let q = Path::from_svg("M 50 75 L 150 200");
+        let (o2, s2) = q.frame(8.0).unwrap();
+        assert!((o2.x - 42.0).abs() < 1e-3, "{o2:?}");
+        assert!((s2.x - 116.0).abs() < 1e-3, "{s2:?}");
+        assert!(Path::new().frame(8.0).is_none());
     }
 }

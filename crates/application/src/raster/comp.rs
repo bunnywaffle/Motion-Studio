@@ -1,11 +1,11 @@
 use compositor::EvaluatedEffectType;
 use image::RgbaImage;
-use project::{Color, LayerSource};
+use project::{BlendMode, Color, LayerSource};
 use std::collections::HashMap;
 use std::sync::Arc;
 use super::affine::{Aff, aff_mul, fold_transform, skew_about};
 use super::buffer::{FloatBuf, blur_buffer};
-use super::effects::RasterFx;use super::layer::{apply_adjustment, apply_bloom, apply_layer_fx, blit_affine, layer_base_dims, raster_layer_content};
+use super::effects::RasterFx;use super::layer::{apply_adjustment, apply_bloom, apply_layer_fx, blit_affine, layer_base_dims, layer_local_box, raster_layer_content};
 use super::mask::apply_masks;
 use super::pixel::Px;
 
@@ -72,16 +72,20 @@ pub fn rasterize_comp(
             continue;
         }
         // Base dims mirror the viewer estimate (anchor/pivot consistent).
+        // Pen/path shapes use their raster frame (arbitrary local coords).
         let (base_w, base_h) = layer_base_dims(layer, comp_w, comp_h, assets);
+        let local_box = layer_local_box(layer, base_w, base_h);
+        let (frame_ox, frame_oy) = (local_box.min.x, local_box.min.y);
         // Local->world affine from the evaluated matrix, scaled to output.
+        // Content px (0, 0) is local `frame origin`, hence `W * origin`.
         let wm = layer.world_matrix();
         let mut map = Aff {
             a: wm.a * k,
             b: wm.b * k,
             c: wm.c * k,
             d: wm.d * k,
-            tx: (wm.tx + comp_w / 2.0) * k,
-            ty: (wm.ty + comp_h / 2.0) * k,
+            tx: (wm.a * frame_ox + wm.c * frame_oy + wm.tx + comp_w / 2.0) * k,
+            ty: (wm.b * frame_ox + wm.d * frame_oy + wm.ty + comp_h / 2.0) * k,
         };
         // Perspective skew folds into the map (local skew about center).
         for eff in &layer.effects {
@@ -115,8 +119,8 @@ pub fn rasterize_comp(
                 }
             }
         }
-        // Output bounds: world AABB in output px.
-        let bbox = layer.world_bounds(base_w, base_h);
+        // Output bounds: world AABB of the local content box in output px.
+        let bbox = layer.local_to_world_bbox(&local_box);
         let x0 = ((bbox.min.x + comp_w / 2.0) * k).floor().max(0.0) as u32;
         let y0 = ((bbox.min.y + comp_h / 2.0) * k).floor().max(0.0) as u32;
         let x1 = ((bbox.max.x + comp_w / 2.0) * k).ceil().min(ow as f32) as u32;
@@ -131,8 +135,27 @@ pub fn rasterize_comp(
         // shader/colors...).
         {
             let mut work = content;
-            // Masks shape alpha before effects (AE order).
-            apply_masks(&mut work, &layer.masks);
+            // Masks shape alpha before effects (AE order). Framed (path)
+            // layers raster frame-relative, so mask paths shift by `-origin`.
+            if frame_ox != 0.0 || frame_oy != 0.0 {
+                use compositor::AffineTransform2D;
+                use project::Vec2;
+                let shift =
+                    AffineTransform2D::from_translation(Vec2::new(-frame_ox, -frame_oy));
+                let shifted_masks: Vec<compositor::EvaluatedMask> = layer
+                    .masks
+                    .iter()
+                    .map(|m| {
+                        let mut m = m.clone();
+                        let lm = m.transform.local_matrix;
+                        m.transform.local_matrix = shift * lm;
+                        m
+                    })
+                    .collect();
+                apply_masks(&mut work, &shifted_masks);
+            } else {
+                apply_masks(&mut work, &layer.masks);
+            }
             apply_layer_fx(&mut work, base_w, base_h, &layer.effects, &fx);
             // Blur + bloom radius (convolution on the content pixmap).
             let mut blur_total = 0.0f32;
@@ -189,19 +212,22 @@ pub fn rasterize_comp(
                 ty: map.ty - y0 as f32,
             };
             // Shadow needs the content blurred for softness: reuse blur.
+            // Blit isolated with Normal (transparent backdrop): exotic
+            // blend math below runs ONCE against the live backdrop pixels.
+            // Blending here too would apply the mode twice (once vs
+            // transparent black, which zeroes multiplicative modes) and
+            // corrupt every non-Normal layer (notably opaque shape fills).
             blit_affine(
                 &mut sub,
                 &work,
                 shifted,
                 layer.effective_opacity.clamp(0.0, 1.0),
-                layer.blend_mode,
+                BlendMode::Normal,
                 shadow,
                 None,
             );
-            // Composite sub-region back (already blended vs transparent;
-            // blend vs backdrop per pixel using sampled backdrop average is
-            // handled by blending vs the live buffer for Normal; for exotic
-            // modes blend vs the actual buffer pixels below).
+            // Composite sub-region back: single blend vs the live buffer
+            // pixels below (exact per-pixel backdrop for every mode).
             for y in 0..sub.h {
                 for x in 0..sub.w {
                     let s = sub.px[(y * sub.w + x) as usize];
