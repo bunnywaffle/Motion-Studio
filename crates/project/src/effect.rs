@@ -798,7 +798,33 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
     /// Returns false for unknown fields or effects without colors.
     pub fn set_color_value(&mut self, field: &str, next: Color) -> bool {
         match &mut self.effect_type {
-            EffectType::Checkerboard { color_a, color_b, .. } => {
+            EffectType::Tint { map_black, map_white, .. } => {
+                if field.eq_ignore_ascii_case("map_black") || field.eq_ignore_ascii_case("black") {
+                    *map_black = next;
+                    true
+                } else if field.eq_ignore_ascii_case("map_white") || field.eq_ignore_ascii_case("white") {
+                    *map_white = next;
+                    true
+                } else {
+                    false
+                }
+            }
+            EffectType::DropShadow { color, .. } => {
+                if field.eq_ignore_ascii_case("color") {
+                    *color = next;
+                    true
+                } else {
+                    false
+                }
+            }
+            EffectType::ChromaKey { key_color, .. } => {
+                if field.eq_ignore_ascii_case("key_color") || field.eq_ignore_ascii_case("color") {
+                    *key_color = next;
+                    true
+                } else {
+                    false
+                }
+            }            EffectType::Checkerboard { color_a, color_b, .. } => {
                 if field.eq_ignore_ascii_case("color_a") || field.eq_ignore_ascii_case("a") {
                     *color_a = next;
                     true
@@ -1706,6 +1732,81 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
     pub fn stock_plugin(&self) -> Option<StockPlugin> {
         match &self.effect_type {
             EffectType::Stock { plugin, .. } => Some(*plugin),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn red() -> Color {
+        Color::rgb(1.0, 0.0, 0.0)
+    }
+
+    #[test]
+    fn every_color_field_accepts_custom_colors() {
+        // (factory, field) pairs mirroring the Properties color rows: each
+        // must round-trip an arbitrary custom color (wheel), not just
+        // presets.
+        let mut cases: Vec<(Effect, &'static str)> = vec![
+            (Effect::tint("t", Color::BLACK, Color::WHITE, 100.0), "map_black"),
+            (Effect::tint("t", Color::BLACK, Color::WHITE, 100.0), "map_white"),
+            (Effect::drop_shadow("d", 5.0, 45.0, 5.0, 80.0, Color::BLACK), "color"),
+            (
+                Effect::chroma_key("c", Color::from_hex("#00FF00").unwrap(), 30.0, 10.0),
+                "key_color",
+            ),
+            (
+                Effect::checkerboard("cb", 32.0, Color::BLACK, Color::WHITE),
+                "color_a",
+            ),
+            (
+                Effect::checkerboard("cb", 32.0, Color::BLACK, Color::WHITE),
+                "color_b",
+            ),
+            (
+                Effect::gradient_ramp("g", Color::BLACK, Color::WHITE, 90.0),
+                "color_a",
+            ),
+            (
+                Effect::gradient_ramp("g", Color::BLACK, Color::WHITE, 90.0),
+                "color_b",
+            ),
+            (Effect::text_outline("o", 3.0, Color::BLACK), "color"),
+        ];
+        for (fx, field) in cases.iter_mut() {
+            assert!(fx.set_color_value(field, red()), "{field}");
+            assert_eq!(fx_color_of(fx, field), Some(red()), "{field}");
+        }
+        assert!(!cases[0].0.set_color_value("nope", red()));
+        // Stock generator slots route through the same setter.
+        let mut stock = Effect::stock("s", StockPlugin::Solid);
+        assert!(stock.set_stock_color("color", red()));
+        assert_eq!(stock.stock_color("color"), Some(red()));
+    }
+
+    fn fx_color_of(fx: &Effect, field: &str) -> Option<Color> {
+        match &fx.effect_type {
+            EffectType::Tint { map_black, map_white, .. } => match field {
+                "map_black" => Some(*map_black),
+                "map_white" => Some(*map_white),
+                _ => None,
+            },
+            EffectType::DropShadow { color, .. } => Some(*color),
+            EffectType::ChromaKey { key_color, .. } => Some(*key_color),
+            EffectType::Checkerboard { color_a, color_b, .. } => match field {
+                "color_a" => Some(*color_a),
+                "color_b" => Some(*color_b),
+                _ => None,
+            },
+            EffectType::GradientRamp { color_a, color_b, .. } => match field {
+                "color_a" => Some(*color_a),
+                "color_b" => Some(*color_b),
+                _ => None,
+            },
+            EffectType::TextOutline { color, .. } => Some(*color),
             _ => None,
         }
     }

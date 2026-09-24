@@ -3439,6 +3439,79 @@ mod tests {
         assert_eq!(picked_bg.as_deref(), Some("layer_bg"));
     }
 
+    #[gpui_kit::test]
+    fn test_pen_curve_overlay_visible(cx: &mut TestAppContext) {
+        use project::Vec2;
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(1000.)), |window, cx| {
+            window.activate_window();
+            window.set_window_title("Motion Compositor");
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        // Draw a two-point pen path (selects the new path layer).
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                let _ = s.pen_press_at(Vec2::new(-100.0, -50.0), None);
+                cx.notify();
+            });
+        });
+        app_view.update(cx, |view, cx| {
+            let sel = view.state().read(cx).selected_layer_id.clone().unwrap();
+            view.state().update(cx, |s, cx| {
+                let _ = s.pen_press_at(Vec2::new(100.0, 60.0), Some(sel));
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        // The spline overlay must be painted for the selected path layer.
+        let visible = cx.update_window(handle.into(), |_, window, _| {
+            window.try_find("pen_curve_overlay").map(|e| e.visible())
+        }).expect("window update");
+        assert_eq!(visible, Some(true));
+    }
+
+    #[gpui_kit::test]
+    fn test_effect_color_wheels_present(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(1000.)), |window, cx| {
+            window.activate_window();
+            window.set_window_title("Motion Compositor");
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        // Checkerboard carries two custom colors; both rows need wheels.
+        let eff_id = app_view.update(cx, |view, cx| {
+            let mut out = String::new();
+            view.state().update(cx, |s, cx| {
+                s.select_layer(Some("layer_accent".to_string()));
+                out = s
+                    .add_effect_to_selected_layer(project::EffectType::checkerboard(
+                        32.0,
+                        project::Color::BLACK,
+                        project::Color::WHITE,
+                    ))
+                    .unwrap();
+                cx.notify();
+            });
+            out
+        });
+        cx.run_until_parked();
+        for field in ["color_a", "color_b"] {
+            let id = format!("fx_wheel_btn_{field}_{eff_id}");
+            let visible = cx.update_window(handle.into(), |_, window, _| {
+                window.try_find(id.clone()).map(|e| e.visible())
+            }).expect("window update");
+            assert_eq!(visible, Some(true), "{field}");
+        }
+    }
+
     #[test]
     fn test_layer_controls_mutations() {
         use crate::state::EditorState;

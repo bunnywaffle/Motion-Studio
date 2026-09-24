@@ -211,7 +211,7 @@ pub fn rasterize_comp(
                     let dx = x0 + x;
                     let dy = y0 + y;
                     let mut d = dst.px[(dy * ow + dx) as usize];
-                    d.blend_over(s, layer.blend_mode);
+                    d.blend_over_at(s, layer.blend_mode, dx as i32, dy as i32);
                     dst.px[(dy * ow + dx) as usize] = d;
                 }
             }

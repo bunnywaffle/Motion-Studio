@@ -2431,6 +2431,75 @@ impl Render for CompositionViewerPanel {
                                 }
                             }
                         }
+
+                        // --- Pen/shape path overlay: sampled spline curves
+                        // (+ nodes) for the selected layer's own paths, so
+                        // pen work is always visible, not just masks.
+                        {
+                            let mut pen_paths: Vec<project::Path> = Vec::new();
+                            match &layer.source {
+                                LayerSource::Shape {
+                                    shape_type: ShapeType::Path { path_data, .. },
+                                } => {
+                                    pen_paths.push(project::Path::from_svg(path_data));
+                                }
+                                LayerSource::Text { text_path: Some(tp), .. } => {
+                                    pen_paths.push(tp.clone());
+                                }
+                                _ => {}
+                            }
+                            // Evaluated mask paths already draw above; pen
+                            // paths draw here in blueprint blue.
+                            let pen_col = Rgba { r: 0.4, g: 0.8, b: 1.0, a: 0.95 };
+                            let mut pen_els = div()
+                                .id("pen_curve_overlay")
+                                .test_support()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .bottom_0();
+                            for path in &pen_paths {
+                                let flat = path.flatten(0.75);
+                                let step = (flat.len() / 120).max(1);
+                                for p in flat.iter().step_by(step) {
+                                    let w = layer.local_to_world_point(*p);
+                                    let cxp = (w.x + giz_cw / 2.0) * giz_fit;
+                                    let cyp = (w.y + giz_ch / 2.0) * giz_fit;
+                                    pen_els = pen_els.child(
+                                        div()
+                                            .absolute()
+                                            .left(px(cxp - 1.5))
+                                            .top(px(cyp - 1.5))
+                                            .w(px(3.))
+                                            .h(px(3.))
+                                            .rounded_full()
+                                            .bg(pen_col),
+                                    );
+                                }
+                                for node in path.points.iter() {
+                                    let w = layer.local_to_world_point(node.pos);
+                                    let cxp = (w.x + giz_cw / 2.0) * giz_fit;
+                                    let cyp = (w.y + giz_ch / 2.0) * giz_fit;
+                                    pen_els = pen_els.child(
+                                        gizmo_dot(
+                                            format!("pen_node_{}_{}_{}", giz_lid, cxp.round() as i32, cyp.round() as i32),
+                                            cxp,
+                                            cyp,
+                                            8.0,
+                                            Rgba { r: 0.4, g: 0.8, b: 1.0, a: 1.0 },
+                                            white,
+                                            true,
+                                        ),
+                                    );
+                                }
+                            }
+                            // Empty containers still hit-test, so only mount
+                            // when there is actually a curve to show.
+                            if !pen_paths.is_empty() {
+                                gizmo_els.push(pen_els.into_any_element());
+                            }
+                        }
                     }
 
                     elements.push(layer_el.into_any_element());
@@ -4105,6 +4174,21 @@ fn fx_scrub_row(
 /// Compact color-swatch row for effect color fields (`color_a` / `color_b`
 /// / `color`): preset swatches + current hex. Used by checker, gradient,
 /// and outline arms (no extra ColorPicker plumbing).
+/// Color field names of one effect for wheel-picker creation (legacy
+/// color slots + stock generator slots). Mirrors the fx_swatch_row call
+/// sites so every color param gets a wheel, not just presets.
+fn fx_color_fields(effect: &project::Effect) -> Vec<&'static str> {
+    match &effect.effect_type {
+        EffectType::Tint { .. } => vec!["map_black", "map_white"],
+        EffectType::DropShadow { .. } => vec!["color"],
+        EffectType::ChromaKey { .. } => vec!["key_color"],
+        EffectType::Checkerboard { .. } => vec!["color_a", "color_b"],
+        EffectType::GradientRamp { .. } => vec!["color_a", "color_b"],
+        EffectType::TextOutline { .. } => vec!["color"],
+        _ => effect.color_slots(),
+    }
+}
+
 fn fx_swatch_row(
     state: &Entity<EditorState>,
     layer_id: &str,
@@ -4112,6 +4196,7 @@ fn fx_swatch_row(
     field: &'static str,
     label: &str,
     current: Color,
+    wheel: Option<&Entity<InspectorColorPicker>>,
     cx: &App,
 ) -> AnyElement {
     let mut row = h_flex().gap_1().items_center();
@@ -4156,6 +4241,17 @@ fn fx_swatch_row(
         (current.g * 255.0) as u8,
         (current.b * 255.0) as u8
     );
+    // Full color wheel for arbitrary custom colors (same control as the
+    // solid/text inspectors). The keyed picker state is created by the
+    // Properties render before the state read-guard (see fx wheels).
+    let wheel_el: AnyElement = match wheel {
+        Some(picker) => div()
+            .id(SharedString::from(format!("fx_wheel_btn_{field}_{eff_id}")))
+            .test_support()
+            .child(ColorPicker::new(&picker.read(cx).state).label("Pick"))
+            .into_any_element(),
+        None => div().into_any_element(),
+    };
     h_flex()
         .items_center()
         .justify_between()
@@ -4174,7 +4270,8 @@ fn fx_swatch_row(
                         .border_color(cx.theme().border)
                         .bg(Rgba { r: current.r, g: current.g, b: current.b, a: 1.0 }),
                 )
-                .child(div().text_color(cx.theme().foreground).child(cur_hex)),
+                .child(div().text_color(cx.theme().foreground).child(cur_hex))
+                .child(wheel_el),
         )
         .child(row)
         .into_any_element()
@@ -4849,6 +4946,7 @@ fn render_applied_effects(
     shadow_color_picker: &Entity<ColorPickerState>,
     shader_editor_open: Option<String>,
     shader_editor: Option<Entity<TextareaState>>,
+    wheels: &HashMap<(String, String), Entity<InspectorColorPicker>>,
     cx: &App,
 ) -> AnyElement {    if layer.effects.is_empty() {
         div()
@@ -6367,16 +6465,16 @@ fn render_applied_effects(
                     let ca = *color_a;
                     let cb = *color_b;
                     effect_box = effect_box
-                        .child(fx_swatch_row(state, &layer.id, &eff_id, "color_a", "Color A", ca, cx))
-                        .child(fx_swatch_row(state, &layer.id, &eff_id, "color_b", "Color B", cb, cx))
+                        .child(fx_swatch_row(state, &layer.id, &eff_id, "color_a", "Color A", ca, wheels.get(&(eff_id.clone(), "color_a".to_string())), cx))
+                        .child(fx_swatch_row(state, &layer.id, &eff_id, "color_b", "Color B", cb, wheels.get(&(eff_id.clone(), "color_b".to_string())), cx))
                         .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "size", "Size", format!("{:.0} px", size.value), 4.0, cx));
                 }
                 EffectType::GradientRamp { color_a, color_b, angle } => {
                     let ca = *color_a;
                     let cb = *color_b;
                     effect_box = effect_box
-                        .child(fx_swatch_row(state, &layer.id, &eff_id, "color_a", "Start", ca, cx))
-                        .child(fx_swatch_row(state, &layer.id, &eff_id, "color_b", "End", cb, cx))
+                        .child(fx_swatch_row(state, &layer.id, &eff_id, "color_a", "Start", ca, wheels.get(&(eff_id.clone(), "color_a".to_string())), cx))
+                        .child(fx_swatch_row(state, &layer.id, &eff_id, "color_b", "End", cb, wheels.get(&(eff_id.clone(), "color_b".to_string())), cx))
                         .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "angle", "Angle", format!("{:.0}°", angle.value), 5.0, cx));
                 }
                 EffectType::Perspective { skew_x, skew_y } => {
@@ -6387,7 +6485,7 @@ fn render_applied_effects(
                 EffectType::TextOutline { width, color } => {
                     let oc = *color;
                     effect_box = effect_box
-                        .child(fx_swatch_row(state, &layer.id, &eff_id, "color", "Color", oc, cx))
+                        .child(fx_swatch_row(state, &layer.id, &eff_id, "color", "Color", oc, wheels.get(&(eff_id.clone(), "color".to_string())), cx))
                         .child(fx_scrub_row(state, panel_entity, &layer.id, &eff_id, "width", "Width", format!("{:.1} px", width.value), 1.0, cx));
                 }
                 EffectType::TextBevel { strength, softness } => {
@@ -6486,6 +6584,7 @@ fn render_applied_effects(
                                 slot,
                                 slot,
                                 col,
+                                wheels.get(&(eff_id.clone(), slot.to_string())),
                                 cx,
                             ));
                         }
@@ -6792,6 +6891,70 @@ impl Render for PropertiesPanel {
             }
         }
 
+        // Dynamic color wheels, one per effect color field on the selected
+        // layer. Created here (before the state read-guard) with the same
+        // keyed pattern as the fixed chroma/tint/shadow pickers above, so
+        // every color param gets a real wheel, not just presets.
+        let fx_color_targets: Vec<(String, &'static str)> = {
+            let s = self.state.read(cx);
+            match s
+                .active_composition()
+                .zip(s.selected_layer_id.clone())
+                .and_then(|(c, lid)| c.get_layer(&lid))
+            {
+                Some(layer) => layer
+                    .effects
+                    .iter()
+                    .flat_map(|e| {
+                        fx_color_fields(e)
+                            .into_iter()
+                            .map(move |f| (e.id.clone(), f))
+                    })
+                    .collect(),
+                None => Vec::new(),
+            }
+        };
+        let fx_editor = self.state.clone();
+        let mut fx_wheels: HashMap<(String, String), Entity<InspectorColorPicker>> =
+            HashMap::new();
+        for (eid, field) in fx_color_targets {
+            let editor = fx_editor.clone();
+            let eid_w = eid.clone();
+            let picker = window.use_keyed_state(
+                SharedString::from(format!("fx_wheel_{eid}_{field}")),
+                cx,
+                move |window, cx| {
+                    let picker = cx.new(|cx| ColorPickerState::new(window, cx));
+                    let editor = editor.clone();
+                    let subscription = cx.subscribe(
+                        &picker,
+                        move |_, _, event: &ColorPickerEvent, cx| {
+                            let ColorPickerEvent::Change(Some(hsla)) = event else {
+                                return;
+                            };
+                            let rgba: Rgba = (*hsla).into();
+                            let color = Color::rgba(rgba.r, rgba.g, rgba.b, rgba.a);
+                            editor.update(cx, |state, cx| {
+                                if let Some(lid) = state.selected_layer_id.clone() {
+                                    let present = state
+                                        .active_composition()
+                                        .and_then(|c| c.get_layer(&lid))
+                                        .and_then(|l| l.get_effect(&eid_w))
+                                        .is_some();
+                                    if present {
+                                        let _ = state.set_effect_color(&lid, &eid_w, field, color);
+                                        cx.notify();
+                                    }
+                                }
+                            });
+                        },
+                    );
+                    InspectorColorPicker { state: picker, _subscription: subscription }
+                },
+            );
+            fx_wheels.insert((eid, field.to_string()), picker);
+        }
+
         let state = self.state.read(cx);
         let selected_layer = state.selected_layer();
 
@@ -6993,16 +7156,21 @@ impl Render for PropertiesPanel {
                         let s_vis = self.state.clone();
                         let s_solo = self.state.clone();
 
+                        let chroma_picker_state = chroma_color_picker.read(cx).state.clone();
+                        let tint_black_picker_state = tint_black_color_picker.read(cx).state.clone();
+                        let tint_white_picker_state = tint_white_color_picker.read(cx).state.clone();
+                        let shadow_picker_state = shadow_color_picker.read(cx).state.clone();
                         let effects_list = render_applied_effects(
                             &self.state,
                             layer,
                             &panel_entity,
-                            &chroma_color_picker.read(cx).state,
-                            &tint_black_color_picker.read(cx).state,
-                            &tint_white_color_picker.read(cx).state,
-                            &shadow_color_picker.read(cx).state,
+                            &chroma_picker_state,
+                            &tint_black_picker_state,
+                            &tint_white_picker_state,
+                            &shadow_picker_state,
                             self.shader_editor_open.clone(),
                             self.shader_editor.clone(),
+                            &fx_wheels,
                             cx,
                         );
 
@@ -10023,8 +10191,6 @@ impl Render for TimelinePanel {
         let s_play = self.state.clone();
         let s_step_next = self.state.clone();
         let s_end = self.state.clone();
-        let s_up_header = self.state.clone();
-        let s_down_header = self.state.clone();
         let s_del_header = self.state.clone();
 
         let in_str = "00:00:00:00";
@@ -10046,8 +10212,6 @@ impl Render for TimelinePanel {
                 let solo_state = self.state.clone();
                 let lock_state = self.state.clone();
                 let matte_state = self.state.clone();
-                let s_up = self.state.clone();
-                let s_down = self.state.clone();
 
                 let lid = layer.id.clone();
                 let lid_vis = layer.id.clone();
@@ -10055,8 +10219,6 @@ impl Render for TimelinePanel {
                 let lid_lock = layer.id.clone();
                 let lid_matte = layer.id.clone();
                 let lid_parent = layer.id.clone();
-                let lid_up = layer.id.clone();
-                let lid_down = layer.id.clone();
                 let current_matte = layer.matte_mode;
 
                 let p_twirl = panel_entity.clone();
@@ -10214,32 +10376,7 @@ impl Render for TimelinePanel {
                                     .rounded_sm()
                                     .bg(Rgba { r: label_color.r, g: label_color.g, b: label_color.b, a: label_color.a }),
                             )
-                            // Reorder arrows
-                            .child(
-                                div()
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(cx.theme().muted))
-                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                        s_up.update(cx, |s, cx| {
-                                            let _ = s.move_layer_up(&lid_up);
-                                            cx.notify();
-                                        });
-                                    })
-                                    .child(icon_box(IconName::ChevronUp)),
-                            )
-                            .child(
-                                div()
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(cx.theme().muted))
-                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                        s_down.update(cx, |s, cx| {
-                                            let _ = s.move_layer_down(&lid_down);
-                                            cx.notify();
-                                        });
-                                    })
-                                    .child(icon_box(IconName::ChevronDown)),
-                            )
-                            // Layer Name
+                            // Layer Name (reorder via drag-and-drop onto rows)
                             .child(
                                 div()
                                     .max_w(px(110.))
@@ -11609,52 +11746,7 @@ impl Render for TimelinePanel {
                                 h_flex()
                                     .gap_1()
                                     .items_center()
-                                    .child(
-                                        div()
-                                            .cursor_pointer()
-                                            .px_2()
-                                            .py_0p5()
-                                            .rounded_sm()
-                                            .bg(cx.theme().muted)
-                                            .hover(|s| s.bg(cx.theme().accent))
-                                            .text_xs()
-                                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                s_up_header.update(cx, |s, cx| {
-                                                    let _ = s.move_selected_layer_up();
-                                                    cx.notify();
-                                                });
-                                            })
-                                            .child(
-                                                h_flex()
-                                                    .gap_0p5()
-                                                    .items_center()
-                                                    .child(icon_box(IconName::ChevronUp))
-                                                    .child("Up"),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .cursor_pointer()
-                                            .px_2()
-                                            .py_0p5()
-                                            .rounded_sm()
-                                            .bg(cx.theme().muted)
-                                            .hover(|s| s.bg(cx.theme().accent))
-                                            .text_xs()
-                                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                s_down_header.update(cx, |s, cx| {
-                                                    let _ = s.move_selected_layer_down();
-                                                    cx.notify();
-                                                });
-                                            })
-                                            .child(
-                                                h_flex()
-                                                    .gap_0p5()
-                                                    .items_center()
-                                                    .child(icon_box(IconName::ChevronDown))
-                                                    .child("Down"),
-                                            ),
-                                    )
+                                    // Reorder is drag-and-drop onto rows.
                                     .child(
                                         div()
                                             .cursor_pointer()

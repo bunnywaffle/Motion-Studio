@@ -748,12 +748,15 @@ pub fn rasterize_layer(
             shadow,
             shadow_blurred.as_ref(),
         );
-        for p in bg.px.iter_mut() {
+        for (i, p) in bg.px.iter_mut().enumerate() {
             if p.a <= 0.003 {
                 continue;
             }
+            // Backdrop blend is positional (dissolve dither stability).
+            let x = (i as u32 % bg.w) as i32;
+            let y = (i as u32 / bg.w) as i32;
             let mut d = Px::from_color(backdrop);
-            d.blend_over(*p, layer.blend_mode);
+            d.blend_over_at(*p, layer.blend_mode, x, y);
             *p = d;
         }
         out = bg;
@@ -818,25 +821,11 @@ pub fn blit_affine(
             if s.a <= 0.003 {
                 continue;
             }
-            // Dissolve dithers per pixel, then draws opaque speckles.
-            if blend == BlendMode::Dissolve {
-                let h = ((x as u32).wrapping_mul(0x85eb_ca6b) ^ (y as u32).wrapping_mul(0xc2b2_ae35)) % 1000;
-                if (h as f32 / 1000.0) > s.a * op {
-                    continue;
-                }
-                if s.a > 1e-6 {
-                    let ia = 1.0 / s.a;
-                    s.r *= ia;
-                    s.g *= ia;
-                    s.b *= ia;
-                }
-                s.a = 1.0;
-            } else {
-                s.scale(op);
-            }
+            s.scale(op);
             let dstp = dst.get(x as i32, y as i32);
             let mut out = dstp;
-            out.blend_over(s, blend);
+            // Dissolve dithers inside (spatially stable speckle).
+            out.blend_over_at(s, blend, x as i32, y as i32);
             dst.put(x as i32, y as i32, out);
         }
     }
