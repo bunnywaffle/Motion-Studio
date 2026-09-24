@@ -68,6 +68,10 @@ pub mod ae {
     pub fn timecode() -> Rgba {
         rgb(0x4da3ff)
     }
+    /// Keyframe diamond amber.
+    pub fn amber() -> Rgba {
+        rgb(0xf5a623)
+    }
 
     /// Small-caps dim section header: `▾ TITLE ......... count`.
     pub fn section_header(title: &str, count: Option<usize>) -> Div {
@@ -10470,6 +10474,17 @@ pub struct TimelinePanel {
     pub scrub_factor: f32,
     /// Active spline/graph keyframe drag (time + value).
     pub graph_drag: Option<GraphKeyDrag>,
+    /// Graph Editor value axis (Value / Speed tabs).
+    pub graph_tab: GraphTab,
+    /// Isolate: plot only the focused series.
+    pub graph_isolate: bool,
+    /// Grid + keyframe diamond visibility (AE Grid / Keys toggles).
+    pub graph_show_grid: bool,
+    pub graph_show_keys: bool,
+    /// Hidden series (`layer_id:path`) via the legend eye.
+    pub graph_hidden: HashSet<String>,
+    /// Explicit graph viewport (None = auto-fit full range).
+    pub graph_view: Option<GraphViewRect>,
     /// Timeline layer reorder drag: (layer id, from-index).
     pub reorder_drag: Option<(String, usize)>,
     /// Hovered row index as drop target while reordering.
@@ -10516,9 +10531,62 @@ pub struct GraphKeyDrag {
     pub v_min: f32,
     pub v_max: f32,
     pub duration: f64,
+    /// Visible time span (seconds) for px→dt scaling (zoom-aware).
+    pub span: f64,
+    /// True once the pointer actually moved (a press without movement is a
+    /// click: the mousedown checkpoint is undone so clicks leave no undo).
+    pub moved: bool,
 }
 
-/// After Effects-style spline/graph editor, rendered inside the Timeline panel.
+/// Graph Editor value axis mode (AE Value Graph / Speed Graph tabs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum GraphTab {
+    #[default]
+    Value,
+    Speed,
+}
+
+/// Render snapshot of the TimelinePanel's graph chrome (the panel itself
+/// is already borrowed by render, so values cross by clone).
+#[derive(Clone)]
+pub struct GraphUi {
+    pub tab: GraphTab,
+    pub isolate: bool,
+    pub show_grid: bool,
+    pub show_keys: bool,
+    pub hidden: HashSet<String>,
+    pub view: Option<GraphViewRect>,
+    pub drag: Option<GraphKeyDrag>,
+}
+
+/// Explicit graph viewport (AE Fit View / Fit Sel). `None` = auto-fit the
+/// full composition range + padded value range.
+#[derive(Clone, Copy, Debug)]
+pub struct GraphViewRect {
+    pub t0: f64,
+    pub t1: f64,
+    pub v0: f32,
+    pub v1: f32,
+}
+
+/// Display unit for a graph path (AE value readouts).
+fn graph_unit(path: &str) -> &'static str {
+    let base = match path.rsplit_once('.') {
+        Some((b, c)) if c == "x" || c == "y" => b,
+        _ => path,
+    };
+    match base {
+        "transform.anchor_point" | "transform.position" => "px",
+        "transform.scale" | "opacity" => "%",
+        "transform.rotation" => "°",
+        "text.font_size" | "shape.rect_width" | "shape.rect_height" | "shape.corner_radius"
+        | "shape.ellipse_rx" | "shape.ellipse_ry" => "px",
+        _ => "",
+    }
+}
+
+/// Graph Editor plot height (shared by layout, tooltip, and drag math).
+const GRAPH_PLOT_H: f32 = 150.0;
 ///
 /// Shows one normalized curve per animated scalar property of the selected
 /// layer (`graph_series`), sampled via `evaluate_graph_param`. Keyframes are
@@ -10528,6 +10596,7 @@ fn render_graph_view(
     state: &Entity<EditorState>,
     panel_entity: &Entity<TimelinePanel>,
     selected_layer_id: Option<String>,
+    gui: &GraphUi,
     cx: &App,
 ) -> AnyElement {
     let (comp_duration, current_time, fps, spline_prop) = {
@@ -10542,12 +10611,277 @@ fn render_graph_view(
     };
     let duration = comp_duration.max(0.01);
 
-    // Header: legend + easing presets for the focused property.
+    // Panel chrome state (tabs, isolate, grid/keys, hidden series, view).
+    let tab = gui.tab;
+    let isolate = gui.isolate;
+    let show_grid = gui.show_grid;
+    let show_keys = gui.show_keys;
+    let hidden = gui.hidden.clone();
+    let view_opt = gui.view;
+    let gdrag = gui.drag.clone();
+
+    // Header legend data: focused-series matching (exact path, or the
+    // `.x`/`.y` pair when focus names a Vec2 base like
+    // `transform.position`).
     let lid_opt = selected_layer_id.clone();
     let series: Vec<GraphSeries> = match &lid_opt {
         Some(lid) => state.read(cx).graph_series(lid),
         None => Vec::new(),
     };
+    let is_focused = |path: &str| -> bool {
+        path == spline_prop
+            || (!spline_prop.is_empty()
+                && !spline_prop.ends_with(".x")
+                && !spline_prop.ends_with(".y")
+                && (path == format!("{spline_prop}.x") || path == format!("{spline_prop}.y")))
+    };
+    let series_key = |lid: &str, path: &str| format!("{lid}:{path}");
+    let is_visible = |lid: &str, path: &str| -> bool {
+        !hidden.contains(&series_key(lid, path)) && (!isolate || is_focused(path))
+    };
+    let visible_idx: Vec<usize> = series
+        .iter()
+        .enumerate()
+        .filter(|(_, se)| {
+            lid_opt
+                .as_deref()
+                .map(|lid| is_visible(lid, &se.path))
+                .unwrap_or(false)
+        })
+        .map(|(i, _)| i)
+        .collect();
+    let focus_idx: Option<usize> = visible_idx
+        .iter()
+        .find(|&&i| is_focused(&series[i].path))
+        .copied()
+        .or(visible_idx.first().copied());
+
+    // Readouts for the focused series at the playhead.
+    let (focus_label, focus_unit, focus_val, focus_speed) = {
+        let s = state.read(cx);
+        match (lid_opt.as_deref(), focus_idx) {
+            (Some(lid), Some(i)) => {
+                let se = &series[i];
+                let v = s
+                    .evaluate_graph_param(lid, &se.path, current_time)
+                    .unwrap_or(0.0);
+                let h = (0.5 / fps.max(1.0)).max(1e-4);
+                let v0 = s.evaluate_graph_param(lid, &se.path, (current_time - h).max(0.0)).unwrap_or(v);
+                let v1 = s.evaluate_graph_param(lid, &se.path, (current_time + h).min(duration)).unwrap_or(v);
+                let dt = ((current_time + h).min(duration) - (current_time - h).max(0.0)).max(1e-6);
+                (
+                    se.label.clone(),
+                    graph_unit(&se.path).to_string(),
+                    v,
+                    ((v1 - v0) as f64 / dt).abs() as f32,
+                )
+            }
+            _ => ("—".to_string(), String::new(), 0.0, 0.0),
+        }
+    };
+
+    // --- AE header bar: legend count, isolate, tabs, fit, readout, grid ---
+    let p_iso = panel_entity.clone();
+    let p_tab_v = panel_entity.clone();
+    let p_tab_s = panel_entity.clone();
+    let p_fit = panel_entity.clone();
+    let p_fitsel = panel_entity.clone();
+    let p_grid = panel_entity.clone();
+    let p_keys = panel_entity.clone();
+    let s_fitsel = state.clone();
+    let lid_fitsel = lid_opt.clone();
+    let focus_fitsel = spline_prop.clone();
+    let tab_btn = |id: &'static str, label: &str, on: bool| {
+        div()
+            .id(id)
+            .test_support()
+            .cursor_pointer()
+            .px_2()
+            .py_0p5()
+            .rounded_sm()
+            .bg(if on { ae::accent() } else { ae::control() })
+            .text_color(if on { rgb(0xffffff) } else { ae::text() })
+            .hover(|s| s.bg(ae::hover()))
+            .text_xs()
+            .child(label.to_string())
+    };
+    let header = h_flex()
+        .px_2()
+        .py_1()
+        .gap_2()
+        .items_center()
+        .flex_wrap()
+        .border_b_1()
+        .border_color(ae::border())
+        .bg(ae::panel())
+        .text_xs()
+        .child(
+            h_flex()
+                .gap_1p5()
+                .items_center()
+                .child(div().font_semibold().text_color(ae::text()).child("Graphed Properties"))
+                .child(
+                    div()
+                        .px_1p5()
+                        .rounded_sm()
+                        .bg(ae::control())
+                        .text_color(ae::dim())
+                        .child(format!("{} Active", visible_idx.len())),
+                ),
+        )
+        .child(
+            div()
+                .id("graph_isolate_toggle")
+                .test_support()
+                .cursor_pointer()
+                .px_2()
+                .py_0p5()
+                .rounded_sm()
+                .bg(if isolate { ae::accent() } else { ae::control() })
+                .text_color(if isolate { rgb(0xffffff) } else { ae::text() })
+                .hover(|s| s.bg(ae::hover()))
+                .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                    p_iso.update(cx, |this, cx| {
+                        this.graph_isolate = !this.graph_isolate;
+                        cx.notify();
+                    });
+                })
+                .child(if isolate { "Isolate" } else { "Animated" }),
+        )
+        .child(
+            h_flex()
+                .gap_1()
+                .items_center()
+                .child(
+                    tab_btn("graph_tab_value", "Value Graph", tab == GraphTab::Value)
+                        .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                            p_tab_v.update(cx, |this, cx| {
+                                this.graph_tab = GraphTab::Value;
+                                cx.notify();
+                            });
+                        }),
+                )
+                .child(
+                    tab_btn("graph_tab_speed", "Speed Graph", tab == GraphTab::Speed)
+                        .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                            p_tab_s.update(cx, |this, cx| {
+                                this.graph_tab = GraphTab::Speed;
+                                cx.notify();
+                            });
+                        }),
+                ),
+        )
+        .child(
+            div()
+                .id("graph_fit_view")
+                .test_support()
+                .cursor_pointer()
+                .px_2()
+                .py_0p5()
+                .rounded_sm()
+                .bg(ae::control())
+                .text_color(ae::text())
+                .hover(|s| s.bg(ae::hover()))
+                .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                    p_fit.update(cx, |this, cx| {
+                        this.reset_graph_view();
+                        cx.notify();
+                    });
+                })
+                .child("Fit View [F]"),
+        )
+        .child(
+            div()
+                .id("graph_fit_sel")
+                .test_support()
+                .cursor_pointer()
+                .px_2()
+                .py_0p5()
+                .rounded_sm()
+                .bg(ae::control())
+                .text_color(ae::text())
+                .hover(|s| s.bg(ae::hover()))
+                .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                    // Fit Sel: frame the focused series' keys (AE parity).
+                    let rect = s_fitsel.read(cx).graph_series(&lid_fitsel.clone().unwrap_or_default())
+                        .into_iter()
+                        .filter(|se| {
+                            focus_fitsel.is_empty()
+                                || se.path == focus_fitsel
+                                || se.path == format!("{}.x", focus_fitsel)
+                                || se.path == format!("{}.y", focus_fitsel)
+                        })
+                        .flat_map(|se| se.keys.into_iter().map(|k| (k.t as f32, k.v)))
+                        .fold(None::<(f32, f32, f32, f32)>, |acc, (t, v)| {
+                            Some(match acc {
+                                None => (t, t, v, v),
+                                Some((a, b, c, d)) => (a.min(t), b.max(t), c.min(v), d.max(v)),
+                            })
+                        })
+                        .map(|(a, b, c, d)| {
+                            let tp = ((b - a) * 0.1).max(0.25);
+                            let vp = ((d - c) * 0.15).max(0.5);
+                            GraphViewRect { t0: (a - tp).max(0.0) as f64, t1: (b + tp) as f64, v0: c - vp, v1: d + vp }
+                        });
+                    p_fitsel.update(cx, |this, cx| {
+                        this.graph_view = rect;
+                        cx.notify();
+                    });
+                })
+                .child("Fit Sel"),
+        )
+        .child(
+            h_flex()
+                .gap_1p5()
+                .items_center()
+                .child(div().text_color(ae::dim()).child("X:"))
+                .child(
+                    div()
+                        .id("graph_readout")
+                        .test_support()
+                        .font_medium()
+                        .text_color(ae::timecode())
+                        .child(format!("{focus_label}  Value: {focus_val:.1} {focus_unit}  Speed: {focus_speed:.1} {focus_unit}/s")),
+                ),
+        )
+        .child(
+            div()
+                .id("graph_toggle_grid")
+                .test_support()
+                .cursor_pointer()
+                .px_2()
+                .py_0p5()
+                .rounded_sm()
+                .bg(if show_grid { ae::accent() } else { ae::control() })
+                .text_color(if show_grid { rgb(0xffffff) } else { ae::text() })
+                .hover(|s| s.bg(ae::hover()))
+                .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                    p_grid.update(cx, |this, cx| {
+                        this.graph_show_grid = !this.graph_show_grid;
+                        cx.notify();
+                    });
+                })
+                .child("Grid"),
+        )
+        .child(
+            div()
+                .id("graph_toggle_keys")
+                .test_support()
+                .cursor_pointer()
+                .px_2()
+                .py_0p5()
+                .rounded_sm()
+                .bg(if show_keys { ae::accent() } else { ae::control() })
+                .text_color(if show_keys { rgb(0xffffff) } else { ae::text() })
+                .hover(|s| s.bg(ae::hover()))
+                .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                    p_keys.update(cx, |this, cx| {
+                        this.graph_show_keys = !this.graph_show_keys;
+                        cx.notify();
+                    });
+                })
+                .child("Keys"),
+        );
 
     // Easing preset bar (applies to focused prop, else all series).
     let mut easing_row = h_flex().gap_1().items_center();
@@ -10570,8 +10904,9 @@ fn render_graph_view(
                     .px_2()
                     .py_0p5()
                     .rounded_sm()
-                    .bg(cx.theme().secondary)
-                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                    .bg(ae::control())
+                    .hover(|s| s.bg(ae::hover()))
+                    .text_color(ae::text())
                     .text_xs()
                     .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
                         if let Some(ref lid) = lid_e {
@@ -10595,67 +10930,158 @@ fn render_graph_view(
         }
     }
 
-    // Legend row: click a series to focus it in the spline editor.
-    let mut legend = h_flex().gap_1().items_center().flex_wrap();
-    if series.is_empty() {
-        legend = legend.child(
-            div()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child("No animated properties — enable a stopwatch, then click ◆ to add keys."),
-        );
-    }
-    for se in &series {
-        let s_f = state.clone();
-        let path_f = se.path.clone();
-        let is_focused = se.path == spline_prop;
-        legend = legend.child(
-            div()
-                .cursor_pointer()
-                .px_2()
-                .py_0p5()
-                .rounded_sm()
-                .border_1()
-                .border_color(cx.theme().border)
-                .bg(if is_focused {
-                    cx.theme().accent
-                } else {
-                    cx.theme().secondary
+    // --- Legend column: layer blocks with per-series eye, value, key ---
+    // (AE Graphed Properties pane). One block per layer carrying curves;
+    // the selected layer always gets a block.
+    let legend = {
+        let s = state.read(cx);
+        let half_frame = 0.5 / fps.max(1.0);
+        let layers: Vec<(String, String, bool)> = match s.active_composition() {
+            Some(comp) => comp
+                .layers
+                .iter()
+                .map(|l| {
+                    (
+                        l.id.clone(),
+                        l.name.clone(),
+                        Some(&l.id) == lid_opt.as_ref(),
+                    )
                 })
-                .text_xs()
-                .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
-                    let p = path_f.clone();
-                    s_f.update(cx, |s, cx| {
-                        s.set_spline_prop_path(&p);
-                        cx.notify();
-                    });
-                })
-                .child(
+                .collect(),
+            None => Vec::new(),
+        };
+        let mut col = v_flex()
+            .id("graph_legend")
+            .test_support()
+            .w(px(210.))
+            .flex_none()
+            .gap_0p5()
+            .py_1()
+            .pr_2()
+            .border_r_1()
+            .border_color(ae::border())
+            .overflow_y_scroll();
+        for (llid, lname, is_sel) in layers {
+            let lseries = s.graph_series(&llid);
+            if lseries.is_empty() && !is_sel {
+                continue;
+            }
+            let mut block = v_flex().gap_0p5().py_1();
+            block = block.child(
+                h_flex()
+                    .gap_1p5()
+                    .items_center()
+                    .text_xs()
+                    .font_semibold()
+                    .text_color(if is_sel { ae::text() } else { ae::dim() })
+                    .child(div().child("▾"))
+                    .child(div().truncate().child(lname)),
+            );
+            if lseries.is_empty() {
+                block = block.child(
+                    div()
+                        .pl_5()
+                        .text_xs()
+                        .text_color(ae::dim())
+                        .child("No Curves"),
+                );
+            }
+            for se in &lseries {
+                let key = series_key(&llid, &se.path);
+                let veiled = hidden.contains(&key);
+                let focused_here = is_sel && is_focused(&se.path);
+                let v_now = s
+                    .evaluate_graph_param(&llid, &se.path, current_time)
+                    .unwrap_or(0.0);
+                let unit = graph_unit(&se.path);
+                let kf_here = se.keys.iter().any(|k| (k.t - current_time).abs() <= half_frame);
+                let s_focus = state.clone();
+                let s_key = state.clone();
+                let p_eye = panel_entity.clone();
+                let path_c = se.path.clone();
+                let path_k = se.path.clone();
+                let lid_k = llid.clone();
+                let eye_key = key.clone();
+                let scol = Rgba { r: se.color.0, g: se.color.1, b: se.color.2, a: 1.0 };
+                block = block.child(
                     h_flex()
-                        .gap_1()
+                        .pl_5()
+                        .pr_1()
+                        .py_0p5()
+                        .gap_1p5()
                         .items_center()
-                        .child(div().w(px(8.)).h(px(8.)).rounded_sm().bg(Rgba {
-                            r: se.color.0,
-                            g: se.color.1,
-                            b: se.color.2,
-                            a: 1.0,
-                        }))
-                        .child(format!("{} ({})", se.label, se.keys.len())),
-                ),
-        );
-    }
+                        .rounded_sm()
+                        .bg(if focused_here { ae::control() } else { rgb(0x00000000) })
+                        .child(
+                            div()
+                                .cursor_pointer()
+                                .text_color(if veiled { ae::dim() } else { ae::text() })
+                                .text_xs()
+                                .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                                    p_eye.update(cx, |this, cx| {
+                                        this.toggle_graph_series(&eye_key);
+                                        cx.notify();
+                                    });
+                                })
+                                .child(if veiled { "○" } else { "◉" }),
+                        )
+                        .child(div().w(px(8.)).h(px(2.)).rounded_sm().bg(scol))
+                        .child(
+                            div()
+                                .cursor_pointer()
+                                .flex_1()
+                                .truncate()
+                                .text_xs()
+                                .text_color(if veiled { ae::dim() } else { ae::text() })
+                                .hover(|s| s.text_color(rgb(0xffffff)))
+                                .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                                    let p = path_c.clone();
+                                    s_focus.update(cx, |s, cx| {
+                                        s.set_spline_prop_path(&p);
+                                        cx.notify();
+                                    });
+                                })
+                                .child(se.label.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_medium()
+                                .text_color(scol)
+                                .child(format!("{v_now:.1} {unit}")),
+                        )
+                        .child(
+                            div()
+                                .cursor_pointer()
+                                .text_xs()
+                                .text_color(if kf_here { ae::amber() } else { ae::dim() })
+                                .hover(|s| s.text_color(rgb(0xffffff)))
+                                .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                                    s_key.update(cx, |s, cx| {
+                                        s.toggle_layer_keyframe_at_current_time(&lid_k, &path_k);
+                                        cx.notify();
+                                    });
+                                })
+                                .child(if kf_here { "◆" } else { "◇" }),
+                        ),
+                );
+            }
+            col = col.child(block);
+        }
+        col.into_any_element()
+    };
 
     // Empty states.
     if lid_opt.is_none() {
         return v_flex()
             .flex_1()
-            .p_3()
-            .gap_2()
-            .child(legend)
+            .gap_0()
+            .child(header)
             .child(
                 div()
+                    .p_3()
                     .text_sm()
-                    .text_color(cx.theme().muted_foreground)
+                    .text_color(ae::dim())
                     .child("Select a layer to edit its splines."),
             )
             .into_any_element();
@@ -10666,17 +11092,17 @@ fn render_graph_view(
         let focus_add = spline_prop.clone();
         return v_flex()
             .flex_1()
-            .p_3()
-            .gap_2()
-            .child(legend)
+            .gap_0()
+            .child(header)
             .child(
                 h_flex()
+                    .p_3()
                     .gap_2()
                     .items_center()
                     .child(
                         div()
                             .text_sm()
-                            .text_color(cx.theme().muted_foreground)
+                            .text_color(ae::dim())
                             .child("No keys yet on this layer."),
                     )
                     .child(
@@ -10685,8 +11111,8 @@ fn render_graph_view(
                             .px_2()
                             .py_1()
                             .rounded_sm()
-                            .bg(cx.theme().primary)
-                            .text_color(cx.theme().primary_foreground)
+                            .bg(ae::accent())
+                            .text_color(rgb(0xffffff))
                             .text_xs()
                             .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
                                 let lid = lid_add.clone();
@@ -10706,77 +11132,210 @@ fn render_graph_view(
             .into_any_element();
     }
 
-    // Sample curves + derive a shared value range for vertical fit.
-    const SAMPLES: usize = 80;
-    let mut samples_per_series: Vec<Vec<f32>> = Vec::new();
-    let mut v_min = f32::MAX;
-    let mut v_max = f32::MIN;
+    // View rect: stored (Fit Sel) or auto-fit full range + padded values.
+    // Range series = focused visible series when any is focused, else all
+    // visible ones (Isolate/hidden respected).
+    let range_idx: Vec<usize> = {
+        let focused: Vec<usize> = visible_idx.iter().copied().filter(|&i| is_focused(&series[i].path)).collect();
+        if focused.is_empty() { visible_idx.clone() } else { focused }
+    };
+    const SAMPLES: usize = 120;
+    // Sampled values per visible series, across the FULL duration (view
+    // mapping applied at draw time so Fit Sel never resamples).
+    let mut values_per_series: Vec<Vec<f32>> = Vec::new();
     {
         let s = state.read(cx);
         let lid = lid_opt.as_deref().unwrap_or("");
-        for se in &series {
+        for &si in &visible_idx {
+            let se = &series[si];
             let mut vals = Vec::with_capacity(SAMPLES);
             for i in 0..SAMPLES {
                 let t = i as f64 / (SAMPLES - 1) as f64 * duration;
-                let v = s.evaluate_graph_param(lid, &se.path, t).unwrap_or(0.0);
-                v_min = v_min.min(v);
-                v_max = v_max.max(v);
-                vals.push(v);
+                vals.push(s.evaluate_graph_param(lid, &se.path, t).unwrap_or(0.0));
             }
-            for k in &se.keys {
-                v_min = v_min.min(k.v);
-                v_max = v_max.max(k.v);
-            }
-            samples_per_series.push(vals);
+            values_per_series.push(vals);
         }
     }
-    if !(v_min < v_max) {
-        v_min -= 1.0;
-        v_max += 1.0;
+    // Auto value range from the range series (samples + key values).
+    let (mut a_min, mut a_max) = (f32::MAX, f32::MIN);
+    for &si in &range_idx {
+        if let Some(pos) = visible_idx.iter().position(|&i| i == si) {
+            for &v in &values_per_series[pos] {
+                a_min = a_min.min(v);
+                a_max = a_max.max(v);
+            }
+        }
+        for k in &series[si].keys {
+            a_min = a_min.min(k.v);
+            a_max = a_max.max(k.v);
+        }
     }
-    let pad = ((v_max - v_min) * 0.12).max(0.001);
-    v_min -= pad;
-    v_max += pad;
-    let span = (v_max - v_min).max(1e-5);
-    let y_to_ratio = |v: f32| -> f32 { ((v - v_min) / span).clamp(0.0, 1.0) };
+    if !(a_min < a_max) {
+        a_min -= 1.0;
+        a_max += 1.0;
+    }
+    let vpad = ((a_max - a_min) * 0.12).max(0.001);
+    let auto_view = GraphViewRect { t0: 0.0, t1: duration, v0: a_min - vpad, v1: a_max + vpad };
+    let view = view_opt.unwrap_or(auto_view);
+    let tspan = (view.t1 - view.t0).max(1e-5);
+    let vspan = (view.v1 - view.v0).max(1e-5);
+    let x_of = |t: f64| -> f32 { ((t - view.t0) / tspan).clamp(0.0, 1.0) as f32 };
+    let y_of = |v: f32| -> f32 { ((v - view.v0) / vspan).clamp(0.0, 1.0) };
+    // Speed curves (units/s, central differences over the same samples).
+    let speed_per_series: Vec<Vec<f32>> = values_per_series
+        .iter()
+        .map(|vals| {
+            let dt = duration / (SAMPLES - 1) as f64;
+            (0..SAMPLES)
+                .map(|i| {
+                    let (a, b) = if i == 0 {
+                        (vals[0], vals[1])
+                    } else if i + 1 == SAMPLES {
+                        (vals[SAMPLES - 2], vals[SAMPLES - 1])
+                    } else {
+                        (vals[i - 1], vals[i + 1])
+                    };
+                    let steps = if i == 0 || i + 1 == SAMPLES { 1.0 } else { 2.0 };
+                    ((b - a) as f64 / (dt * steps)).abs() as f32
+                })
+                .collect()
+        })
+        .collect();
+    // Speed range for the Speed tab (shared across visible series).
+    let (s_min, s_max) = {
+        let (mut a, mut b) = (f32::MAX, f32::MIN);
+        for vals in &speed_per_series {
+            for &v in vals {
+                a = a.min(v);
+                b = b.max(v);
+            }
+        }
+        if !(a < b) {
+            a -= 1.0;
+            b += 1.0;
+        }
+        let p = ((b - a) * 0.12).max(0.001);
+        (a - p, b + p)
+    };
+    let sspan = (s_max - s_min).max(1e-5);
+    let sy_of = |v: f32| -> f32 { ((v - s_min) / sspan).clamp(0.0, 1.0) };
 
-    let playhead_pct = (current_time / duration * 100.0).clamp(0.0, 100.0) as f32;
+    let playhead_x = x_of(current_time);
     let lid_graph = lid_opt.clone().unwrap_or_default();
+    let half_frame2 = 0.5 / fps.max(1.0);
 
-    // Graph canvas: fixed height, axis gutter + plot area.
-    let mut plot = div().flex_1().h(px(190.)).relative().bg(cx.theme().background);
+    // Speed of one series at one time (central difference, units/s).
+    let series_speed_at = |lid: &str, path: &str, t: f64| -> f32 {
+        let s = state.read(cx);
+        let h = half_frame2.max(1e-4);
+        let v0 = s.evaluate_graph_param(lid, path, (t - h).max(0.0)).unwrap_or(0.0);
+        let v1 = s.evaluate_graph_param(lid, path, (t + h).min(duration)).unwrap_or(v0);
+        let dt = ((t + h).min(duration) - (t - h).max(0.0)).max(1e-6);
+        ((v1 - v0) as f64 / dt).abs() as f32
+    };
 
-    // Horizontal grid (25/50/75%) + per-second vertical grid (cap 12 lines).
-    for frac in [0.25f32, 0.5, 0.75] {
-        plot = plot.child(
-            div()
-                .absolute()
-                .left_0()
-                .right_0()
-                .top(relative(frac))
-                .h(px(1.))
-                .bg(cx.theme().border.opacity(0.35)),
-        );
-    }
-    let vlines = (duration.round() as usize).clamp(1, 12);
-    for i in 1..vlines {
-        let f = i as f32 / vlines as f32;
-        plot = plot.child(
-            div()
-                .absolute()
-                .top_0()
-                .bottom_0()
-                .left(relative(f))
-                .w(px(1.))
-                .bg(cx.theme().border.opacity(0.22)),
-        );
+    // Tooltip anchor: dragged key wins, else the focused series' key at
+    // the playhead (AE pins the readout to the selected key).
+    let tooltip: Option<(String, String, f32, f32, f32)> = {
+        let pick = |lid: &str, path: &str, t: f64| -> Option<(String, String, f32, f32, f32)> {
+            let se = series.iter().find(|se| se.path == path)?;
+            let k = se.keys.iter().min_by(|a, b| {
+                (a.t - t).abs().partial_cmp(&(b.t - t).abs()).unwrap_or(std::cmp::Ordering::Equal)
+            })?;
+            let unit = graph_unit(path);
+            let tc = TimeCode::from_seconds(k.t.max(0.0), fps);
+            let spd = series_speed_at(lid, path, k.t);
+            Some((
+                format!("{}: {:.1} {unit} @ {tc}", se.label, k.v),
+                format!("Speed: {spd:.1} {unit}/s"),
+                x_of(k.t),
+                y_of(k.v),
+                spd,
+            ))
+        };
+        if let Some(gd) = gdrag.clone() {
+            pick(&gd.layer_id, &gd.path, gd.at_s)
+        } else if let (Some(lid), Some(i)) = (lid_opt.as_deref(), focus_idx) {
+            let se = &series[i];
+            if se.keys.iter().any(|k| (k.t - current_time).abs() <= half_frame2) {
+                pick(lid, &se.path, current_time)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    // Bottom-bar key position for the focused series.
+    let key_info: String = match (lid_opt.as_deref(), focus_idx) {
+        (Some(_), Some(i)) => {
+            let se = &series[i];
+            if se.keys.is_empty() {
+                String::new()
+            } else {
+                let n = se.keys.iter().filter(|k| k.t <= current_time + half_frame2).count().max(1);
+                let interp = se
+                    .keys
+                    .iter()
+                    .min_by(|a, b| {
+                        (a.t - current_time).abs().partial_cmp(&(b.t - current_time).abs()).unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .map(|k| match k.interp {
+                        project::KeyframeInterpolation::Linear => "Linear",
+                        project::KeyframeInterpolation::Bezier => "Bezier",
+                        project::KeyframeInterpolation::Hold => "Hold",
+                    })
+                    .unwrap_or("");
+                format!("Keyframe {n} of {} · {interp}", se.keys.len())
+            }
+        }
+        _ => String::new(),
+    };
+
+    // Graph canvas: fixed height plot area (AE graph pane).
+    let mut plot = div().flex_1().h(px(GRAPH_PLOT_H)).relative().bg(rgb(0x141414));
+
+    // Grid: horizontal quarters + per-second verticals across the VIEW.
+    if show_grid {
+        for frac in [0.25f32, 0.5, 0.75] {
+            plot = plot.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top(relative(frac))
+                    .h(px(1.))
+                    .bg(rgb(0x2e2e2e)),
+            );
+        }
+        let span_secs = (view.t1 - view.t0).max(0.5);
+        let step = ((span_secs / 12.0).ceil().max(1.0)) as i64;
+        let mut s = view.t0.ceil() as i64;
+        if s < 1 {
+            s = step;
+        }
+        while (s as f64) < view.t1 {
+            let f = ((s as f64 - view.t0) / tspan) as f32;
+            plot = plot.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(relative(f))
+                    .w(px(1.))
+                    .bg(rgb(0x262626)),
+            );
+            s += step;
+        }
     }
 
     // Background seek slices (below curves/keys so keys stay clickable).
+    // Mapped across the VIEW so Fit Sel seeks precisely.
     for slice_idx in 0..120 {
         let frac = slice_idx as f64 / 120.0;
         let s_seek = state.clone();
-        let target = frac * duration;
+        let target = view.t0 + frac * tspan;
         plot = plot.child(
             div()
                 .absolute()
@@ -10794,128 +11353,267 @@ fn render_graph_view(
         );
     }
 
-    // Curves as small dots (80 per series keeps element count bounded).
-    for (si, se) in series.iter().enumerate() {
+    // Curves as dense dots (120 per series reads as a line).
+    let speed_tab = tab == GraphTab::Speed;
+    for (vi, &si) in visible_idx.iter().enumerate() {
+        let se = &series[si];
         let col = Rgba { r: se.color.0, g: se.color.1, b: se.color.2, a: 0.95 };
-        let dimmed = !spline_prop.is_empty() && se.path != spline_prop;
-        for (i, v) in samples_per_series[si].iter().enumerate() {
-            let x = i as f32 / (SAMPLES - 1) as f32;
-            let y = y_to_ratio(*v);
+        let dimmed = !is_focused(&se.path);
+        let vals = if speed_tab { &speed_per_series[vi] } else { &values_per_series[vi] };
+        for (i, v) in vals.iter().enumerate() {
+            let t = i as f64 / (SAMPLES - 1) as f64 * duration;
+            let (x, y) = if speed_tab {
+                (x_of(t), sy_of(*v))
+            } else {
+                (x_of(t), y_of(*v))
+            };
             plot = plot.child(
                 div()
                     .absolute()
                     .left(relative(x))
                     .top(relative(1.0 - y))
-                    .w(px(3.))
-                    .h(px(3.))
+                    .w(px(2.))
+                    .h(px(2.))
                     .ml(px(-1.))
                     .mt(px(-1.))
                     .rounded_full()
                     .bg(col)
-                    .opacity(if dimmed { 0.25 } else { 1.0 }),
+                    .opacity(if dimmed { 0.3 } else { 1.0 }),
             );
         }
     }
 
-    // Playhead.
-    plot = plot.child(
-        div()
-            .absolute()
-            .top_0()
-            .bottom_0()
-            .w(px(1.))
-            .bg(rgb(0xef4444))
-            .left(relative(playhead_pct / 100.0)),
-    );
+    // Playhead (red line + square handle, AE style).
+    plot = plot
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .w(px(1.))
+                .bg(rgb(0xef4444))
+                .left(relative(playhead_x)),
+        )
+        .child(
+            div()
+                .absolute()
+                .top(px(0.))
+                .left(relative(playhead_x))
+                .ml(px(-4.))
+                .w(px(9.))
+                .h(px(9.))
+                .rounded_sm()
+                .bg(rgb(0xef4444)),
+        );
 
-    // Keyframes on top: drag to move, right-click cycles interpolation.
-    for se in &series {
-        let dimmed = !spline_prop.is_empty() && se.path != spline_prop;
-        for k in &se.keys {
-            let x = (k.t / duration).clamp(0.0, 1.0) as f32;
-            let y = y_to_ratio(k.v);
-            let p_down = panel_entity.clone();
-            let s_down_ck = state.clone();
-            let s_cycle = state.clone();
-            let lid_k = lid_graph.clone();
-            let path_k = se.path.clone();
-            let at_s = k.t;
-            let (glyph, glyph_col): (&str, Rgba) = match k.interp {
-                project::KeyframeInterpolation::Linear => ("◆", rgb(0x38bdf8)),
-                project::KeyframeInterpolation::Bezier => ("●", rgb(0x4ade80)),
-                project::KeyframeInterpolation::Hold => ("■", rgb(0xf59e0b)),
-            };
-            let drag_vmin = v_min;
-            let drag_vmax = v_max;
-            let drag_dur = duration;
-            let lid_r = lid_graph.clone();
-            let path_r = se.path.clone();
-            plot = plot.child(
-                div()
-                    .absolute()
-                    .left(relative(x))
-                    .top(relative(1.0 - y))
-                    .ml(px(-8.))
-                    .mt(px(-9.))
-                    .w(px(16.))
-                    .h(px(18.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_sm()
-                    .font_bold()
-                    .cursor_pointer()
-                    .text_color(glyph_col)
-                    .opacity(if dimmed { 0.35 } else { 1.0 })
-                    .hover(|s| s.text_color(rgb(0xffffff)))
-                    .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
-                        let cxp = event.position.x / px(1.0);
-                        let cyp = event.position.y / px(1.0);
-                        s_down_ck.update(cx, |s, cx| {
-                            s.checkpoint();
-                            s.preview_fast = true;
-                            cx.notify();
-                        });
-                        p_down.update(cx, |this, cx| {
-                            this.graph_drag = Some(GraphKeyDrag {
-                                layer_id: lid_k.clone(),
-                                path: path_k.clone(),
-                                at_s,
-                                last_x: cxp,
-                                last_y: cyp,
-                                v_min: drag_vmin,
-                                v_max: drag_vmax,
-                                duration: drag_dur,
+    // Keyframes: click-drag moves time + value (Value tab), right-click
+    // cycles interpolation. Selected keys (dragged or at playhead) render
+    // white. The Speed tab is view-only.
+    if show_keys {
+        for &si in &visible_idx {
+            let se = &series[si];
+            let focused_here = is_focused(&se.path);
+            for k in &se.keys {
+                if k.t < view.t0 - half_frame2 || k.t > view.t1 + half_frame2 {
+                    continue;
+                }
+                let x = x_of(k.t);
+                let dragging_this = gdrag
+                    .as_ref()
+                    .map(|gd| gd.layer_id == lid_graph && gd.path == se.path && (gd.at_s - k.t).abs() <= half_frame2)
+                    .unwrap_or(false);
+                let at_playhead = (k.t - current_time).abs() <= half_frame2;
+                let selected = dragging_this || at_playhead;
+                let (glyph, glyph_col): (&str, Rgba) = if selected {
+                    ("◆", rgb(0xffffff))
+                } else {
+                    match k.interp {
+                        project::KeyframeInterpolation::Linear => ("◆", rgb(0x38bdf8)),
+                        project::KeyframeInterpolation::Bezier => ("●", rgb(0x4ade80)),
+                        project::KeyframeInterpolation::Hold => ("■", rgb(0xf59e0b)),
+                    }
+                };
+                let y = if speed_tab {
+                    sy_of(series_speed_at(&lid_graph, &se.path, k.t))
+                } else {
+                    y_of(k.v)
+                };
+                if speed_tab {
+                    plot = plot.child(
+                        div()
+                            .absolute()
+                            .left(relative(x))
+                            .top(relative(1.0 - y))
+                            .ml(px(-8.))
+                            .mt(px(-9.))
+                            .w(px(16.))
+                            .h(px(18.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_sm()
+                            .font_bold()
+                            .text_color(glyph_col)
+                            .opacity(if focused_here { 1.0 } else { 0.45 })
+                            .child(glyph),
+                    );
+                    continue;
+                }
+                let p_down = panel_entity.clone();
+                let s_down_ck = state.clone();
+                let s_cycle = state.clone();
+                let lid_k = lid_graph.clone();
+                let path_k = se.path.clone();
+                let at_s = k.t;
+                let lid_r = lid_graph.clone();
+                let path_r = se.path.clone();
+                plot = plot.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "graph_key_{}_{}_{}",
+                            lid_graph,
+                            se.path.replace(['.', ':'], "_"),
+                            (k.t * 1000.0).round() as i64
+                        )))
+                        .test_support()
+                        .absolute()
+                        .left(relative(x))
+                        .top(relative(1.0 - y))
+                        .ml(px(-8.))
+                        .mt(px(-9.))
+                        .w(px(16.))
+                        .h(px(18.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_sm()
+                        .font_bold()
+                        .cursor_pointer()
+                        .text_color(glyph_col)
+                        .opacity(if focused_here { 1.0 } else { 0.45 })
+                        .hover(|s| s.text_color(rgb(0xffffff)))
+                        .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+                            let cxp = event.position.x / px(1.0);
+                            let cyp = event.position.y / px(1.0);
+                            s_down_ck.update(cx, |s, cx| {
+                                s.checkpoint();
+                                s.preview_fast = true;
+                                cx.notify();
                             });
-                            cx.notify();
-                        });
-                    })
-                    .on_mouse_down(MouseButton::Right, move |_event, _window, cx| {
-                        let lid = lid_r.clone();
-                        let path = path_r.clone();
-                        s_cycle.update(cx, |s, cx| {
-                            s.checkpoint();
-                            s.cycle_graph_key_interp(&lid, &path, at_s);
-                            cx.notify();
-                        });
-                    })
-                    .child(glyph),
-            );
+                            p_down.update(cx, |this, cx| {
+                                this.graph_drag = Some(GraphKeyDrag {
+                                    layer_id: lid_k.clone(),
+                                    path: path_k.clone(),
+                                    at_s,
+                                    last_x: cxp,
+                                    last_y: cyp,
+                                    v_min: view.v0,
+                                    v_max: view.v1,
+                                    duration,
+                                    span: tspan,
+                                    moved: false,
+                                });
+                                cx.notify();
+                            });
+                        })
+                        .on_mouse_down(MouseButton::Right, move |_event, _window, cx| {
+                            let lid = lid_r.clone();
+                            let path = path_r.clone();
+                            s_cycle.update(cx, |s, cx| {
+                                s.checkpoint();
+                                s.cycle_graph_key_interp(&lid, &path, at_s);
+                                cx.notify();
+                            });
+                        })
+                        .child(glyph),
+                );
+            }
         }
     }
 
-    let mid = (v_min + v_max) * 0.5;
-    let axis = v_flex()
+    // Tooltip pinned to the selected key (value + speed + influence row).
+    if let Some((line1, line2, tx, ty, _spd)) = tooltip.clone() {
+        let ty_px = (1.0 - ty) * GRAPH_PLOT_H - 52.0;
+        plot = plot.child(
+            div()
+                .id("graph_tooltip")
+                .test_support()
+                .absolute()
+                .left(relative(tx.clamp(0.0, 0.72)))
+                .top(px(ty_px.max(2.0)))
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .bg(rgb(0x0a0a0a))
+                .border_1()
+                .border_color(ae::amber())
+                .text_xs()
+                .child(
+                    div()
+                        .font_medium()
+                        .text_color(ae::timecode())
+                        .child(line1),
+                )
+                .child(
+                    div()
+                        .text_color(ae::amber())
+                        .child(line2),
+                ),
+        );
+    }
+
+    // Value axis gutter (5 ticks with the focused unit, AE style).
+    let axis_unit = focus_idx.map(|i| graph_unit(&series[i].path)).unwrap_or("");
+    let (axis_lo, axis_hi) = if speed_tab { (s_min, s_max) } else { (view.v0, view.v1) };
+    let mut axis = v_flex()
         .w(px(64.))
-        .h(px(190.))
+        .h(px(GRAPH_PLOT_H))
+        .flex_none()
         .justify_between()
         .py_1()
         .pr_2()
         .text_xs()
-        .text_color(cx.theme().muted_foreground)
-        .child(div().child(format!("{v_max:.1}")))
-        .child(div().child(format!("{mid:.1}")))
-        .child(div().child(format!("{v_min:.1}")));
+        .text_color(ae::dim());
+    for r in [1.0f32, 0.75, 0.5, 0.25, 0.0] {
+        let v = axis_lo + (axis_hi - axis_lo) * r;
+        axis = axis.child(div().child(format!("{v:.0} {axis_unit}")));
+    }
+
+    // Time ruler across the view (AE `00:01s (30f)` ticks).
+    let mut ruler = div()
+        .id("graph_ruler")
+        .test_support()
+        .w_full()
+        .h(px(18.))
+        .flex_none()
+        .relative()
+        .text_xs()
+        .text_color(ae::dim());
+    {
+        let span_secs = view.t1 - view.t0;
+        let step = ((span_secs / 8.0).ceil().max(1.0)) as i64;
+        let mut s = (view.t0.ceil() as i64).max(0);
+        if s == 0 {
+            s = 0;
+        }
+        while (s as f64) <= view.t1 + 1e-6 {
+            let f = ((s as f64 - view.t0) / tspan) as f32;
+            let tc = TimeCode::from_seconds(s.max(0) as f64, fps);
+            let fr = (s.max(0) as f64 * fps).round() as i64;
+            ruler = ruler.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(relative(f.clamp(0.0, 0.92)))
+                    .child(format!("{tc} ({fr}f)")),
+            );
+            s += step;
+            if step <= 0 {
+                break;
+            }
+        }
+    }
 
     // Quick actions for the focused key under the playhead.
     let s_add2 = state.clone();
@@ -10928,54 +11626,74 @@ fn render_graph_view(
         .test_support()
         .flex_1()
         .overflow_y_scroll()
-        .p_2()
-        .gap_2()
+        .bg(ae::bg())
+        .text_color(ae::text())
+        .child(header)
         .child(
             h_flex()
-                .gap_1()
-                .items_center()
-                .child(div().text_xs().font_semibold().text_color(cx.theme().foreground).child("Graph"))
+                .flex_1()
+                .min_h_0()
+                .child(legend)
                 .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(format!("{} · {} props · ◆ Linear  ● Bezier  ■ Hold · drag keys · right-click cycles interp", lid_graph, series.len())),
-                ),
-        )
-        .child(legend)
-        .child(
-            h_flex()
-                .gap_2()
-                .items_center()
-                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Ease:"))
-                .child(easing_row)
-                .child(
-                    div()
-                        .cursor_pointer()
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
                         .px_2()
-                        .py_0p5()
-                        .rounded_sm()
-                        .bg(cx.theme().muted)
-                        .hover(|s| s.bg(cx.theme().accent))
-                        .text_xs()
-                        .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
-                            let lid = lid_add2.clone();
-                            let prop = focus_add2.clone();
-                            let prop = if prop.is_empty() { "opacity".to_string() } else { prop };
-                            s_add2.update(cx, |s, cx| {
-                                s.toggle_layer_keyframe_at_current_time(&lid, &prop);
-                                cx.notify();
-                            });
-                        })
-                        .child(format!("◆ Key {focus_label} @ playhead")),
+                        .py_1()
+                        .gap_1()
+                        .child(ruler)
+                        .child(h_flex().gap_0().child(axis).child(plot))
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .flex_wrap()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(ae::dim())
+                                        .child("Ease:"),
+                                )
+                                .child(easing_row)
+                                .child(
+                                    div()
+                                        .cursor_pointer()
+                                        .px_2()
+                                        .py_0p5()
+                                        .rounded_sm()
+                                        .bg(ae::control())
+                                        .hover(|s| s.bg(ae::hover()))
+                                        .text_xs()
+                                        .text_color(ae::text())
+                                        .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                                            let lid = lid_add2.clone();
+                                            let prop = focus_add2.clone();
+                                            let prop = if prop.is_empty() { "opacity".to_string() } else { prop };
+                                            s_add2.update(cx, |s, cx| {
+                                                s.toggle_layer_keyframe_at_current_time(&lid, &prop);
+                                                cx.notify();
+                                            });
+                                        })
+                                        .child(format!("◆ Key {focus_label} @ playhead")),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(ae::amber())
+                                        .child(key_info),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(ae::dim())
+                                        .child(if speed_tab {
+                                            "Speed Graph is view-only — switch to Value Graph to drag keys"
+                                        } else {
+                                            "Click-drag diamonds to move time + value · right-click cycles interp"
+                                        }),
+                                ),
+                        ),
                 ),
-        )
-        .child(h_flex().gap_0().child(axis).child(plot))
-        .child(
-            div()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child(format!("t 0:00 → {duration:.2}s @ {fps:.0}fps · value [{v_min:.1}, {v_max:.1}] · left-drag background seeks")),
         )
         .into_any_element()
 }
@@ -11005,6 +11723,12 @@ impl TimelinePanel {
             scrub_moved: false,
             scrub_factor: 1.0,
             graph_drag: None,
+            graph_tab: GraphTab::Value,
+            graph_isolate: false,
+            graph_show_grid: true,
+            graph_show_keys: true,
+            graph_hidden: HashSet::new(),
+            graph_view: None,
             reorder_drag: None,
             reorder_hover: None,
             reorder_start_y: 0.0,
@@ -11129,6 +11853,20 @@ impl TimelinePanel {
             self.expanded_groups.remove(key);
         } else {
             self.expanded_groups.insert(key.to_string());
+        }
+    }
+
+    /// Reset the graph viewport to auto-fit (AE Fit View [F]).
+    pub fn reset_graph_view(&mut self) {
+        self.graph_view = None;
+    }
+
+    /// Toggle a legend series' visibility (AE per-series eye).
+    pub fn toggle_graph_series(&mut self, key: &str) {
+        if self.graph_hidden.contains(key) {
+            self.graph_hidden.remove(key);
+        } else {
+            self.graph_hidden.insert(key.to_string());
         }
     }
 
@@ -12310,8 +13048,8 @@ impl Render for TimelinePanel {
                     let dy = cur_y - gd.last_y;
                     if dx != 0.0 || dy != 0.0 {
                         let track_w = (window.bounds().size.width / px(1.0) - 560.0).max(200.0);
-                        let graph_h = 190.0f32;
-                        let dt = dx / track_w * gd.duration as f32;
+                        let graph_h = GRAPH_PLOT_H;
+                        let dt = dx / track_w * gd.span as f32;
                         let vspan = (gd.v_max - gd.v_min).max(1e-5);
                         let dv = -dy / graph_h * vspan;
                         // Current value of the dragged key.
@@ -12346,6 +13084,7 @@ impl Render for TimelinePanel {
                         gd.at_s = new_t;
                         gd.last_x = cur_x;
                         gd.last_y = cur_y;
+                        gd.moved = true;
                         p_root_move.update(cx, |this, cx| {
                             this.graph_drag = Some(gd);
                             cx.notify();
@@ -12454,6 +13193,15 @@ impl Render for TimelinePanel {
                         _ => None,
                     }
                 };
+                // A graph-key press without movement is a click, not a
+                // drag: undo the mousedown checkpoint so clicks leave the
+                // undo stack untouched.
+                let graph_clicked = p_root_up
+                    .read(cx)
+                    .graph_drag
+                    .clone()
+                    .map(|gd| !gd.moved)
+                    .unwrap_or(false);
                 p_root_up.update(cx, |this, cx| {
                     this.is_scrubbing_ruler = false;
                     this.drag_action = None;
@@ -12481,6 +13229,9 @@ impl Render for TimelinePanel {
                 });
                 s_root_up.update(cx, |s, cx| {
                     s.preview_fast = false;
+                    if graph_clicked {
+                        s.undo();
+                    }
                     cx.notify();
                 });
                 if let Some((lid, key)) = edit {
@@ -12876,12 +13627,21 @@ impl Render for TimelinePanel {
                 let p_tl_ctx = panel_entity.clone();
                 if state.spline_editor_open {
                     let sel = state.selected_layer_id.clone();
+                    let gui = GraphUi {
+                        tab: self.graph_tab,
+                        isolate: self.graph_isolate,
+                        show_grid: self.graph_show_grid,
+                        show_keys: self.graph_show_keys,
+                        hidden: self.graph_hidden.clone(),
+                        view: self.graph_view,
+                        drag: self.graph_drag.clone(),
+                    };
                     div()
                         .flex_1()
                         .flex()
                         .flex_col()
                         .overflow_hidden()
-                        .child(render_graph_view(&self.state, &panel_entity, sel, cx))
+                        .child(render_graph_view(&self.state, &panel_entity, sel, &gui, cx))
                         .into_any_element()
                 } else {
                     v_flex()

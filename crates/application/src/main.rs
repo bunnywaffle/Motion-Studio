@@ -1918,6 +1918,15 @@ impl Render for AppView {
                         let _ = s.trim_selected_layer_in_to_playhead();
                         cx.notify();
                     });
+                } else if key == "f" {
+                    // Fit View in the Graph Editor (no-op elsewhere).
+                    if state_key.read(cx).spline_editor_open {
+                        let panels = app_key.read(cx).panels().clone();
+                        panels.timeline.update(cx, |this, cx| {
+                            this.reset_graph_view();
+                            cx.notify();
+                        });
+                    }
                 } else if key == "]" {
                     state_key.update(cx, |s, cx| {
                         let _ = s.trim_selected_layer_out_to_playhead();
@@ -3514,6 +3523,163 @@ mod tests {
             panels.viewer.read_with(cx, |panel, _| panel.pick_top_at(-900.0, -500.0))
         });
         assert_eq!(picked_bg.as_deref(), Some("layer_bg"));
+    }
+
+    #[test]
+    fn test_graph_key_drag_moves_time_and_value() {
+        use crate::state::EditorState;
+        use project::KeyframeInterpolation;
+
+        let mut state = EditorState::new();
+        // Accent position.x: bezier keys at 0s/2s/4s, y stays 0.
+        let before: Vec<(f64, f32)> = state
+            .active_composition()
+            .unwrap()
+            .get_layer("layer_accent")
+            .unwrap()
+            .transform
+            .position
+            .keyframes()
+            .iter()
+            .map(|k| (k.time.seconds(), k.value.x))
+            .collect();
+        assert_eq!(before.len(), 3);
+        // Drag first key: 0s/-200px -> 0.5s/-150px (no checkpoint version).
+        assert!(state.move_graph_keyframe_live("layer_accent", "transform.position.x", 0.0, 0.5, -150.0));
+        let keys = &state
+            .active_composition()
+            .unwrap()
+            .get_layer("layer_accent")
+            .unwrap()
+            .transform
+            .position
+            .keyframes();
+        assert_eq!(keys.len(), 3, "move must not add/remove keys");
+        let moved = keys.iter().find(|k| (k.time.seconds() - 0.5).abs() < 1e-6).unwrap();
+        assert!((moved.value.x + 150.0).abs() < 1e-3, "value follows the drag");
+        assert!(moved.value.y.abs() < 1e-6, "other axis preserved");
+        assert_eq!(moved.interpolation, KeyframeInterpolation::Bezier, "interp preserved");
+        // Scalar path moves too (rotation 0°@0s -> 1s).
+        assert!(state.move_graph_keyframe_live("layer_accent", "transform.rotation", 0.0, 1.0, 45.0));
+        let rot = &state
+            .active_composition()
+            .unwrap()
+            .get_layer("layer_accent")
+            .unwrap()
+            .transform
+            .rotation
+            .keyframes();
+        assert!(rot.iter().any(|k| (k.time.seconds() - 1.0).abs() < 1e-6 && (k.value - 45.0).abs() < 1e-3));
+        // Unknown key misses cleanly.
+        assert!(!state.move_graph_keyframe_live("layer_accent", "transform.position.x", 99.0, 99.5, 0.0));
+    }
+
+    #[gpui_kit::test]
+    fn test_graph_key_click_drag_moves(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+        use gpui_kit::point;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        // Accent position.x has keys at 0s/2s/4s: open Graph on it.
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.select_layer(Some("layer_accent".to_string()));
+                if !s.spline_editor_open {
+                    s.toggle_spline_editor();
+                }
+                cx.notify();
+            });
+        });
+        let before: (f64, f32, usize) = app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            let kfs = &s
+                .active_composition()
+                .unwrap()
+                .get_layer("layer_accent")
+                .unwrap()
+                .transform
+                .position
+                .keyframes();
+            (kfs[1].time.seconds(), kfs[1].value.x, kfs.len())
+        });
+        // Real pointer drag on the middle diamond (deterministic id).
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let snap = window.find("graph_key_layer_accent_transform_position_x_2000");
+            assert!(snap.visible());
+            let from = snap.bounds().center();
+            window.drag(from, from + point(px(60.0), px(30.0)), cx);
+        })
+        .expect("update_window failed");
+        let after: (f64, f32, usize) = app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            let kfs = &s
+                .active_composition()
+                .unwrap()
+                .get_layer("layer_accent")
+                .unwrap()
+                .transform
+                .position
+                .keyframes();
+            // Keys stay sorted by time; find the moved one by value shift.
+            let moved = kfs.iter().min_by(|a, b| {
+                (a.time.seconds() - before.0)
+                    .abs()
+                    .partial_cmp(&(b.time.seconds() - before.0).abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }).unwrap();
+            (moved.time.seconds(), moved.value.x, kfs.len())
+        });
+        assert_eq!(after.2, before.2, "drag must not add/remove keys");
+        assert!(after.0 > before.0, "rightward drag moves the key later in time");
+        assert!(after.1 < before.1, "downward drag lowers the value, y-axis up");
+    }
+
+    #[gpui_kit::test]
+    fn test_graph_editor_ae_chrome(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        // Accent has animated position: open the Graph view on it.
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.select_layer(Some("layer_accent".to_string()));
+                if !s.spline_editor_open {
+                    s.toggle_spline_editor();
+                }
+                cx.notify();
+            });
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            // AE header chrome.
+            assert!(window.find("graph_tab_value").visible());
+            assert!(window.find("graph_tab_speed").visible());
+            assert!(window.find("graph_fit_view").visible());
+            assert!(window.find("graph_fit_sel").visible());
+            assert!(window.find("graph_readout").visible());
+            assert!(window.find("graph_toggle_grid").visible());
+            assert!(window.find("graph_toggle_keys").visible());
+            assert!(window.find("graph_isolate_toggle").visible());
+            // Legend + ruler + key diamonds.
+            assert!(window.find("graph_legend").visible());
+            assert!(window.find("graph_ruler").visible());
+        })
+        .expect("update_window failed");
     }
 
     #[gpui_kit::test]
