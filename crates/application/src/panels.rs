@@ -1,5 +1,9 @@
 use gpui_kit::assets::IconName;
+use gpui_kit::base::IndexPath;
+use gpui_kit::component::button::Button;
 use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::searchable_list::SearchableVec;
+use gpui_kit::component::select::{SelectEvent, SelectState};
 use gpui_kit::base::{h_flex, v_flex, ElementExt as _, Positioner, StyledExt, TestSupportExt};
 use gpui_kit::component::dock::{BasePanel, Panel, PanelEvent};
 use gpui_kit::component::ActiveTheme;
@@ -2555,29 +2559,27 @@ impl Render for CompositionViewerPanel {
         };
         let active_tool = state.active_tool;
         let s_side = self.state.clone();
-        let tool_btn = |tool: EditorTool, icon: IconName, label: &'static str, _cx: &App| {
+        // Semantic tool buttons (kit Button: focus, keyboard, tooltip and
+        // cursor contracts included; toggled marks the active tool).
+        let tool_btn = |tool: EditorTool, icon: IconName, label: &'static str, tip: &'static str, _cx: &App| {
             let is_active = active_tool == tool;
             let s_click = s_side.clone();
             div()
                 .id(SharedString::from(format!("side_tool_btn_{label}")))
                 .test_support()
-                .cursor_pointer()
-                .w(px(28.))
-                .h(px(28.))
-                .rounded_sm()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(if is_active { ae::accent() } else { ae::control() })
-                .text_color(if is_active { rgb(0xffffff) } else { ae::text() })
-                .hover(|s| if !is_active { s.bg(ae::hover()) } else { s })
-                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                    s_click.update(cx, |s, cx| {
-                        s.set_tool(tool);
-                        cx.notify();
-                    });
-                })
-                .child(icon_box(icon))
+                .child(
+                    Button::new(SharedString::from(format!("side_tool_btn_{label}_btn")))
+                        .compact()
+                        .toggled(is_active)
+                        .tooltip(tip)
+                        .child(icon_box(icon))
+                        .on_click(move |_, _, cx| {
+                            s_click.update(cx, |s, cx| {
+                                s.set_tool(tool);
+                                cx.notify();
+                            });
+                        }),
+                )
         };
 
         let s_add = self.state.clone();
@@ -2605,44 +2607,40 @@ impl Render for CompositionViewerPanel {
             .border_r_1()
             .border_color(ae::border())
             .bg(ae::panel())
-            .child(tool_btn(EditorTool::Move, IconName::Move, "move", cx))
-            .child(tool_btn(EditorTool::Hand, IconName::Hand, "hand", cx))
-            .child(tool_btn(EditorTool::Rotate, IconName::RotateCw, "rotate", cx))
-            .child(tool_btn(EditorTool::Pen, IconName::Pen, "pen", cx))
-            .child(tool_btn(EditorTool::Text, IconName::Type, "text", cx))
+            .child(tool_btn(EditorTool::Move, IconName::Move, "move", "Move Tool (V)", cx))
+            .child(tool_btn(EditorTool::Hand, IconName::Hand, "hand", "Hand Tool (H)", cx))
+            .child(tool_btn(EditorTool::Rotate, IconName::RotateCw, "rotate", "Rotate Tool (W)", cx))
+            .child(tool_btn(EditorTool::Pen, IconName::Pen, "pen", "Pen Tool (G)", cx))
+            .child(tool_btn(EditorTool::Text, IconName::Type, "text", "Text Tool (T)", cx))
             .child({
                 let p_shape = panel_entity.clone();
                 div()
                     .id(SharedString::from(format!("side_tool_btn_{shape_label}")))
                     .test_support()
-                    .cursor_pointer()
-                    .w(px(28.))
-                    .h(px(28.))
-                    .rounded_sm()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(if shape_is_active { ae::accent() } else { ae::control() })
-                    .text_color(if shape_is_active { rgb(0xffffff) } else { ae::text() })
-                    .hover(|s| if !shape_is_active { s.bg(ae::hover()) } else { s })
-                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                        p_shape.update(cx, |this, cx| {
-                            // Clicking the grouped tool selects it; clicking
-                            // again toggles rectangle/ellipse (same as `Q`).
-                            let next = match this.state.read(cx).active_tool {
-                                EditorTool::ShapeRect => EditorTool::ShapeEllipse,
-                                EditorTool::ShapeEllipse => EditorTool::ShapeRect,
-                                _ => this.shape_variant,
-                            };
-                            this.shape_variant = next;
-                            this.state.update(cx, |s, cx| {
-                                s.set_tool(next);
-                                cx.notify();
-                            });
-                            cx.notify();
-                        });
-                    })
-                    .child(icon_box(shape_icon))
+                    .child(
+                        Button::new(SharedString::from(format!("side_tool_btn_{shape_label}_btn")))
+                            .compact()
+                            .toggled(shape_is_active)
+                            .tooltip("Shape Tool (Q) — click again to toggle rectangle/ellipse")
+                            .child(icon_box(shape_icon))
+                            .on_click(move |_, _, cx| {
+                                p_shape.update(cx, |this, cx| {
+                                    // Clicking the grouped tool selects it; clicking
+                                    // again toggles rectangle/ellipse (same as `Q`).
+                                    let next = match this.state.read(cx).active_tool {
+                                        EditorTool::ShapeRect => EditorTool::ShapeEllipse,
+                                        EditorTool::ShapeEllipse => EditorTool::ShapeRect,
+                                        _ => this.shape_variant,
+                                    };
+                                    this.shape_variant = next;
+                                    this.state.update(cx, |s, cx| {
+                                        s.set_tool(next);
+                                        cx.notify();
+                                    });
+                                    cx.notify();
+                                });
+                            }),
+                    )
             })
             .child(div().w(px(20.)).h(px(1.)).bg(ae::border()).my_1())
             // Single contextual action: creates a layer of the active tool
@@ -2651,17 +2649,13 @@ impl Render for CompositionViewerPanel {
                 div()
                     .id("quick_add_center_button")
                     .test_support()
-                    .cursor_pointer()
-                    .w(px(28.))
-                    .h(px(28.))
-                    .rounded_sm()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(ae::control())
-                    .hover(|s| s.bg(ae::hover()))
-                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                        s_add.update(cx, |s, cx| {
+                    .child(
+                        Button::new("quick_add_center_btn")
+                            .compact()
+                            .tooltip("Add layer of the active tool at viewport center")
+                            .child(icon_box(IconName::Plus))
+                            .on_click(move |_, _, cx| {
+                                s_add.update(cx, |s, cx| {
                             match s.active_tool {
                                 EditorTool::Text => {
                                     let _ = s.add_text_layer("New Text", None);
@@ -2687,7 +2681,7 @@ impl Render for CompositionViewerPanel {
                             cx.notify();
                         });
                     })
-                    .child(icon_box(IconName::Plus))
+                )
             );
 
         div()
@@ -3460,8 +3454,11 @@ pub struct PropertiesPanel {
     pub trace_error: Option<String>,
     /// Armed shape-clipboard source layer for cross-layer Shape→Mask.
     pub shape_clipboard: Option<String>,
-    /// Open enum dropdown (`effect_id:param`) in applied effects.
-    pub prop_dropdown: Option<String>,
+    /// Retained Select states per ShaderLab enum param
+    /// (`effect_id`, `param`, selected index).
+    pub select_states: HashMap<(String, String, usize), Entity<SelectState<SearchableVec<String>>>>,
+    /// Confirm subscriptions for the retained Select states.
+    pub select_subs: HashMap<(String, String, usize), Subscription>,
     /// Linked vector widgets (`effect_id:param` present = linked).
     pub vec_link: HashSet<String>,
     /// Selected gradient-editor stop per effect id.
@@ -3512,11 +3509,9 @@ pub struct MaskRenameView {
 }
 
 /// Render snapshot for the automatic effect widgets (the panel is
-/// borrowed by render, so dropdown/link/stop state crosses by clone).
+/// borrowed by render, so link/stop state crosses by clone).
 #[derive(Clone, Default)]
 pub struct PropUi {
-    /// Open enum dropdown (`effect_id:param`).
-    pub dropdown_open: Option<String>,
     /// Linked vector widgets (`effect_id:param` present = linked).
     pub vec_link: HashSet<String>,
     /// Selected gradient-editor stop per effect id.
@@ -3563,7 +3558,8 @@ impl PropertiesPanel {
             trace_opts: project::AutoTraceOptions::default(),
             trace_error: None,
             shape_clipboard: None,
-            prop_dropdown: None,
+            select_states: HashMap::new(),
+            select_subs: HashMap::new(),
             vec_link: HashSet::new(),
             gradient_stop: HashMap::new(),
         }
@@ -5870,6 +5866,7 @@ fn render_applied_effects(
     shader_editor: Option<Entity<TextareaState>>,
     wheels: &HashMap<(String, String), Entity<InspectorColorPicker>>,
     ui: &PropUi,
+    selects: &HashMap<(String, String), Entity<SelectState<SearchableVec<String>>>>,
     cx: &App,
 ) -> AnyElement {    if layer.effects.is_empty() {
         div()
@@ -6358,10 +6355,11 @@ fn render_applied_effects(
                                     &plabel,
                                     on,
                                     format!("shader_bool_{eff_key}_{pname}"),
-                                    move |cx: &mut App| {
+                                    &format!("Toggle {plabel}"),
+                                    move |next: bool, cx: &mut App| {
                                         let (eid, pn) = (eid.clone(), pn.clone());
                                         s_t.update(cx, |s, cx| {
-                                            let _ = s.set_shaderlab_param(&eid, &pn, if on { 0.0 } else { 1.0 });
+                                            let _ = s.set_shaderlab_param(&eid, &pn, if next { 1.0 } else { 0.0 });
                                             cx.notify();
                                         });
                                     },
@@ -6369,25 +6367,11 @@ fn render_applied_effects(
                                 ));
                             }
                             project::widget::WidgetKind::Dropdown => {
-                                let (options, idx) = match &param.param_type {
-                                    project::shader::ShaderParamType::Enum { options } => {
-                                        let idx = match resolved.get(pname.as_str()) {
-                                            Some(ShaderParamValue::Int(v)) => (*v).clamp(0, options.len().saturating_sub(1) as i32) as usize,
-                                            _ => 0,
-                                        };
-                                        (options.clone(), idx)
-                                    }
-                                    _ => (Vec::new(), 0),
-                                };
                                 effect_box = effect_box.child(crate::widgets::widget_dropdown(
-                                    state,
-                                    panel_entity,
                                     &eff_key,
                                     &pname,
                                     &plabel,
-                                    &options,
-                                    idx,
-                                    ui.dropdown_open.as_deref() == Some(&format!("{eff_key}:{pname}")),
+                                    selects.get(&(eff_key.clone(), pname.clone())),
                                     cx,
                                 ));
                             }
@@ -7159,6 +7143,95 @@ impl Render for PropertiesPanel {
             fx_wheels.insert((eid, field.to_string()), picker);
         }
 
+        // Enum Select states, one per ShaderLab enum param on the selected
+        // layer (kit Select: keyboard nav, search, dismissal and a11y come
+        // free). Keyed by (effect, param, index) so external changes (undo)
+        // resync by construction; Confirm commits through the shader
+        // setter. States + subscriptions live on the panel — never rebuilt
+        // in render — with stale keys pruned every frame.
+        let fx_enum_targets: Vec<(String, String, Vec<String>, usize)> = {
+            let s = self.state.read(cx);
+            match s
+                .active_composition()
+                .zip(s.selected_layer_id.clone())
+                .and_then(|(c, lid)| c.get_layer(&lid))
+            {
+                Some(layer) => layer
+                    .effects
+                    .iter()
+                    .flat_map(|e| {
+                        let eid = e.id.clone();
+                        match &e.effect_type {
+                            EffectType::ShaderLab { params, values, .. } => params
+                                .iter()
+                                .filter_map(|p| {
+                                    let project::shader::ShaderParamType::Enum { options } =
+                                        &p.param_type
+                                    else {
+                                        return None;
+                                    };
+                                    let idx = match values.get(&p.name) {
+                                        Some(project::ShaderParamValue::Int(v)) => (*v).clamp(
+                                            0,
+                                            options.len().saturating_sub(1) as i32,
+                                        )
+                                            as usize,
+                                        _ => 0,
+                                    };
+                                    Some((eid.clone(), p.name.clone(), options.clone(), idx))
+                                })
+                                .collect::<Vec<_>>(),
+                            _ => Vec::new(),
+                        }
+                    })
+                    .collect(),
+                None => Vec::new(),
+            }
+        };
+        let mut fx_selects: HashMap<
+            (String, String),
+            Entity<SelectState<SearchableVec<String>>>,
+        > = HashMap::new();
+        {
+            let live: HashSet<(String, String, usize)> = fx_enum_targets
+                .iter()
+                .map(|(e, p, _, i)| (e.clone(), p.clone(), *i))
+                .collect();
+            self.select_states.retain(|k, _| live.contains(k));
+            self.select_subs.retain(|k, _| live.contains(k));
+            for (eid, pname, options, idx) in &fx_enum_targets {
+                let key = (eid.clone(), pname.clone(), *idx);
+                if !self.select_states.contains_key(&key) {
+                    let delegate = SearchableVec::new(options.clone());
+                    let st = cx.new(|cx| {
+                        SelectState::new(delegate, Some(IndexPath::new(*idx)), window, cx)
+                    });
+                    let editor = self.state.clone();
+                    let (eid_s, pname_s, opts_s) =
+                        (eid.clone(), pname.clone(), options.clone());
+                    let sub = cx.subscribe(
+                        &st,
+                        move |_, _, event: &SelectEvent<SearchableVec<String>>, cx| {
+                            let SelectEvent::Confirm(value) = event;
+                            let Some(v) = value else {
+                                return;
+                            };
+                            let i = opts_s.iter().position(|o| o == v).unwrap_or(0) as f32;
+                            editor.update(cx, |state, cx| {
+                                let _ = state.set_shaderlab_param(&eid_s, &pname_s, i);
+                                cx.notify();
+                            });
+                        },
+                    );
+                    self.select_states.insert(key.clone(), st);
+                    self.select_subs.insert(key, sub);
+                }
+                if let Some(st) = self.select_states.get(&(eid.clone(), pname.clone(), *idx)) {
+                    fx_selects.insert((eid.clone(), pname.clone()), st.clone());
+                }
+            }
+        }
+
         let state = self.state.read(cx);
         let selected_layer = state.selected_layer();
 
@@ -7381,10 +7454,10 @@ impl Render for PropertiesPanel {
                             self.shader_editor.clone(),
                             &fx_wheels,
                             &PropUi {
-                                dropdown_open: self.prop_dropdown.clone(),
                                 vec_link: self.vec_link.clone(),
                                 gradient_stop: self.gradient_stop.clone(),
                             },
+                            &fx_selects,
                             cx,
                         );
 
@@ -9856,9 +9929,97 @@ pub struct GraphViewRect {
     pub v1: f32,
 }
 
+/// Graph legend series row as a value-like component (guide:
+/// RenderOnce when all inputs come from the caller and no state is
+/// retained between frames). Eye, focus, live value and key toggle.
+#[derive(IntoElement)]
+struct GraphLegendRow {
+    state: Entity<EditorState>,
+    panel: Entity<TimelinePanel>,
+    layer_id: String,
+    path: String,
+    label: String,
+    color: Rgba,
+    value_text: String,
+    veiled: bool,
+    focused: bool,
+    key_here: bool,
+}
+
+impl RenderOnce for GraphLegendRow {
+    fn render(self, _: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let s_focus = self.state.clone();
+        let s_key = self.state.clone();
+        let p_eye = self.panel.clone();
+        let path_c = self.path.clone();
+        let path_k = self.path.clone();
+        let lid_k = self.layer_id.clone();
+        let eye_key = format!("{}:{}", self.layer_id, self.path);
+        h_flex()
+            .pl_5()
+            .pr_1()
+            .py_0p5()
+            .gap_1p5()
+            .items_center()
+            .rounded_sm()
+            .bg(if self.focused { ae::control() } else { rgb(0x00000000) })
+            .child(
+                div()
+                    .cursor_pointer()
+                    .text_color(if self.veiled { ae::dim() } else { ae::text() })
+                    .text_xs()
+                    .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                        p_eye.update(cx, |this, cx| {
+                            this.toggle_graph_series(&eye_key);
+                            cx.notify();
+                        });
+                    })
+                    .child(if self.veiled { "○" } else { "◉" }),
+            )
+            .child(div().w(px(8.)).h(px(2.)).rounded_sm().bg(self.color))
+            .child(
+                div()
+                    .cursor_pointer()
+                    .flex_1()
+                    .truncate()
+                    .text_xs()
+                    .text_color(if self.veiled { ae::dim() } else { ae::text() })
+                    .hover(|s| s.text_color(rgb(0xffffff)))
+                    .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                        let p = path_c.clone();
+                        s_focus.update(cx, |s, cx| {
+                            s.set_spline_prop_path(&p);
+                            cx.notify();
+                        });
+                    })
+                    .child(self.label),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .font_medium()
+                    .text_color(self.color)
+                    .child(self.value_text),
+            )
+            .child(
+                div()
+                    .cursor_pointer()
+                    .text_xs()
+                    .text_color(if self.key_here { ae::amber() } else { ae::dim() })
+                    .hover(|s| s.text_color(rgb(0xffffff)))
+                    .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                        s_key.update(cx, |s, cx| {
+                            s.toggle_layer_keyframe_at_current_time(&lid_k, &path_k);
+                            cx.notify();
+                        });
+                    })
+                    .child(if self.key_here { "◆" } else { "◇" }),
+            )
+    }
+}
+
 /// Display unit for a graph path (AE value readouts).
-fn graph_unit(path: &str) -> &'static str {
-    let base = match path.rsplit_once('.') {
+fn graph_unit(path: &str) -> &'static str {    let base = match path.rsplit_once('.') {
         Some((b, c)) if c == "x" || c == "y" => b,
         _ => path,
     };
@@ -10282,76 +10443,19 @@ fn render_graph_view(
                     .unwrap_or(0.0);
                 let unit = graph_unit(&se.path);
                 let kf_here = se.keys.iter().any(|k| (k.t - current_time).abs() <= half_frame);
-                let s_focus = state.clone();
-                let s_key = state.clone();
-                let p_eye = panel_entity.clone();
-                let path_c = se.path.clone();
-                let path_k = se.path.clone();
-                let lid_k = llid.clone();
-                let eye_key = key.clone();
                 let scol = Rgba { r: se.color.0, g: se.color.1, b: se.color.2, a: 1.0 };
-                block = block.child(
-                    h_flex()
-                        .pl_5()
-                        .pr_1()
-                        .py_0p5()
-                        .gap_1p5()
-                        .items_center()
-                        .rounded_sm()
-                        .bg(if focused_here { ae::control() } else { rgb(0x00000000) })
-                        .child(
-                            div()
-                                .cursor_pointer()
-                                .text_color(if veiled { ae::dim() } else { ae::text() })
-                                .text_xs()
-                                .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
-                                    p_eye.update(cx, |this, cx| {
-                                        this.toggle_graph_series(&eye_key);
-                                        cx.notify();
-                                    });
-                                })
-                                .child(if veiled { "○" } else { "◉" }),
-                        )
-                        .child(div().w(px(8.)).h(px(2.)).rounded_sm().bg(scol))
-                        .child(
-                            div()
-                                .cursor_pointer()
-                                .flex_1()
-                                .truncate()
-                                .text_xs()
-                                .text_color(if veiled { ae::dim() } else { ae::text() })
-                                .hover(|s| s.text_color(rgb(0xffffff)))
-                                .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
-                                    let p = path_c.clone();
-                                    s_focus.update(cx, |s, cx| {
-                                        s.set_spline_prop_path(&p);
-                                        cx.notify();
-                                    });
-                                })
-                                .child(se.label.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .font_medium()
-                                .text_color(scol)
-                                .child(format!("{v_now:.1} {unit}")),
-                        )
-                        .child(
-                            div()
-                                .cursor_pointer()
-                                .text_xs()
-                                .text_color(if kf_here { ae::amber() } else { ae::dim() })
-                                .hover(|s| s.text_color(rgb(0xffffff)))
-                                .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
-                                    s_key.update(cx, |s, cx| {
-                                        s.toggle_layer_keyframe_at_current_time(&lid_k, &path_k);
-                                        cx.notify();
-                                    });
-                                })
-                                .child(if kf_here { "◆" } else { "◇" }),
-                        ),
-                );
+                block = block.child(GraphLegendRow {
+                    state: state.clone(),
+                    panel: panel_entity.clone(),
+                    layer_id: llid.clone(),
+                    path: se.path.clone(),
+                    label: se.label.clone(),
+                    color: scol,
+                    value_text: format!("{v_now:.1} {unit}"),
+                    veiled,
+                    focused: focused_here,
+                    key_here: kf_here,
+                });
             }
             col = col.child(block);
         }
@@ -12675,108 +12779,97 @@ impl Render for TimelinePanel {
                                 div()
                                     .id("transport_start")
                                     .test_support()
-                                    .px_2()
-                                    .py_0p5()
-                                    .rounded_sm()
-                                    .bg(cx.theme().muted)
-                                    .hover(|s| s.bg(cx.theme().accent))
-                                    .cursor_pointer()
-                                    .text_xs()
-                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                        s_start.update(cx, |s, cx| {
-                                            s.jump_to_start();
-                                            cx.notify();
-                                        });
-                                    })
-                                    .child(icon_box(IconName::SkipBack)),
+                                    .child(
+                                        Button::new("transport_start_btn")
+                                            .compact()
+                                            .tooltip("Go to Start (Home)")
+                                            .child(icon_box(IconName::SkipBack))
+                                            .on_click(move |_, _, cx| {
+                                                s_start.update(cx, |s, cx| {
+                                                    s.jump_to_start();
+                                                    cx.notify();
+                                                });
+                                            }),
+                                    ),
                             )
                             .child(
                                 div()
                                     .id("transport_prev")
                                     .test_support()
-                                    .px_2()
-                                    .py_0p5()
-                                    .rounded_sm()
-                                    .bg(cx.theme().muted)
-                                    .hover(|s| s.bg(cx.theme().accent))
-                                    .cursor_pointer()
-                                    .text_xs()
-                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                        s_step_prev.update(cx, |s, cx| {
-                                            s.step_backward();
-                                            cx.notify();
-                                        });
-                                    })
-                                    .child(icon_box(IconName::StepBack)),
+                                    .child(
+                                        Button::new("transport_prev_btn")
+                                            .compact()
+                                            .tooltip("Previous Frame (Left)")
+                                            .child(icon_box(IconName::StepBack))
+                                            .on_click(move |_, _, cx| {
+                                                s_step_prev.update(cx, |s, cx| {
+                                                    s.step_backward();
+                                                    cx.notify();
+                                                });
+                                            }),
+                                    ),
                             )
                             .child(
                                 div()
                                     .id("transport_play")
                                     .test_support()
-                                    .px_3()
-                                    .py_0p5()
-                                    .rounded_sm()
-                                    .bg(ae::accent())
-                                    .hover(|s| s.opacity(0.9))
-                                    .cursor_pointer()
-                                    .text_color(rgb(0xffffff))
-                                    .text_xs()
-                                    .font_bold()
-                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                        s_play.update(cx, |s, cx| {
-                                            s.toggle_playback();
-                                            cx.notify();
-                                        });
-                                    })
                                     .child(
-                                        h_flex()
-                                            .gap_1()
-                                            .items_center()
-                                            .child(icon_box(if is_playing {
-                                                IconName::Pause
-                                            } else {
-                                                IconName::Play
-                                            }))
-                                            .child(if is_playing { "Pause" } else { "Play" }),
+                                        Button::new("transport_play_btn")
+                                            .compact()
+                                            .toggled(is_playing)
+                                            .tooltip("Play / Pause (Space)")
+                                            .child(
+                                                h_flex()
+                                                    .gap_1()
+                                                    .items_center()
+                                                    .child(icon_box(if is_playing {
+                                                        IconName::Pause
+                                                    } else {
+                                                        IconName::Play
+                                                    }))
+                                                    .child(if is_playing { "Pause" } else { "Play" }),
+                                            )
+                                            .on_click(move |_, _, cx| {
+                                                s_play.update(cx, |s, cx| {
+                                                    s.toggle_playback();
+                                                    cx.notify();
+                                                });
+                                            }),
                                     ),
                             )
                             .child(
                                 div()
                                     .id("transport_next")
                                     .test_support()
-                                    .px_2()
-                                    .py_0p5()
-                                    .rounded_sm()
-                                    .bg(cx.theme().muted)
-                                    .hover(|s| s.bg(cx.theme().accent))
-                                    .cursor_pointer()
-                                    .text_xs()
-                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                        s_step_next.update(cx, |s, cx| {
-                                            s.step_forward();
-                                            cx.notify();
-                                        });
-                                    })
-                                    .child(icon_box(IconName::StepForward)),
+                                    .child(
+                                        Button::new("transport_next_btn")
+                                            .compact()
+                                            .tooltip("Next Frame (Right)")
+                                            .child(icon_box(IconName::StepForward))
+                                            .on_click(move |_, _, cx| {
+                                                s_step_next.update(cx, |s, cx| {
+                                                    s.step_forward();
+                                                    cx.notify();
+                                                });
+                                            }),
+                                    ),
                             )
                             .child(
                                 div()
                                     .id("transport_end")
                                     .test_support()
-                                    .px_2()
-                                    .py_0p5()
-                                    .rounded_sm()
-                                    .bg(cx.theme().muted)
-                                    .hover(|s| s.bg(cx.theme().accent))
-                                    .cursor_pointer()
-                                    .text_xs()
-                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                        s_end.update(cx, |s, cx| {
-                                            s.jump_to_end();
-                                            cx.notify();
-                                        });
-                                    })
-                                    .child(icon_box(IconName::SkipForward)),
+                                    .child(
+                                        Button::new("transport_end_btn")
+                                            .compact()
+                                            .tooltip("Go to End (End)")
+                                            .child(icon_box(IconName::SkipForward))
+                                            .on_click(move |_, _, cx| {
+                                                s_end.update(cx, |s, cx| {
+                                                    s.jump_to_end();
+                                                    cx.notify();
+                                                });
+                                            }),
+                                    ),
                             )
                             .child(
                                 h_flex()

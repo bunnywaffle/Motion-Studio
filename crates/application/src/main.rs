@@ -19,7 +19,19 @@ pub use panels::{
     PropertiesPanel, TimelinePanel,
 };
 
-actions!(workspace, [TogglePlayback]);
+actions!(
+    workspace,
+    [
+        TogglePlayback,
+        SelectMoveTool,
+        SelectHandTool,
+        SelectRotateTool,
+        SelectPenTool,
+        SelectTextTool,
+        CycleShapeTool,
+        FitGraphView
+    ]
+);
 
 pub struct AppView {
     state: Entity<EditorState>,
@@ -56,6 +68,17 @@ impl AppView {
 
         // Bind spacebar key to TogglePlayback
         cx.bind_keys([KeyBinding::new("space", TogglePlayback, None)]);
+        // One desktop command per tool (toolbar clicks dispatch the same
+        // actions — see the root view's on_action handlers).
+        cx.bind_keys([
+            KeyBinding::new("v", SelectMoveTool, None),
+            KeyBinding::new("h", SelectHandTool, None),
+            KeyBinding::new("w", SelectRotateTool, None),
+            KeyBinding::new("g", SelectPenTool, None),
+            KeyBinding::new("t", SelectTextTool, None),
+            KeyBinding::new("q", CycleShapeTool, None),
+            KeyBinding::new("f", FitGraphView, None),
+        ]);
 
         // Setup background 60Hz playback loop
         let loop_state = state.clone();
@@ -1806,6 +1829,73 @@ impl Render for AppView {
                     });
                 }
             })
+            .on_action({
+                let state = self.state.clone();
+                move |_: &SelectMoveTool, _window, cx| {
+                    state.update(cx, |s, cx| {
+                        s.set_tool(state::EditorTool::Move);
+                        cx.notify();
+                    });
+                }
+            })
+            .on_action({
+                let state = self.state.clone();
+                move |_: &SelectHandTool, _window, cx| {
+                    state.update(cx, |s, cx| {
+                        s.set_tool(state::EditorTool::Hand);
+                        cx.notify();
+                    });
+                }
+            })
+            .on_action({
+                let state = self.state.clone();
+                move |_: &SelectRotateTool, _window, cx| {
+                    state.update(cx, |s, cx| {
+                        s.set_tool(state::EditorTool::Rotate);
+                        cx.notify();
+                    });
+                }
+            })
+            .on_action({
+                let state = self.state.clone();
+                move |_: &SelectPenTool, _window, cx| {
+                    state.update(cx, |s, cx| {
+                        s.set_tool(state::EditorTool::Pen);
+                        cx.notify();
+                    });
+                }
+            })
+            .on_action({
+                let state = self.state.clone();
+                move |_: &SelectTextTool, _window, cx| {
+                    state.update(cx, |s, cx| {
+                        s.set_tool(state::EditorTool::Text);
+                        cx.notify();
+                    });
+                }
+            })
+            .on_action({
+                let state = self.state.clone();
+                move |_: &CycleShapeTool, _window, cx| {
+                    state.update(cx, |s, cx| {
+                        s.cycle_shape_tool();
+                        cx.notify();
+                    });
+                }
+            })
+            .on_action({
+                let panels = self.panels.clone();
+                let state = self.state.clone();
+                move |_: &FitGraphView, _window, cx| {
+                    if !state.read(cx).spline_editor_open {
+                        return;
+                    }
+                    panels.timeline.update(cx, |this, cx| {
+                        this.reset_graph_view();
+                        cx.notify();
+                    });
+                }
+            })
             .on_key_down(move |event, _window, cx| {
                 let mods = event.keystroke.modifiers;
                 let ctrl = mods.control || mods.platform;
@@ -1882,36 +1972,6 @@ impl Render for AppView {
                 } else if key == "right" || key == "arrowright" {
                     state_key.update(cx, |s, cx| {
                         s.step_forward();
-                        cx.notify();
-                    });
-                } else if key == "v" {
-                    state_key.update(cx, |s, cx| {
-                        s.set_tool(state::EditorTool::Move);
-                        cx.notify();
-                    });
-                } else if key == "h" {
-                    state_key.update(cx, |s, cx| {
-                        s.set_tool(state::EditorTool::Hand);
-                        cx.notify();
-                    });
-                } else if key == "w" {
-                    state_key.update(cx, |s, cx| {
-                        s.set_tool(state::EditorTool::Rotate);
-                        cx.notify();
-                    });
-                } else if key == "g" {
-                    state_key.update(cx, |s, cx| {
-                        s.set_tool(state::EditorTool::Pen);
-                        cx.notify();
-                    });
-                } else if key == "t" {
-                    state_key.update(cx, |s, cx| {
-                        s.set_tool(state::EditorTool::Text);
-                        cx.notify();
-                    });
-                } else if key == "q" {
-                    state_key.update(cx, |s, cx| {
-                        s.cycle_shape_tool();
                         cx.notify();
                     });
                 } else if key == "[" {
@@ -3820,6 +3880,69 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn test_kit_components_drive_commands(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        // Keyboard action selects the Pen tool (same command as clicking).
+        cx.update_window(handle.into(), |_, window, cx| {
+            let focus_handle = app_view.read(cx).focus_handle().clone();
+            window.focus(&focus_handle, cx);
+            window.render_frame(cx);
+            window.press("g", cx);
+        })
+        .expect("update_window failed");
+        assert_eq!(
+            app_view.read_with(cx, |view, cx| view.state().read(cx).active_tool),
+            crate::state::EditorTool::Pen
+        );
+        // Side-strip Text button (kit Button) selects Text.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("side_tool_btn_text").visible());
+            window.click("side_tool_btn_text", cx);
+        })
+        .expect("update_window failed");
+        assert_eq!(
+            app_view.read_with(cx, |view, cx| view.state().read(cx).active_tool),
+            crate::state::EditorTool::Text
+        );
+        // Kit Checkbox toggles the boolean param.
+        let noise = app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, _| {
+                s.select_layer(Some("layer_accent".to_string()));
+                s.add_effect_to_selected_layer(project::EffectType::noise_generator(50.0, false))
+                    .unwrap()
+            })
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let id = SharedString::from(format!("fx_bool_monochrome_{noise}"));
+            assert!(window.find(id.clone()).visible());
+            window.click(id, cx);
+        })
+        .expect("update_window failed");
+        assert!(app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            let comp = s.active_composition().unwrap();
+            let layer = comp.get_layer("layer_accent").unwrap();
+            let eff = layer.get_effect(&noise).unwrap();
+            matches!(
+                &eff.effect_type,
+                project::EffectType::NoiseGenerator { monochrome: true, .. }
+            )
+        }));
+    }
+
+    #[gpui_kit::test]
     fn test_graph_editor_ae_chrome(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let mut app_view_entity = None;
@@ -3933,20 +4056,15 @@ mod tests {
             // Vec widget: link pill + per-component rows.
             assert!(window.find(SharedString::from(format!("vec_link_{eff}_offset"))).visible());
             assert!(window.find(SharedString::from(format!("shader_param_{eff}_offset_0"))).visible());
-            // Dropdown: closed pill first, options after opening.
-            let closed = SharedString::from(format!("shader_enum_{eff}_mode"));
-            assert!(window.find(closed.clone()).visible());
-            window.click(closed.clone(), cx);
-            let opt = SharedString::from(format!("shader_enum_opt_{eff}_mode_2"));
-            assert!(window.find(opt.clone()).visible());
-            window.click(opt, cx);
+            // Kit Select: click the trigger, arrow to Glow, confirm.
+            let trigger = SharedString::from(format!("shader_enum_{eff}_mode"));
+            assert!(window.find(trigger.clone()).visible());
+            window.click(trigger, cx);
+            window.press("down", cx);
+            window.press("down", cx);
+            window.press("enter", cx);
         })
         .expect("update_window failed");
-        // Dropdown must have closed (proves the pick handler ran).
-        let dd = app_view.read_with(cx, |view, cx| {
-            view.panels().properties.read_with(cx, |p, _| p.prop_dropdown.clone())
-        });
-        assert_eq!(dd, None);
         // Pick committed Glow (index 2).
         app_view.read_with(cx, |view, cx| {
             let s = view.state().read(cx);

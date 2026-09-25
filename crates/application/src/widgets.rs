@@ -14,8 +14,11 @@
 
 use crate::panels::{self, InspectorColorPicker, PropertiesPanel};
 use crate::state::EditorState;
-use gpui_kit::base::{h_flex, v_flex, StyledExt, TestSupportExt};
+use gpui_kit::base::{h_flex, v_flex, TestSupportExt};
 use gpui_kit::component::ActiveTheme;
+use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::searchable_list::SearchableVec;
+use gpui_kit::component::select::{Select, SelectState};
 use gpui_kit::*;
 use project::{Color, PropDecl};
 use std::collections::HashMap;
@@ -124,16 +127,18 @@ pub(crate) fn widget_scalar(
         .into_any_element()
 }
 
-/// Boolean checkbox (AE-style box + label). Commits through `on_toggle`.
+/// Boolean checkbox: kit semantic Checkbox (checked state, tooltip,
+/// keyboard + accessibility contract included). Commits through `on_toggle`.
 pub(crate) fn widget_bool<F>(
     label: &str,
     on: bool,
     test_id: String,
+    tooltip: &str,
     on_toggle: F,
     cx: &App,
 ) -> AnyElement
 where
-    F: Fn(&mut App) + 'static,
+    F: Fn(bool, &mut App) + 'static,
 {
     h_flex()
         .items_center()
@@ -142,128 +147,54 @@ where
         .py_0p5()
         .child(div().text_color(cx.theme().muted_foreground).child(label.to_string()))
         .child(
-            h_flex()
-                .gap_1p5()
-                .items_center()
+            div()
+                .id(SharedString::from(test_id.clone()))
+                .test_support()
                 .child(
-                    div()
-                        .id(SharedString::from(test_id))
-                        .test_support()
-                        .cursor_pointer()
-                        .w(px(14.))
-                        .h(px(14.))
-                        .rounded_sm()
-                        .border_1()
-                        .border_color(if on { cx.theme().primary } else { cx.theme().border })
-                        .bg(if on { cx.theme().primary } else { cx.theme().muted })
-                        .text_color(cx.theme().primary_foreground)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_xs()
-                        .font_bold()
-                        .hover(|s| s.opacity(0.85))
-                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                            on_toggle(cx);
-                        })
-                        .child(if on { "✓" } else { "" }),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(if on { "On" } else { "Off" }),
+                    Checkbox::new(SharedString::from(format!("{test_id}_box")))
+                        .checked(on)
+                        .label(if on { "On" } else { "Off" })
+                        .tooltip(tooltip.to_string())
+                        .on_click(move |checked: &bool, _window, cx| {
+                            on_toggle(*checked, cx);
+                        }),
                 ),
         )
         .into_any_element()
 }
 
-/// Enum dropdown: closed pill plus an expanding option list (AE parity).
-/// Commits Shader Lab enum params by index.
-#[allow(clippy::too_many_arguments)]
+/// Enum dropdown: kit Select (keyboard nav, search, dismissal and a11y
+/// included). The retained state entity is provisioned by the Properties
+/// panel; Confirm commits through the shader setter.
 pub(crate) fn widget_dropdown(
-    state: &Entity<EditorState>,
-    panel: &Entity<PropertiesPanel>,
     eff_id: &str,
     field: &str,
     label: &str,
-    options: &[String],
-    index: usize,
-    open: bool,
+    select: Option<&Entity<SelectState<SearchableVec<String>>>>,
     cx: &App,
 ) -> AnyElement {
-    let open_key = format!("{eff_id}:{field}");
-    let s_t = state.clone();
-    let p_t = panel.clone();
-    let open_key_t = open_key.clone();
-    let cur_label = options.get(index).cloned().unwrap_or_else(|| format!("{index}"));
-    let mut col = v_flex().gap_0p5();
-    col = col.child(
-        h_flex()
-            .items_center()
-            .justify_between()
-            .text_xs()
-            .child(div().text_color(cx.theme().muted_foreground).child(label.to_string()))
-            .child(
-                div()
-                    .id(SharedString::from(format!("shader_enum_{eff_id}_{field}")))
-                    .test_support()
-                    .cursor_pointer()
-                    .px_2()
-                    .py_0p5()
-                    .rounded_sm()
-                    .bg(cx.theme().muted)
-                    .text_color(cx.theme().foreground)
-                    .hover(|s| s.bg(cx.theme().accent))
-                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                        p_t.update(cx, |this, cx| {
-                            this.prop_dropdown = if open { None } else { Some(open_key_t.clone()) };
-                            cx.notify();
-                        });
-                        let _ = &s_t;
-                    })
-                    .child(format!("◂ {cur_label} ▸")),
-            ),
-    );
-    if open {
-        for (i, opt) in options.iter().enumerate() {
-            let s_p = state.clone();
-            let p_p = panel.clone();
-            let eid = eff_id.to_string();
-            let fld = field.to_string();
-            col = col.child(
-                div()
-                    .id(SharedString::from(format!("shader_enum_opt_{eff_id}_{field}_{i}")))
-                    .test_support()
-                    .cursor_pointer()
-                    .px_2()
-                    .py_0p5()
-                    .ml_6()
-                    .rounded_sm()
-                    .text_xs()
-                    .bg(if i == index { cx.theme().primary } else { cx.theme().muted })
-                    .text_color(if i == index {
-                        cx.theme().primary_foreground
-                    } else {
-                        cx.theme().foreground
-                    })
-                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                        let v = i as f32;
-                        s_p.update(cx, |s, cx| {
-                            let _ = s.set_shaderlab_param(&eid, &fld, v);
-                            cx.notify();
-                        });
-                        p_p.update(cx, |this, cx| {
-                            this.prop_dropdown = None;
-                            cx.notify();
-                        });
-                    })
-                    .child(opt.clone()),
-            );
-        }
-    }
-    col.into_any_element()
+    h_flex()
+        .items_center()
+        .justify_between()
+        .text_xs()
+        .child(div().text_color(cx.theme().muted_foreground).child(label.to_string()))
+        .child(match select {
+            Some(st) => div()
+                .id(SharedString::from(format!("shader_enum_{eff_id}_{field}")))
+                .test_support()
+                .child(
+                    Select::new(st)
+                        .accessibility_label(format!("{label} values"))
+                        .placeholder(label.to_string()),
+                )
+                .into_any_element(),
+            None => div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child("—")
+                .into_any_element(),
+        })
+        .into_any_element()
 }
 
 /// Vector row (Vec2/Vec3/Vec4): per-component scrub rows with X/Y/Z/W tags
@@ -624,7 +555,8 @@ pub(crate) fn widget_for_decl(
                     &decl.label,
                     on,
                     format!("fx_bool_{}_{}", decl.field, eff_id),
-                    move |cx: &mut App| {
+                    &format!("Toggle {}", decl.label),
+                    move |_on: bool, cx: &mut App| {
                         let (eid, fld) = (eid.clone(), fld.clone());
                         s_t.update(cx, |s, cx| {
                             // Classic bool params toggle through their own
