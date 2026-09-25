@@ -8034,86 +8034,232 @@ impl Render for PropertiesPanel {
             }
         }
 
-        // Retain and sync Combobox states for Font Family and Font Style
+        // Retain and sync Combobox states for Font Family, Font Style, Blend Mode, Track Matte, Parent Layer
         {
-            let (is_text, cur_fam, cur_w) = {
+            let selected_info = {
                 let st = self.state.read(cx);
-                match st.selected_layer().map(|l| &l.source) {
-                    Some(LayerSource::Text { font_family, weight, .. }) => (true, font_family.clone(), *weight),
-                    _ => (false, "Inter".to_string(), 400u16),
-                }
+                st.selected_layer().map(|l| {
+                    (
+                        l.id.clone(),
+                        l.blend_mode,
+                        l.matte_mode,
+                        l.parent_id.clone(),
+                        match &l.source {
+                            LayerSource::Text { font_family, weight, .. } => Some((font_family.clone(), *weight)),
+                            _ => None,
+                        },
+                    )
+                })
             };
-            if is_text {
-                if !self.combobox_states.contains_key("text_font_family") {
-                    let sys_fonts = EditorState::available_system_fonts().to_vec();
-                    let sel_idx = sys_fonts.iter().position(|f| f == &cur_fam).unwrap_or(0);
-                    let delegate = SearchableVec::new(sys_fonts);
-                    let cb = cx.new(|cx| {
-                        ComboboxState::new(delegate, vec![IndexPath::new(sel_idx)], window, cx)
-                    });
-                    let s_f = self.state.clone();
-                    let sub = cx.subscribe(&cb, move |_, _, event: &ComboboxEvent<SearchableVec<String>>, cx| {
-                        let vals = match event {
-                            ComboboxEvent::Confirm(v) => v,
-                            ComboboxEvent::Change(v) => v,
-                        };
-                        if let Some(font_name) = vals.first() {
-                            s_f.update(cx, |s, cx| {
-                                if let Some(lid) = s.selected_layer_id.clone() {
-                                    let _ = s.set_layer_font_family(&lid, font_name);
+
+            if let Some((sel_lid, cur_bm, cur_matte, cur_parent, text_info)) = selected_info {
+                if let Some((cur_fam, cur_w)) = text_info {
+                    let font_key = format!("text_font_family_{sel_lid}");
+                    if !self.combobox_states.contains_key(&font_key) {
+                        let sys_fonts = EditorState::available_system_fonts().to_vec();
+                        let sel_idx = sys_fonts.iter().position(|f| f == &cur_fam).unwrap_or(0);
+                        let delegate = SearchableVec::new(sys_fonts);
+                        let cb = cx.new(|cx| {
+                            ComboboxState::new(delegate, vec![IndexPath::new(sel_idx)], window, cx)
+                        });
+                        let s_f = self.state.clone();
+                        let lid_c = sel_lid.clone();
+                        let sub = cx.subscribe(&cb, move |_, _, event: &ComboboxEvent<SearchableVec<String>>, cx| {
+                            let vals = match event {
+                                ComboboxEvent::Confirm(v) => v,
+                                ComboboxEvent::Change(v) => v,
+                            };
+                            if let Some(font_name) = vals.first() {
+                                s_f.update(cx, |s, cx| {
+                                    let _ = s.set_layer_font_family(&lid_c, font_name);
                                     cx.notify();
-                                }
-                            });
-                        }
-                    });
-                    self.combobox_states.insert("text_font_family".to_string(), cb);
-                    self.combobox_subs.insert("text_font_family".to_string(), sub);
+                                });
+                            }
+                        });
+                        self.combobox_states.insert(font_key.clone(), cb.clone());
+                        self.combobox_subs.insert(font_key, sub);
+                        self.combobox_states.insert("text_font_family".to_string(), cb);
+                    }
+
+                    let style_key = format!("text_font_style_{sel_lid}");
+                    if !self.combobox_states.contains_key(&style_key) {
+                        let style_options = vec![
+                            "Regular".to_string(),
+                            "Medium".to_string(),
+                            "SemiBold".to_string(),
+                            "Bold".to_string(),
+                            "Black".to_string(),
+                        ];
+                        let sel_style_idx = match cur_w {
+                            w if w < 450 => 0,
+                            w if w < 550 => 1,
+                            w if w < 650 => 2,
+                            w if w < 800 => 3,
+                            _ => 4,
+                        };
+                        let delegate = SearchableVec::new(style_options);
+                        let cb = cx.new(|cx| {
+                            ComboboxState::new(delegate, vec![IndexPath::new(sel_style_idx)], window, cx)
+                        });
+                        let s_w = self.state.clone();
+                        let lid_c = sel_lid.clone();
+                        let sub = cx.subscribe(&cb, move |_, _, event: &ComboboxEvent<SearchableVec<String>>, cx| {
+                            let vals = match event {
+                                ComboboxEvent::Confirm(v) => v,
+                                ComboboxEvent::Change(v) => v,
+                            };
+                            if let Some(style_name) = vals.first() {
+                                let w = match style_name.as_str() {
+                                    "Regular" => 400,
+                                    "Medium" => 500,
+                                    "SemiBold" => 600,
+                                    "Bold" => 700,
+                                    "Black" => 900,
+                                    _ => 400,
+                                };
+                                s_w.update(cx, |s, cx| {
+                                    let _ = s.set_layer_font_weight(&lid_c, w);
+                                    cx.notify();
+                                });
+                            }
+                        });
+                        self.combobox_states.insert(style_key.clone(), cb.clone());
+                        self.combobox_subs.insert(style_key, sub);
+                        self.combobox_states.insert("text_font_style".to_string(), cb);
+                    }
                 }
 
-                if !self.combobox_states.contains_key("text_font_style") {
-                    let style_options = vec![
-                        "Regular".to_string(),
-                        "Medium".to_string(),
-                        "SemiBold".to_string(),
-                        "Bold".to_string(),
-                        "Black".to_string(),
-                    ];
-                    let sel_style_idx = match cur_w {
-                        w if w < 450 => 0,
-                        w if w < 550 => 1,
-                        w if w < 650 => 2,
-                        w if w < 800 => 3,
-                        _ => 4,
-                    };
-                    let delegate = SearchableVec::new(style_options);
+                // Blend Mode Combobox
+                let bm_key = format!("props_blend_mode_{sel_lid}");
+                if !self.combobox_states.contains_key(&bm_key) {
+                    let bm_options: Vec<String> = project::BlendMode::ALL.iter().map(|b| b.as_str().to_string()).collect();
+                    let sel_bm_idx = project::BlendMode::ALL.iter().position(|b| b == &cur_bm).unwrap_or(0);
+                    let delegate = SearchableVec::new(bm_options);
                     let cb = cx.new(|cx| {
-                        ComboboxState::new(delegate, vec![IndexPath::new(sel_style_idx)], window, cx)
+                        ComboboxState::new(delegate, vec![IndexPath::new(sel_bm_idx)], window, cx)
                     });
-                    let s_w = self.state.clone();
+                    let s_b = self.state.clone();
+                    let lid_c = sel_lid.clone();
                     let sub = cx.subscribe(&cb, move |_, _, event: &ComboboxEvent<SearchableVec<String>>, cx| {
                         let vals = match event {
                             ComboboxEvent::Confirm(v) => v,
                             ComboboxEvent::Change(v) => v,
                         };
-                        if let Some(style_name) = vals.first() {
-                            let w = match style_name.as_str() {
-                                "Regular" => 400,
-                                "Medium" => 500,
-                                "SemiBold" => 600,
-                                "Bold" => 700,
-                                "Black" => 900,
-                                _ => 400,
-                            };
-                            s_w.update(cx, |s, cx| {
-                                if let Some(lid) = s.selected_layer_id.clone() {
-                                    let _ = s.set_layer_font_weight(&lid, w);
+                        if let Some(name) = vals.first() {
+                            if let Some(&bm) = project::BlendMode::ALL.iter().find(|b| b.as_str() == name) {
+                                s_b.update(cx, |s, cx| {
+                                    s.set_layer_blend_mode(&lid_c, bm);
                                     cx.notify();
-                                }
+                                });
+                            }
+                        }
+                    });
+                    self.combobox_states.insert(bm_key.clone(), cb.clone());
+                    self.combobox_subs.insert(bm_key, sub);
+                    self.combobox_states.insert("props_blend_mode".to_string(), cb);
+                }
+
+                // Track Matte Combobox
+                let tm_key = format!("props_track_matte_{sel_lid}");
+                if !self.combobox_states.contains_key(&tm_key) {
+                    let tm_options = vec![
+                        "No Matte".to_string(),
+                        "Alpha Matte".to_string(),
+                        "Alpha Invert".to_string(),
+                        "Luma Matte".to_string(),
+                        "Luma Invert".to_string(),
+                    ];
+                    let sel_tm_idx = match cur_matte {
+                        project::TrackMatteMode::None => 0,
+                        project::TrackMatteMode::Alpha => 1,
+                        project::TrackMatteMode::AlphaInverted => 2,
+                        project::TrackMatteMode::Luma => 3,
+                        project::TrackMatteMode::LumaInverted => 4,
+                    };
+                    let delegate = SearchableVec::new(tm_options);
+                    let cb = cx.new(|cx| {
+                        ComboboxState::new(delegate, vec![IndexPath::new(sel_tm_idx)], window, cx)
+                    });
+                    let s_m = self.state.clone();
+                    let lid_c = sel_lid.clone();
+                    let sub = cx.subscribe(&cb, move |_, _, event: &ComboboxEvent<SearchableVec<String>>, cx| {
+                        let vals = match event {
+                            ComboboxEvent::Confirm(v) => v,
+                            ComboboxEvent::Change(v) => v,
+                        };
+                        if let Some(name) = vals.first() {
+                            let mode = match name.as_str() {
+                                "Alpha Matte" => project::TrackMatteMode::Alpha,
+                                "Alpha Invert" => project::TrackMatteMode::AlphaInverted,
+                                "Luma Matte" => project::TrackMatteMode::Luma,
+                                "Luma Invert" => project::TrackMatteMode::LumaInverted,
+                                _ => project::TrackMatteMode::None,
+                            };
+                            s_m.update(cx, |s, cx| {
+                                s.set_layer_track_matte(&lid_c, mode, None);
+                                cx.notify();
                             });
                         }
                     });
-                    self.combobox_states.insert("text_font_style".to_string(), cb);
-                    self.combobox_subs.insert("text_font_style".to_string(), sub);
+                    self.combobox_states.insert(tm_key.clone(), cb.clone());
+                    self.combobox_subs.insert(tm_key, sub);
+                    self.combobox_states.insert("props_track_matte".to_string(), cb);
+                }
+
+                // Parent Layer Combobox
+                let pl_key = format!("props_parent_layer_{sel_lid}");
+                if !self.combobox_states.contains_key(&pl_key) {
+                    let candidates: Vec<(String, String)> = self.state.read(cx).active_composition().map(|comp| {
+                        comp.layers.iter().filter(|l| {
+                            if l.id == sel_lid { return false; }
+                            let mut cursor = l.parent_id.as_deref();
+                            let mut d = 0;
+                            while let Some(cid) = cursor {
+                                if cid == sel_lid { return false; }
+                                d += 1;
+                                if d > 1024 { return false; }
+                                cursor = comp.get_layer(cid).and_then(|p| p.parent_id.as_deref());
+                            }
+                            true
+                        }).map(|l| (l.id.clone(), l.name.clone())).collect()
+                    }).unwrap_or_default();
+
+                    let mut pl_options = vec!["None (unparent)".to_string()];
+                    let mut sel_pl_idx = 0;
+                    for (i, (cid, cname)) in candidates.iter().enumerate() {
+                        let opt_str = format!("{cname} ({cid})");
+                        if cur_parent.as_deref() == Some(cid.as_str()) {
+                            sel_pl_idx = i + 1;
+                        }
+                        pl_options.push(opt_str);
+                    }
+                    let delegate = SearchableVec::new(pl_options);
+                    let cb = cx.new(|cx| {
+                        ComboboxState::new(delegate, vec![IndexPath::new(sel_pl_idx)], window, cx)
+                    });
+                    let s_p = self.state.clone();
+                    let lid_c = sel_lid.clone();
+                    let cands_c = candidates.clone();
+                    let sub = cx.subscribe(&cb, move |_, _, event: &ComboboxEvent<SearchableVec<String>>, cx| {
+                        let vals = match event {
+                            ComboboxEvent::Confirm(v) => v,
+                            ComboboxEvent::Change(v) => v,
+                        };
+                        if let Some(opt_name) = vals.first() {
+                            let parent_id = if opt_name == "None (unparent)" {
+                                None
+                            } else {
+                                cands_c.iter().find(|(cid, cname)| &format!("{cname} ({cid})") == opt_name).map(|(cid, _)| cid.clone())
+                            };
+                            s_p.update(cx, |s, cx| {
+                                s.set_layer_parent(&lid_c, parent_id);
+                                cx.notify();
+                            });
+                        }
+                    });
+                    self.combobox_states.insert(pl_key.clone(), cb.clone());
+                    self.combobox_subs.insert(pl_key, sub);
+                    self.combobox_states.insert("props_parent_layer".to_string(), cb);
                 }
             } else {
                 self.combobox_states.clear();
@@ -10077,11 +10223,7 @@ impl Render for PropertiesPanel {
 
                         // --- Switches & Modes Card ---
                         let p_switches = panel_entity.clone();
-                        let s_blend = self.state.clone();
-                        let s_matte = self.state.clone();
                         let s_lock = self.state.clone();
-                        let lid_blend = layer.id.clone();
-                        let lid_matte = layer.id.clone();
                         let lid_lock = layer.id.clone();
                         let cur_bm = layer.blend_mode;
                         let cur_matte = layer.matte_mode;
@@ -10156,7 +10298,7 @@ impl Render for PropertiesPanel {
                                             .child(if is_locked { "Locked" } else { "Lock" }),
                                     ),
                             )
-                            // Blend Mode Row
+                            // Blend Mode Row (GPUI Kit Combobox)
                             .child(
                                 h_flex()
                                     .items_center()
@@ -10167,30 +10309,18 @@ impl Render for PropertiesPanel {
                                         div()
                                             .id("props_blend_mode_button")
                                             .test_support()
-                                            .cursor_pointer()
-                                            .px_2()
-                                            .py_0p5()
-                                            .rounded_sm()
-                                            .bg(cx.theme().muted)
-                                            .text_color(cx.theme().primary)
-                                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-                                            .child(cur_bm.as_str())
-                                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                let next_bm = match cur_bm {
-                                                    project::BlendMode::Normal => project::BlendMode::Multiply,
-                                                    project::BlendMode::Multiply => project::BlendMode::Screen,
-                                                    project::BlendMode::Screen => project::BlendMode::Overlay,
-                                                    project::BlendMode::Overlay => project::BlendMode::Add,
-                                                    _ => project::BlendMode::Normal,
-                                                };
-                                                s_blend.update(cx, |s, cx| {
-                                                    s.set_layer_blend_mode(&lid_blend, next_bm);
-                                                    cx.notify();
-                                                });
+                                            .w(px(140.))
+                                            .child({
+                                                let bm_key = format!("props_blend_mode_{}", layer.id);
+                                                if let Some(cb) = self.combobox_states.get(&bm_key).or_else(|| self.combobox_states.get("props_blend_mode")) {
+                                                    Combobox::new(cb).into_any_element()
+                                                } else {
+                                                    div().child(cur_bm.as_str()).into_any_element()
+                                                }
                                             }),
                                     ),
                             )
-                            // Track Matte Row
+                            // Track Matte Row (GPUI Kit Combobox)
                             .child(
                                 h_flex()
                                     .items_center()
@@ -10201,32 +10331,42 @@ impl Render for PropertiesPanel {
                                         div()
                                             .id("props_track_matte_button")
                                             .test_support()
-                                            .cursor_pointer()
-                                            .px_2()
-                                            .py_0p5()
-                                            .rounded_sm()
-                                            .bg(cx.theme().muted)
-                                            .text_color(cx.theme().primary)
-                                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-                                            .child(match cur_matte {
-                                                project::TrackMatteMode::None => "No Matte",
-                                                project::TrackMatteMode::Alpha => "Alpha Matte",
-                                                project::TrackMatteMode::AlphaInverted => "Alpha Invert",
-                                                project::TrackMatteMode::Luma => "Luma Matte",
-                                                project::TrackMatteMode::LumaInverted => "Luma Invert",
-                                            })
-                                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                let next_matte = match cur_matte {
-                                                    project::TrackMatteMode::None => project::TrackMatteMode::Alpha,
-                                                    project::TrackMatteMode::Alpha => project::TrackMatteMode::AlphaInverted,
-                                                    project::TrackMatteMode::AlphaInverted => project::TrackMatteMode::Luma,
-                                                    project::TrackMatteMode::Luma => project::TrackMatteMode::LumaInverted,
-                                                    project::TrackMatteMode::LumaInverted => project::TrackMatteMode::None,
-                                                };
-                                                s_matte.update(cx, |s, cx| {
-                                                    s.set_layer_track_matte(&lid_matte, next_matte, None);
-                                                    cx.notify();
-                                                });
+                                            .w(px(140.))
+                                            .child({
+                                                let tm_key = format!("props_track_matte_{}", layer.id);
+                                                if let Some(cb) = self.combobox_states.get(&tm_key).or_else(|| self.combobox_states.get("props_track_matte")) {
+                                                    Combobox::new(cb).into_any_element()
+                                                } else {
+                                                    div().child(match cur_matte {
+                                                        project::TrackMatteMode::None => "No Matte",
+                                                        project::TrackMatteMode::Alpha => "Alpha Matte",
+                                                        project::TrackMatteMode::AlphaInverted => "Alpha Invert",
+                                                        project::TrackMatteMode::Luma => "Luma Matte",
+                                                        project::TrackMatteMode::LumaInverted => "Luma Invert",
+                                                    }).into_any_element()
+                                                }
+                                            }),
+                                    ),
+                            )
+                            // Parent Layer Row (GPUI Kit Combobox)
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .text_xs()
+                                    .child(div().text_color(cx.theme().muted_foreground).child("Parent Layer"))
+                                    .child(
+                                        div()
+                                            .id("props_parent_picker_button")
+                                            .test_support()
+                                            .w(px(140.))
+                                            .child({
+                                                let pl_key = format!("props_parent_layer_{}", layer.id);
+                                                if let Some(cb) = self.combobox_states.get(&pl_key).or_else(|| self.combobox_states.get("props_parent_layer")) {
+                                                    Combobox::new(cb).into_any_element()
+                                                } else {
+                                                    div().child(layer.parent_id.clone().unwrap_or_else(|| "None".to_string())).into_any_element()
+                                                }
                                             }),
                                     ),
                             );
@@ -10862,12 +11002,15 @@ fn timeline_stopwatch_nav(
 }
 
 fn timeline_keyframe_lane(
+    layer_id: &str,
+    prop_path: &str,
     keyframe_times: &[f64],
     total_duration_secs: f64,
     current_time_secs: f64,
     fps: f64,
     playhead_percent: f32,
-    state: &Entity<EditorState>,
+    panel_entity: &Entity<TimelinePanel>,
+    _state: &Entity<EditorState>,
     cx: &App,
 ) -> Div {
     let mut lane = div()
@@ -10890,18 +11033,21 @@ fn timeline_keyframe_lane(
     for &t in keyframe_times {
         let percent = (t / total_duration_secs.max(0.001) * 100.0).clamp(0.0, 100.0) as f32;
         let is_at_playhead = (t - current_time_secs).abs() < (0.5 / fps);
-        let s_seek = state.clone();
-        let target_tc = TimeCode::from_seconds(t, fps);
+        let p_drag = panel_entity.clone();
+        let lid_drag = layer_id.to_string();
+        let path_drag = prop_path.to_string();
 
         lane = lane.child(
             div()
+                .id(SharedString::from(format!("tl_kf_{}_{}_{}", layer_id, prop_path.replace('.', "_"), (t * 100.0) as i64)))
+                .test_support()
                 .absolute()
                 .top(px(4.))
                 .left(relative(percent / 100.0))
                 .ml(px(-6.))
                 .w(px(12.))
                 .h(px(14.))
-                .cursor_pointer()
+                .cursor_col_resize()
                 .flex()
                 .items_center()
                 .justify_center()
@@ -10913,9 +11059,17 @@ fn timeline_keyframe_lane(
                     rgb(0x38bdf8)
                 })
                 .hover(|s| s.text_color(rgb(0xffffff)))
-                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                    s_seek.update(cx, |s, cx| {
-                        s.clock.seek(target_tc);
+                .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+                    let mx = event.position.x / px(1.0);
+                    p_drag.update(cx, |this, cx| {
+                        this.keyframe_drag = Some(TimelineKeyframeDrag {
+                            layer_id: lid_drag.clone(),
+                            prop_path: path_drag.clone(),
+                            original_time_s: t,
+                            current_time_s: t,
+                            initial_mouse_x: mx,
+                            moved: false,
+                        });
                         cx.notify();
                     });
                 })
@@ -11092,6 +11246,19 @@ pub struct TimelinePanel {
     pub reorder_hover: Option<usize>,
     /// Window-y where the reorder press started (threshold gate).
     pub reorder_start_y: f32,
+    /// Active timeline keyframe drag (interactive moving of keyframe along timeline).
+    pub keyframe_drag: Option<TimelineKeyframeDrag>,
+}
+
+/// Active drag of a keyframe along the timeline time ruler.
+#[derive(Clone, Debug)]
+pub struct TimelineKeyframeDrag {
+    pub layer_id: String,
+    pub prop_path: String,
+    pub original_time_s: f64,
+    pub current_time_s: f64,
+    pub initial_mouse_x: f32,
+    pub moved: bool,
 }
 
 /// Describes what kind of drag the user is performing on the timeline layer strip.
@@ -12500,6 +12667,7 @@ impl TimelinePanel {
             reorder_drag: None,
             reorder_hover: None,
             reorder_start_y: 0.0,
+            keyframe_drag: None,
         }
     }
 
@@ -13255,7 +13423,7 @@ impl Render for TimelinePanel {
                                     .child(timeline_scrub(SharedString::from(format!("tl_scrub_{}_anchor_x", layer.id)), "X", format!("{:.0}", ap.x), layer.id.clone(), "anchor_x".to_string(), 1.0, 1.0, &self.state, &panel_entity, cx))
                                     .child(timeline_scrub(SharedString::from(format!("tl_scrub_{}_anchor_y", layer.id)), "Y", format!("{:.0}", ap.y), layer.id.clone(), "anchor_y".to_string(), 1.0, 1.0, &self.state, &panel_entity, cx)),
                             );
-                        let ap_lane = timeline_keyframe_lane(&ap_times, total_duration_secs, current_time_secs, fps, playhead_percent, &self.state, cx);
+                        let ap_lane = timeline_keyframe_lane(&layer.id, "transform.anchor_point", &ap_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, cx);
                         timeline_rows.push(h_flex().h(px(24.)).items_center().child(ap_left).child(ap_lane));
 
                         // 2. Position
@@ -13302,7 +13470,7 @@ impl Render for TimelinePanel {
                                     .child(timeline_scrub(SharedString::from(format!("tl_scrub_{}_pos_x", layer.id)), "X", format!("{:.0}", pos.x), layer.id.clone(), "pos_x".to_string(), 1.0, 1.0, &self.state, &panel_entity, cx))
                                     .child(timeline_scrub(SharedString::from(format!("tl_scrub_{}_pos_y", layer.id)), "Y", format!("{:.0}", pos.y), layer.id.clone(), "pos_y".to_string(), 1.0, 1.0, &self.state, &panel_entity, cx)),
                             );
-                        let pos_lane = timeline_keyframe_lane(&pos_times, total_duration_secs, current_time_secs, fps, playhead_percent, &self.state, cx);
+                        let pos_lane = timeline_keyframe_lane(&layer.id, "transform.position", &pos_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, cx);
                         timeline_rows.push(h_flex().h(px(24.)).items_center().child(pos_left).child(pos_lane));
 
                         // 3. Scale
@@ -13349,7 +13517,7 @@ impl Render for TimelinePanel {
                                     .child(timeline_scrub(SharedString::from(format!("tl_scrub_{}_scale_x", layer.id)), "X", format!("{:.0}%", sc.x), layer.id.clone(), "scale_x".to_string(), 0.5, 1.0, &self.state, &panel_entity, cx))
                                     .child(timeline_scrub(SharedString::from(format!("tl_scrub_{}_scale_y", layer.id)), "Y", format!("{:.0}%", sc.y), layer.id.clone(), "scale_y".to_string(), 0.5, 1.0, &self.state, &panel_entity, cx)),
                             );
-                        let sc_lane = timeline_keyframe_lane(&sc_times, total_duration_secs, current_time_secs, fps, playhead_percent, &self.state, cx);
+                        let sc_lane = timeline_keyframe_lane(&layer.id, "transform.scale", &sc_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, cx);
                         timeline_rows.push(h_flex().h(px(24.)).items_center().child(sc_left).child(sc_lane));
 
                         // 4. Rotation
@@ -13393,7 +13561,7 @@ impl Render for TimelinePanel {
                             .child(
                                 timeline_scrub(SharedString::from(format!("tl_scrub_{}_rotation", layer.id)), "Angle", format!("{:.1}°", rot), layer.id.clone(), "rotation".to_string(), 0.25, 1.0, &self.state, &panel_entity, cx),
                             );
-                        let rot_lane = timeline_keyframe_lane(&rot_times, total_duration_secs, current_time_secs, fps, playhead_percent, &self.state, cx);
+                        let rot_lane = timeline_keyframe_lane(&layer.id, "transform.rotation", &rot_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, cx);
                         timeline_rows.push(h_flex().h(px(24.)).items_center().child(rot_left).child(rot_lane));
 
                         // 5. Opacity
@@ -13437,7 +13605,7 @@ impl Render for TimelinePanel {
                             .child(
                                 timeline_scrub(SharedString::from(format!("tl_scrub_{}_opacity", layer.id)), "Op", format!("{:.0}%", op), layer.id.clone(), "opacity".to_string(), 0.25, 1.0, &self.state, &panel_entity, cx),
                             );
-                        let op_lane = timeline_keyframe_lane(&op_times, total_duration_secs, current_time_secs, fps, playhead_percent, &self.state, cx);
+                        let op_lane = timeline_keyframe_lane(&layer.id, "opacity", &op_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, cx);
                         timeline_rows.push(h_flex().h(px(24.)).items_center().child(op_left).child(op_lane));
                     }
 
@@ -13675,7 +13843,7 @@ impl Render for TimelinePanel {
                                                 timeline_scrub(SharedString::from(format!("tl_scrub_{}_{}_{}", layer.id, effect.id, p_slug)), "Val", format!("{:.1}", p_val), layer.id.clone(), fx_key, fx_drag, p_step, &self.state, &panel_entity, cx),
                                             );
 
-                                        let param_lane = timeline_keyframe_lane(&kf_times, total_duration_secs, current_time_secs, fps, playhead_percent, &self.state, cx);
+                                        let param_lane = timeline_keyframe_lane(&layer.id, &fx_prop_path, &kf_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, cx);
 
                                         timeline_rows.push(
                                             h_flex()
@@ -13808,6 +13976,32 @@ impl Render for TimelinePanel {
                     }
                     return;
                 }
+                if let Some(mut kd) = p_root_move.read(cx).keyframe_drag.clone() {
+                    let track_width = (window.bounds().size.width / px(1.0) - 380.0).max(200.0);
+                    let cur_x = event.position.x / px(1.0);
+                    let delta_px = cur_x - kd.initial_mouse_x;
+                    if delta_px.abs() > 2.0 || kd.moved {
+                        kd.moved = true;
+                        let delta_time_s = (delta_px / track_width) as f64 * total_duration_secs;
+                        let target_time_s = (kd.original_time_s + delta_time_s).clamp(0.0, total_duration_secs);
+                        if (target_time_s - kd.current_time_s).abs() > 0.0001 {
+                            let from_t = kd.current_time_s;
+                            s_root_move.update(cx, |s, cx| {
+                                if s.move_layer_keyframe_time(&kd.layer_id, &kd.prop_path, from_t, target_time_s) {
+                                    let tc = TimeCode::from_seconds(target_time_s, fps);
+                                    s.clock.seek(tc);
+                                }
+                                cx.notify();
+                            });
+                            kd.current_time_s = target_time_s;
+                            p_root_move.update(cx, |this, cx| {
+                                this.keyframe_drag = Some(kd);
+                                cx.notify();
+                            });
+                        }
+                    }
+                    return;
+                }
                 let action = p_root_move.read(cx).drag_action.clone();
                 if let Some(action) = action {
                     let track_width = (window.bounds().size.width / px(1.0) - 380.0).max(200.0);
@@ -13899,6 +14093,19 @@ impl Render for TimelinePanel {
                 }
             })
             .on_mouse_up(MouseButton::Left, move |_event, window, cx| {
+                if let Some(kd) = p_root_up.read(cx).keyframe_drag.clone() {
+                    if !kd.moved {
+                        let target_tc = TimeCode::from_seconds(kd.original_time_s, fps);
+                        s_root_up.update(cx, |s, cx| {
+                            s.clock.seek(target_tc);
+                            cx.notify();
+                        });
+                    }
+                    p_root_up.update(cx, |this, cx| {
+                        this.keyframe_drag = None;
+                        cx.notify();
+                    });
+                }
                 // Click (no drag) on a value pill opens keyboard entry.
                 let edit = {
                     let p = p_root_up.read(cx);
@@ -13933,6 +14140,7 @@ impl Render for TimelinePanel {
                     this.scrub_key = None;
                     this.scrub_last_x = None;
                     this.scrub_moved = false;
+                    this.keyframe_drag = None;
                     cx.notify();
                 });
                 // Commit a layer reorder drop (dragged onto another row).
@@ -13975,6 +14183,7 @@ impl Render for TimelinePanel {
                     this.scrub_moved = false;
                     this.reorder_drag = None;
                     this.reorder_hover = None;
+                    this.keyframe_drag = None;
                     cx.notify();
                 });
                 s_root_up_out.update(cx, |s, cx| {

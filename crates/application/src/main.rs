@@ -4264,29 +4264,26 @@ mod tests {
         assert_eq!(layer.matte_mode, TrackMatteMode::Alpha);
         assert_eq!(layer.matte_layer_id.as_deref(), Some("layer_bg"));
 
-        // Parenting preserves the child's world transform (no jump).
-        let world_before = state.layer_world_matrix_fast(layer_id).unwrap();
+        // Parenting: child cleanly inherits the parent's transform changes
         assert!(state.set_layer_parent(layer_id, Some("layer_bg".to_string())));
         assert_eq!(state.active_composition().unwrap().get_layer(layer_id).unwrap().parent_id.as_deref(), Some("layer_bg"));
-        let world_after = state.layer_world_matrix_fast(layer_id).unwrap();
-        for (a, b) in [world_before.a, world_before.b, world_before.c, world_before.d, world_before.tx, world_before.ty]
+        let parent_world = state.layer_world_matrix_fast("layer_bg").unwrap();
+        let child_world = state.layer_world_matrix_fast(layer_id).unwrap();
+        let (anchor, pos, scale, rot) = state.active_composition().unwrap().get_layer(layer_id).unwrap().transform.evaluate_at(&state.clock.timecode());
+        let child_local = compositor::AffineTransform2D::from_transform_components(pos, scale, rot, anchor);
+        let expected_child_world = parent_world * child_local;
+        for (a, b) in [expected_child_world.a, expected_child_world.b, expected_child_world.c, expected_child_world.d, expected_child_world.tx, expected_child_world.ty]
             .iter()
-            .zip([world_after.a, world_after.b, world_after.c, world_after.d, world_after.tx, world_after.ty].iter())
+            .zip([child_world.a, child_world.b, child_world.c, child_world.d, child_world.tx, child_world.ty].iter())
         {
-            assert!((a - b).abs() < 1e-3, "{world_before:?} vs {world_after:?}");
+            assert!((a - b).abs() < 1e-3, "{expected_child_world:?} vs {child_world:?}");
         }
-        // Any layer can be a parent; unparenting also preserves world.
+        // Any layer can be a parent; cycle rejection
         assert!(!state.set_layer_parent("layer_bg", Some(layer_id.to_string())), "child-as-parent must cycle-reject");
         assert!(!state.set_layer_parent(layer_id, Some(layer_id.to_string())), "self-parent must reject");
         assert!(!state.set_layer_parent(layer_id, Some("nope".to_string())), "missing parent must reject");
         assert!(state.set_layer_parent(layer_id, None));
-        let world_unparented = state.layer_world_matrix_fast(layer_id).unwrap();
-        for (a, b) in [world_before.a, world_before.b, world_before.c, world_before.d, world_before.tx, world_before.ty]
-            .iter()
-            .zip([world_unparented.a, world_unparented.b, world_unparented.c, world_unparented.d, world_unparented.tx, world_unparented.ty].iter())
-        {
-            assert!((a - b).abs() < 1e-3, "{world_before:?} vs {world_unparented:?}");
-        }
+        assert_eq!(state.active_composition().unwrap().get_layer(layer_id).unwrap().parent_id, None);
 
         // Lock
         state.toggle_layer_lock(layer_id);
@@ -4320,16 +4317,18 @@ mod tests {
         let pid = state.pen_press_at(Vec2::new(-100.0, -50.0), None).unwrap();
         let sel = state.selected_layer_id.clone().unwrap();
         state.pen_press_at(Vec2::new(100.0, 60.0), Some(sel)).unwrap();
-        let world_before = state.layer_world_matrix_fast(&pid).unwrap();
-        // Parent to the background: world must not jump, and the layer must
-        // stay in the render list with a real (non-collapsed) world box.
+        // Parent to the background: layer inherits parent's transform and stays in the render list
         assert!(state.set_layer_parent(&pid, Some("layer_bg".to_string())));
-        let world_after = state.layer_world_matrix_fast(&pid).unwrap();
-        for (a, b) in [world_before.a, world_before.b, world_before.c, world_before.d, world_before.tx, world_before.ty]
+        let parent_world = state.layer_world_matrix_fast("layer_bg").unwrap();
+        let child_world = state.layer_world_matrix_fast(&pid).unwrap();
+        let (anchor, pos, scale, rot) = state.active_composition().unwrap().get_layer(&pid).unwrap().transform.evaluate_at(&state.clock.timecode());
+        let child_local = compositor::AffineTransform2D::from_transform_components(pos, scale, rot, anchor);
+        let expected_child_world = parent_world * child_local;
+        for (a, b) in [expected_child_world.a, expected_child_world.b, expected_child_world.c, expected_child_world.d, expected_child_world.tx, expected_child_world.ty]
             .iter()
-            .zip([world_after.a, world_after.b, world_after.c, world_after.d, world_after.tx, world_after.ty].iter())
+            .zip([child_world.a, child_world.b, child_world.c, child_world.d, child_world.tx, child_world.ty].iter())
         {
-            assert!((a - b).abs() < 1e-3, "{world_before:?} vs {world_after:?}");
+            assert!((a - b).abs() < 1e-3, "{expected_child_world:?} vs {child_world:?}");
         }
         let eval = state.evaluate_current_frame().unwrap();
         let layer = eval.get_layer(&pid).expect("parented pen layer evaluated");
@@ -4706,6 +4705,7 @@ mod tests {
             let comp = state.active_composition().unwrap();
             let dup_layer = comp.get_layer(&dup_id).unwrap();
             assert_eq!(dup_layer.transform.position.value, Vec2::ZERO);
+            assert_eq!(dup_layer.transform.anchor_point.value, Vec2::new(150.0, 150.0));
             assert_eq!(dup_layer.transform.rotation.value, 0.0);
             assert_eq!(dup_layer.opacity.value, 100.0);
         }
@@ -4737,6 +4737,49 @@ mod tests {
             assert_eq!(dup_layer.transform.anchor_point.keyframe_count(), 1);
             assert!(dup_layer.opacity.is_animated());
             assert_eq!(dup_layer.opacity.keyframe_count(), 1);
+        }
+    }
+
+    #[test]
+    fn test_move_layer_keyframe_time_and_reset_content_center() {
+        use crate::state::EditorState;
+        use project::{Keyframe, TimeCode, Vec2};
+
+        let mut state = EditorState::new();
+        let lid = "layer_accent";
+
+        // Set clean keyframes at 1.0s and 2.0s
+        {
+            let comp = state.active_composition_mut().unwrap();
+            let layer = comp.get_layer_mut(lid).unwrap();
+            layer.transform.position.clear_keyframes();
+            layer.transform.position.add_keyframe(Keyframe::new(TimeCode::from_seconds(1.0, 30.0), Vec2::new(100.0, 200.0)));
+            layer.transform.position.add_keyframe(Keyframe::new(TimeCode::from_seconds(2.0, 30.0), Vec2::new(300.0, 400.0)));
+        }
+
+        // Move keyframe from 1.0s to 1.5s
+        let moved = state.move_layer_keyframe_time(lid, "transform.position", 1.0, 1.5);
+        assert!(moved);
+
+        {
+            let comp = state.active_composition().unwrap();
+            let layer = comp.get_layer(lid).unwrap();
+            let kfs = layer.transform.position.keyframes();
+            assert_eq!(kfs.len(), 2);
+            assert!((kfs[0].time_seconds() - 1.5).abs() < 1e-4);
+            assert_eq!(kfs[0].value, Vec2::new(100.0, 200.0));
+            assert!((kfs[1].time_seconds() - 2.0).abs() < 1e-4);
+        }
+
+        // Test reset layer transform resets pos to ZERO and anchor point to content center (150x150 for 300x300 solid)
+        state.reset_layer_transform(lid);
+        {
+            let comp = state.active_composition().unwrap();
+            let layer = comp.get_layer(lid).unwrap();
+            assert_eq!(layer.transform.position.value, Vec2::ZERO);
+            assert_eq!(layer.transform.anchor_point.value, Vec2::new(150.0, 150.0));
+            assert_eq!(layer.transform.rotation.value, 0.0);
+            assert!(!layer.transform.position.is_animated());
         }
     }
 

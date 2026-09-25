@@ -40,6 +40,11 @@ impl AffineTransform2D {
         Self { a, b, c, d, tx, ty }
     }
 
+    /// Return the identity transformation matrix.
+    pub const fn identity() -> Self {
+        Self::IDENTITY
+    }
+
     /// Construct a pure translation transformation.
     pub const fn from_translation(offset: Vec2) -> Self {
         Self {
@@ -504,6 +509,8 @@ impl Default for BoundingBox2D {
 pub struct EvaluatedTransform {
     pub local_matrix: AffineTransform2D,
     pub world_matrix: AffineTransform2D,
+    #[serde(default = "AffineTransform2D::identity")]
+    pub carrier_frame: AffineTransform2D,
     pub anchor_point: Vec2,
     pub position: Vec2,
     pub scale: Vec2,
@@ -515,6 +522,7 @@ impl EvaluatedTransform {
     pub const IDENTITY: Self = Self {
         local_matrix: AffineTransform2D::IDENTITY,
         world_matrix: AffineTransform2D::IDENTITY,
+        carrier_frame: AffineTransform2D::IDENTITY,
         anchor_point: Vec2::ZERO,
         position: Vec2::ZERO,
         scale: Vec2::SCALE_100,
@@ -531,6 +539,10 @@ impl EvaluatedTransform {
     ) -> Self {
         let local_matrix =
             AffineTransform2D::from_transform_components(position, scale, rotation, anchor_point);
+        let carrier_frame =
+            AffineTransform2D::from_translation(position)
+            * AffineTransform2D::from_rotation_degrees(rotation)
+            * AffineTransform2D::from_scale(scale / 100.0);
         let world_matrix = match parent_world_matrix {
             Some(parent_world) => *parent_world * local_matrix,
             None => local_matrix,
@@ -539,6 +551,7 @@ impl EvaluatedTransform {
         Self {
             local_matrix,
             world_matrix,
+            carrier_frame,
             anchor_point,
             position,
             scale,
@@ -624,22 +637,30 @@ impl TransformResolver {
             let local_matrix =
                 AffineTransform2D::from_transform_components(position, scale, rotation, anchor);
 
-            let world_matrix = if let Some(ref parent_id) = node.parent_id {
+            let node_frame =
+                AffineTransform2D::from_translation(position)
+                * AffineTransform2D::from_rotation_degrees(rotation)
+                * AffineTransform2D::from_scale(scale / 100.0);
+
+            let (carrier_frame, world_matrix) = if let Some(ref parent_id) = node.parent_id {
                 let parent_eval = resolved.get(parent_id).ok_or_else(|| {
                     SceneGraphError::ParentNotFound {
                         node_id: node.id.clone(),
                         parent_id: parent_id.clone(),
                     }
                 })?;
-                parent_eval.world_matrix * local_matrix
+                let carrier = parent_eval.carrier_frame * node_frame;
+                let world = parent_eval.world_matrix * local_matrix;
+                (carrier, world)
             } else {
-                local_matrix
+                (node_frame, local_matrix)
             };
 
             resolved.insert(
                 node.id.clone(),
                 EvaluatedTransform {
                     local_matrix,
+                    carrier_frame,
                     world_matrix,
                     anchor_point: anchor,
                     position,

@@ -5608,21 +5608,6 @@ impl EditorState {
     /// Rejects self-parenting, missing parents, and parent cycles.
     /// Returns true when the parenting changed.
     pub fn set_layer_parent(&mut self, layer_id: &str, parent_id: Option<String>) -> bool {
-        // --- Read-only phase: validate + resolve matrices. ---
-        let current_tc = self.clock.timecode();
-        let (child_world, anchor) = match self.active_composition() {
-            Some(comp) => match comp.get_layer(layer_id) {
-                Some(layer) => {
-                    let a = layer.transform.anchor_point.evaluate_at(&current_tc);
-                    match self.layer_world_matrix_fast(layer_id) {
-                        Some(w) => (w, a),
-                        None => return false,
-                    }
-                }
-                None => return false,
-            },
-            None => return false,
-        };
         if let Some(ref pid) = parent_id {
             if pid == layer_id {
                 return false;
@@ -5649,24 +5634,6 @@ impl EditorState {
                 cursor = comp.get_layer(id).and_then(|l| l.parent_id.as_deref());
             }
         }
-        // New parent world (identity when unparenting). Safe to resolve
-        // against the current graph: cycle rejection above guarantees the
-        // new parent's chain does not include the child.
-        let parent_world = match parent_id.as_deref() {
-            Some(pid) => match self.layer_world_matrix_fast(pid) {
-                Some(w) => w,
-                None => return false,
-            },
-            None => AffineTransform2D::IDENTITY,
-        };
-        let new_local = match parent_world.inverse() {
-            Some(inv) => inv * child_world,
-            None => return false,
-        };
-        let (pos, scale, rot) = match AffineTransform2D::decompose_components(new_local, anchor) {
-            Some(v) => v,
-            None => return false,
-        };
         // No-op when nothing changes.
         if let Some(comp) = self.active_composition() {
             if let Some(layer) = comp.get_layer(layer_id) {
@@ -5679,18 +5646,6 @@ impl EditorState {
         self.checkpoint();
         if let Some(comp) = self.active_composition_mut() {
             if let Some(layer) = comp.get_layer_mut(layer_id) {
-                layer.transform.position.set_value(pos);
-                if layer.transform.position.is_animated() {
-                    layer.transform.position.add_keyframe(Keyframe::new(current_tc, pos));
-                }
-                layer.transform.scale.set_value(scale);
-                if layer.transform.scale.is_animated() {
-                    layer.transform.scale.add_keyframe(Keyframe::new(current_tc, scale));
-                }
-                layer.transform.rotation.set_value(rot);
-                if layer.transform.rotation.is_animated() {
-                    layer.transform.rotation.add_keyframe(Keyframe::new(current_tc, rot));
-                }
                 layer.set_parent(parent_id);
             }
         }
@@ -6223,16 +6178,177 @@ impl EditorState {
         self.duplicate_layer(&sel_id)
     }
 
-    /// Reset transform properties of the specified layer to defaults.
+    /// Calculate the center point of a layer's content in local coordinates.
+    pub fn layer_content_center(&self, layer: &Layer) -> Vec2 {
+        let (w, h) = match &layer.source {
+            LayerSource::Solid { width, height, .. } => (*width as f32, *height as f32),
+            LayerSource::Image { asset_id } => {
+                if let Some(asset) = self.project.get_asset(asset_id) {
+                    let (dw, dh) = image::image_dimensions(&asset.path).unwrap_or((1920, 1080));
+                    (dw as f32, dh as f32)
+                } else {
+                    (1920.0, 1080.0)
+                }
+            }
+            LayerSource::Video { .. } => (1920.0, 1080.0),
+            LayerSource::Text { font_size, text, box_width, box_height, .. } => {
+                let bw = box_width.value;
+                let bh = box_height.value;
+                if bw > 0.0 && bh > 0.0 {
+                    (bw, bh)
+                } else {
+                    let len = text.value.chars().count().max(1) as f32;
+                    let fs = font_size.value;
+                    let est_w = if bw > 0.0 { bw } else { (len * fs * 0.6 + 40.0).max(100.0) };
+                    let est_h = if bh > 0.0 { bh } else { (fs * 1.4 + 20.0).max(40.0) };
+                    (est_w, est_h)
+                }
+            }
+            LayerSource::Shape { shape_type } => match shape_type {
+                ShapeType::Rectangle { width, height, .. } => (width.value, height.value),
+                ShapeType::Ellipse { radius_x, radius_y, .. } => (radius_x.value * 2.0, radius_y.value * 2.0),
+                ShapeType::Path { path_data, .. } => {
+                    match project::Path::from_svg(path_data).frame(8.0) {
+                        Some((origin, size)) => return origin + size * 0.5,
+                        None => (400.0, 300.0),
+                    }
+                }
+            },
+            LayerSource::Adjustment => {
+                if let Some(comp) = self.active_composition() {
+                    (comp.width as f32, comp.height as f32)
+                } else {
+                    (1920.0, 1080.0)
+                }
+            }
+            _ => (400.0, 300.0),
+        };
+        Vec2::new(w * 0.5, h * 0.5)
+    }
+
+    /// Reset transform properties of the specified layer to defaults:
+    /// Position is reset to (0, 0), and Anchor Point is reset to the center of the content.
     pub fn reset_layer_transform(&mut self, layer_id: &str) {
         self.checkpoint();
+        let center = if let Some(comp) = self.active_composition() {
+            if let Some(layer) = comp.get_layer(layer_id) {
+                self.layer_content_center(layer)
+            } else {
+                Vec2::ZERO
+            }
+        } else {
+            Vec2::ZERO
+        };
         if let Some(comp) = self.active_composition_mut() {
             if let Some(layer) = comp.get_layer_mut(layer_id) {
                 layer.transform = project::Transform::default();
                 layer.transform.position.set_value(Vec2::ZERO);
+                layer.transform.anchor_point.set_value(center);
+                layer.transform.scale.set_value(Vec2::SCALE_100);
+                layer.transform.rotation.set_value(0.0);
                 layer.opacity.set_value(100.0);
+                // Also clear keyframes so the reset takes full effect:
+                layer.transform.position.keyframes_mut().clear();
+                layer.transform.anchor_point.keyframes_mut().clear();
+                layer.transform.scale.keyframes_mut().clear();
+                layer.transform.rotation.keyframes_mut().clear();
+                layer.opacity.keyframes_mut().clear();
             }
         }
+    }
+
+    /// Move an existing keyframe on the given property path to a new timecode (in seconds).
+    /// Returns true if a keyframe was found and moved.
+    pub fn move_layer_keyframe_time(
+        &mut self,
+        layer_id: &str,
+        prop_path: &str,
+        from_time_s: f64,
+        to_time_s: f64,
+    ) -> bool {
+        let fps = match self.active_composition() {
+            Some(c) => c.frame_rate,
+            None => return false,
+        };
+        let comp = match self.active_composition_mut() {
+            Some(c) => c,
+            None => return false,
+        };
+        let layer = match comp.get_layer_mut(layer_id) {
+            Some(l) => l,
+            None => return false,
+        };
+        let tol = 0.5 / fps.max(1.0);
+        let new_tc = TimeCode::from_seconds(to_time_s.max(0.0), fps);
+
+        match prop_path {
+            "transform.anchor_point" => {
+                let prop = &mut layer.transform.anchor_point;
+                if let Some(idx) = prop.keyframes().iter().position(|k| (k.time_seconds() - from_time_s).abs() <= tol) {
+                    let mut kf = prop.keyframes()[idx].clone();
+                    kf.time = new_tc;
+                    prop.keyframes_mut().remove(idx);
+                    prop.add_keyframe(kf);
+                    return true;
+                }
+            }
+            "transform.position" => {
+                let prop = &mut layer.transform.position;
+                if let Some(idx) = prop.keyframes().iter().position(|k| (k.time_seconds() - from_time_s).abs() <= tol) {
+                    let mut kf = prop.keyframes()[idx].clone();
+                    kf.time = new_tc;
+                    prop.keyframes_mut().remove(idx);
+                    prop.add_keyframe(kf);
+                    return true;
+                }
+            }
+            "transform.scale" => {
+                let prop = &mut layer.transform.scale;
+                if let Some(idx) = prop.keyframes().iter().position(|k| (k.time_seconds() - from_time_s).abs() <= tol) {
+                    let mut kf = prop.keyframes()[idx].clone();
+                    kf.time = new_tc;
+                    prop.keyframes_mut().remove(idx);
+                    prop.add_keyframe(kf);
+                    return true;
+                }
+            }
+            "transform.rotation" => {
+                let prop = &mut layer.transform.rotation;
+                if let Some(idx) = prop.keyframes().iter().position(|k| (k.time_seconds() - from_time_s).abs() <= tol) {
+                    let mut kf = prop.keyframes()[idx].clone();
+                    kf.time = new_tc;
+                    prop.keyframes_mut().remove(idx);
+                    prop.add_keyframe(kf);
+                    return true;
+                }
+            }
+            "opacity" => {
+                let prop = &mut layer.opacity;
+                if let Some(idx) = prop.keyframes().iter().position(|k| (k.time_seconds() - from_time_s).abs() <= tol) {
+                    let mut kf = prop.keyframes()[idx].clone();
+                    kf.time = new_tc;
+                    prop.keyframes_mut().remove(idx);
+                    prop.add_keyframe(kf);
+                    return true;
+                }
+            }
+            _ => {
+                let mut moved = false;
+                let _ = with_graph_scalar(layer, prop_path, |p| {
+                    if let Some(idx) = p.keyframes().iter().position(|k| (k.time_seconds() - from_time_s).abs() <= tol) {
+                        let mut kf = p.keyframes()[idx].clone();
+                        kf.time = new_tc;
+                        p.keyframes_mut().remove(idx);
+                        p.add_keyframe(kf);
+                        moved = true;
+                    }
+                });
+                if moved {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Duplicate an effect on the specified layer.

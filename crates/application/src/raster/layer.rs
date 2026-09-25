@@ -681,8 +681,8 @@ pub fn rasterize_layer(
     let wm = layer.world_matrix();
     let mut pmap = Aff {
         a: wm.a * kx,
-        b: wm.b * kx,
-        c: wm.c * ky,
+        b: wm.b * ky,
+        c: wm.c * kx,
         d: wm.d * ky,
         tx: ((wm.a * frame_ox + wm.c * frame_oy + wm.tx) - bbox.min.x) * kx,
         ty: ((wm.b * frame_ox + wm.d * frame_oy + wm.ty) - bbox.min.y) * ky,
