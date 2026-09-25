@@ -5577,4 +5577,180 @@ mod tests {
         assert!(state.end_value_edit_state());
         assert!(!state.preview_fast);
     }
+
+    #[gpui_kit::test]
+    fn test_text_properties_gpui_kit_components_and_effects_collapsible(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1440.), px(1200.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+
+        let (text_id, blur_id) = app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, _| {
+                let tid = s.add_text_layer("Hello GPUI Kit", None).unwrap();
+                s.select_layer(Some(tid.clone()));
+                let bid = s
+                    .add_effect_to_selected_layer(project::EffectType::gaussian_blur(15.0))
+                    .unwrap();
+                (tid, bid)
+            })
+        });
+
+        // Ensure Properties panel has source expanded and other sections collapsed so controls fit
+        app_view.update(cx, |view, cx| {
+            view.panels().properties.update(cx, |this, cx| {
+                this.source_expanded = true;
+                this.transform_expanded = false;
+                this.switches_expanded = false;
+                this.tools_expanded = false;
+                cx.notify();
+            });
+        });
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+
+            // 1. Text Presets (Button)
+            assert!(window.find("text_preset_Title Text").visible());
+            assert!(window.find("text_preset_Motion Studio").visible());
+            window.click("text_preset_Motion Studio", cx);
+        })
+        .expect("update_window failed");
+
+        assert!(app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            let comp = s.active_composition().unwrap();
+            let l = comp.get_layer(&text_id).unwrap();
+            match &l.source {
+                project::LayerSource::Text { text, .. } => text.value == "Motion Studio",
+                _ => false,
+            }
+        }));
+
+        // 2. Font Size (Button)
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("text_font_size_48").visible());
+            window.click("text_font_size_48", cx);
+        })
+        .expect("update_window failed");
+
+        assert!(app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            let comp = s.active_composition().unwrap();
+            let l = comp.get_layer(&text_id).unwrap();
+            match &l.source {
+                project::LayerSource::Text { font_size, .. } => (font_size.value - 48.0).abs() < 0.1,
+                _ => false,
+            }
+        }));
+
+        // 3. Faux Italic and ALL CAPS (Checkbox)
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("text_italic_toggle").visible());
+            assert!(window.find("text_caps_toggle").visible());
+            window.click("text_italic_toggle", cx);
+            window.click("text_caps_toggle", cx);
+        })
+        .expect("update_window failed");
+
+        assert!(app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            let comp = s.active_composition().unwrap();
+            let l = comp.get_layer(&text_id).unwrap();
+            match &l.source {
+                project::LayerSource::Text { italic, all_caps, .. } => *italic && *all_caps,
+                _ => false,
+            }
+        }));
+
+        // 4. Font Weight (Button)
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("text_weight_700").visible());
+            window.click("text_weight_700", cx);
+        })
+        .expect("update_window failed");
+
+        assert!(app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            let comp = s.active_composition().unwrap();
+            let l = comp.get_layer(&text_id).unwrap();
+            match &l.source {
+                project::LayerSource::Text { weight, .. } => *weight == 700,
+                _ => false,
+            }
+        }));
+
+        // Collapse Character group so Paragraph and Stroke groups sit near the top
+        app_view.update(cx, |view, cx| {
+            view.panels().properties.update(cx, |this, cx| {
+                this.text_collapsed.insert("character");
+                cx.notify();
+            });
+        });
+
+        // 5. Text Alignment (Button)
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("text_align_Center").visible());
+            window.click("text_align_Center", cx);
+        })
+        .expect("update_window failed");
+
+        assert!(app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            let comp = s.active_composition().unwrap();
+            let l = comp.get_layer(&text_id).unwrap();
+            match &l.source {
+                project::LayerSource::Text { align, .. } => *align == project::TextAlign::Center,
+                _ => false,
+            }
+        }));
+
+        // 6. Stroke Preset (Button)
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("text_stroke_2").visible());
+            window.click("text_stroke_2", cx);
+        })
+        .expect("update_window failed");
+
+        assert!(app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            let comp = s.active_composition().unwrap();
+            let l = comp.get_layer(&text_id).unwrap();
+            match &l.source {
+                project::LayerSource::Text { stroke_width, .. } => (stroke_width.value - 2.0).abs() < 0.1,
+                _ => false,
+            }
+        }));
+
+        // 7. Applied Effects Card with nested Collapsible
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let card_id = SharedString::from(format!("applied_effect_{blur_id}"));
+            let disc_id = SharedString::from(format!("effect_disclosure_{blur_id}"));
+            assert!(window.find(card_id.clone()).visible());
+            assert!(window.find(disc_id.clone()).visible());
+            // Parameter is visible while open
+            assert!(window.find(SharedString::from(format!("param_radius_{blur_id}"))).visible());
+            // Click disclosure to collapse
+            window.click(disc_id, cx);
+        })
+        .expect("update_window failed");
+
+        // Verify collapsed state in PropertiesPanel
+        assert!(app_view.read_with(cx, |view, cx| {
+            view.panels().properties.read(cx).fx_collapsed.contains(&blur_id)
+        }));
+    }
 }

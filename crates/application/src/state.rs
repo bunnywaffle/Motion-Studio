@@ -306,6 +306,26 @@ fn graph_prop_mut<'a>(layer: &'a mut Layer, path: &str) -> Option<&'a mut Proper
             LayerSource::Text { font_size, .. } => Some(font_size),
             _ => None,
         },
+        "text.tracking" => match &mut layer.source {
+            LayerSource::Text { tracking, .. } => Some(tracking),
+            _ => None,
+        },
+        "text.leading" => match &mut layer.source {
+            LayerSource::Text { leading, .. } => Some(leading),
+            _ => None,
+        },
+        "text.stroke_width" => match &mut layer.source {
+            LayerSource::Text { stroke_width, .. } => Some(stroke_width),
+            _ => None,
+        },
+        "text.baseline_shift" => match &mut layer.source {
+            LayerSource::Text { baseline_shift, .. } => Some(baseline_shift),
+            _ => None,
+        },
+        "text.box_width" => match &mut layer.source {
+            LayerSource::Text { box_width, .. } => Some(box_width),
+            _ => None,
+        },
         "shape.rect_width" => match &mut layer.source {
             LayerSource::Shape { shape_type: ShapeType::Rectangle { width, .. } } => Some(width),
             _ => None,
@@ -410,6 +430,26 @@ fn graph_prop_read(layer: &Layer, path: &str) -> Option<(Vec<GraphKey>, f32)> {
             LayerSource::Text { font_size, .. } => take_f32(font_size),
             _ => return None,
         },
+        "text.tracking" => match &layer.source {
+            LayerSource::Text { tracking, .. } => take_f32(tracking),
+            _ => return None,
+        },
+        "text.leading" => match &layer.source {
+            LayerSource::Text { leading, .. } => take_f32(leading),
+            _ => return None,
+        },
+        "text.stroke_width" => match &layer.source {
+            LayerSource::Text { stroke_width, .. } => take_f32(stroke_width),
+            _ => return None,
+        },
+        "text.baseline_shift" => match &layer.source {
+            LayerSource::Text { baseline_shift, .. } => take_f32(baseline_shift),
+            _ => return None,
+        },
+        "text.box_width" => match &layer.source {
+            LayerSource::Text { box_width, .. } => take_f32(box_width),
+            _ => return None,
+        },
         "shape.rect_width" => match &layer.source {
             LayerSource::Shape { shape_type: ShapeType::Rectangle { width, .. } } => {
                 take_f32(width)
@@ -464,6 +504,11 @@ fn graph_candidates(layer: &Layer) -> Vec<(String, String)> {
     match &layer.source {
         LayerSource::Text { .. } => {
             out.push(("text.font_size".to_string(), "Font Size".to_string()));
+            out.push(("text.tracking".to_string(), "Tracking".to_string()));
+            out.push(("text.leading".to_string(), "Leading".to_string()));
+            out.push(("text.stroke_width".to_string(), "Stroke Width".to_string()));
+            out.push(("text.baseline_shift".to_string(), "Baseline Shift".to_string()));
+            out.push(("text.box_width".to_string(), "Box Width".to_string()));
         }
         LayerSource::Shape { shape_type } => match shape_type {
             ShapeType::Rectangle { .. } => {
@@ -3371,6 +3416,26 @@ impl EditorState {
                 LayerSource::Text { font_size, .. } => Some(eval_or(font_size)),
                 _ => None,
             },
+            _ if key.split(':').next().unwrap_or(key).starts_with("text_") => match &layer.source {
+                LayerSource::Text {
+                    tracking,
+                    leading,
+                    stroke_width,
+                    baseline_shift,
+                    box_width,
+                    ..
+                } => {
+                    let prop = match key.split(':').next().unwrap_or(key) {
+                        "text_tracking" => tracking,
+                        "text_leading" => leading,
+                        "text_stroke_w" => stroke_width,
+                        "text_baseline" => baseline_shift,
+                        _ => box_width,
+                    };
+                    Some(eval_or(prop))
+                }
+                _ => None,
+            },
             "solid_w" => match &layer.source {
                 LayerSource::Solid { width, .. } => Some(*width as f32),
                 _ => None,
@@ -3745,6 +3810,24 @@ impl EditorState {
                         };
                         return self.nudge_mask_param(lid, mid, param, v - cur).is_ok();
                     }
+                }
+                // Text scalar scrub keys (`text_tracking`, `text_leading`,
+                // `text_stroke_w`, `text_baseline`, `text_box_w`); the key
+                // carries an optional `:<mult100>` suffix.
+                let text_field = match key.split(':').next().unwrap_or(key) {
+                    "text_tracking" => Some("tracking"),
+                    "text_leading" => Some("leading"),
+                    "text_stroke_w" => Some("stroke_width"),
+                    "text_baseline" => Some("baseline_shift"),
+                    "text_box_w" => Some("box_width"),
+                    _ => None,
+                };
+                if let Some(field) = text_field {
+                    let lid = match self.selected_layer_id.clone() {
+                        Some(l) => l,
+                        None => return false,
+                    };
+                    return self.set_layer_text_scalar(&lid, field, v).is_ok();
                 }
                 false
             }
@@ -4269,6 +4352,36 @@ impl EditorState {
                     else { font_size.add_keyframe(Keyframe::new(current_tc, font_size.value)); }
                 }
             }
+            "text.tracking" => {
+                if let LayerSource::Text { tracking, .. } = &mut layer.source {
+                    if tracking.is_animated() { tracking.clear_keyframes(); }
+                    else { tracking.add_keyframe(Keyframe::new(current_tc, tracking.value)); }
+                }
+            }
+            "text.leading" => {
+                if let LayerSource::Text { leading, .. } = &mut layer.source {
+                    if leading.is_animated() { leading.clear_keyframes(); }
+                    else { leading.add_keyframe(Keyframe::new(current_tc, leading.value)); }
+                }
+            }
+            "text.stroke_width" => {
+                if let LayerSource::Text { stroke_width, .. } = &mut layer.source {
+                    if stroke_width.is_animated() { stroke_width.clear_keyframes(); }
+                    else { stroke_width.add_keyframe(Keyframe::new(current_tc, stroke_width.value)); }
+                }
+            }
+            "text.baseline_shift" => {
+                if let LayerSource::Text { baseline_shift, .. } = &mut layer.source {
+                    if baseline_shift.is_animated() { baseline_shift.clear_keyframes(); }
+                    else { baseline_shift.add_keyframe(Keyframe::new(current_tc, baseline_shift.value)); }
+                }
+            }
+            "text.box_width" => {
+                if let LayerSource::Text { box_width, .. } = &mut layer.source {
+                    if box_width.is_animated() { box_width.clear_keyframes(); }
+                    else { box_width.add_keyframe(Keyframe::new(current_tc, box_width.value)); }
+                }
+            }
             "text.fill_color" => {
                 if let LayerSource::Text { fill_color, .. } = &mut layer.source {
                     if fill_color.is_animated() { fill_color.clear_keyframes(); }
@@ -4672,6 +4785,26 @@ impl EditorState {
                 LayerSource::Text { font_size, .. } => get_f32(font_size),
                 _ => return None,
             },
+            "text.tracking" => match &layer.source {
+                LayerSource::Text { tracking, .. } => get_f32(tracking),
+                _ => return None,
+            },
+            "text.leading" => match &layer.source {
+                LayerSource::Text { leading, .. } => get_f32(leading),
+                _ => return None,
+            },
+            "text.stroke_width" => match &layer.source {
+                LayerSource::Text { stroke_width, .. } => get_f32(stroke_width),
+                _ => return None,
+            },
+            "text.baseline_shift" => match &layer.source {
+                LayerSource::Text { baseline_shift, .. } => get_f32(baseline_shift),
+                _ => return None,
+            },
+            "text.box_width" => match &layer.source {
+                LayerSource::Text { box_width, .. } => get_f32(box_width),
+                _ => return None,
+            },
             "shape.rect_width" => match &layer.source {
                 LayerSource::Shape { shape_type: ShapeType::Rectangle { width, .. } } => get_f32(width),
                 _ => return None,
@@ -4867,6 +5000,56 @@ impl EditorState {
                     font_size.toggle_keyframe(current_tc, val);
                 }
             }
+            "text.tracking" => {
+                if let LayerSource::Text { ref mut tracking, .. } = layer.source {
+                    let val = if tracking.is_animated() {
+                        tracking.evaluate_at(&current_tc)
+                    } else {
+                        tracking.value
+                    };
+                    tracking.toggle_keyframe(current_tc, val);
+                }
+            }
+            "text.leading" => {
+                if let LayerSource::Text { ref mut leading, .. } = layer.source {
+                    let val = if leading.is_animated() {
+                        leading.evaluate_at(&current_tc)
+                    } else {
+                        leading.value
+                    };
+                    leading.toggle_keyframe(current_tc, val);
+                }
+            }
+            "text.stroke_width" => {
+                if let LayerSource::Text { ref mut stroke_width, .. } = layer.source {
+                    let val = if stroke_width.is_animated() {
+                        stroke_width.evaluate_at(&current_tc)
+                    } else {
+                        stroke_width.value
+                    };
+                    stroke_width.toggle_keyframe(current_tc, val);
+                }
+            }
+            "text.baseline_shift" => {
+                if let LayerSource::Text { ref mut baseline_shift, .. } = layer.source {
+                    let val = if baseline_shift.is_animated() {
+                        baseline_shift.evaluate_at(&current_tc)
+                    } else {
+                        baseline_shift.value
+                    };
+                    baseline_shift.toggle_keyframe(current_tc, val);
+                }
+            }
+            "text.box_width" => {
+                if let LayerSource::Text { ref mut box_width, .. } = layer.source {
+                    let val = if box_width.is_animated() {
+                        box_width.evaluate_at(&current_tc)
+                    } else {
+                        box_width.value
+                    };
+                    box_width.toggle_keyframe(current_tc, val);
+                }
+            }
             "text.fill_color" => {
                 if let LayerSource::Text { ref mut fill_color, .. } = layer.source {
                     let val = if fill_color.is_animated() {
@@ -4982,6 +5165,31 @@ impl EditorState {
                         font_size.previous_keyframe_time(&current_tc)
                     } else { None }
                 }
+                "text.tracking" => {
+                    if let LayerSource::Text { ref tracking, .. } = layer.source {
+                        tracking.previous_keyframe_time(&current_tc)
+                    } else { None }
+                }
+                "text.leading" => {
+                    if let LayerSource::Text { ref leading, .. } = layer.source {
+                        leading.previous_keyframe_time(&current_tc)
+                    } else { None }
+                }
+                "text.stroke_width" => {
+                    if let LayerSource::Text { ref stroke_width, .. } = layer.source {
+                        stroke_width.previous_keyframe_time(&current_tc)
+                    } else { None }
+                }
+                "text.baseline_shift" => {
+                    if let LayerSource::Text { ref baseline_shift, .. } = layer.source {
+                        baseline_shift.previous_keyframe_time(&current_tc)
+                    } else { None }
+                }
+                "text.box_width" => {
+                    if let LayerSource::Text { ref box_width, .. } = layer.source {
+                        box_width.previous_keyframe_time(&current_tc)
+                    } else { None }
+                }
                 "text.fill_color" => {
                     if let LayerSource::Text { ref fill_color, .. } = layer.source {
                         fill_color.previous_keyframe_time(&current_tc)
@@ -5057,6 +5265,31 @@ impl EditorState {
                 "text.font_size" => {
                     if let LayerSource::Text { ref font_size, .. } = layer.source {
                         font_size.next_keyframe_time(&current_tc)
+                    } else { None }
+                }
+                "text.tracking" => {
+                    if let LayerSource::Text { ref tracking, .. } = layer.source {
+                        tracking.next_keyframe_time(&current_tc)
+                    } else { None }
+                }
+                "text.leading" => {
+                    if let LayerSource::Text { ref leading, .. } = layer.source {
+                        leading.next_keyframe_time(&current_tc)
+                    } else { None }
+                }
+                "text.stroke_width" => {
+                    if let LayerSource::Text { ref stroke_width, .. } = layer.source {
+                        stroke_width.next_keyframe_time(&current_tc)
+                    } else { None }
+                }
+                "text.baseline_shift" => {
+                    if let LayerSource::Text { ref baseline_shift, .. } = layer.source {
+                        baseline_shift.next_keyframe_time(&current_tc)
+                    } else { None }
+                }
+                "text.box_width" => {
+                    if let LayerSource::Text { ref box_width, .. } = layer.source {
+                        box_width.next_keyframe_time(&current_tc)
                     } else { None }
                 }
                 "text.fill_color" => {
@@ -6267,6 +6500,34 @@ impl EditorState {
         match &mut layer.source {
             LayerSource::Text { all_caps, .. } => {
                 *all_caps = !*all_caps;
+                Ok(())
+            }
+            _ => Err(format!("Layer {layer_id} is not a Text layer")),
+        }
+    }
+
+    /// Set faux italic on a Text layer.
+    pub fn set_layer_italic(&mut self, layer_id: &str, val: bool) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self.active_composition_mut().ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp.get_layer_mut(layer_id).ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        match &mut layer.source {
+            LayerSource::Text { italic, .. } => {
+                *italic = val;
+                Ok(())
+            }
+            _ => Err(format!("Layer {layer_id} is not a Text layer")),
+        }
+    }
+
+    /// Set all-caps on a Text layer.
+    pub fn set_layer_caps(&mut self, layer_id: &str, val: bool) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self.active_composition_mut().ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp.get_layer_mut(layer_id).ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        match &mut layer.source {
+            LayerSource::Text { all_caps, .. } => {
+                *all_caps = val;
                 Ok(())
             }
             _ => Err(format!("Layer {layer_id} is not a Text layer")),

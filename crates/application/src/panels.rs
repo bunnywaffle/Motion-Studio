@@ -1,6 +1,9 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::base::IndexPath;
 use gpui_kit::component::button::Button;
+use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::collapsible::Collapsible;
+use gpui_kit::component::Selectable;
 use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::searchable_list::SearchableVec;
 use gpui_kit::component::select::{SelectEvent, SelectState};
@@ -3434,6 +3437,13 @@ pub struct PropertiesPanel {
     pub effects_expanded: bool,
     pub masks_expanded: bool,
     pub tools_expanded: bool,
+    /// AE text inspector twirl-downs (`true` = collapsed).
+    /// Keys: `character`, `paragraph`, `stroke`, `path`.
+    pub text_collapsed: HashSet<&'static str>,
+    /// Collapsed applied-effect cards by effect id (empty = all expanded).
+    pub fx_collapsed: HashSet<String>,
+    /// Collapsed Shader Lab parameter groups (`effect_id:group`).
+    pub fx_group_collapsed: HashSet<String>,
     /// Effect ID with the Shader Lab source editor open (`None` = closed).
     pub shader_editor_open: Option<String>,
     /// Live Shader Lab source editor (single open editor; re-created when
@@ -3548,6 +3558,9 @@ impl PropertiesPanel {
             effects_expanded: true,
             masks_expanded: true,
             tools_expanded: false,
+            text_collapsed: HashSet::new(),
+            fx_collapsed: HashSet::new(),
+            fx_group_collapsed: HashSet::new(),
             shader_editor_open: None,
             shader_editor: None,
             shader_editor_key: None,
@@ -3627,6 +3640,24 @@ impl PropertiesPanel {
                     }
                 }
                 other => {
+                    if let Some((key_head, rest)) = other.split_once(':') {
+                        if key_head.starts_with("text_") && rest.starts_with(|c: char| c.is_ascii_digit()) {
+                            // text_scalar key: `text_tracking:<mult100>`.
+                            if let Some(lid) = s.selected_layer_id.clone() {
+                                let field = match key_head {
+                                    "text_tracking" => "tracking",
+                                    "text_leading" => "leading",
+                                    "text_stroke_w" => "stroke_width",
+                                    "text_baseline" => "baseline_shift",
+                                    _ => "box_width",
+                                };
+                                let cur = s.scrub_current_value(key_head).unwrap_or(0.0);
+                                let mult = rest.parse::<f32>().unwrap_or(50.0) / 100.0;
+                                let _ = s.set_layer_text_scalar(&lid, field, cur + dx * mult);
+                            }
+                            return;
+                        }
+                    }
                     if let Some(rest) = other.strip_prefix("slcl:") {
                         // Linked vector scrub: slcl:<eff>:<name> (all
                         // components together; see the vector widget).
@@ -4071,6 +4102,36 @@ fn property_keyframe_controls(
                             )
                         } else {
                             (false, false, false)
+                        }
+                    }
+                    "text.tracking" | "text.leading" | "text.stroke_width"
+                    | "text.baseline_shift" | "text.box_width" => {
+                        let prop = if let LayerSource::Text {
+                            ref tracking,
+                            ref leading,
+                            ref stroke_width,
+                            ref baseline_shift,
+                            ref box_width,
+                            ..
+                        } = layer.source
+                        {
+                            match prop_path {
+                                "text.tracking" => Some(tracking),
+                                "text.leading" => Some(leading),
+                                "text.stroke_width" => Some(stroke_width),
+                                "text.baseline_shift" => Some(baseline_shift),
+                                _ => Some(box_width),
+                            }
+                        } else {
+                            None
+                        };
+                        match prop {
+                            Some(p) => (
+                                p.has_keyframe_at(&current_tc),
+                                p.previous_keyframe_time(&current_tc).is_some(),
+                                p.next_keyframe_time(&current_tc).is_some(),
+                            ),
+                            None => (false, false, false),
                         }
                     }
                     "shape.rect_width" => {
@@ -4696,9 +4757,9 @@ fn render_tool_settings(state: &Entity<EditorState>, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// Collapsible inspector section card (Properties accordion). Only the
-/// header always renders; the body shows when expanded. Keeps the panel
-/// to what matters for the selection.
+/// Collapsible inspector section card (Properties accordion) built on the
+/// gpui-kit `Collapsible` primitive: header goes via `.child`, body via
+/// `.content`, controlled with `.open`. Only the header always renders.
 fn prop_section<F>(
     id: &'static str,
     title: String,
@@ -4711,36 +4772,77 @@ fn prop_section<F>(
 where
     F: Fn(&mut App) + 'static,
 {
-    let mut card = v_flex()
+    let header_el = h_flex()
+        .id(SharedString::from(format!("props_section_{id}")))
+        .test_support()
+        .gap_1p5()
+        .items_center()
+        .font_semibold()
+        .text_xs()
+        .text_color(ae::dim())
+        .cursor_pointer()
+        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+            on_toggle(cx);
+        })
+        .child(div().w(px(10.)).child(if expanded { "▾" } else { "▸" }))
+        .child(icon_box(icon))
+        .child(title.to_uppercase())
+        .into_any_element();
+    let chrome = v_flex()
         .p_2p5()
         .rounded_sm()
         .border_b_1()
         .border_color(ae::border())
         .bg(ae::panel())
         .gap_2()
+        .child(header_el)
+        .into_any_element();
+    let content = body.filter(|_| expanded).unwrap_or_else(|| div().into_any_element());
+    Collapsible::new()
+        .open(expanded)
+        .child(chrome)
+        .content(content)
+        .into_any_element()
+}
+
+/// Nested twirl-down group inside an open card (applied-effect parameter
+/// groups, AE Character / Paragraph groups, Shader Lab groups). The caret
+/// pill is the only toggle hit-target so sibling controls (eye, trash,
+/// presets) never collapse the group. Body mounts only while `open`.
+fn nested_group<F>(
+    toggle_id: SharedString,
+    title: AnyElement,
+    open: bool,
+    on_toggle: F,
+    content: AnyElement,
+) -> AnyElement
+where
+    F: Fn(&mut App) + 'static,
+{
+    let header = h_flex()
+        .gap_1p5()
+        .items_center()
+        .text_xs()
         .child(
-            h_flex()
-                .id(SharedString::from(format!("props_section_{id}")))
+            div()
+                .id(toggle_id)
                 .test_support()
-                .gap_1p5()
-                .items_center()
-                .font_semibold()
-                .text_xs()
-                .text_color(ae::dim())
                 .cursor_pointer()
+                .px_1()
+                .text_color(ae::dim())
+                .hover(|s| s.text_color(ae::text()))
                 .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                     on_toggle(cx);
                 })
-                .child(div().w(px(10.)).child(if expanded { "▾" } else { "▸" }))
-                .child(icon_box(icon))
-                .child(title.to_uppercase()),
-        );
-    if let Some(content) = body {
-        if expanded {
-            card = card.child(content);
-        }
-    }
-    card.into_any_element()
+                .child(if open { "▾" } else { "▸" }),
+        )
+        .child(title);
+    let body = if open { content } else { div().into_any_element() };
+    Collapsible::new()
+        .open(open)
+        .child(header.into_any_element())
+        .content(body)
+        .into_any_element()
 }
 
 /// Compact scalar row for mask params: stopwatch, label, drag/wheel/type
@@ -4801,6 +4903,48 @@ fn mask_param_row(
         .child(scrub_field(
             SharedString::from(format!("param_mask_{param_name}_{mask_id}")),
             format!("mask:{layer_id}:{mask_id}:{param_name}:{mult}"),
+            display,
+            None,
+            None,
+            state,
+            panel_entity,
+            cx,
+            move |_| {},
+            move |_| {},
+        ))
+        .into_any_element()
+}
+
+/// Compact scalar row for a keyframable text property: stopwatch (toggles
+/// and navigates keyframes), label, and an AE-style scrub/click-type field.
+#[allow(clippy::too_many_arguments)]
+fn text_param_row(
+    state: &Entity<EditorState>,
+    panel_entity: &Entity<PropertiesPanel>,
+    layer_id: &str,
+    prop_path: &'static str,
+    scrub_key: &'static str,
+    label: &str,
+    display: String,
+    step: f32,
+    animated: bool,
+    cx: &App,
+) -> AnyElement {
+    let mult = (step * 100.0).round().max(1.0) as i64;
+    h_flex()
+        .items_center()
+        .justify_between()
+        .text_xs()
+        .child(
+            h_flex()
+                .gap_1()
+                .items_center()
+                .child(property_stopwatch(state, layer_id, prop_path, animated, cx))
+                .child(div().text_color(cx.theme().muted_foreground).child(label.to_string())),
+        )
+        .child(scrub_field(
+            SharedString::from(format!("text_param_{scrub_key}")),
+            format!("{scrub_key}:{mult}"),
             display,
             None,
             None,
@@ -5867,6 +6011,8 @@ fn render_applied_effects(
     wheels: &HashMap<(String, String), Entity<InspectorColorPicker>>,
     ui: &PropUi,
     selects: &HashMap<(String, String), Entity<SelectState<SearchableVec<String>>>>,
+    collapsed: &HashSet<String>,
+    group_collapsed: &HashSet<String>,
     cx: &App,
 ) -> AnyElement {    if layer.effects.is_empty() {
         div()
@@ -5885,16 +6031,16 @@ fn render_applied_effects(
             let eff_id = effect.id.clone();
             let eff_id_toggle = effect.id.clone();
             let eff_id_del = effect.id.clone();
+            let eff_id_disc = effect.id.clone();
             let s_toggle = state.clone();
             let s_del = state.clone();
+            let p_disc = panel_entity.clone();
+            // Nested-collapsible state: expanded by default so every
+            // `param_*` / `shader_*` test id stays visible until collapsed.
+            let fx_open = !collapsed.contains(&eff_id);
 
-            let mut effect_box = v_flex()
-                .id(SharedString::from(format!("applied_effect_{}", effect.id)))
-                .test_support()
-                .p_2()
-                .rounded_sm()
-                .bg(cx.theme().secondary)
-                .gap_1p5();
+            // Parameter body (nested inside the collapsible card below).
+            let mut effect_box = v_flex().gap_1p5();
 
             let header_row = h_flex()
                 .items_center()
@@ -5904,6 +6050,25 @@ fn render_applied_effects(
                     h_flex()
                         .gap_1p5()
                         .items_center()
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("effect_disclosure_{}", effect.id)))
+                                .test_support()
+                                .cursor_pointer()
+                                .w(px(10.))
+                                .text_color(cx.theme().muted_foreground)
+                                .hover(|s| s.text_color(ae::text()))
+                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                    let key = eff_id_disc.clone();
+                                    p_disc.update(cx, |this, cx| {
+                                        if !this.fx_collapsed.remove(key.as_str()) {
+                                            this.fx_collapsed.insert(key);
+                                        }
+                                        cx.notify();
+                                    });
+                                })
+                                .child(if fx_open { "▾" } else { "▸" }),
+                        )
                         .child(
                             div()
                                 .id(SharedString::from(format!("effect_toggle_{}", effect.id)))
@@ -5958,8 +6123,6 @@ fn render_applied_effects(
                         })
                         .child(icon_box(IconName::Trash)),
                 );
-
-            effect_box = effect_box.child(header_row);
 
             match &effect.effect_type {
                 // Fully declarative arms: every parameter renders from its
@@ -6294,27 +6457,23 @@ fn render_applied_effects(
                     };
                     effect_box = effect_box.child(status_row);
 
-                    // Auto-generated parameter UI (adding/removing a uniform
-                    // in the source changes this list after Apply).
-                    let mut last_group: Option<&str> = None;
+                    // Auto-generated parameter UI, grouped into nested
+                    // collapsibles (AE-style twirl-downs). Params without a
+                    // declared group render flat; grouped params collapse.
+                    let mut groups: Vec<(Option<String>, Vec<AnyElement>)> = Vec::new();
                     for param in params {
-                        if param.group.as_deref() != last_group {
-                            last_group = param.group.as_deref();
-                            if let Some(g) = last_group {
-                                effect_box = effect_box.child(
-                                    div()
-                                        .mt_1()
-                                        .text_xs()
-                                        .font_semibold()
-                                        .text_color(cx.theme().foreground)
-                                        .child(g.to_string()),
-                                );
-                            }
+                        let gname = param.group.clone();
+                        if groups.last().map(|(n, _)| n != &gname).unwrap_or(true) {
+                            groups.push((gname, Vec::new()));
                         }
+                        let slot = match groups.last_mut() {
+                            Some(s) => s,
+                            None => continue,
+                        };
                         let pname = param.name.clone();
                         let plabel = param.label.clone();
                         let eff_key = eff_id.clone();
-                        match param.param_type.widget_kind() {
+                        let row: AnyElement = match param.param_type.widget_kind() {
                             project::widget::WidgetKind::Slider
                             | project::widget::WidgetKind::Integer
                             | project::widget::WidgetKind::Angle => {
@@ -6328,7 +6487,7 @@ fn render_applied_effects(
                                 } else {
                                     ""
                                 };
-                                effect_box = effect_box.child(crate::widgets::widget_scalar(
+                                crate::widgets::widget_scalar(
                                     state,
                                     panel_entity,
                                     &layer.id,
@@ -6341,7 +6500,7 @@ fn render_applied_effects(
                                     false,
                                     crate::widgets::ScalarCommit::ShaderLab,
                                     cx,
-                                ));
+                                )
                             }
                             project::widget::WidgetKind::Checkbox => {
                                 let on = matches!(
@@ -6351,7 +6510,7 @@ fn render_applied_effects(
                                 let s_t = state.clone();
                                 let eid = eff_key.clone();
                                 let pn = pname.clone();
-                                effect_box = effect_box.child(crate::widgets::widget_bool(
+                                crate::widgets::widget_bool(
                                     &plabel,
                                     on,
                                     format!("shader_bool_{eff_key}_{pname}"),
@@ -6364,16 +6523,16 @@ fn render_applied_effects(
                                         });
                                     },
                                     cx,
-                                ));
+                                )
                             }
                             project::widget::WidgetKind::Dropdown => {
-                                effect_box = effect_box.child(crate::widgets::widget_dropdown(
+                                crate::widgets::widget_dropdown(
                                     &eff_key,
                                     &pname,
                                     &plabel,
                                     selects.get(&(eff_key.clone(), pname.clone())),
                                     cx,
-                                ));
+                                )
                             }
                             project::widget::WidgetKind::Vec2
                             | project::widget::WidgetKind::Vec3
@@ -6398,7 +6557,7 @@ fn render_applied_effects(
                                         _ => 0.0,
                                     };
                                 }
-                                effect_box = effect_box.child(crate::widgets::widget_vec(
+                                crate::widgets::widget_vec(
                                     state,
                                     panel_entity,
                                     &eff_key,
@@ -6408,11 +6567,47 @@ fn render_applied_effects(
                                     &values,
                                     ui.vec_link.contains(&format!("{eff_key}:{pname}")),
                                     cx,
-                                ));
+                                )
                             }
                             // Slider-family fallthrough is handled above;
                             // unmapped kinds render nothing.
-                            _ => {}
+                            _ => div().into_any_element(),
+                        };
+                        slot.1.push(row);
+                    }
+
+                    // Emit groups: declared groups become nested collapsibles,
+                    // ungrouped params stay flat.
+                    for (gname, rows) in groups {
+                        let rows_body = v_flex().gap_1p5().children(rows).into_any_element();
+                        match gname {
+                            None => effect_box = effect_box.child(rows_body),
+                            Some(g) => {
+                                let gkey = format!("{eff_id}:{g}");
+                                let gopen = !group_collapsed.contains(&gkey);
+                                let p_grp = panel_entity.clone();
+                                let gkey_t = gkey.clone();
+                                let gtitle = div()
+                                    .font_semibold()
+                                    .text_color(cx.theme().foreground)
+                                    .child(g.clone())
+                                    .into_any_element();
+                                effect_box = effect_box.child(nested_group(
+                                    SharedString::from(format!("shader_group_{gkey}")),
+                                    gtitle,
+                                    gopen,
+                                    move |cx| {
+                                        let key = gkey_t.clone();
+                                        p_grp.update(cx, |this, cx| {
+                                            if !this.fx_group_collapsed.remove(key.as_str()) {
+                                                this.fx_group_collapsed.insert(key);
+                                            }
+                                            cx.notify();
+                                        });
+                                    },
+                                    rows_body,
+                                ));
+                            }
                         }
                     }
 
@@ -6780,7 +6975,29 @@ fn render_applied_effects(
                 }
             }
 
-            fx_col = fx_col.child(effect_box);
+            // AE-style nested collapsible: the header (disclosure, eye,
+            // name, trash) always mounts so the card keeps its test id and
+            // actions; the parameter body mounts only while expanded.
+            let params_body = if fx_open {
+                effect_box.into_any_element()
+            } else {
+                div().into_any_element()
+            };
+            fx_col = fx_col.child(
+                v_flex()
+                    .id(SharedString::from(format!("applied_effect_{}", effect.id)))
+                    .test_support()
+                    .p_2()
+                    .rounded_sm()
+                    .bg(cx.theme().secondary)
+                    .gap_1p5()
+                    .child(
+                        Collapsible::new()
+                            .open(fx_open)
+                            .child(header_row)
+                            .content(params_body),
+                    ),
+            );
         }
         fx_col.into_any_element()
     }
@@ -7458,6 +7675,8 @@ impl Render for PropertiesPanel {
                                 gradient_stop: self.gradient_stop.clone(),
                             },
                             &fx_selects,
+                            &self.fx_collapsed,
+                            &self.fx_group_collapsed,
                             cx,
                         );
 
@@ -7653,21 +7872,18 @@ impl Render for PropertiesPanel {
                                         div()
                                             .id(SharedString::from(format!("text_preset_{p_str}")))
                                             .test_support()
-                                            .cursor_pointer()
-                                            .px_1p5()
-                                            .py_0p5()
-                                            .rounded_sm()
-                                            .bg(cx.theme().muted)
-                                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-                                            .text_xs()
-                                            .child(p_str)
-                                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                let t = target_str.clone();
-                                                s_p.update(cx, |s, cx| {
-                                                    let _ = s.set_layer_text(&lid_p, &t);
-                                                    cx.notify();
-                                                });
-                                            }),
+                                            .child(
+                                                Button::new(SharedString::from(format!("text_preset_btn_{p_str}")))
+                                                    .compact()
+                                                    .child(p_str)
+                                                    .on_click(move |_, _, cx| {
+                                                        let t = target_str.clone();
+                                                        s_p.update(cx, |s, cx| {
+                                                            let _ = s.set_layer_text(&lid_p, &t);
+                                                            cx.notify();
+                                                        });
+                                                    }),
+                                            ),
                                     );
                                 }
 
@@ -7676,22 +7892,23 @@ impl Render for PropertiesPanel {
                                 for sz in [24.0f32, 36.0, 48.0, 72.0] {
                                     let s_sz = s_fs.clone();
                                     let lid_sz = lid_t.clone();
+                                    let is_sel = (cur_fs - sz).abs() < 1.0;
                                     fs_buttons = fs_buttons.child(
                                         div()
-                                            .cursor_pointer()
-                                            .px_1()
-                                            .py_0p5()
-                                            .rounded_sm()
-                                            .bg(if (cur_fs - sz).abs() < 1.0 { cx.theme().primary } else { cx.theme().muted })
-                                            .text_color(if (cur_fs - sz).abs() < 1.0 { cx.theme().primary_foreground } else { cx.theme().foreground })
-                                            .text_xs()
-                                            .child(format!("{:.0}", sz))
-                                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                s_sz.update(cx, |s, cx| {
-                                                    let _ = s.set_layer_font_size(&lid_sz, sz);
-                                                    cx.notify();
-                                                });
-                                            }),
+                                            .id(SharedString::from(format!("text_font_size_{sz:.0}")))
+                                            .test_support()
+                                            .child(
+                                                Button::new(SharedString::from(format!("text_fs_btn_{sz:.0}")))
+                                                    .compact()
+                                                    .selected(is_sel)
+                                                    .child(format!("{:.0}", sz))
+                                                    .on_click(move |_, _, cx| {
+                                                        s_sz.update(cx, |s, cx| {
+                                                            let _ = s.set_layer_font_size(&lid_sz, sz);
+                                                            cx.notify();
+                                                        });
+                                                    }),
+                                            ),
                                     );
                                 }
 
@@ -7742,22 +7959,19 @@ impl Render for PropertiesPanel {
                                         div()
                                             .id(SharedString::from(format!("font_preset_{fam}")))
                                             .test_support()
-                                            .cursor_pointer()
-                                            .px_1p5()
-                                            .py_0p5()
-                                            .rounded_sm()
-                                            .bg(if is_sel { cx.theme().primary } else { cx.theme().muted })
-                                            .text_color(if is_sel { cx.theme().primary_foreground } else { cx.theme().foreground })
-                                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-                                            .text_xs()
-                                            .child(fam.clone())
-                                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                let f = fam_str.clone();
-                                                s_fam.update(cx, |s, cx| {
-                                                    let _ = s.set_layer_font_family(&lid_fam, &f);
-                                                    cx.notify();
-                                                });
-                                            }),
+                                            .child(
+                                                Button::new(SharedString::from(format!("font_preset_btn_{fam}")))
+                                                    .compact()
+                                                    .selected(is_sel)
+                                                    .child(fam.clone())
+                                                    .on_click(move |_, _, cx| {
+                                                        let f = fam_str.clone();
+                                                        s_fam.update(cx, |s, cx| {
+                                                            let _ = s.set_layer_font_family(&lid_fam, &f);
+                                                            cx.notify();
+                                                        });
+                                                    }),
+                                            ),
                                     );
                                 }
                                 let font_browser = v_flex()
@@ -7839,21 +8053,18 @@ impl Render for PropertiesPanel {
                                                     div()
                                                         .id(SharedString::from(format!("text_weight_{w}")))
                                                         .test_support()
-                                                        .cursor_pointer()
-                                                        .px_1p5()
-                                                        .py_0p5()
-                                                        .rounded_sm()
-                                                        .bg(if sel { cx.theme().primary } else { cx.theme().muted })
-                                                        .text_color(if sel { cx.theme().primary_foreground } else { cx.theme().foreground })
-                                                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-                                                        .text_xs()
-                                                        .child(label)
-                                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                            s_w.update(cx, |s, cx| {
-                                                                let _ = s.set_layer_font_weight(&lid_w, w);
-                                                                cx.notify();
-                                                            });
-                                                        }),
+                                                        .child(
+                                                            Button::new(SharedString::from(format!("text_weight_btn_{w}")))
+                                                                .compact()
+                                                                .selected(sel)
+                                                                .child(label)
+                                                                .on_click(move |_, _, cx| {
+                                                                    s_w.update(cx, |s, cx| {
+                                                                        let _ = s.set_layer_font_weight(&lid_w, w);
+                                                                        cx.notify();
+                                                                    });
+                                                                }),
+                                                        ),
                                                 );
                                             }
                                             let s_it = s_ty.clone();
@@ -7861,48 +8072,42 @@ impl Render for PropertiesPanel {
                                             let s_cp = s_ty.clone();
                                             let lid_cp = lid_ty.clone();
                                             let style_row = h_flex()
-                                                .gap_1()
+                                                .gap_3()
                                                 .items_center()
                                                 .flex_wrap()
                                                 .child(
                                                     div()
                                                         .id("text_italic_toggle")
                                                         .test_support()
-                                                        .cursor_pointer()
-                                                        .px_1p5()
-                                                        .py_0p5()
-                                                        .rounded_sm()
-                                                        .bg(if cur_italic { cx.theme().primary } else { cx.theme().muted })
-                                                        .text_color(if cur_italic { cx.theme().primary_foreground } else { cx.theme().foreground })
-                                                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-                                                        .text_xs()
-                                                        .child("Italic")
-                                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                            s_it.update(cx, |s, cx| {
-                                                                let _ = s.toggle_layer_italic(&lid_it);
-                                                                cx.notify();
-                                                            });
-                                                        }),
+                                                        .child(
+                                                            Checkbox::new("text_italic_checkbox")
+                                                                .checked(cur_italic)
+                                                                .label("Italic")
+                                                                .on_click(move |checked: &bool, _window, cx| {
+                                                                    let val = *checked;
+                                                                    s_it.update(cx, |s, cx| {
+                                                                        let _ = s.set_layer_italic(&lid_it, val);
+                                                                        cx.notify();
+                                                                    });
+                                                                }),
+                                                        ),
                                                 )
                                                 .child(
                                                     div()
                                                         .id("text_caps_toggle")
                                                         .test_support()
-                                                        .cursor_pointer()
-                                                        .px_1p5()
-                                                        .py_0p5()
-                                                        .rounded_sm()
-                                                        .bg(if cur_caps { cx.theme().primary } else { cx.theme().muted })
-                                                        .text_color(if cur_caps { cx.theme().primary_foreground } else { cx.theme().foreground })
-                                                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-                                                        .text_xs()
-                                                        .child("ALL CAPS")
-                                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                            s_cp.update(cx, |s, cx| {
-                                                                let _ = s.toggle_layer_caps(&lid_cp);
-                                                                cx.notify();
-                                                            });
-                                                        }),
+                                                        .child(
+                                                            Checkbox::new("text_caps_checkbox")
+                                                                .checked(cur_caps)
+                                                                .label("ALL CAPS")
+                                                                .on_click(move |checked: &bool, _window, cx| {
+                                                                    let val = *checked;
+                                                                    s_cp.update(cx, |s, cx| {
+                                                                        let _ = s.set_layer_caps(&lid_cp, val);
+                                                                        cx.notify();
+                                                                    });
+                                                                }),
+                                                        ),
                                                 );
                                             let mut align_row = h_flex().gap_1().items_center().flex_wrap();
                                             for (a, label) in [
@@ -7917,21 +8122,18 @@ impl Render for PropertiesPanel {
                                                     div()
                                                         .id(SharedString::from(format!("text_align_{label}")))
                                                         .test_support()
-                                                        .cursor_pointer()
-                                                        .px_1p5()
-                                                        .py_0p5()
-                                                        .rounded_sm()
-                                                        .bg(if sel { cx.theme().primary } else { cx.theme().muted })
-                                                        .text_color(if sel { cx.theme().primary_foreground } else { cx.theme().foreground })
-                                                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-                                                        .text_xs()
-                                                        .child(label)
-                                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                            s_a.update(cx, |s, cx| {
-                                                                let _ = s.set_layer_text_align(&lid_a, a);
-                                                                cx.notify();
-                                                            });
-                                                        }),
+                                                        .child(
+                                                            Button::new(SharedString::from(format!("text_align_btn_{label}")))
+                                                                .compact()
+                                                                .selected(sel)
+                                                                .child(label)
+                                                                .on_click(move |_, _, cx| {
+                                                                    s_a.update(cx, |s, cx| {
+                                                                        let _ = s.set_layer_text_align(&lid_a, a);
+                                                                        cx.notify();
+                                                                    });
+                                                                }),
+                                                        ),
                                                 );
                                             }
                                             let mut track_row = h_flex().gap_1().items_center().flex_wrap();
@@ -7943,20 +8145,18 @@ impl Render for PropertiesPanel {
                                                     div()
                                                         .id(SharedString::from(format!("text_tracking_{tv:.0}")))
                                                         .test_support()
-                                                        .cursor_pointer()
-                                                        .px_1()
-                                                        .py_0p5()
-                                                        .rounded_sm()
-                                                        .bg(if sel { cx.theme().primary } else { cx.theme().muted })
-                                                        .text_color(if sel { cx.theme().primary_foreground } else { cx.theme().foreground })
-                                                        .text_xs()
-                                                        .child(format!("{tv:.0}"))
-                                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                            s_t.update(cx, |s, cx| {
-                                                                let _ = s.set_layer_text_scalar(&lid_t2, "tracking", tv);
-                                                                cx.notify();
-                                                            });
-                                                        }),
+                                                        .child(
+                                                            Button::new(SharedString::from(format!("text_tracking_btn_{tv:.0}")))
+                                                                .compact()
+                                                                .selected(sel)
+                                                                .child(format!("{tv:.0}"))
+                                                                .on_click(move |_, _, cx| {
+                                                                    s_t.update(cx, |s, cx| {
+                                                                        let _ = s.set_layer_text_scalar(&lid_t2, "tracking", tv);
+                                                                        cx.notify();
+                                                                    });
+                                                                }),
+                                                        ),
                                                 );
                                             }
                                             let mut lead_row = h_flex().gap_1().items_center().flex_wrap();
@@ -7973,20 +8173,18 @@ impl Render for PropertiesPanel {
                                                     div()
                                                         .id(SharedString::from(format!("text_leading_{label}")))
                                                         .test_support()
-                                                        .cursor_pointer()
-                                                        .px_1()
-                                                        .py_0p5()
-                                                        .rounded_sm()
-                                                        .bg(if sel { cx.theme().primary } else { cx.theme().muted })
-                                                        .text_color(if sel { cx.theme().primary_foreground } else { cx.theme().foreground })
-                                                        .text_xs()
-                                                        .child(label)
-                                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                            s_l.update(cx, |s, cx| {
-                                                                let _ = s.set_layer_text_scalar(&lid_l, "leading", target);
-                                                                cx.notify();
-                                                            });
-                                                        }),
+                                                        .child(
+                                                            Button::new(SharedString::from(format!("text_leading_btn_{label}")))
+                                                                .compact()
+                                                                .selected(sel)
+                                                                .child(label)
+                                                                .on_click(move |_, _, cx| {
+                                                                    s_l.update(cx, |s, cx| {
+                                                                        let _ = s.set_layer_text_scalar(&lid_l, "leading", target);
+                                                                        cx.notify();
+                                                                    });
+                                                                }),
+                                                        ),
                                                 );
                                             }
                                             let mut stroke_row = h_flex().gap_1().items_center().flex_wrap();
@@ -7994,24 +8192,23 @@ impl Render for PropertiesPanel {
                                                 let s_s = s_ty.clone();
                                                 let lid_s = lid_ty.clone();
                                                 let sel = (cur_stroke_w - sw).abs() < 0.05;
+                                                let sw_lbl = if sw <= 0.0 { "Off".to_string() } else { format!("{sw:.0}px") };
                                                 stroke_row = stroke_row.child(
                                                     div()
                                                         .id(SharedString::from(format!("text_stroke_{sw:.0}")))
                                                         .test_support()
-                                                        .cursor_pointer()
-                                                        .px_1()
-                                                        .py_0p5()
-                                                        .rounded_sm()
-                                                        .bg(if sel { cx.theme().primary } else { cx.theme().muted })
-                                                        .text_color(if sel { cx.theme().primary_foreground } else { cx.theme().foreground })
-                                                        .text_xs()
-                                                        .child(if sw <= 0.0 { "Off".to_string() } else { format!("{sw:.0}px") })
-                                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                            s_s.update(cx, |s, cx| {
-                                                                let _ = s.set_layer_text_scalar(&lid_s, "stroke_width", sw);
-                                                                cx.notify();
-                                                            });
-                                                        }),
+                                                        .child(
+                                                            Button::new(SharedString::from(format!("text_stroke_btn_{sw:.0}")))
+                                                                .compact()
+                                                                .selected(sel)
+                                                                .child(sw_lbl)
+                                                                .on_click(move |_, _, cx| {
+                                                                    s_s.update(cx, |s, cx| {
+                                                                        let _ = s.set_layer_text_scalar(&lid_s, "stroke_width", sw);
+                                                                        cx.notify();
+                                                                    });
+                                                                }),
+                                                        ),
                                                 );
                                             }
                                             let mut stroke_cols = h_flex().gap_1().items_center().flex_wrap();
@@ -8055,23 +8252,22 @@ impl Render for PropertiesPanel {
                                                     div()
                                                         .id(SharedString::from(format!("text_baseline_{bv:.0}")))
                                                         .test_support()
-                                                        .cursor_pointer()
-                                                        .px_1()
-                                                        .py_0p5()
-                                                        .rounded_sm()
-                                                        .bg(if sel { cx.theme().primary } else { cx.theme().muted })
-                                                        .text_color(if sel { cx.theme().primary_foreground } else { cx.theme().foreground })
-                                                        .text_xs()
-                                                        .child(format!("{bv:+.0}"))
-                                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                            s_b.update(cx, |s, cx| {
-                                                                let _ = s.set_layer_text_scalar(&lid_b, "baseline_shift", bv);
-                                                                cx.notify();
-                                                            });
-                                                        }),
+                                                        .child(
+                                                            Button::new(SharedString::from(format!("text_baseline_btn_{bv:.0}")))
+                                                                .compact()
+                                                                .selected(sel)
+                                                                .child(format!("{bv:+.0}"))
+                                                                .on_click(move |_, _, cx| {
+                                                                    s_b.update(cx, |s, cx| {
+                                                                        let _ = s.set_layer_text_scalar(&lid_b, "baseline_shift", bv);
+                                                                        cx.notify();
+                                                                    });
+                                                                }),
+                                                        ),
                                                 );
                                             }
-                                            let mut box_row = h_flex().gap_1().items_center().flex_wrap();                                            for (bv, label) in [(0.0f32, "Point"), (240.0, "240"), (480.0, "480"), (720.0, "720")] {
+                                            let mut box_row = h_flex().gap_1().items_center().flex_wrap();
+                                            for (bv, label) in [(0.0f32, "Point"), (240.0, "240"), (480.0, "480"), (720.0, "720")] {
                                                 let s_b = s_ty.clone();
                                                 let lid_b = lid_ty.clone();
                                                 let sel = (cur_box - bv).abs() < 1.0;
@@ -8079,42 +8275,176 @@ impl Render for PropertiesPanel {
                                                     div()
                                                         .id(SharedString::from(format!("text_box_{label}")))
                                                         .test_support()
-                                                        .cursor_pointer()
-                                                        .px_1()
-                                                        .py_0p5()
-                                                        .rounded_sm()
-                                                        .bg(if sel { cx.theme().primary } else { cx.theme().muted })
-                                                        .text_color(if sel { cx.theme().primary_foreground } else { cx.theme().foreground })
-                                                        .text_xs()
-                                                        .child(label)
-                                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                            s_b.update(cx, |s, cx| {
-                                                                let _ = s.set_layer_text_scalar(&lid_b, "box_width", bv);
-                                                                cx.notify();
-                                                            });
-                                                        }),
+                                                        .child(
+                                                            Button::new(SharedString::from(format!("text_box_btn_{label}")))
+                                                                .compact()
+                                                                .selected(sel)
+                                                                .child(label)
+                                                                .on_click(move |_, _, cx| {
+                                                                    s_b.update(cx, |s, cx| {
+                                                                        let _ = s.set_layer_text_scalar(&lid_b, "box_width", bv);
+                                                                        cx.notify();
+                                                                    });
+                                                                }),
+                                                        ),
                                                 );
                                             }
-                                            v_flex()
-                                                .gap_1p5()
-                                                .child(div().text_xs().font_semibold().text_color(cx.theme().foreground).child("Typography"))
-                                                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Weight"))
-                                                .child(weight_row)
-                                                .child(style_row)
-                                                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Alignment"))
-                                                .child(align_row)
-                                                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Tracking (px)"))
-                                                .child(track_row)
-                                                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Leading"))
-                                                .child(lead_row)
-                                                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Stroke"))
-                                                .child(stroke_row)
-                                                .child(stroke_cols)
-                                                .child(div().text_xs().text_color(cx.theme().muted_foreground).child(format!("Box width (wrap): {}", if cur_box <= 0.0 { "point text".to_string() } else { format!("{:.0}px", cur_box) })))
-                                                .child(box_row)
-                                                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Baseline shift (px)"))
-                                                .child(base_row)
-                                                .child({
+                                            // AE-style groups: each is a nested
+                                            // collapsible; every animatable value keeps
+                                            // a real stopwatch plus a scrub field.
+                                            let (char_open, para_open, stroke_open) = (
+                                                !self.text_collapsed.contains("character"),
+                                                !self.text_collapsed.contains("paragraph"),
+                                                !self.text_collapsed.contains("stroke"),
+                                            );
+                                            let p_char = panel_entity.clone();
+                                            let char_group = nested_group(
+                                                SharedString::from("text_group_character"),
+                                                div().font_semibold().text_color(cx.theme().foreground).child("Character").into_any_element(),
+                                                char_open,
+                                                move |cx| {
+                                                    p_char.update(cx, |this, cx| {
+                                                        if !this.text_collapsed.remove("character") {
+                                                            this.text_collapsed.insert("character");
+                                                        }
+                                                        cx.notify();
+                                                    });
+                                                },
+                                                v_flex()
+                                                    .gap_1p5()
+                                                    .child(
+                                                        h_flex()
+                                                            .gap_1p5()
+                                                            .items_center()
+                                                            .child(property_stopwatch(&self.state, &layer.id, "text.fill_color", fill_color.is_animated(), cx))
+                                                            .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Fill Color"))
+                                                            .child(div().w(px(14.)).h(px(14.)).rounded_sm().bg(Rgba { r: cur_col.r, g: cur_col.g, b: cur_col.b, a: 1.0 }).border_1().border_color(cx.theme().border))
+                                                            .child(div().id("text_color_wheel").test_support().child(ColorPicker::new(&inspector_color.read(cx).state).label("Fill")))
+                                                    )
+                                                    .child(text_col_row)
+                                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Weight"))
+                                                    .child(weight_row)
+                                                    .child(style_row)
+                                                    .child(text_param_row(
+                                                        &self.state,
+                                                        &panel_entity,
+                                                        &layer.id,
+                                                        "text.tracking",
+                                                        "text_tracking",
+                                                        "Tracking (px)",
+                                                        format!("{:.1}", cur_tracking),
+                                                        0.5,
+                                                        tracking.is_animated(),
+                                                        cx,
+                                                    ))
+                                                    .child(track_row)
+                                                    .child(text_param_row(
+                                                        &self.state,
+                                                        &panel_entity,
+                                                        &layer.id,
+                                                        "text.baseline_shift",
+                                                        "text_baseline",
+                                                        "Baseline Shift (px)",
+                                                        format!("{:.1}", cur_baseline),
+                                                        0.5,
+                                                        baseline_shift.is_animated(),
+                                                        cx,
+                                                    ))
+                                                    .child(base_row)
+                                                    .into_any_element(),
+                                            );
+
+                                            let p_para = panel_entity.clone();
+                                            let para_group = nested_group(
+                                                SharedString::from("text_group_paragraph"),
+                                                div().font_semibold().text_color(cx.theme().foreground).child("Paragraph").into_any_element(),
+                                                para_open,
+                                                move |cx| {
+                                                    p_para.update(cx, |this, cx| {
+                                                        if !this.text_collapsed.remove("paragraph") {
+                                                            this.text_collapsed.insert("paragraph");
+                                                        }
+                                                        cx.notify();
+                                                    });
+                                                },
+                                                v_flex()
+                                                    .gap_1p5()
+                                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Alignment"))
+                                                    .child(align_row)
+                                                    .child(text_param_row(
+                                                        &self.state,
+                                                        &panel_entity,
+                                                        &layer.id,
+                                                        "text.leading",
+                                                        "text_leading",
+                                                        "Leading (px)",
+                                                        format!("{:.1}", cur_leading),
+                                                        0.5,
+                                                        leading.is_animated(),
+                                                        cx,
+                                                    ))
+                                                    .child(lead_row)
+                                                    .child(text_param_row(
+                                                        &self.state,
+                                                        &panel_entity,
+                                                        &layer.id,
+                                                        "text.box_width",
+                                                        "text_box_w",
+                                                        "Box Width (px)",
+                                                        if cur_box <= 0.0 { "Point".to_string() } else { format!("{:.0}", cur_box) },
+                                                        2.0,
+                                                        box_width.is_animated(),
+                                                        cx,
+                                                    ))
+                                                    .child(box_row)
+                                                    .into_any_element(),
+                                            );
+                                            let p_stroke = panel_entity.clone();
+                                            let stroke_group = nested_group(
+                                                SharedString::from("text_group_stroke"),
+                                                div().font_semibold().text_color(cx.theme().foreground).child("Stroke").into_any_element(),
+                                                stroke_open,
+                                                move |cx| {
+                                                    p_stroke.update(cx, |this, cx| {
+                                                        if !this.text_collapsed.remove("stroke") {
+                                                            this.text_collapsed.insert("stroke");
+                                                        }
+                                                        cx.notify();
+                                                    });
+                                                },
+                                                v_flex()
+                                                    .gap_1p5()
+                                                    .child(text_param_row(
+                                                        &self.state,
+                                                        &panel_entity,
+                                                        &layer.id,
+                                                        "text.stroke_width",
+                                                        "text_stroke_w",
+                                                        "Stroke Width (px)",
+                                                        format!("{:.0}", cur_stroke_w),
+                                                        0.5,
+                                                        stroke_width.is_animated(),
+                                                        cx,
+                                                    ))
+                                                    .child(stroke_row)
+                                                    .child(stroke_cols)
+                                                    .into_any_element(),
+                                            );
+
+                                            let p_path = panel_entity.clone();
+                                            let path_group = nested_group(
+                                                SharedString::from("text_group_path"),
+                                                div().font_semibold().text_color(cx.theme().foreground).child("Path").into_any_element(),
+                                                !self.text_collapsed.contains("path"),
+                                                move |cx| {
+                                                    p_path.update(cx, |this, cx| {
+                                                        if !this.text_collapsed.remove("path") {
+                                                            this.text_collapsed.insert("path");
+                                                        }
+                                                        cx.notify();
+                                                    });
+                                                },
+                                                {
                                                     let s_tp = self.state.clone();
                                                     let lid_tp = lid_t.clone();
                                                     let has_path = text_path.is_some();
@@ -8133,38 +8463,29 @@ impl Render for PropertiesPanel {
                                                             div()
                                                                 .id("text_path_clear")
                                                                 .test_support()
-                                                                .cursor_pointer()
-                                                                .px_1p5()
-                                                                .py_0p5()
-                                                                .rounded_sm()
-                                                                .bg(cx.theme().muted)
-                                                                .hover(|s| s.bg(rgb(0xef4444)).text_color(rgb(0xffffff)))
-                                                                .text_xs()
-                                                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                                    s_tp.update(cx, |s, cx| {
-                                                                        let _ = s.clear_text_path(&lid_tp);
-                                                                        cx.notify();
-                                                                    });
-                                                                })
-                                                                .child("Clear"),
+                                                                .child(
+                                                                    Button::new("text_clear_path_btn")
+                                                                        .compact()
+                                                                        .child("Clear")
+                                                                        .on_click(move |_, _, cx| {
+                                                                            s_tp.update(cx, |s, cx| {
+                                                                                let _ = s.clear_text_path(&lid_tp);
+                                                                                cx.notify();
+                                                                            });
+                                                                        }),
+                                                                ),
                                                         )
-                                                })
+                                                        .into_any_element()
+                                                },
+                                            );
+                                            v_flex()
+                                                .gap_1p5()
+                                                .child(char_group)
+                                                .child(para_group)
+                                                .child(stroke_group)
+                                                .child(path_group)
                                         })
-                                        .child(
-                                            h_flex()
-                                                .items_center()
-                                                .justify_between()
-                                                .text_xs()
-                                                .child(
-                                                    h_flex()
-                                                        .gap_1p5()
-                                                        .items_center()
-                                                        .child(div().text_color(cx.theme().muted_foreground).child("Color"))
-                                                        .child(div().w(px(14.)).h(px(14.)).rounded_sm().bg(Rgba { r: cur_col.r, g: cur_col.g, b: cur_col.b, a: 1.0 }).border_1().border_color(cx.theme().border))
-                                                        .child(div().id("text_color_wheel").test_support().child(ColorPicker::new(&inspector_color.read(cx).state).label("Fill")))
-                                                )
-                                                .child(text_col_row),
-                                        );
+                                        ;
 
                                 let text_section = prop_section(
                                     "text_source",
