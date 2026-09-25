@@ -3416,6 +3416,10 @@ impl EditorState {
                 LayerSource::Text { font_size, .. } => Some(eval_or(font_size)),
                 _ => None,
             },
+            "font_weight" | "text_weight" => match &layer.source {
+                LayerSource::Text { weight, .. } => Some(*weight as f32),
+                _ => None,
+            },
             _ if key.split(':').next().unwrap_or(key).starts_with("text_") => match &layer.source {
                 LayerSource::Text {
                     tracking,
@@ -3423,6 +3427,7 @@ impl EditorState {
                     stroke_width,
                     baseline_shift,
                     box_width,
+                    box_height,
                     ..
                 } => {
                     let prop = match key.split(':').next().unwrap_or(key) {
@@ -3430,6 +3435,7 @@ impl EditorState {
                         "text_leading" => leading,
                         "text_stroke_w" => stroke_width,
                         "text_baseline" => baseline_shift,
+                        "text_box_h" => box_height,
                         _ => box_width,
                     };
                     Some(eval_or(prop))
@@ -3820,6 +3826,7 @@ impl EditorState {
                     "text_stroke_w" => Some("stroke_width"),
                     "text_baseline" => Some("baseline_shift"),
                     "text_box_w" => Some("box_width"),
+                    "text_box_h" => Some("box_height"),
                     _ => None,
                 };
                 if let Some(field) = text_field {
@@ -3828,6 +3835,13 @@ impl EditorState {
                         None => return false,
                     };
                     return self.set_layer_text_scalar(&lid, field, v).is_ok();
+                }
+                if key == "font_weight" || key == "text_weight" {
+                    let lid = match self.selected_layer_id.clone() {
+                        Some(l) => l,
+                        None => return false,
+                    };
+                    return self.set_layer_font_weight(&lid, v.clamp(100.0, 900.0).round() as u16).is_ok();
                 }
                 false
             }
@@ -6549,7 +6563,7 @@ impl EditorState {
     }
 
     /// Set a scalar text property (tracking / leading / stroke_width /
-    /// baseline_shift / box_width) on a Text layer. Keyframe-aware.
+    /// baseline_shift / box_width / box_height) on a Text layer. Keyframe-aware.
     pub fn set_layer_text_scalar(&mut self, layer_id: &str, field: &str, v: f32) -> Result<(), String> {
         self.checkpoint();
         if !v.is_finite() {
@@ -6559,13 +6573,14 @@ impl EditorState {
         let comp = self.active_composition_mut().ok_or_else(|| "No active composition".to_string())?;
         let layer = comp.get_layer_mut(layer_id).ok_or_else(|| format!("Layer {layer_id} not found"))?;
         match &mut layer.source {
-            LayerSource::Text { tracking, leading, stroke_width, baseline_shift, box_width, .. } => {
+            LayerSource::Text { tracking, leading, stroke_width, baseline_shift, box_width, box_height, .. } => {
                 let prop = match field {
                     "tracking" => tracking,
                     "leading" => leading,
                     "stroke_width" => stroke_width,
                     "baseline_shift" => baseline_shift,
                     "box_width" => box_width,
+                    "box_height" => box_height,
                     _ => return Err(format!("Unknown text field {field}")),
                 };
                 let value = match field {
@@ -6579,6 +6594,104 @@ impl EditorState {
                 if prop.is_animated() {
                     prop.add_keyframe(Keyframe::new(current_tc, value));
                 }
+                Ok(())
+            }
+            _ => Err(format!("Layer {layer_id} is not a Text layer")),
+        }
+    }
+
+    /// Set faux underline on a Text layer.
+    pub fn set_layer_underline(&mut self, layer_id: &str, val: bool) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self.active_composition_mut().ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp.get_layer_mut(layer_id).ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        match &mut layer.source {
+            LayerSource::Text { underline, .. } => {
+                *underline = val;
+                Ok(())
+            }
+            _ => Err(format!("Layer {layer_id} is not a Text layer")),
+        }
+    }
+
+    /// Set small-caps mode on a Text layer.
+    pub fn set_layer_small_caps(&mut self, layer_id: &str, val: bool) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self.active_composition_mut().ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp.get_layer_mut(layer_id).ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        match &mut layer.source {
+            LayerSource::Text { small_caps, .. } => {
+                *small_caps = val;
+                Ok(())
+            }
+            _ => Err(format!("Layer {layer_id} is not a Text layer")),
+        }
+    }
+
+    /// Set superscript mode on a Text layer.
+    pub fn set_layer_superscript(&mut self, layer_id: &str, val: bool) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self.active_composition_mut().ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp.get_layer_mut(layer_id).ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        match &mut layer.source {
+            LayerSource::Text { superscript, .. } => {
+                *superscript = val;
+                Ok(())
+            }
+            _ => Err(format!("Layer {layer_id} is not a Text layer")),
+        }
+    }
+
+    /// Set subscript mode on a Text layer.
+    pub fn set_layer_subscript(&mut self, layer_id: &str, val: bool) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self.active_composition_mut().ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp.get_layer_mut(layer_id).ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        match &mut layer.source {
+            LayerSource::Text { subscript, .. } => {
+                *subscript = val;
+                Ok(())
+            }
+            _ => Err(format!("Layer {layer_id} is not a Text layer")),
+        }
+    }
+
+    /// Set stroke position on a Text layer ("center", "inside", "outside").
+    pub fn set_layer_stroke_position(&mut self, layer_id: &str, pos: impl Into<String>) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self.active_composition_mut().ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp.get_layer_mut(layer_id).ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        match &mut layer.source {
+            LayerSource::Text { stroke_position, .. } => {
+                *stroke_position = pos.into();
+                Ok(())
+            }
+            _ => Err(format!("Layer {layer_id} is not a Text layer")),
+        }
+    }
+
+    /// Set paint order on a Text layer ("fill_over_stroke", "stroke_over_fill").
+    pub fn set_layer_paint_order(&mut self, layer_id: &str, order: impl Into<String>) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self.active_composition_mut().ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp.get_layer_mut(layer_id).ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        match &mut layer.source {
+            LayerSource::Text { paint_order, .. } => {
+                *paint_order = order.into();
+                Ok(())
+            }
+            _ => Err(format!("Layer {layer_id} is not a Text layer")),
+        }
+    }
+
+    /// Set vertical alignment on a Text layer ("top", "middle", "bottom").
+    pub fn set_layer_vertical_align(&mut self, layer_id: &str, align: impl Into<String>) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self.active_composition_mut().ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp.get_layer_mut(layer_id).ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        match &mut layer.source {
+            LayerSource::Text { vertical_align, .. } => {
+                *vertical_align = align.into();
                 Ok(())
             }
             _ => Err(format!("Layer {layer_id} is not a Text layer")),

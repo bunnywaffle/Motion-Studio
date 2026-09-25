@@ -5753,4 +5753,130 @@ mod tests {
             view.panels().properties.read(cx).fx_collapsed.contains(&blur_id)
         }));
     }
+
+    #[gpui_kit::test]
+    fn test_text_properties_combobox_scrub_and_three_mode_color_picker(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1440.), px(1200.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+
+        let text_id = app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, _| {
+                let tid = s.add_text_layer("Editable Text", None).unwrap();
+                s.select_layer(Some(tid.clone()));
+                tid
+            })
+        });
+
+        // 1. Verify Comboboxes and UI elements render
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("text_font_combobox").visible());
+            assert!(window.find("text_style_combobox").visible());
+            assert!(window.find("text_fill_swatch").visible());
+            assert!(window.find("text_stroke_swatch").visible());
+        })
+        .expect("update_window failed");
+
+        // 2. Test interactive scrubbing on text properties via apply_scrub_delta
+        let props_entity = app_view.read_with(cx, |view, _| view.panels().properties.clone());
+        props_entity.update(cx, |panel, cx| {
+            // Scrub font size (+10.0 -> delta 10.0 * 0.5 = +5.0)
+            panel.apply_scrub_delta("font_size", 10.0, cx);
+            // Scrub font weight (+10.0 -> +100 to weight)
+            panel.apply_scrub_delta("font_weight", 10.0, cx);
+            // Scrub box width (+50.0)
+            panel.apply_scrub_delta("text_box_w:100", 50.0, cx);
+            // Scrub box height (+30.0)
+            panel.apply_scrub_delta("text_box_h:100", 30.0, cx);
+            // Scrub tracking (+4.0)
+            panel.apply_scrub_delta("text_tracking:50", 8.0, cx);
+            // Scrub leading (+10.0)
+            panel.apply_scrub_delta("text_leading:50", 20.0, cx);
+            // Scrub stroke width (+4.0)
+            panel.apply_scrub_delta("text_stroke_w:50", 8.0, cx);
+        });
+
+        assert!(app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            let comp = s.active_composition().unwrap();
+            let l = comp.get_layer(&text_id).unwrap();
+            match &l.source {
+                project::LayerSource::Text {
+                    font_size,
+                    weight,
+                    box_width,
+                    box_height,
+                    tracking,
+                    leading,
+                    stroke_width,
+                    ..
+                } => {
+                    font_size.value > 48.0
+                        && *weight >= 500
+                        && box_width.value > 0.0
+                        && box_height.value > 0.0
+                        && tracking.value > 0.0
+                        && leading.value > 0.0
+                        && stroke_width.value > 0.0
+                }
+                _ => false,
+            }
+        }));
+
+        // 3. Test Three-Mode Color Picker: None, Color, Gradient on Text Fill
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            // Click fill swatch to open 3-mode picker popover
+            window.click("text_fill_swatch", cx);
+        })
+        .expect("update_window failed");
+
+        // Verify popover modes are visible and clickable
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("text_fill_tab_none").visible());
+            assert!(window.find("text_fill_tab_color").visible());
+            assert!(window.find("text_fill_tab_gradient").visible());
+
+            // Click "None" tab
+            window.click("text_fill_btn_none", cx);
+        })
+        .expect("update_window failed");
+
+        assert!(app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            let comp = s.active_composition().unwrap();
+            let l = comp.get_layer(&text_id).unwrap();
+            match &l.source {
+                project::LayerSource::Text { fill_color, .. } => fill_color.value.a == 0.0,
+                _ => false,
+            }
+        }));
+
+        // Click "Color" tab
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("text_fill_btn_color", cx);
+        })
+        .expect("update_window failed");
+
+        assert!(app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            let comp = s.active_composition().unwrap();
+            let l = comp.get_layer(&text_id).unwrap();
+            match &l.source {
+                project::LayerSource::Text { fill_color, .. } => fill_color.value.a > 0.0,
+                _ => false,
+            }
+        }));
+    }
 }

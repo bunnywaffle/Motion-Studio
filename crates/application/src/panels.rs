@@ -1,10 +1,13 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::base::IndexPath;
 use gpui_kit::component::button::Button;
+#[allow(unused_imports)]
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::collapsible::Collapsible;
+use gpui_kit::component::combobox::{Combobox, ComboboxEvent, ComboboxState};
 use gpui_kit::component::Selectable;
-use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
+use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::searchable_list::SearchableVec;
 use gpui_kit::component::select::{SelectEvent, SelectState};
 use gpui_kit::base::{h_flex, v_flex, ElementExt as _, Positioner, StyledExt, TestSupportExt};
@@ -3473,6 +3476,20 @@ pub struct PropertiesPanel {
     pub vec_link: HashSet<String>,
     /// Selected gradient-editor stop per effect id.
     pub gradient_stop: HashMap<String, usize>,
+    /// Active 3-mode color picker key: e.g. "text_fill", "text_stroke", "solid_color" (None = closed).
+    pub active_color_picker: Option<String>,
+    /// Color mode per key: "none" | "color" | "gradient"
+    pub color_picker_mode: HashMap<String, String>,
+    /// Gradient angle per key in degrees.
+    pub color_picker_gradient_angle: HashMap<String, f32>,
+    /// Active gradient stop index (0 or 1) per key.
+    pub color_picker_gradient_stop: HashMap<String, usize>,
+    /// Gradient stop colors (stop0, stop1) per key.
+    pub color_picker_gradient_colors: HashMap<String, (Color, Color)>,
+    /// Retained Combobox states (e.g. "text_font_family", "text_font_style").
+    pub combobox_states: HashMap<String, Entity<ComboboxState<SearchableVec<String>>>>,
+    /// Subscriptions for retained Combobox states.
+    pub combobox_subs: HashMap<String, Subscription>,
 }
 
 /// Live rename editor for one mask (Enter commits, blur/Esc cancels).
@@ -3575,6 +3592,13 @@ impl PropertiesPanel {
             select_subs: HashMap::new(),
             vec_link: HashSet::new(),
             gradient_stop: HashMap::new(),
+            active_color_picker: None,
+            color_picker_mode: HashMap::new(),
+            color_picker_gradient_angle: HashMap::new(),
+            color_picker_gradient_stop: HashMap::new(),
+            color_picker_gradient_colors: HashMap::new(),
+            combobox_states: HashMap::new(),
+            combobox_subs: HashMap::new(),
         }
     }
 
@@ -3639,6 +3663,16 @@ impl PropertiesPanel {
                         let _ = s.nudge_layer_ellipse_radii(&lid, 0.0, dx * 1.0);
                     }
                 }
+                "font_weight" | "text_weight" => {
+                    if let Some(lid) = s.selected_layer_id.clone() {
+                        let cur = match s.selected_layer().map(|l| &l.source) {
+                            Some(LayerSource::Text { weight, .. }) => *weight as f32,
+                            _ => 400.0,
+                        };
+                        let new_w = (cur + dx * 10.0).clamp(100.0, 900.0).round() as u16;
+                        let _ = s.set_layer_font_weight(&lid, new_w);
+                    }
+                }
                 other => {
                     if let Some((key_head, rest)) = other.split_once(':') {
                         if key_head.starts_with("text_") && rest.starts_with(|c: char| c.is_ascii_digit()) {
@@ -3649,6 +3683,7 @@ impl PropertiesPanel {
                                     "text_leading" => "leading",
                                     "text_stroke_w" => "stroke_width",
                                     "text_baseline" => "baseline_shift",
+                                    "text_box_h" => "box_height",
                                     _ => "box_width",
                                 };
                                 let cur = s.scrub_current_value(key_head).unwrap_or(0.0);
@@ -4034,6 +4069,556 @@ where
         .items_center()
         .flex_1()
         .child(value_child)
+}
+
+/// After Effects-style blue numeric scrubbable value label with drag-scrubbing, scroll-wheel nudging, and click-to-type.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ae_blue_scrub_field<FMinus, FPlus>(
+    id: impl Into<ElementId>,
+    prop_key: String,
+    label: String,
+    state: &Entity<EditorState>,
+    panel_entity: &Entity<PropertiesPanel>,
+    cx: &App,
+    _on_minus: FMinus,
+    _on_plus: FPlus,
+) -> Div
+where
+    FMinus: Fn(&mut App) + 'static,
+    FPlus: Fn(&mut App) + 'static,
+{
+    let panel_down = panel_entity.clone();
+    let state_scroll = state.clone();
+    let state_fast = state.clone();
+    let prop_for_wheel = prop_key.clone();
+    let prop_for_edit = prop_key.clone();
+
+    let edit_id = id.into();
+    let edit_state = state.read(cx);
+    let editor_opt = edit_state.value_editor.clone();
+    let is_editing = edit_state.value_edit_key.as_deref() == Some(prop_key.as_str());
+
+    let value_child: AnyElement = match (is_editing, editor_opt) {
+        (true, Some(editor)) => Input::new(&editor)
+            .id(edit_id.clone())
+            .w(px(70.))
+            .into_any_element(),
+        _ => div()
+            .id(edit_id)
+            .test_support()
+            .px_1p5()
+            .py_0p5()
+            .text_color(rgb(0x3b82f6))
+            .hover(|s| s.text_color(rgb(0x60a5fa)).bg(rgba(0x3b82f620)))
+            .rounded_sm()
+            .cursor_col_resize()
+            .text_xs()
+            .font_medium()
+            .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+                let curr_x = event.position.x / px(1.0);
+                let p = prop_for_edit.clone();
+                panel_down.update(cx, |this, _| {
+                    this.scrub_prop = Some(p);
+                    this.scrub_last_x = Some(curr_x);
+                    this.scrub_moved = false;
+                });
+                state_fast.update(cx, |s, cx| {
+                    s.checkpoint();
+                    s.preview_fast = true;
+                    cx.notify();
+                });
+            })
+            .on_scroll_wheel(move |event, _window, cx| {
+                let dy = match event.delta {
+                    ScrollDelta::Pixels(p) => p.y / px(1.0),
+                    ScrollDelta::Lines(l) => l.y * 5.0,
+                };
+                if dy != 0.0 {
+                    let step = if dy > 0.0 { 1.0 } else { -1.0 };
+                    let pk = prop_for_wheel.clone();
+                    state_scroll.update(cx, |s, cx| {
+                        s.checkpoint();
+                        if pk == "font_size" {
+                            if let Some(lid) = s.selected_layer_id.clone() {
+                                let _ = s.nudge_layer_font_size(&lid, step);
+                            }
+                        } else if pk == "font_weight" || pk == "text_weight" {
+                            if let Some(lid) = s.selected_layer_id.clone() {
+                                let cur = match s.selected_layer().map(|l| &l.source) {
+                                    Some(LayerSource::Text { weight, .. }) => *weight as f32,
+                                    _ => 400.0,
+                                };
+                                let _ = s.set_layer_font_weight(&lid, (cur + step * 50.0).clamp(100.0, 900.0).round() as u16);
+                            }
+                        } else if let Some((head, _)) = pk.split_once(':') {
+                            if let Some(lid) = s.selected_layer_id.clone() {
+                                let field = match head {
+                                    "text_tracking" => "tracking",
+                                    "text_leading" => "leading",
+                                    "text_stroke_w" => "stroke_width",
+                                    "text_baseline" => "baseline_shift",
+                                    "text_box_h" => "box_height",
+                                    _ => "box_width",
+                                };
+                                let cur = s.scrub_current_value(head).unwrap_or(0.0);
+                                let _ = s.set_layer_text_scalar(&lid, field, cur + step);
+                            }
+                        }
+                        cx.notify();
+                    });
+                }
+            })
+            .child(label)
+            .into_any_element(),
+    };
+
+    h_flex()
+        .items_center()
+        .child(value_child)
+}
+
+/// Swatch supporting 3 modes: None (white box with red diagonal slash), Solid Color, or Gradient.
+pub(crate) fn render_color_swatch<F>(
+    id: impl Into<ElementId>,
+    color: Color,
+    mode: &str,
+    grad_colors: (Color, Color),
+    is_active: bool,
+    cx: &App,
+    on_click: F,
+) -> AnyElement
+where
+    F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+{
+    let swatch_id = id.into();
+    let border_col: Hsla = if is_active {
+        cx.theme().primary
+    } else {
+        cx.theme().border
+    };
+
+    let inner: AnyElement = match mode {
+        "none" => {
+            let mut slash = div()
+                .relative()
+                .w(px(32.))
+                .h(px(20.))
+                .rounded_sm()
+                .bg(rgb(0xffffff))
+                .border_1()
+                .border_color(border_col)
+                .overflow_hidden();
+            for i in 0..14 {
+                let x = i as f32 * 2.3;
+                let y = i as f32 * 1.45;
+                slash = slash.child(
+                    div()
+                        .absolute()
+                        .left(px(x))
+                        .top(px(y))
+                        .w(px(3.5))
+                        .h(px(2.5))
+                        .bg(rgb(0xef4444)),
+                );
+            }
+            slash.into_any_element()
+        }
+        "gradient" => {
+            let (ca, cb) = grad_colors;
+            let mut bar = h_flex()
+                .w(px(32.))
+                .h(px(20.))
+                .rounded_sm()
+                .overflow_hidden()
+                .border_1()
+                .border_color(border_col);
+            for i in 0..16 {
+                let t = i as f32 / 15.0;
+                bar = bar.child(
+                    div().flex_1().h_full().bg(Rgba {
+                        r: ca.r + (cb.r - ca.r) * t,
+                        g: ca.g + (cb.g - ca.g) * t,
+                        b: ca.b + (cb.b - ca.b) * t,
+                        a: 1.0,
+                    }),
+                );
+            }
+            bar.into_any_element()
+        }
+        _ => {
+            div()
+                .w(px(32.))
+                .h(px(20.))
+                .rounded_sm()
+                .bg(Rgba {
+                    r: color.r,
+                    g: color.g,
+                    b: color.b,
+                    a: if color.a <= 0.0 { 1.0 } else { color.a },
+                })
+                .border_1()
+                .border_color(border_col)
+                .into_any_element()
+        }
+    };
+
+    div()
+        .id(swatch_id)
+        .test_support()
+        .cursor_pointer()
+        .on_click(on_click)
+        .child(inner)
+        .into_any_element()
+}
+
+/// Three-mode color picker dialog / popover: None, Color, Gradient.
+pub(crate) fn render_three_mode_color_picker(
+    key: &str,
+    current_color: Color,
+    panel_self: &PropertiesPanel,
+    panel_entity: &Entity<PropertiesPanel>,
+    state: &Entity<EditorState>,
+    inspector_color: &Entity<InspectorColorPicker>,
+    cx: &App,
+) -> Div {
+    let mode = panel_self.color_picker_mode.get(key).map(|s| s.as_str()).unwrap_or_else(|| {
+        if current_color.a <= 0.0 {
+            "none"
+        } else {
+            "color"
+        }
+    });
+    let grad_colors = panel_self.color_picker_gradient_colors.get(key).copied().unwrap_or((Color::WHITE, Color::BLACK));
+    let grad_stop = panel_self.color_picker_gradient_stop.get(key).copied().unwrap_or(0);
+    let grad_angle = panel_self.color_picker_gradient_angle.get(key).copied().unwrap_or(0.0);
+
+    let k_none = key.to_string();
+    let k_col = key.to_string();
+    let k_grad = key.to_string();
+    let k_close = key.to_string();
+
+    let p_none = panel_entity.clone();
+    let s_none = state.clone();
+    let p_col = panel_entity.clone();
+    let s_col = state.clone();
+    let p_grad = panel_entity.clone();
+    let s_grad = state.clone();
+    let p_close = panel_entity.clone();
+
+    // Mode tabs: None | Color | Gradient
+    let mode_tabs = h_flex()
+        .gap_1()
+        .items_center()
+        .justify_between()
+        .child(
+            h_flex()
+                .gap_1()
+                .items_center()
+                .child(
+                    div()
+                        .id(SharedString::from(format!("{key}_tab_none")))
+                        .test_support()
+                        .child(
+                            Button::new(SharedString::from(format!("{key}_btn_none")))
+                                .compact()
+                                .selected(mode == "none")
+                                .child("None")
+                                .on_click(move |_, _, cx| {
+                                    let k = k_none.clone();
+                                    p_none.update(cx, |this, _| {
+                                        this.color_picker_mode.insert(k.clone(), "none".to_string());
+                                    });
+                                    s_none.update(cx, |s, cx| {
+                                        if let Some(lid) = s.selected_layer_id.clone() {
+                                            match k.as_str() {
+                                                "text_fill" => { let _ = s.set_layer_text_color(&lid, Color::TRANSPARENT); }
+                                                "text_stroke" => { let _ = s.set_layer_text_scalar(&lid, "stroke_width", 0.0); }
+                                                "solid_color" => { let _ = s.set_layer_solid_color(&lid, Color::TRANSPARENT); }
+                                                "shape_fill" => { let _ = s.set_layer_shape_fill(&lid, Color::TRANSPARENT); }
+                                                _ => {}
+                                            }
+                                            cx.notify();
+                                        }
+                                    });
+                                }),
+                        ),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("{key}_tab_color")))
+                        .test_support()
+                        .child(
+                            Button::new(SharedString::from(format!("{key}_btn_color")))
+                                .compact()
+                                .selected(mode == "color")
+                                .child("Color")
+                                .on_click(move |_, _, cx| {
+                                    let k = k_col.clone();
+                                    p_col.update(cx, |this, _| {
+                                        this.color_picker_mode.insert(k.clone(), "color".to_string());
+                                    });
+                                    s_col.update(cx, |s, cx| {
+                                        if let Some(lid) = s.selected_layer_id.clone() {
+                                            match k.as_str() {
+                                                "text_fill" => { let _ = s.set_layer_text_color(&lid, Color::WHITE); }
+                                                "text_stroke" => {
+                                                    let _ = s.set_layer_text_scalar(&lid, "stroke_width", 2.0);
+                                                    let _ = s.set_layer_stroke_color(&lid, Color::WHITE);
+                                                }
+                                                "solid_color" => { let _ = s.set_layer_solid_color(&lid, Color::WHITE); }
+                                                "shape_fill" => { let _ = s.set_layer_shape_fill(&lid, Color::WHITE); }
+                                                _ => {}
+                                            }
+                                            cx.notify();
+                                        }
+                                    });
+                                }),
+                        ),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("{key}_tab_gradient")))
+                        .test_support()
+                        .child(
+                            Button::new(SharedString::from(format!("{key}_btn_gradient")))
+                                .compact()
+                                .selected(mode == "gradient")
+                                .child("Gradient")
+                                .on_click(move |_, _, cx| {
+                                    let k = k_grad.clone();
+                                    p_grad.update(cx, |this, _| {
+                                        this.color_picker_mode.insert(k.clone(), "gradient".to_string());
+                                    });
+                                    s_grad.update(cx, |s, cx| {
+                                        if let Some(lid) = s.selected_layer_id.clone() {
+                                            match k.as_str() {
+                                                "text_fill" => { let _ = s.set_layer_text_color(&lid, Color::from_hex("#3B82F6").unwrap()); }
+                                                "text_stroke" => {
+                                                    let _ = s.set_layer_text_scalar(&lid, "stroke_width", 2.0);
+                                                    let _ = s.set_layer_stroke_color(&lid, Color::from_hex("#3B82F6").unwrap());
+                                                }
+                                                _ => {}
+                                            }
+                                            cx.notify();
+                                        }
+                                    });
+                                }),
+                        ),
+                ),
+        )
+        .child(
+            div()
+                .cursor_pointer()
+                .px_1p5()
+                .py_0p5()
+                .rounded_sm()
+                .hover(|s| s.bg(cx.theme().muted))
+                .child("✕")
+                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    p_close.update(cx, |this, cx| {
+                        if this.active_color_picker.as_deref() == Some(k_close.as_str()) {
+                            this.active_color_picker = None;
+                        }
+                        cx.notify();
+                    });
+                }),
+        );
+
+    let content = match mode {
+        "none" => {
+            v_flex()
+                .gap_2()
+                .p_2()
+                .items_center()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("No Color / Transparent mode active"),
+                )
+                .into_any_element()
+        }
+        "gradient" => {
+            let (ca, cb) = grad_colors;
+            let mut bar = h_flex().flex_1().h(px(18.)).rounded_sm().overflow_hidden();
+            for i in 0..24 {
+                let t = i as f32 / 23.0;
+                bar = bar.child(
+                    div().flex_1().h_full().bg(Rgba {
+                        r: ca.r + (cb.r - ca.r) * t,
+                        g: ca.g + (cb.g - ca.g) * t,
+                        b: ca.b + (cb.b - ca.b) * t,
+                        a: 1.0,
+                    }),
+                );
+            }
+
+            let p_s0 = panel_entity.clone();
+            let p_s1 = panel_entity.clone();
+            let k_s0 = key.to_string();
+            let k_s1 = key.to_string();
+
+            let mut presets_row = h_flex().gap_1().items_center().flex_wrap();
+            for (p_name, c1, c2) in [
+                ("Sunset", Color::from_hex("#F59E0B").unwrap(), Color::from_hex("#EC4899").unwrap()),
+                ("Ocean", Color::from_hex("#3B82F6").unwrap(), Color::from_hex("#10B981").unwrap()),
+                ("Neon", Color::from_hex("#8B5CF6").unwrap(), Color::from_hex("#EC4899").unwrap()),
+                ("Mono", Color::WHITE, Color::BLACK),
+            ] {
+                let p_pr = panel_entity.clone();
+                let s_pr = state.clone();
+                let k_pr = key.to_string();
+                presets_row = presets_row.child(
+                    Button::new(SharedString::from(format!("{key}_grad_{p_name}")))
+                        .compact()
+                        .child(p_name)
+                        .on_click(move |_, _, cx| {
+                            let k = k_pr.clone();
+                            p_pr.update(cx, |this, _| {
+                                this.color_picker_gradient_colors.insert(k.clone(), (c1, c2));
+                            });
+                            s_pr.update(cx, |s, cx| {
+                                if let Some(lid) = s.selected_layer_id.clone() {
+                                    if k == "text_fill" {
+                                        let _ = s.set_layer_text_color(&lid, c1);
+                                    } else if k == "text_stroke" {
+                                        let _ = s.set_layer_stroke_color(&lid, c1);
+                                    }
+                                    cx.notify();
+                                }
+                            });
+                        }),
+                );
+            }
+
+            v_flex()
+                .gap_2()
+                .p_1()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(bar)
+                        .child(div().text_xs().text_color(cx.theme().muted_foreground).child(format!("{grad_angle:.0}°"))),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .cursor_pointer()
+                                .px_2()
+                                .py_0p5()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(if grad_stop == 0 { cx.theme().primary } else { cx.theme().border })
+                                .child("Stop 1")
+                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                    p_s0.update(cx, |this, cx| {
+                                        this.color_picker_gradient_stop.insert(k_s0.clone(), 0);
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                        .child(
+                            div()
+                                .cursor_pointer()
+                                .px_2()
+                                .py_0p5()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(if grad_stop == 1 { cx.theme().primary } else { cx.theme().border })
+                                .child("Stop 2")
+                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                    p_s1.update(cx, |this, cx| {
+                                        this.color_picker_gradient_stop.insert(k_s1.clone(), 1);
+                                        cx.notify();
+                                    });
+                                }),
+                        ),
+                )
+                .child(presets_row)
+                .into_any_element()
+        }
+        _ => {
+            // Solid Color mode: GPUI Kit ColorPicker + Swatch Palette + Hex Code
+            let hex_str = format!(
+                "#{:02X}{:02X}{:02X}",
+                (current_color.r * 255.0).round() as u8,
+                (current_color.g * 255.0).round() as u8,
+                (current_color.b * 255.0).round() as u8
+            );
+
+            let mut palette = h_flex().gap_1p5().items_center().flex_wrap();
+            for hex in ["#FFFFFF", "#000000", "#EF4444", "#F59E0B", "#10B981", "#3B82F6", "#8B5CF6", "#EC4899"] {
+                let col = Color::from_hex(hex).unwrap();
+                let s_p = state.clone();
+                let k_p = key.to_string();
+                let sel = (current_color.r - col.r).abs() < 0.02
+                    && (current_color.g - col.g).abs() < 0.02
+                    && (current_color.b - col.b).abs() < 0.02;
+                palette = palette.child(
+                    div()
+                        .id(SharedString::from(format!("{key}_palette_{hex}")))
+                        .test_support()
+                        .cursor_pointer()
+                        .w(px(16.))
+                        .h(px(16.))
+                        .rounded_sm()
+                        .bg(Rgba { r: col.r, g: col.g, b: col.b, a: 1.0 })
+                        .border_1()
+                        .border_color(if sel { cx.theme().primary } else { cx.theme().border })
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            let k = k_p.clone();
+                            s_p.update(cx, |s, cx| {
+                                if let Some(lid) = s.selected_layer_id.clone() {
+                                    match k.as_str() {
+                                        "text_fill" => { let _ = s.set_layer_text_color(&lid, col); }
+                                        "text_stroke" => { let _ = s.set_layer_stroke_color(&lid, col); }
+                                        "solid_color" => { let _ = s.set_layer_solid_color(&lid, col); }
+                                        "shape_fill" => { let _ = s.set_layer_shape_fill(&lid, col); }
+                                        _ => {}
+                                    }
+                                    cx.notify();
+                                }
+                            });
+                        }),
+                );
+            }
+
+            v_flex()
+                .gap_2()
+                .p_1()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(ColorPicker::new(&inspector_color.read(cx).state).label("Pick Color"))
+                        .child(
+                            div()
+                                .px_2()
+                                .py_0p5()
+                                .rounded_sm()
+                                .bg(cx.theme().muted)
+                                .text_xs()
+                                .child(hex_str),
+                        ),
+                )
+                .child(palette)
+                .into_any_element()
+        }
+    };
+
+    v_flex()
+        .gap_1p5()
+        .p_2()
+        .rounded_md()
+        .bg(cx.theme().background)
+        .border_1()
+        .border_color(cx.theme().border)
+        .child(mode_tabs)
+        .child(content)
 }
 
 /// Keyframe controls widget for the Properties Panel inspector:
@@ -4917,7 +5502,7 @@ fn mask_param_row(
 
 /// Compact scalar row for a keyframable text property: stopwatch (toggles
 /// and navigates keyframes), label, and an AE-style scrub/click-type field.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, dead_code)]
 fn text_param_row(
     state: &Entity<EditorState>,
     panel_entity: &Entity<PropertiesPanel>,
@@ -7449,6 +8034,93 @@ impl Render for PropertiesPanel {
             }
         }
 
+        // Retain and sync Combobox states for Font Family and Font Style
+        {
+            let (is_text, cur_fam, cur_w) = {
+                let st = self.state.read(cx);
+                match st.selected_layer().map(|l| &l.source) {
+                    Some(LayerSource::Text { font_family, weight, .. }) => (true, font_family.clone(), *weight),
+                    _ => (false, "Inter".to_string(), 400u16),
+                }
+            };
+            if is_text {
+                if !self.combobox_states.contains_key("text_font_family") {
+                    let sys_fonts = EditorState::available_system_fonts().to_vec();
+                    let sel_idx = sys_fonts.iter().position(|f| f == &cur_fam).unwrap_or(0);
+                    let delegate = SearchableVec::new(sys_fonts);
+                    let cb = cx.new(|cx| {
+                        ComboboxState::new(delegate, vec![IndexPath::new(sel_idx)], window, cx)
+                    });
+                    let s_f = self.state.clone();
+                    let sub = cx.subscribe(&cb, move |_, _, event: &ComboboxEvent<SearchableVec<String>>, cx| {
+                        let vals = match event {
+                            ComboboxEvent::Confirm(v) => v,
+                            ComboboxEvent::Change(v) => v,
+                        };
+                        if let Some(font_name) = vals.first() {
+                            s_f.update(cx, |s, cx| {
+                                if let Some(lid) = s.selected_layer_id.clone() {
+                                    let _ = s.set_layer_font_family(&lid, font_name);
+                                    cx.notify();
+                                }
+                            });
+                        }
+                    });
+                    self.combobox_states.insert("text_font_family".to_string(), cb);
+                    self.combobox_subs.insert("text_font_family".to_string(), sub);
+                }
+
+                if !self.combobox_states.contains_key("text_font_style") {
+                    let style_options = vec![
+                        "Regular".to_string(),
+                        "Medium".to_string(),
+                        "SemiBold".to_string(),
+                        "Bold".to_string(),
+                        "Black".to_string(),
+                    ];
+                    let sel_style_idx = match cur_w {
+                        w if w < 450 => 0,
+                        w if w < 550 => 1,
+                        w if w < 650 => 2,
+                        w if w < 800 => 3,
+                        _ => 4,
+                    };
+                    let delegate = SearchableVec::new(style_options);
+                    let cb = cx.new(|cx| {
+                        ComboboxState::new(delegate, vec![IndexPath::new(sel_style_idx)], window, cx)
+                    });
+                    let s_w = self.state.clone();
+                    let sub = cx.subscribe(&cb, move |_, _, event: &ComboboxEvent<SearchableVec<String>>, cx| {
+                        let vals = match event {
+                            ComboboxEvent::Confirm(v) => v,
+                            ComboboxEvent::Change(v) => v,
+                        };
+                        if let Some(style_name) = vals.first() {
+                            let w = match style_name.as_str() {
+                                "Regular" => 400,
+                                "Medium" => 500,
+                                "SemiBold" => 600,
+                                "Bold" => 700,
+                                "Black" => 900,
+                                _ => 400,
+                            };
+                            s_w.update(cx, |s, cx| {
+                                if let Some(lid) = s.selected_layer_id.clone() {
+                                    let _ = s.set_layer_font_weight(&lid, w);
+                                    cx.notify();
+                                }
+                            });
+                        }
+                    });
+                    self.combobox_states.insert("text_font_style".to_string(), cb);
+                    self.combobox_subs.insert("text_font_style".to_string(), sub);
+                }
+            } else {
+                self.combobox_states.clear();
+                self.combobox_subs.clear();
+            }
+        }
+
         let state = self.state.read(cx);
         let selected_layer = state.selected_layer();
 
@@ -7728,7 +8400,18 @@ impl Render for PropertiesPanel {
                                     );
                                 }
 
+                                let solid_mode = self.color_picker_mode.get("solid_color").map(|s| s.as_str()).unwrap_or(if c.a <= 0.0 { "none" } else { "color" });
+                                let solid_grad = self.color_picker_gradient_colors.get("solid_color").copied().unwrap_or((Color::WHITE, Color::BLACK));
+                                let is_solid_active = self.active_color_picker.as_deref() == Some("solid_color");
+                                let p_solid_picker = panel_entity.clone();
                                 let p_src = panel_entity.clone();
+
+                                let solid_dialog: Option<AnyElement> = if is_solid_active {
+                                    Some(render_three_mode_color_picker("solid_color", c, self, &panel_entity, &self.state, &inspector_color, cx).into_any_element())
+                                } else {
+                                    None
+                                };
+
                                 let solid_body = v_flex()
                                     .id("solid_properties_section")
                                     .test_support()
@@ -7742,17 +8425,26 @@ impl Render for PropertiesPanel {
                                                 h_flex()
                                                     .gap_2()
                                                     .items_center()
-                                                    .child(div().text_color(ae::dim()).child("Hex Color:"))
+                                                    .child(div().text_color(ae::dim()).child("Color:"))
                                                     .child(
-                                                        div()
-                                                            .id("solid_color_swatch")
-                                                            .test_support()
-                                                            .w(px(28.))
-                                                            .h(px(20.))
-                                                            .rounded_sm()
-                                                            .bg(Rgba { r: c.r, g: c.g, b: c.b, a: 1.0 })
-                                                            .border_1()
-                                                            .border_color(ae::border()),
+                                                        render_color_swatch(
+                                                            "solid_color_swatch",
+                                                            c,
+                                                            solid_mode,
+                                                            solid_grad,
+                                                            is_solid_active,
+                                                            cx,
+                                                            move |_event, _window, cx| {
+                                                                p_solid_picker.update(cx, |this, cx| {
+                                                                    this.active_color_picker = if this.active_color_picker.as_deref() == Some("solid_color") {
+                                                                        None
+                                                                    } else {
+                                                                        Some("solid_color".to_string())
+                                                                    };
+                                                                    cx.notify();
+                                                                });
+                                                            },
+                                                        )
                                                     )
                                                     .child(
                                                         div()
@@ -7765,6 +8457,7 @@ impl Render for PropertiesPanel {
                                                     .child(div().id("solid_color_wheel").test_support().child(ColorPicker::new(&inspector_color.read(cx).state).label("Color")))
                                             )
                                     )
+                                    .children(solid_dialog)
                                     .child(
                                         h_flex()
                                             .items_center()
@@ -7838,16 +8531,41 @@ impl Render for PropertiesPanel {
                                     Some(solid_body.into_any_element()),
                                 ));
                             }
-                            LayerSource::Text { text, font_family, font_size, fill_color, weight, italic, tracking, leading, align, all_caps, stroke_width, stroke_color, baseline_shift, box_width, text_path } => {
+                            LayerSource::Text {
+                                text,
+                                font_family,
+                                font_size,
+                                fill_color,
+                                weight,
+                                italic,
+                                tracking,
+                                leading,
+                                align,
+                                all_caps,
+                                stroke_width,
+                                stroke_color,
+                                baseline_shift,
+                                box_width,
+                                box_height,
+                                underline,
+                                small_caps,
+                                superscript,
+                                subscript,
+                                stroke_position,
+                                paint_order,
+                                vertical_align,
+                                text_path,
+                                ..
+                            } => {
                                 let lid_t = layer.id.clone();
                                 let s_text = self.state.clone();
                                 let s_fs = self.state.clone();
-                                let s_col = self.state.clone();
+                                let _s_col = self.state.clone();
                                 let s_typo = self.state.clone();
 
                                 let cur_text = text.value.clone();
                                 let cur_fs = font_size.value;
-                                let cur_fam = font_family.clone();
+                                let _cur_fam = font_family.clone();
                                 let cur_col = fill_color.value;
                                 let cur_weight = *weight;
                                 let cur_italic = *italic;
@@ -7857,11 +8575,20 @@ impl Render for PropertiesPanel {
                                 let cur_caps = *all_caps;
                                 let cur_stroke_w = stroke_width.value;
                                 let cur_stroke = *stroke_color;
-                                let cur_baseline = baseline_shift.value;
+                                let _cur_baseline = baseline_shift.value;
                                 let cur_box = box_width.value;
+                                let cur_box_h = box_height.value;
+                                let cur_underline = *underline;
+                                let cur_small_caps = *small_caps;
+                                let cur_superscript = *superscript;
+                                let cur_subscript = *subscript;
+                                let cur_stroke_pos = stroke_position.clone();
+                                let cur_paint_order = paint_order.clone();
+                                let cur_vert_align = vertical_align.clone();
 
                                 let inputs = text_inputs.read(cx);
 
+                                // 1. Source Text Presets
                                 let presets = ["Title Text", "Motion Studio", "Subheading", "After Effects"];
                                 let mut text_presets = h_flex().gap_1().items_center().flex_wrap();
                                 for p_str in presets {
@@ -7887,24 +8614,558 @@ impl Render for PropertiesPanel {
                                     );
                                 }
 
-                                // Font size presets (type an exact size in the box beside them).
-                                let mut fs_buttons = h_flex().gap_1().items_center();
-                                for sz in [24.0f32, 36.0, 48.0, 72.0] {
-                                    let s_sz = s_fs.clone();
-                                    let lid_sz = lid_t.clone();
-                                    let is_sel = (cur_fs - sz).abs() < 1.0;
-                                    fs_buttons = fs_buttons.child(
+                                // 2. Font Group Collapsible
+                                let (font_open, fill_open, para_open) = (
+                                    !self.text_collapsed.contains("font") && !self.text_collapsed.contains("character"),
+                                    !self.text_collapsed.contains("fill_stroke") && !self.text_collapsed.contains("stroke"),
+                                    !self.text_collapsed.contains("paragraph"),
+                                );
+
+                                // Comboboxes for Font Family and Font Style
+                                let font_family_cb = if let Some(cb) = self.combobox_states.get("text_font_family") {
+                                    div().id("text_font_combobox").test_support().w_full().child(Combobox::new(cb)).into_any_element()
+                                } else {
+                                    Input::new(&inputs.font_family).id("text_font_input").w_full().into_any_element()
+                                };
+
+                                let font_style_cb = if let Some(cb) = self.combobox_states.get("text_font_style") {
+                                    div().id("text_style_combobox").test_support().w_full().child(Combobox::new(cb)).into_any_element()
+                                } else {
+                                    div().text_xs().text_color(cx.theme().muted_foreground).child("Regular").into_any_element()
+                                };
+
+                                // Style Row: 7 buttons (B, I, U, AB, AA, x², x₂)
+                                let s_b = s_typo.clone();
+                                let lid_b = lid_t.clone();
+                                let s_it = s_typo.clone();
+                                let lid_it = lid_t.clone();
+                                let s_u = s_typo.clone();
+                                let lid_u = lid_t.clone();
+                                let s_sc = s_typo.clone();
+                                let lid_sc = lid_t.clone();
+                                let s_cp = s_typo.clone();
+                                let lid_cp = lid_t.clone();
+                                let s_sup = s_typo.clone();
+                                let lid_sup = lid_t.clone();
+                                let s_sub = s_typo.clone();
+                                let lid_sub = lid_t.clone();
+
+                                let style_row = h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(
                                         div()
-                                            .id(SharedString::from(format!("text_font_size_{sz:.0}")))
+                                            .id("text_weight_700")
                                             .test_support()
                                             .child(
-                                                Button::new(SharedString::from(format!("text_fs_btn_{sz:.0}")))
+                                                Button::new("text_weight_btn_700")
                                                     .compact()
-                                                    .selected(is_sel)
-                                                    .child(format!("{:.0}", sz))
+                                                    .selected(cur_weight >= 700)
+                                                    .child("B")
                                                     .on_click(move |_, _, cx| {
-                                                        s_sz.update(cx, |s, cx| {
-                                                            let _ = s.set_layer_font_size(&lid_sz, sz);
+                                                        let new_w = if cur_weight >= 700 { 400 } else { 700 };
+                                                        s_b.update(cx, |s, cx| {
+                                                            let _ = s.set_layer_font_weight(&lid_b, new_w);
+                                                            cx.notify();
+                                                        });
+                                                    }),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("text_italic_toggle")
+                                            .test_support()
+                                            .child(
+                                                Button::new("text_italic_btn")
+                                                    .compact()
+                                                    .selected(cur_italic)
+                                                    .child("I")
+                                                    .on_click(move |_, _, cx| {
+                                                        s_it.update(cx, |s, cx| {
+                                                            let _ = s.set_layer_italic(&lid_it, !cur_italic);
+                                                            cx.notify();
+                                                        });
+                                                    }),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("text_underline_toggle")
+                                            .test_support()
+                                            .child(
+                                                Button::new("text_underline_btn")
+                                                    .compact()
+                                                    .selected(cur_underline)
+                                                    .child("U")
+                                                    .on_click(move |_, _, cx| {
+                                                        s_u.update(cx, |s, cx| {
+                                                            let _ = s.set_layer_underline(&lid_u, !cur_underline);
+                                                            cx.notify();
+                                                        });
+                                                    }),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("text_small_caps_toggle")
+                                            .test_support()
+                                            .child(
+                                                Button::new("text_small_caps_btn")
+                                                    .compact()
+                                                    .selected(cur_small_caps)
+                                                    .child("AB")
+                                                    .on_click(move |_, _, cx| {
+                                                        s_sc.update(cx, |s, cx| {
+                                                            let _ = s.set_layer_small_caps(&lid_sc, !cur_small_caps);
+                                                            cx.notify();
+                                                        });
+                                                    }),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("text_caps_toggle")
+                                            .test_support()
+                                            .child(
+                                                Button::new("text_caps_btn")
+                                                    .compact()
+                                                    .selected(cur_caps)
+                                                    .child("AA")
+                                                    .on_click(move |_, _, cx| {
+                                                        s_cp.update(cx, |s, cx| {
+                                                            let _ = s.set_layer_caps(&lid_cp, !cur_caps);
+                                                            cx.notify();
+                                                        });
+                                                    }),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("text_superscript_toggle")
+                                            .test_support()
+                                            .child(
+                                                Button::new("text_superscript_btn")
+                                                    .compact()
+                                                    .selected(cur_superscript)
+                                                    .child("x²")
+                                                    .on_click(move |_, _, cx| {
+                                                        s_sup.update(cx, |s, cx| {
+                                                            let _ = s.set_layer_superscript(&lid_sup, !cur_superscript);
+                                                            cx.notify();
+                                                        });
+                                                    }),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("text_subscript_toggle")
+                                            .test_support()
+                                            .child(
+                                                Button::new("text_subscript_btn")
+                                                    .compact()
+                                                    .selected(cur_subscript)
+                                                    .child("x₂")
+                                                    .on_click(move |_, _, cx| {
+                                                        s_sub.update(cx, |s, cx| {
+                                                            let _ = s.set_layer_subscript(&lid_sub, !cur_subscript);
+                                                            cx.notify();
+                                                        });
+                                                    }),
+                                            ),
+                                    );
+
+                                // 2x2 Numeric Parameter Grid:
+                                // Row 1: T (Size) | ↕ (Leading)
+                                // Row 2: ↔ (Tracking) | ≡ (Box Width %)
+                                let s_fs48 = s_fs.clone();
+                                let lid_fs48 = lid_t.clone();
+                                let numeric_grid = v_flex()
+                                    .gap_1p5()
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .items_center()
+                                            .justify_between()
+                                            .child(
+                                                h_flex()
+                                                    .gap_1p5()
+                                                    .items_center()
+                                                    .child(div().font_bold().text_xs().text_color(cx.theme().muted_foreground).child("T"))
+                                                    .child(ae_blue_scrub_field(
+                                                        "text_font_size_scrub",
+                                                        "font_size".to_string(),
+                                                        format!("{cur_fs:.1}"),
+                                                        &self.state,
+                                                        &panel_entity,
+                                                        cx,
+                                                        move |_| {},
+                                                        move |_| {},
+                                                    ))
+                                                    .child(
+                                                        div()
+                                                            .id("text_font_size_48")
+                                                            .test_support()
+                                                            .child(
+                                                                Button::new("text_fs_btn_48")
+                                                                    .compact()
+                                                                    .selected((cur_fs - 48.0).abs() < 1.0)
+                                                                    .child("48")
+                                                                    .on_click(move |_, _, cx| {
+                                                                        s_fs48.update(cx, |s, cx| {
+                                                                            let _ = s.set_layer_font_size(&lid_fs48, 48.0);
+                                                                            cx.notify();
+                                                                        });
+                                                                    }),
+                                                            ),
+                                                    ),
+                                            )
+                                            .child(
+                                                h_flex()
+                                                    .gap_1p5()
+                                                    .items_center()
+                                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("↕"))
+                                                    .child(ae_blue_scrub_field(
+                                                        "text_leading_scrub",
+                                                        "text_leading:50".to_string(),
+                                                        format!("{:.1}", if cur_leading <= 0.0 { 1.2 } else { cur_leading / cur_fs.max(1.0) }),
+                                                        &self.state,
+                                                        &panel_entity,
+                                                        cx,
+                                                        move |_| {},
+                                                        move |_| {},
+                                                    )),
+                                            ),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .items_center()
+                                            .justify_between()
+                                            .child(
+                                                h_flex()
+                                                    .gap_1p5()
+                                                    .items_center()
+                                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("↔"))
+                                                    .child(ae_blue_scrub_field(
+                                                        "text_tracking_scrub",
+                                                        "text_tracking:50".to_string(),
+                                                        format!("{cur_tracking:.1}"),
+                                                        &self.state,
+                                                        &panel_entity,
+                                                        cx,
+                                                        move |_| {},
+                                                        move |_| {},
+                                                    )),
+                                            )
+                                            .child(
+                                                h_flex()
+                                                    .gap_1p5()
+                                                    .items_center()
+                                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("≡"))
+                                                    .child(ae_blue_scrub_field(
+                                                        "text_box_w_scrub_grid",
+                                                        "text_box_w:100".to_string(),
+                                                        format!("{:.1}%", if cur_box <= 0.0 { 100.0 } else { cur_box / 6.0 }),
+                                                        &self.state,
+                                                        &panel_entity,
+                                                        cx,
+                                                        move |_| {},
+                                                        move |_| {},
+                                                    )),
+                                            ),
+                                    );
+
+                                let p_font = panel_entity.clone();
+                                let font_group = nested_group(
+                                    SharedString::from("text_group_character"),
+                                    div().font_semibold().text_color(cx.theme().foreground).child("FONT").into_any_element(),
+                                    font_open,
+                                    move |cx| {
+                                        p_font.update(cx, |this, cx| {
+                                            let is_collapsed = this.text_collapsed.contains("font") || this.text_collapsed.contains("character");
+                                            if is_collapsed {
+                                                this.text_collapsed.remove("font");
+                                                this.text_collapsed.remove("character");
+                                            } else {
+                                                this.text_collapsed.insert("font");
+                                                this.text_collapsed.insert("character");
+                                            }
+                                            cx.notify();
+                                        });
+                                    },
+                                    v_flex()
+                                        .gap_2()
+                                        .child(font_family_cb)
+                                        .child(font_style_cb)
+                                        .child(
+                                            h_flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .text_xs()
+                                                .child(div().text_color(cx.theme().muted_foreground).child("Weight"))
+                                                .child(ae_blue_scrub_field(
+                                                    "text_font_weight_scrub",
+                                                    "font_weight".to_string(),
+                                                    format!("{:.1}", cur_weight as f32),
+                                                    &self.state,
+                                                    &panel_entity,
+                                                    cx,
+                                                    move |_| {},
+                                                    move |_| {},
+                                                )),
+                                        )
+                                        .child(style_row)
+                                        .child(numeric_grid)
+                                        .into_any_element(),
+                                );
+
+                                // 3. Fill & Stroke Group Collapsible
+                                let fill_mode = self.color_picker_mode.get("text_fill").map(|s| s.as_str()).unwrap_or(if cur_col.a <= 0.0 { "none" } else { "color" });
+                                let fill_grad = self.color_picker_gradient_colors.get("text_fill").copied().unwrap_or((Color::WHITE, Color::BLACK));
+                                let is_fill_active = self.active_color_picker.as_deref() == Some("text_fill");
+
+                                let stroke_mode = self.color_picker_mode.get("text_stroke").map(|s| s.as_str()).unwrap_or(if cur_stroke_w <= 0.0 || cur_stroke.a <= 0.0 { "none" } else { "color" });
+                                let stroke_grad = self.color_picker_gradient_colors.get("text_stroke").copied().unwrap_or((Color::WHITE, Color::BLACK));
+                                let is_stroke_active = self.active_color_picker.as_deref() == Some("text_stroke");
+
+                                let p_swatch_fill = panel_entity.clone();
+                                let p_swatch_stroke = panel_entity.clone();
+
+                                let swatches_row = h_flex()
+                                    .gap_3()
+                                    .items_center()
+                                    .child(
+                                        render_color_swatch(
+                                            "text_fill_swatch",
+                                            cur_col,
+                                            fill_mode,
+                                            fill_grad,
+                                            is_fill_active,
+                                            cx,
+                                            move |_event, _window, cx| {
+                                                p_swatch_fill.update(cx, |this, cx| {
+                                                    this.active_color_picker = if this.active_color_picker.as_deref() == Some("text_fill") {
+                                                        None
+                                                    } else {
+                                                        Some("text_fill".to_string())
+                                                    };
+                                                    cx.notify();
+                                                });
+                                            },
+                                        )
+                                    )
+                                    .child(
+                                        render_color_swatch(
+                                            "text_stroke_swatch",
+                                            cur_stroke,
+                                            stroke_mode,
+                                            stroke_grad,
+                                            is_stroke_active,
+                                            cx,
+                                            move |_event, _window, cx| {
+                                                p_swatch_stroke.update(cx, |this, cx| {
+                                                    this.active_color_picker = if this.active_color_picker.as_deref() == Some("text_stroke") {
+                                                        None
+                                                    } else {
+                                                        Some("text_stroke".to_string())
+                                                    };
+                                                    cx.notify();
+                                                });
+                                            },
+                                        )
+                                    );
+
+                                let color_dialog: Option<AnyElement> = if is_fill_active {
+                                    Some(render_three_mode_color_picker("text_fill", cur_col, self, &panel_entity, &self.state, &inspector_color, cx).into_any_element())
+                                } else if is_stroke_active {
+                                    Some(render_three_mode_color_picker("text_stroke", cur_stroke, self, &panel_entity, &self.state, &inspector_color, cx).into_any_element())
+                                } else {
+                                    None
+                                };
+
+                                let s_st2 = s_typo.clone();
+                                let lid_st2 = lid_t.clone();
+
+                                let p_fill_stroke = panel_entity.clone();
+                                let fill_stroke_group = nested_group(
+                                    SharedString::from("text_group_fill_stroke"),
+                                    div().font_semibold().text_color(cx.theme().foreground).child("FILL & STROKE").into_any_element(),
+                                    fill_open,
+                                    move |cx| {
+                                        p_fill_stroke.update(cx, |this, cx| {
+                                            if !this.text_collapsed.remove("fill_stroke") {
+                                                this.text_collapsed.insert("fill_stroke");
+                                            }
+                                            cx.notify();
+                                        });
+                                    },
+                                    v_flex()
+                                        .gap_2()
+                                        .child(swatches_row)
+                                        .children(color_dialog)
+                                        .child(
+                                            h_flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .text_xs()
+                                                .child(div().text_color(cx.theme().muted_foreground).child("Stroke Width"))
+                                                .child(
+                                                    h_flex()
+                                                        .gap_2()
+                                                        .items_center()
+                                                        .child(ae_blue_scrub_field(
+                                                            "text_stroke_w_scrub",
+                                                            "text_stroke_w:50".to_string(),
+                                                            format!("{cur_stroke_w:.1}"),
+                                                            &self.state,
+                                                            &panel_entity,
+                                                            cx,
+                                                            move |_| {},
+                                                            move |_| {},
+                                                        ))
+                                                        .child(
+                                                            div()
+                                                                .id("text_stroke_2")
+                                                                .test_support()
+                                                                .child(
+                                                                    Button::new("text_stroke_btn_2")
+                                                                        .compact()
+                                                                        .selected((cur_stroke_w - 2.0).abs() < 0.1)
+                                                                        .child("2px")
+                                                                        .on_click(move |_, _, cx| {
+                                                                            s_st2.update(cx, |s, cx| {
+                                                                                let _ = s.set_layer_text_scalar(&lid_st2, "stroke_width", 2.0);
+                                                                                cx.notify();
+                                                                            });
+                                                                        }),
+                                                                ),
+                                                        ),
+                                                ),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .text_xs()
+                                                .child(div().text_color(cx.theme().muted_foreground).child("Position"))
+                                                .child(
+                                                    h_flex()
+                                                        .gap_1()
+                                                        .items_center()
+                                                        .child({
+                                                            let s_pos = s_typo.clone();
+                                                            let lid_pos = lid_t.clone();
+                                                            Button::new("text_pos_center")
+                                                                .compact()
+                                                                .selected(cur_stroke_pos == "Center" || cur_stroke_pos.is_empty())
+                                                                .child("Center")
+                                                                .on_click(move |_, _, cx| {
+                                                                    s_pos.update(cx, |s, cx| {
+                                                                        let _ = s.set_layer_stroke_position(&lid_pos, "Center");
+                                                                        cx.notify();
+                                                                    });
+                                                                })
+                                                        })
+                                                        .child({
+                                                            let s_pos = s_typo.clone();
+                                                            let lid_pos = lid_t.clone();
+                                                            Button::new("text_pos_inside")
+                                                                .compact()
+                                                                .selected(cur_stroke_pos == "Inside")
+                                                                .child("Inside")
+                                                                .on_click(move |_, _, cx| {
+                                                                    s_pos.update(cx, |s, cx| {
+                                                                        let _ = s.set_layer_stroke_position(&lid_pos, "Inside");
+                                                                        cx.notify();
+                                                                    });
+                                                                })
+                                                        })
+                                                        .child({
+                                                            let s_pos = s_typo.clone();
+                                                            let lid_pos = lid_t.clone();
+                                                            Button::new("text_pos_outside")
+                                                                .compact()
+                                                                .selected(cur_stroke_pos == "Outside")
+                                                                .child("Outside")
+                                                                .on_click(move |_, _, cx| {
+                                                                    s_pos.update(cx, |s, cx| {
+                                                                        let _ = s.set_layer_stroke_position(&lid_pos, "Outside");
+                                                                        cx.notify();
+                                                                    });
+                                                                })
+                                                        }),
+                                                ),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .text_xs()
+                                                .child(div().text_color(cx.theme().muted_foreground).child("Paint Order"))
+                                                .child(
+                                                    h_flex()
+                                                        .gap_1()
+                                                        .items_center()
+                                                        .child({
+                                                            let s_po = s_typo.clone();
+                                                            let lid_po = lid_t.clone();
+                                                            Button::new("text_po_fos")
+                                                                .compact()
+                                                                .selected(cur_paint_order == "Fill over Stroke" || cur_paint_order.is_empty())
+                                                                .child("Fill over Stroke")
+                                                                .on_click(move |_, _, cx| {
+                                                                    s_po.update(cx, |s, cx| {
+                                                                        let _ = s.set_layer_paint_order(&lid_po, "Fill over Stroke");
+                                                                        cx.notify();
+                                                                    });
+                                                                })
+                                                        })
+                                                        .child({
+                                                            let s_po = s_typo.clone();
+                                                            let lid_po = lid_t.clone();
+                                                            Button::new("text_po_sof")
+                                                                .compact()
+                                                                .selected(cur_paint_order == "Stroke over Fill")
+                                                                .child("Stroke over Fill")
+                                                                .on_click(move |_, _, cx| {
+                                                                    s_po.update(cx, |s, cx| {
+                                                                        let _ = s.set_layer_paint_order(&lid_po, "Stroke over Fill");
+                                                                        cx.notify();
+                                                                    });
+                                                                })
+                                                        }),
+                                                ),
+                                        )
+                                        .into_any_element(),
+                                );
+
+                                // 4. Paragraph Group Collapsible
+                                let align_presets = [
+                                    (project::TextAlign::Left, "Left", "L"),
+                                    (project::TextAlign::Center, "Center", "C"),
+                                    (project::TextAlign::Right, "Right", "R"),
+                                    (project::TextAlign::JustifyLeft, "JustifyLeft", "JL"),
+                                    (project::TextAlign::JustifyCenter, "JustifyCenter", "JC"),
+                                    (project::TextAlign::JustifyRight, "JustifyRight", "JR"),
+                                    (project::TextAlign::JustifyAll, "JustifyAll", "JA"),
+                                ];
+                                let mut align_row = h_flex().gap_1().items_center().flex_wrap();
+                                for (a, id_tag, label) in align_presets {
+                                    let s_a = s_typo.clone();
+                                    let lid_a = lid_t.clone();
+                                    let sel = cur_align == a;
+                                    align_row = align_row.child(
+                                        div()
+                                            .id(SharedString::from(format!("text_align_{id_tag}")))
+                                            .test_support()
+                                            .child(
+                                                Button::new(SharedString::from(format!("text_align_btn_{id_tag}")))
+                                                    .compact()
+                                                    .selected(sel)
+                                                    .child(label)
+                                                    .on_click(move |_, _, cx| {
+                                                        s_a.update(cx, |s, cx| {
+                                                            let _ = s.set_layer_text_align(&lid_a, a);
                                                             cx.notify();
                                                         });
                                                     }),
@@ -7912,580 +9173,185 @@ impl Render for PropertiesPanel {
                                     );
                                 }
 
-                                let col_presets = [
-                                    ("#FFFFFF", Color::WHITE),
-                                    ("#F59E0B", Color::from_hex("#F59E0B").unwrap()),
-                                    ("#38BDF8", Color::from_hex("#38BDF8").unwrap()),
-                                    ("#EF4444", Color::from_hex("#EF4444").unwrap()),
-                                    ("#10B981", Color::from_hex("#10B981").unwrap()),
+                                let vert_presets = [
+                                    ("top", "Top"),
+                                    ("center", "Center"),
+                                    ("bottom", "Bottom"),
                                 ];
-                                let mut text_col_row = h_flex().gap_1().items_center();
-                                for (hex_str, col_val) in col_presets {
-                                    let s_cp = s_col.clone();
-                                    let lid_cp = lid_t.clone();
-                                    text_col_row = text_col_row.child(
-                                        div()
-                                            .id(SharedString::from(format!("text_color_preset_{hex_str}")))
-                                            .test_support()
-                                            .cursor_pointer()
-                                            .w(px(14.))
-                                            .h(px(14.))
-                                            .rounded_sm()
-                                            .bg(Rgba { r: col_val.r, g: col_val.g, b: col_val.b, a: 1.0 })
-                                            .border_1()
-                                            .border_color(cx.theme().border)
-                                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                s_cp.update(cx, |s, cx| {
-                                                    let _ = s.set_layer_text_color(&lid_cp, col_val);
+                                let mut vert_row = h_flex().gap_1().items_center().flex_wrap();
+                                for (v_code, v_label) in vert_presets {
+                                    let s_v = s_typo.clone();
+                                    let lid_v = lid_t.clone();
+                                    let sel = cur_vert_align.eq_ignore_ascii_case(v_code);
+                                    let v_str = v_code.to_string();
+                                    vert_row = vert_row.child(
+                                        Button::new(SharedString::from(format!("text_vert_{v_code}")))
+                                            .compact()
+                                            .selected(sel)
+                                            .child(v_label)
+                                            .on_click(move |_, _, cx| {
+                                                let vs = v_str.clone();
+                                                s_v.update(cx, |s, cx| {
+                                                    let _ = s.set_layer_vertical_align(&lid_v, &vs);
                                                     cx.notify();
                                                 });
                                             }),
                                     );
                                 }
 
-                                let sys_fonts = EditorState::available_system_fonts();
-                                let font_count = sys_fonts.len();
-                                // Full system-font browser: every family installed
-                                // on this PC (Windows/macOS/Linux via fontdb),
-                                // not a hardcoded shortlist. Scrollable, with
-                                // the current family highlighted.
-                                let mut font_list = h_flex().gap_1().items_center().flex_wrap();
-                                for fam in sys_fonts.iter() {
-                                    let s_fam = s_text.clone();
-                                    let lid_fam = lid_t.clone();
-                                    let is_sel = cur_fam.eq_ignore_ascii_case(fam);
-                                    let fam_str = fam.clone();
-                                    font_list = font_list.child(
-                                        div()
-                                            .id(SharedString::from(format!("font_preset_{fam}")))
-                                            .test_support()
+                                let p_para = panel_entity.clone();
+                                let para_group = nested_group(
+                                    SharedString::from("text_group_paragraph"),
+                                    div().font_semibold().text_color(cx.theme().foreground).child("PARAGRAPH").into_any_element(),
+                                    para_open,
+                                    move |cx| {
+                                        p_para.update(cx, |this, cx| {
+                                            if !this.text_collapsed.remove("paragraph") {
+                                                this.text_collapsed.insert("paragraph");
+                                            }
+                                            cx.notify();
+                                        });
+                                    },
+                                    v_flex()
+                                        .gap_2()
+                                        .child(
+                                            v_flex()
+                                                .gap_1()
+                                                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Horizontal Alignment"))
+                                                .child(align_row),
+                                        )
+                                        .child(
+                                            v_flex()
+                                                .gap_1()
+                                                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Vertical Alignment"))
+                                                .child(vert_row),
+                                        )
+                                        .into_any_element(),
+                                );
+
+                                // 5. Path Group Collapsible
+                                let p_path = panel_entity.clone();
+                                let path_group = nested_group(
+                                    SharedString::from("text_group_path"),
+                                    div().font_semibold().text_color(cx.theme().foreground).child("PATH").into_any_element(),
+                                    !self.text_collapsed.contains("path"),
+                                    move |cx| {
+                                        p_path.update(cx, |this, cx| {
+                                            if !this.text_collapsed.remove("path") {
+                                                this.text_collapsed.insert("path");
+                                            }
+                                            cx.notify();
+                                        });
+                                    },
+                                    {
+                                        let s_tp = self.state.clone();
+                                        let lid_tp = lid_t.clone();
+                                        let has_path = text_path.is_some();
+                                        let count = text_path.as_ref().map(|p| p.points.len()).unwrap_or(0);
+                                        h_flex()
+                                            .gap_1()
+                                            .items_center()
+                                            .child(div().text_xs().text_color(cx.theme().muted_foreground).child(
+                                                if has_path {
+                                                    format!("Text path: {count} pts (Pen adds points)")
+                                                } else {
+                                                    "Text path: none (select + Pen clicks to draw)".to_string()
+                                                },
+                                            ))
                                             .child(
-                                                Button::new(SharedString::from(format!("font_preset_btn_{fam}")))
-                                                    .compact()
-                                                    .selected(is_sel)
-                                                    .child(fam.clone())
-                                                    .on_click(move |_, _, cx| {
-                                                        let f = fam_str.clone();
-                                                        s_fam.update(cx, |s, cx| {
-                                                            let _ = s.set_layer_font_family(&lid_fam, &f);
-                                                            cx.notify();
-                                                        });
-                                                    }),
-                                            ),
-                                    );
-                                }
-                                let font_browser = v_flex()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(format!("System Fonts ({font_count} installed — scroll for all)")),
-                                    )
-                                    .child(
-                                        div()
-                                            .id("font_browser_list")
-                                            .test_support()
-                                            .max_h(px(132.))
-                                            .overflow_y_scroll()
-                                            .p_1()
-                                            .rounded_sm()
-                                            .bg(cx.theme().background)
-                                            .border_1()
-                                            .border_color(cx.theme().border)
-                                            .child(font_list),
-                                    );
+                                                div()
+                                                    .id("text_path_clear")
+                                                    .test_support()
+                                                    .child(
+                                                        Button::new("text_clear_path_btn")
+                                                            .compact()
+                                                            .child("Clear")
+                                                            .on_click(move |_, _, cx| {
+                                                                s_tp.update(cx, |s, cx| {
+                                                                    let _ = s.clear_text_path(&lid_tp);
+                                                                    cx.notify();
+                                                                });
+                                                            }),
+                                                    ),
+                                            )
+                                            .into_any_element()
+                                    },
+                                );
 
                                 let p_src = panel_entity.clone();
                                 let text_body = v_flex()
                                     .id("text_properties_section")
                                     .test_support()
-                                    .gap_2()
-                                        .child(
-                                            h_flex()
-                                                .gap_1p5()
-                                                .items_center()
-                                                .font_semibold()
-                                                .text_xs()
-                                                .text_color(cx.theme().foreground)
-                                                .child(icon_box(IconName::Type))
-                                                .child(property_stopwatch(&self.state, &layer.id, "text.source", text.is_animated(), cx))
-                                                .child(property_stopwatch(&self.state, &layer.id, "text.font_size", font_size.is_animated(), cx))
-                                                .child(property_stopwatch(&self.state, &layer.id, "text.fill_color", fill_color.is_animated(), cx))
-                                                .child(format!("Text Layer (\"{}\")", cur_text)),
-                                        )
-                                        .child(
-                                            h_flex()
-                                                .items_center()
-                                                .justify_between()
-                                                .text_xs()
-                                                .child(div().text_color(cx.theme().muted_foreground).child("Text"))
-                                                .child(Input::new(&inputs.text).id("text_content_input").w(px(220.))),
-                                        )
-                                        .child(text_presets)
-                                        .child(
-                                            h_flex()
-                                                .items_center()
-                                                .justify_between()
-                                                .text_xs()
-                                                .child(Input::new(&inputs.font_family).id("text_font_input").w(px(130.)))
-                                                .child(Input::new(&inputs.font_size).id("text_size_input").w(px(60.)))
-                                                .child(fs_buttons),
-                                        )
-                                        .child(font_browser)
-                                        .child({
-                                            // Typography: weight, style, alignment,
-                                            // spacing, stroke, and box layout.
-                                            let s_ty = s_typo.clone();
-                                            let lid_ty = lid_t.clone();
-                                            let mut weight_row = h_flex().gap_1().items_center().flex_wrap();
-                                            for w in [400u16, 500, 700, 900] {
-                                                let s_w = s_ty.clone();
-                                                let lid_w = lid_ty.clone();
-                                                let sel = cur_weight == w;
-                                                let label = match w {
-                                                    400 => "Regular",
-                                                    500 => "Medium",
-                                                    700 => "Bold",
-                                                    _ => "Black",
-                                                };
-                                                weight_row = weight_row.child(
-                                                    div()
-                                                        .id(SharedString::from(format!("text_weight_{w}")))
-                                                        .test_support()
-                                                        .child(
-                                                            Button::new(SharedString::from(format!("text_weight_btn_{w}")))
-                                                                .compact()
-                                                                .selected(sel)
-                                                                .child(label)
-                                                                .on_click(move |_, _, cx| {
-                                                                    s_w.update(cx, |s, cx| {
-                                                                        let _ = s.set_layer_font_weight(&lid_w, w);
-                                                                        cx.notify();
-                                                                    });
-                                                                }),
-                                                        ),
-                                                );
-                                            }
-                                            let s_it = s_ty.clone();
-                                            let lid_it = lid_ty.clone();
-                                            let s_cp = s_ty.clone();
-                                            let lid_cp = lid_ty.clone();
-                                            let style_row = h_flex()
-                                                .gap_3()
-                                                .items_center()
-                                                .flex_wrap()
-                                                .child(
-                                                    div()
-                                                        .id("text_italic_toggle")
-                                                        .test_support()
-                                                        .child(
-                                                            Checkbox::new("text_italic_checkbox")
-                                                                .checked(cur_italic)
-                                                                .label("Italic")
-                                                                .on_click(move |checked: &bool, _window, cx| {
-                                                                    let val = *checked;
-                                                                    s_it.update(cx, |s, cx| {
-                                                                        let _ = s.set_layer_italic(&lid_it, val);
-                                                                        cx.notify();
-                                                                    });
-                                                                }),
-                                                        ),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .id("text_caps_toggle")
-                                                        .test_support()
-                                                        .child(
-                                                            Checkbox::new("text_caps_checkbox")
-                                                                .checked(cur_caps)
-                                                                .label("ALL CAPS")
-                                                                .on_click(move |checked: &bool, _window, cx| {
-                                                                    let val = *checked;
-                                                                    s_cp.update(cx, |s, cx| {
-                                                                        let _ = s.set_layer_caps(&lid_cp, val);
-                                                                        cx.notify();
-                                                                    });
-                                                                }),
-                                                        ),
-                                                );
-                                            let mut align_row = h_flex().gap_1().items_center().flex_wrap();
-                                            for (a, label) in [
-                                                (project::TextAlign::Left, "Left"),
-                                                (project::TextAlign::Center, "Center"),
-                                                (project::TextAlign::Right, "Right"),
-                                            ] {
-                                                let s_a = s_ty.clone();
-                                                let lid_a = lid_ty.clone();
-                                                let sel = cur_align == a;
-                                                align_row = align_row.child(
-                                                    div()
-                                                        .id(SharedString::from(format!("text_align_{label}")))
-                                                        .test_support()
-                                                        .child(
-                                                            Button::new(SharedString::from(format!("text_align_btn_{label}")))
-                                                                .compact()
-                                                                .selected(sel)
-                                                                .child(label)
-                                                                .on_click(move |_, _, cx| {
-                                                                    s_a.update(cx, |s, cx| {
-                                                                        let _ = s.set_layer_text_align(&lid_a, a);
-                                                                        cx.notify();
-                                                                    });
-                                                                }),
-                                                        ),
-                                                );
-                                            }
-                                            let mut track_row = h_flex().gap_1().items_center().flex_wrap();
-                                            for tv in [-2.0f32, 0.0, 2.0, 5.0, 10.0] {
-                                                let s_t = s_ty.clone();
-                                                let lid_t2 = lid_ty.clone();
-                                                let sel = (cur_tracking - tv).abs() < 0.05;
-                                                track_row = track_row.child(
-                                                    div()
-                                                        .id(SharedString::from(format!("text_tracking_{tv:.0}")))
-                                                        .test_support()
-                                                        .child(
-                                                            Button::new(SharedString::from(format!("text_tracking_btn_{tv:.0}")))
-                                                                .compact()
-                                                                .selected(sel)
-                                                                .child(format!("{tv:.0}"))
-                                                                .on_click(move |_, _, cx| {
-                                                                    s_t.update(cx, |s, cx| {
-                                                                        let _ = s.set_layer_text_scalar(&lid_t2, "tracking", tv);
-                                                                        cx.notify();
-                                                                    });
-                                                                }),
-                                                        ),
-                                                );
-                                            }
-                                            let mut lead_row = h_flex().gap_1().items_center().flex_wrap();
-                                            for (lv, label) in [(0.0f32, "Auto"), (1.0, "1.0x"), (1.2, "1.2x"), (1.5, "1.5x"), (2.0, "2.0x")] {
-                                                let s_l = s_ty.clone();
-                                                let lid_l = lid_ty.clone();
-                                                let target = if lv <= 0.0 { 0.0 } else { lv * cur_fs };
-                                                let sel = if lv <= 0.0 {
-                                                    cur_leading <= 0.0
-                                                } else {
-                                                    (cur_leading - target).abs() < 1.0
-                                                };
-                                                lead_row = lead_row.child(
-                                                    div()
-                                                        .id(SharedString::from(format!("text_leading_{label}")))
-                                                        .test_support()
-                                                        .child(
-                                                            Button::new(SharedString::from(format!("text_leading_btn_{label}")))
-                                                                .compact()
-                                                                .selected(sel)
-                                                                .child(label)
-                                                                .on_click(move |_, _, cx| {
-                                                                    s_l.update(cx, |s, cx| {
-                                                                        let _ = s.set_layer_text_scalar(&lid_l, "leading", target);
-                                                                        cx.notify();
-                                                                    });
-                                                                }),
-                                                        ),
-                                                );
-                                            }
-                                            let mut stroke_row = h_flex().gap_1().items_center().flex_wrap();
-                                            for sw in [0.0f32, 1.0, 2.0, 3.0, 5.0] {
-                                                let s_s = s_ty.clone();
-                                                let lid_s = lid_ty.clone();
-                                                let sel = (cur_stroke_w - sw).abs() < 0.05;
-                                                let sw_lbl = if sw <= 0.0 { "Off".to_string() } else { format!("{sw:.0}px") };
-                                                stroke_row = stroke_row.child(
-                                                    div()
-                                                        .id(SharedString::from(format!("text_stroke_{sw:.0}")))
-                                                        .test_support()
-                                                        .child(
-                                                            Button::new(SharedString::from(format!("text_stroke_btn_{sw:.0}")))
-                                                                .compact()
-                                                                .selected(sel)
-                                                                .child(sw_lbl)
-                                                                .on_click(move |_, _, cx| {
-                                                                    s_s.update(cx, |s, cx| {
-                                                                        let _ = s.set_layer_text_scalar(&lid_s, "stroke_width", sw);
-                                                                        cx.notify();
-                                                                    });
-                                                                }),
-                                                        ),
-                                                );
-                                            }
-                                            let mut stroke_cols = h_flex().gap_1().items_center().flex_wrap();
-                                            for (hex_str, col_val) in [
-                                                ("#000000", Color::BLACK),
-                                                ("#FFFFFF", Color::WHITE),
-                                                ("#EF4444", Color::from_hex("#EF4444").unwrap()),
-                                                ("#3B82F6", Color::from_hex("#3B82F6").unwrap()),
-                                                ("#F59E0B", Color::from_hex("#F59E0B").unwrap()),
-                                            ] {
-                                                let s_sc = s_ty.clone();
-                                                let lid_sc = lid_ty.clone();
-                                                let sel = (cur_stroke.r - col_val.r).abs() < 0.01
-                                                    && (cur_stroke.g - col_val.g).abs() < 0.01
-                                                    && (cur_stroke.b - col_val.b).abs() < 0.01;
-                                                stroke_cols = stroke_cols.child(
-                                                    div()
-                                                        .id(SharedString::from(format!("text_stroke_color_{hex_str}")))
-                                                        .test_support()
-                                                        .cursor_pointer()
-                                                        .w(px(14.))
-                                                        .h(px(14.))
-                                                        .rounded_sm()
-                                                        .bg(Rgba { r: col_val.r, g: col_val.g, b: col_val.b, a: 1.0 })
-                                                        .border_1()
-                                                        .border_color(if sel { cx.theme().primary } else { cx.theme().border })
-                                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                            s_sc.update(cx, |s, cx| {
-                                                                let _ = s.set_layer_stroke_color(&lid_sc, col_val);
-                                                                cx.notify();
-                                                            });
-                                                        }),
-                                                );
-                                            }
-                                            let mut base_row = h_flex().gap_1().items_center().flex_wrap();
-                                            for bv in [-20.0f32, -5.0, 0.0, 5.0, 20.0] {
-                                                let s_b = s_ty.clone();
-                                                let lid_b = lid_ty.clone();
-                                                let sel = (cur_baseline - bv).abs() < 0.5;
-                                                base_row = base_row.child(
-                                                    div()
-                                                        .id(SharedString::from(format!("text_baseline_{bv:.0}")))
-                                                        .test_support()
-                                                        .child(
-                                                            Button::new(SharedString::from(format!("text_baseline_btn_{bv:.0}")))
-                                                                .compact()
-                                                                .selected(sel)
-                                                                .child(format!("{bv:+.0}"))
-                                                                .on_click(move |_, _, cx| {
-                                                                    s_b.update(cx, |s, cx| {
-                                                                        let _ = s.set_layer_text_scalar(&lid_b, "baseline_shift", bv);
-                                                                        cx.notify();
-                                                                    });
-                                                                }),
-                                                        ),
-                                                );
-                                            }
-                                            let mut box_row = h_flex().gap_1().items_center().flex_wrap();
-                                            for (bv, label) in [(0.0f32, "Point"), (240.0, "240"), (480.0, "480"), (720.0, "720")] {
-                                                let s_b = s_ty.clone();
-                                                let lid_b = lid_ty.clone();
-                                                let sel = (cur_box - bv).abs() < 1.0;
-                                                box_row = box_row.child(
-                                                    div()
-                                                        .id(SharedString::from(format!("text_box_{label}")))
-                                                        .test_support()
-                                                        .child(
-                                                            Button::new(SharedString::from(format!("text_box_btn_{label}")))
-                                                                .compact()
-                                                                .selected(sel)
-                                                                .child(label)
-                                                                .on_click(move |_, _, cx| {
-                                                                    s_b.update(cx, |s, cx| {
-                                                                        let _ = s.set_layer_text_scalar(&lid_b, "box_width", bv);
-                                                                        cx.notify();
-                                                                    });
-                                                                }),
-                                                        ),
-                                                );
-                                            }
-                                            // AE-style groups: each is a nested
-                                            // collapsible; every animatable value keeps
-                                            // a real stopwatch plus a scrub field.
-                                            let (char_open, para_open, stroke_open) = (
-                                                !self.text_collapsed.contains("character"),
-                                                !self.text_collapsed.contains("paragraph"),
-                                                !self.text_collapsed.contains("stroke"),
-                                            );
-                                            let p_char = panel_entity.clone();
-                                            let char_group = nested_group(
-                                                SharedString::from("text_group_character"),
-                                                div().font_semibold().text_color(cx.theme().foreground).child("Character").into_any_element(),
-                                                char_open,
-                                                move |cx| {
-                                                    p_char.update(cx, |this, cx| {
-                                                        if !this.text_collapsed.remove("character") {
-                                                            this.text_collapsed.insert("character");
-                                                        }
-                                                        cx.notify();
-                                                    });
-                                                },
-                                                v_flex()
+                                    .gap_3()
+                                    // Header: red icon + Text
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .items_center()
+                                            .child(div().w(px(10.)).h(px(10.)).rounded_xs().bg(rgb(0xef4444)))
+                                            .child(div().font_bold().text_sm().text_color(cx.theme().foreground).child("Text")),
+                                    )
+                                    // Source Text
+                                    .child(
+                                        v_flex()
+                                            .gap_1()
+                                            .child(
+                                                h_flex()
                                                     .gap_1p5()
-                                                    .child(
-                                                        h_flex()
-                                                            .gap_1p5()
-                                                            .items_center()
-                                                            .child(property_stopwatch(&self.state, &layer.id, "text.fill_color", fill_color.is_animated(), cx))
-                                                            .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Fill Color"))
-                                                            .child(div().w(px(14.)).h(px(14.)).rounded_sm().bg(Rgba { r: cur_col.r, g: cur_col.g, b: cur_col.b, a: 1.0 }).border_1().border_color(cx.theme().border))
-                                                            .child(div().id("text_color_wheel").test_support().child(ColorPicker::new(&inspector_color.read(cx).state).label("Fill")))
-                                                    )
-                                                    .child(text_col_row)
-                                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Weight"))
-                                                    .child(weight_row)
-                                                    .child(style_row)
-                                                    .child(text_param_row(
-                                                        &self.state,
-                                                        &panel_entity,
-                                                        &layer.id,
-                                                        "text.tracking",
-                                                        "text_tracking",
-                                                        "Tracking (px)",
-                                                        format!("{:.1}", cur_tracking),
-                                                        0.5,
-                                                        tracking.is_animated(),
-                                                        cx,
-                                                    ))
-                                                    .child(track_row)
-                                                    .child(text_param_row(
-                                                        &self.state,
-                                                        &panel_entity,
-                                                        &layer.id,
-                                                        "text.baseline_shift",
-                                                        "text_baseline",
-                                                        "Baseline Shift (px)",
-                                                        format!("{:.1}", cur_baseline),
-                                                        0.5,
-                                                        baseline_shift.is_animated(),
-                                                        cx,
-                                                    ))
-                                                    .child(base_row)
-                                                    .into_any_element(),
-                                            );
-
-                                            let p_para = panel_entity.clone();
-                                            let para_group = nested_group(
-                                                SharedString::from("text_group_paragraph"),
-                                                div().font_semibold().text_color(cx.theme().foreground).child("Paragraph").into_any_element(),
-                                                para_open,
-                                                move |cx| {
-                                                    p_para.update(cx, |this, cx| {
-                                                        if !this.text_collapsed.remove("paragraph") {
-                                                            this.text_collapsed.insert("paragraph");
-                                                        }
-                                                        cx.notify();
-                                                    });
-                                                },
-                                                v_flex()
+                                                    .items_center()
+                                                    .child(property_stopwatch(&self.state, &layer.id, "text.source", text.is_animated(), cx))
+                                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Source Text")),
+                                            )
+                                            .child(Input::new(&inputs.text).id("text_content_input").w_full())
+                                            .child(text_presets),
+                                    )
+                                    // Box Size
+                                    .child(
+                                        h_flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .text_xs()
+                                            .child(
+                                                h_flex()
                                                     .gap_1p5()
-                                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Alignment"))
-                                                    .child(align_row)
-                                                    .child(text_param_row(
+                                                    .items_center()
+                                                    .child(property_stopwatch(&self.state, &layer.id, "text.box_width", box_width.is_animated(), cx))
+                                                    .child(div().text_color(cx.theme().muted_foreground).child("Box Size")),
+                                            )
+                                            .child(
+                                                h_flex()
+                                                    .gap_2()
+                                                    .items_center()
+                                                    .child(ae_blue_scrub_field(
+                                                        "text_box_w_scrub",
+                                                        "text_box_w:100".to_string(),
+                                                        format!("{:.1}", if cur_box <= 0.0 { 600.0 } else { cur_box }),
                                                         &self.state,
                                                         &panel_entity,
-                                                        &layer.id,
-                                                        "text.leading",
-                                                        "text_leading",
-                                                        "Leading (px)",
-                                                        format!("{:.1}", cur_leading),
-                                                        0.5,
-                                                        leading.is_animated(),
                                                         cx,
+                                                        move |_| {},
+                                                        move |_| {},
                                                     ))
-                                                    .child(lead_row)
-                                                    .child(text_param_row(
+                                                    .child(ae_blue_scrub_field(
+                                                        "text_box_h_scrub",
+                                                        "text_box_h:100".to_string(),
+                                                        format!("{:.1}", if cur_box_h <= 0.0 { 200.0 } else { cur_box_h }),
                                                         &self.state,
                                                         &panel_entity,
-                                                        &layer.id,
-                                                        "text.box_width",
-                                                        "text_box_w",
-                                                        "Box Width (px)",
-                                                        if cur_box <= 0.0 { "Point".to_string() } else { format!("{:.0}", cur_box) },
-                                                        2.0,
-                                                        box_width.is_animated(),
                                                         cx,
-                                                    ))
-                                                    .child(box_row)
-                                                    .into_any_element(),
-                                            );
-                                            let p_stroke = panel_entity.clone();
-                                            let stroke_group = nested_group(
-                                                SharedString::from("text_group_stroke"),
-                                                div().font_semibold().text_color(cx.theme().foreground).child("Stroke").into_any_element(),
-                                                stroke_open,
-                                                move |cx| {
-                                                    p_stroke.update(cx, |this, cx| {
-                                                        if !this.text_collapsed.remove("stroke") {
-                                                            this.text_collapsed.insert("stroke");
-                                                        }
-                                                        cx.notify();
-                                                    });
-                                                },
-                                                v_flex()
-                                                    .gap_1p5()
-                                                    .child(text_param_row(
-                                                        &self.state,
-                                                        &panel_entity,
-                                                        &layer.id,
-                                                        "text.stroke_width",
-                                                        "text_stroke_w",
-                                                        "Stroke Width (px)",
-                                                        format!("{:.0}", cur_stroke_w),
-                                                        0.5,
-                                                        stroke_width.is_animated(),
-                                                        cx,
-                                                    ))
-                                                    .child(stroke_row)
-                                                    .child(stroke_cols)
-                                                    .into_any_element(),
-                                            );
-
-                                            let p_path = panel_entity.clone();
-                                            let path_group = nested_group(
-                                                SharedString::from("text_group_path"),
-                                                div().font_semibold().text_color(cx.theme().foreground).child("Path").into_any_element(),
-                                                !self.text_collapsed.contains("path"),
-                                                move |cx| {
-                                                    p_path.update(cx, |this, cx| {
-                                                        if !this.text_collapsed.remove("path") {
-                                                            this.text_collapsed.insert("path");
-                                                        }
-                                                        cx.notify();
-                                                    });
-                                                },
-                                                {
-                                                    let s_tp = self.state.clone();
-                                                    let lid_tp = lid_t.clone();
-                                                    let has_path = text_path.is_some();
-                                                    let count = text_path.as_ref().map(|p| p.points.len()).unwrap_or(0);
-                                                    h_flex()
-                                                        .gap_1()
-                                                        .items_center()
-                                                        .child(div().text_xs().text_color(cx.theme().muted_foreground).child(
-                                                            if has_path {
-                                                                format!("Text path: {count} pts (Pen adds points)")
-                                                            } else {
-                                                                "Text path: none (select + Pen clicks to draw)".to_string()
-                                                            },
-                                                        ))
-                                                        .child(
-                                                            div()
-                                                                .id("text_path_clear")
-                                                                .test_support()
-                                                                .child(
-                                                                    Button::new("text_clear_path_btn")
-                                                                        .compact()
-                                                                        .child("Clear")
-                                                                        .on_click(move |_, _, cx| {
-                                                                            s_tp.update(cx, |s, cx| {
-                                                                                let _ = s.clear_text_path(&lid_tp);
-                                                                                cx.notify();
-                                                                            });
-                                                                        }),
-                                                                ),
-                                                        )
-                                                        .into_any_element()
-                                                },
-                                            );
-                                            v_flex()
-                                                .gap_1p5()
-                                                .child(char_group)
-                                                .child(para_group)
-                                                .child(stroke_group)
-                                                .child(path_group)
-                                        })
-                                        ;
+                                                        move |_| {},
+                                                        move |_| {},
+                                                    )),
+                                            ),
+                                    )
+                                    // FONT group
+                                    .child(font_group)
+                                    // FILL & STROKE group
+                                    .child(fill_stroke_group)
+                                    // PARAGRAPH group
+                                    .child(para_group)
+                                    // PATH group
+                                    .child(path_group);
 
                                 let text_section = prop_section(
                                     "text_source",
@@ -8545,6 +9411,16 @@ impl Render for PropertiesPanel {
                                                     }),
                                             );
                                         }
+                                        let shape_mode = self.color_picker_mode.get("shape_fill").map(|s| s.as_str()).unwrap_or(if fill_col.a <= 0.0 { "none" } else { "color" });
+                                        let shape_grad = self.color_picker_gradient_colors.get("shape_fill").copied().unwrap_or((Color::WHITE, Color::BLACK));
+                                        let is_shape_active = self.active_color_picker.as_deref() == Some("shape_fill");
+                                        let p_shape_picker = panel_entity.clone();
+
+                                        let shape_dialog: Option<AnyElement> = if is_shape_active {
+                                            Some(render_three_mode_color_picker("shape_fill", fill_col, self, &panel_entity, &self.state, &inspector_color, cx).into_any_element())
+                                        } else {
+                                            None
+                                        };
 
                                         let rect_body = v_flex()
                                             .id("shape_properties_section")
@@ -8556,8 +9432,34 @@ impl Render for PropertiesPanel {
                                                     .justify_between()
                                                     .text_xs()
                                                     .child(div().text_color(cx.theme().muted_foreground).child("Fill"))
-                                                    .child(fill_row),
+                                                    .child(
+                                                        h_flex()
+                                                            .gap_2()
+                                                            .items_center()
+                                                            .child(
+                                                                render_color_swatch(
+                                                                    "shape_fill_swatch",
+                                                                    fill_col,
+                                                                    shape_mode,
+                                                                    shape_grad,
+                                                                    is_shape_active,
+                                                                    cx,
+                                                                    move |_event, _window, cx| {
+                                                                        p_shape_picker.update(cx, |this, cx| {
+                                                                            this.active_color_picker = if this.active_color_picker.as_deref() == Some("shape_fill") {
+                                                                                None
+                                                                            } else {
+                                                                                Some("shape_fill".to_string())
+                                                                            };
+                                                                            cx.notify();
+                                                                        });
+                                                                    },
+                                                                )
+                                                            )
+                                                            .child(fill_row),
+                                                    ),
                                             )
+                                            .children(shape_dialog)
                                             .child(
                                                 h_flex()
                                                     .items_center()
@@ -8672,6 +9574,16 @@ impl Render for PropertiesPanel {
                                                     }),
                                             );
                                         }
+                                        let shape_mode = self.color_picker_mode.get("shape_fill").map(|s| s.as_str()).unwrap_or(if fill_col.a <= 0.0 { "none" } else { "color" });
+                                        let shape_grad = self.color_picker_gradient_colors.get("shape_fill").copied().unwrap_or((Color::WHITE, Color::BLACK));
+                                        let is_shape_active = self.active_color_picker.as_deref() == Some("shape_fill");
+                                        let p_shape_picker = panel_entity.clone();
+
+                                        let shape_dialog: Option<AnyElement> = if is_shape_active {
+                                            Some(render_three_mode_color_picker("shape_fill", fill_col, self, &panel_entity, &self.state, &inspector_color, cx).into_any_element())
+                                        } else {
+                                            None
+                                        };
 
                                         let ellipse_body = v_flex()
                                             .id("shape_properties_section")
@@ -8683,8 +9595,34 @@ impl Render for PropertiesPanel {
                                                     .justify_between()
                                                     .text_xs()
                                                     .child(div().text_color(cx.theme().muted_foreground).child("Fill"))
-                                                    .child(fill_row),
+                                                    .child(
+                                                        h_flex()
+                                                            .gap_2()
+                                                            .items_center()
+                                                            .child(
+                                                                render_color_swatch(
+                                                                    "ellipse_fill_swatch",
+                                                                    fill_col,
+                                                                    shape_mode,
+                                                                    shape_grad,
+                                                                    is_shape_active,
+                                                                    cx,
+                                                                    move |_event, _window, cx| {
+                                                                        p_shape_picker.update(cx, |this, cx| {
+                                                                            this.active_color_picker = if this.active_color_picker.as_deref() == Some("shape_fill") {
+                                                                                None
+                                                                            } else {
+                                                                                Some("shape_fill".to_string())
+                                                                            };
+                                                                            cx.notify();
+                                                                        });
+                                                                    },
+                                                                )
+                                                            )
+                                                            .child(fill_row),
+                                                    ),
                                             )
+                                            .children(shape_dialog)
                                             .child(
                                                 h_flex()
                                                     .items_center()

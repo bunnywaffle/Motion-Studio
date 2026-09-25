@@ -267,7 +267,7 @@ mod tests {
         assert!(close(blend_color(BlendMode::SoftLight, [0.25, 0.25, 0.25], [0.0, 0.0, 0.0]), [0.0625, 0.0625, 0.0625]));
         // White source lifts mids toward sqrt: 0.5 + (0.7071-0.5) = 0.7071.
         let r = blend_color(BlendMode::SoftLight, [0.5, 0.5, 0.5], [1.0, 1.0, 1.0]);
-        assert!((r[0] - 0.7071).abs() < 1e-3, "{r:?}");
+        assert!((r[0] - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-3, "{r:?}");
     }
 
     #[test]

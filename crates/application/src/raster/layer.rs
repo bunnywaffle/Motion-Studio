@@ -115,6 +115,7 @@ pub fn raster_content(
             baseline_shift,
             box_width,
             text_path,
+            ..
         } => {
             // Effective outline: TextOutline effect wins over native stroke.
             let mut sw = stroke_width.value.max(0.0);
@@ -275,6 +276,7 @@ pub fn layer_cache_key(
             baseline_shift,
             box_width,
             text_path,
+            ..
         } => {
             3u8.hash(&mut h);
             text.value.hash(&mut h);

@@ -71,9 +71,10 @@ pub fn raster_text(spec: &TextSpec) -> (FloatBuf, (f32, f32, f32, f32)) {
         attrs.letter_spacing_opt = Some(LetterSpacing(spec.tracking));
     }
     let align = match spec.align {
-        TextAlign::Left => Align::Left,
-        TextAlign::Center => Align::Center,
-        TextAlign::Right => Align::Right,
+        TextAlign::Left | TextAlign::JustifyLeft => Align::Left,
+        TextAlign::Center | TextAlign::JustifyCenter => Align::Center,
+        TextAlign::Right | TextAlign::JustifyRight => Align::Right,
+        TextAlign::JustifyAll => Align::Justified,
     };
     buffer.set_text(&content, &attrs, Shaping::Advanced, Some(align));
     buffer.shape_until_scroll(&mut fs, false);
@@ -267,9 +268,10 @@ pub fn raster_text_on_path(
         attrs.letter_spacing_opt = Some(LetterSpacing(spec.tracking));
     }
     let align = match spec.align {
-        TextAlign::Left => Align::Left,
-        TextAlign::Center => Align::Center,
-        TextAlign::Right => Align::Right,
+        TextAlign::Left | TextAlign::JustifyLeft => Align::Left,
+        TextAlign::Center | TextAlign::JustifyCenter => Align::Center,
+        TextAlign::Right | TextAlign::JustifyRight => Align::Right,
+        TextAlign::JustifyAll => Align::Justified,
     };
     buffer.set_text(&content, &attrs, Shaping::Advanced, Some(align));
     buffer.shape_until_scroll(&mut fs, false);

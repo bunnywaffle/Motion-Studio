@@ -38,6 +38,22 @@ pub enum TextAlign {
     Left,
     Center,
     Right,
+    JustifyLeft,
+    JustifyCenter,
+    JustifyRight,
+    JustifyAll,
+}
+
+fn default_stroke_position() -> String {
+    "center".to_string()
+}
+
+fn default_paint_order() -> String {
+    "fill_over_stroke".to_string()
+}
+
+fn default_vertical_align() -> String {
+    "top".to_string()
 }
 
 /// Geometric shape types supported by vector shape layers.
@@ -113,6 +129,23 @@ pub enum LayerSource {
         /// Wrap width in px (0 = point text, no wrap).
         #[serde(default)]
         box_width: Property<f32>,
+        /// Wrap box height in px (0 = auto).
+        #[serde(default)]
+        box_height: Property<f32>,
+        #[serde(default)]
+        underline: bool,
+        #[serde(default)]
+        small_caps: bool,
+        #[serde(default)]
+        superscript: bool,
+        #[serde(default)]
+        subscript: bool,
+        #[serde(default = "default_stroke_position")]
+        stroke_position: String,
+        #[serde(default = "default_paint_order")]
+        paint_order: String,
+        #[serde(default = "default_vertical_align")]
+        vertical_align: String,
         /// Optional baseline path: glyphs flow along it (pen on a text
         /// layer appends here). None = straight horizontal layout.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -335,6 +368,14 @@ impl Layer {
                 stroke_color: default_stroke_color(),
                 baseline_shift: Property::new("Baseline Shift", 0.0),
                 box_width: Property::new("Box Width", 0.0),
+                box_height: Property::new("Box Height", 0.0),
+                underline: false,
+                small_caps: false,
+                superscript: false,
+                subscript: false,
+                stroke_position: default_stroke_position(),
+                paint_order: default_paint_order(),
+                vertical_align: default_vertical_align(),
                 text_path: None,
             },
             in_point,
