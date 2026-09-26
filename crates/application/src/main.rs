@@ -208,6 +208,17 @@ impl TopMenu {
             Self::About => "About",
         }
     }
+
+    fn menu_x(self) -> Pixels {
+        match self {
+            Self::File => px(8.),
+            Self::Edit => px(50.),
+            Self::Composition => px(92.),
+            Self::Layer => px(178.),
+            Self::View => px(226.),
+            Self::About => px(270.),
+        }
+    }
 }
 
 /// Reset the project to a fresh untitled project.
@@ -582,9 +593,7 @@ where
         .into_any_element()
 }
 
-/// The File / Edit / About bar above the toolbar. Dropdowns anchor under
-/// their buttons (parent-relative, no coordinate math) with viewport
-/// clamping handled by the panel layout.
+/// The File / Edit / About bar above the toolbar.
 fn render_menubar(
     app: &Entity<AppView>,
     open_menu: Option<TopMenu>,
@@ -593,10 +602,6 @@ fn render_menubar(
     cx: &App,
 ) -> AnyElement {
     let proj_name = state.read(cx).project_display_name();
-    let can_undo = state.read(cx).can_undo();
-    let can_redo = state.read(cx).can_redo();
-    let has_selection = state.read(cx).selected_layer_id.is_some();
-    let recents: Vec<std::path::PathBuf> = state.read(cx).recent_projects.clone();
 
     let mut bar = h_flex()
         .id("top_menubar")
@@ -617,7 +622,6 @@ fn render_menubar(
         let mut btn = div()
             .id(SharedString::from(format!("menubar_{:?}", menu).to_lowercase()))
             .test_support()
-            .relative()
             .cursor_pointer()
             .px_2()
             .py_1()
@@ -634,9 +638,51 @@ fn render_menubar(
             .child(menu.label());
         if is_open {
             btn = btn.bg(cx.theme().muted);
-            let mut items = v_flex().gap_0p5().p_1().min_w(px(250.));
-            match menu {
-                TopMenu::File => {
+        }
+        bar = bar.child(btn);
+    }
+
+    bar.child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .justify_center()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(
+                div()
+                    .truncate()
+                    .child(proj_name),
+            ),
+    )
+    .child(
+        div()
+            .min_w_0()
+            .max_w(px(320.))
+            .truncate()
+            .text_xs()
+            .text_color(cx.theme().primary)
+            .child(menu_note.unwrap_or_default()),
+    )
+    .into_any_element()
+}
+
+/// Renders the dropdown items for the active menu.
+fn render_menu_dropdown(
+    menu: TopMenu,
+    app: &Entity<AppView>,
+    state: &Entity<EditorState>,
+    cx: &App,
+) -> AnyElement {
+    let can_undo = state.read(cx).can_undo();
+    let can_redo = state.read(cx).can_redo();
+    let has_selection = state.read(cx).selected_layer_id.is_some();
+    let recents: Vec<std::path::PathBuf> = state.read(cx).recent_projects.clone();
+
+    let mut items = v_flex().gap_0p5().p_1().min_w(px(250.));
+    match menu {
+        TopMenu::File => {
                     // --- New Group ---
                     {
                         let (a, s) = (app.clone(), state.clone());
@@ -1300,46 +1346,8 @@ fn render_menubar(
                         });
                     }));
                 }
-            }
-            let dropdown = div()
-                .absolute()
-                .top_full()
-                .left_0()
-                .bg(cx.theme().background)
-                .border_1()
-                .border_color(cx.theme().border)
-                .rounded_md()
-                .shadow_lg()
-                .child(items);
-            btn = btn.child(dropdown);
         }
-        bar = bar.child(btn);
-    }
-
-    bar.child(
-        div()
-            .flex_1()
-            .min_w_0()
-            .flex()
-            .justify_center()
-            .text_xs()
-            .text_color(cx.theme().muted_foreground)
-            .child(
-                div()
-                    .truncate()
-                    .child(proj_name),
-            ),
-    )
-    .child(
-        div()
-            .min_w_0()
-            .max_w(px(320.))
-            .truncate()
-            .text_xs()
-            .text_color(cx.theme().primary)
-            .child(menu_note.unwrap_or_default()),
-    )
-    .into_any_element()
+    items.into_any_element()
 }
 
 fn render_toolbar(state: &Entity<EditorState>, cx: &App) -> impl IntoElement {
@@ -1534,6 +1542,54 @@ impl Render for AppView {
         let vw_f = vw as f32;
         let vh_f = vh as f32;
         let mut dialogs: Vec<AnyElement> = Vec::new();
+
+        // Render open menubar dropdown as a deferred overlay above all workspace panels and canvas
+        if let Some(menu) = self.open_menu {
+            let menu_pos = point(menu.menu_x(), px(30.));
+            let a_dismiss = cx.entity().clone();
+            // Full-window transparent backdrop (starting below menubar) so clicking outside dismisses menu
+            dialogs.push(
+                deferred(
+                    Positioner::corner(Anchor::TopLeft, point(px(0.), px(30.)))
+                        .margin(px(0.))
+                        .child(
+                            div()
+                                .id("menu_dismiss_backdrop")
+                                .size_full()
+                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                    a_dismiss.update(cx, |this, cx| {
+                                        this.open_menu = None;
+                                        cx.notify();
+                                    });
+                                })
+                        )
+                )
+                .into_any_element()
+            );
+            // Dropdown menu container with occlude so clicks inside execute menu actions
+            let dropdown_content = render_menu_dropdown(menu, &cx.entity(), &self.state, cx);
+            dialogs.push(
+                deferred(
+                    Positioner::corner(Anchor::TopLeft, menu_pos)
+                        .margin(px(0.))
+                        .occlude()
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("dropdown_{:?}", menu).to_lowercase()))
+                                .test_support()
+                                .min_w(px(250.))
+                                .bg(cx.theme().background)
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .rounded_md()
+                                .shadow_lg()
+                                .p_1()
+                                .child(dropdown_content)
+                        )
+                )
+                .into_any_element()
+            );
+        }
         if self.show_about {
             let a_close = cx.entity().clone();
             let dlg_pos = point(px((vw_f - 320.0).max(8.0) / 2.0), px((vh_f - 260.0).max(8.0) / 2.0));
