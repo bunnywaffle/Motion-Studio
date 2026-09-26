@@ -74,7 +74,7 @@ pub(crate) fn fill_path(
         return;
     }
     for p in pts.iter_mut() {
-        *p = *p - origin;
+        *p -= origin;
     }
     let mut cov = vec![0.0f32; (buf.w * buf.h) as usize];
     super::mask::fill_even_odd(&mut cov, buf.w, buf.h, &pts);
@@ -111,7 +111,7 @@ pub(crate) fn stroke_path(
         return;
     }
     for p in pts.iter_mut() {
-        *p = *p - origin;
+        *p -= origin;
     }
     if path.closed {
         pts.push(pts[0]);

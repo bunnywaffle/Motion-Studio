@@ -553,17 +553,18 @@ impl EvaluatedEffectType {
             Self::NoiseGenerator { amount, monochrome } => {
                 let n_amount = (*amount / 100.0).clamp(0.0, 1.0);
                 if *monochrome {
-                    let hash = ((c.r * 12.9898 + c.g * 78.233 + c.b * 45.164).sin() * 43758.5453).fract();
-                    let noise = (hash - 0.5) * n_amount;                    Color::rgba(
+                    let hash = ((c.r * 12.9898 + c.g * 78.233 + c.b * 45.164).sin() * 43_758.547).fract();
+                    let noise = (hash - 0.5) * n_amount;
+                    Color::rgba(
                         (c.r + noise).clamp(0.0, 1.0),
                         (c.g + noise).clamp(0.0, 1.0),
                         (c.b + noise).clamp(0.0, 1.0),
                         c.a,
                     )
                 } else {
-                    let hr = ((c.r * 12.9898).sin() * 43758.5453).fract();
-                    let hg = ((c.g * 78.2330).sin() * 43758.5453).fract();
-                    let hb = ((c.b * 45.1640).sin() * 43758.5453).fract();
+                    let hr = ((c.r * 12.9898).sin() * 43_758.547).fract();
+                    let hg = ((c.g * 78.2330).sin() * 43_758.547).fract();
+                    let hb = ((c.b * 45.1640).sin() * 43_758.547).fract();
                     Color::rgba(
                         (c.r + (hr - 0.5) * n_amount).clamp(0.0, 1.0),
                         (c.g + (hg - 0.5) * n_amount).clamp(0.0, 1.0),

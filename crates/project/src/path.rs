@@ -186,7 +186,7 @@ impl Path {
 
     /// Closed ellipse approximation (4 smooth nodes, kappa handles).
     pub fn ellipse(cx: f32, cy: f32, rx: f32, ry: f32) -> Self {
-        const KAPPA: f32 = 0.5522847498;
+        const KAPPA: f32 = 0.552_284_8;
         let (kx, ky) = (KAPPA * rx, KAPPA * ry);
         Self {
             points: vec![
@@ -515,7 +515,7 @@ impl Path {
         let closed_loop = self.closed;
         // Resample evenly for stable normals.
         let total = poly_length(&flat, closed_loop).max(1e-6);
-        let count = ((self.segment_count() * samples_per_seg).max(8)).min(512);
+        let count = (self.segment_count() * samples_per_seg).clamp(8, 512);
         let mut pts = Vec::with_capacity(count);
         for i in 0..count {
             let t = i as f32 / count as f32;
@@ -542,7 +542,7 @@ impl Path {
                 out.push(PathPoint::corner(pts[i]));
                 continue;
             }
-            tangent = tangent / len;
+            tangent /= len;
             // Left normal, flipped outward per winding.
             let normal = Vec2::new(-tangent.y, tangent.x) * side;
             out.push(PathPoint::corner(pts[i] + normal * distance));
@@ -688,7 +688,7 @@ impl Path {
                         ];
                         if rel {
                             for p in &mut pts {
-                                *p = *p + cursor;
+                                *p += cursor;
                             }
                         }
                         // Previous node gains the outgoing handle; new node
@@ -716,8 +716,8 @@ impl Path {
                         let mut ctrl = Vec2::new(vals[0], vals[1]);
                         let mut end = Vec2::new(vals[2], vals[3]);
                         if rel {
-                            ctrl = ctrl + cursor;
-                            end = end + cursor;
+                            ctrl += cursor;
+                            end += cursor;
                         }
                         // Degree-elevate quadratic to cubic.
                         let c1 = cursor + (ctrl - cursor) * (2.0 / 3.0);
@@ -879,8 +879,8 @@ fn rdp(pts: &[Vec2], first: usize, last: usize, tol: f32, keep: &mut [bool]) {
     let denom = (dx * dx + dy * dy).sqrt().max(1e-9);
     let mut max_d = 0.0f32;
     let mut idx = first;
-    for i in (first + 1)..last {
-        let d = ((pts[i].x - a.x) * dy - (pts[i].y - a.y) * dx).abs() / denom;
+    for (i, pt) in pts.iter().enumerate().take(last).skip(first + 1) {
+        let d = ((pt.x - a.x) * dy - (pt.y - a.y) * dx).abs() / denom;
         if d > max_d {
             max_d = d;
             idx = i;
@@ -921,8 +921,8 @@ fn tokenize_svg(data: &str) -> Vec<SvgTok> {
             num.clear();
         }
     };
-    let mut chars = data.chars().peekable();
-    while let Some(c) = chars.next() {
+    let chars = data.chars();
+    for c in chars {
         if c.is_ascii_alphabetic() {
             flush(&mut num, &mut out);
             out.push(SvgTok::Cmd(c));
@@ -1076,8 +1076,6 @@ pub fn boolean_polygons(a: &[Vec2], b: &[Vec2], op: PathBooleanOp) -> Vec<Vec<Ve
             PathBooleanOp::Xor => {
                 if a_in_b {
                     vec![pb, pa]
-                } else if b_in_a {
-                    vec![pa, pb]
                 } else {
                     vec![pa, pb]
                 }
@@ -1319,13 +1317,7 @@ fn boolean_polygons_fallback(a: &[Vec2], b: &[Vec2], op: PathBooleanOp) -> Vec<V
                 vec![a.to_vec()]
             }
         }
-        PathBooleanOp::Xor => {
-            if a_in_b || b_in_a {
-                vec![a.to_vec(), b.to_vec()]
-            } else {
-                vec![a.to_vec(), b.to_vec()]
-            }
-        }
+        PathBooleanOp::Xor => vec![a.to_vec(), b.to_vec()],
     }
 }
 
@@ -1453,7 +1445,7 @@ mod tests {
         let sub = outer.boolean_op(&inner, PathBooleanOp::Subtract, 0.5);
         // Hole pair for even-odd rasterization.
         assert_eq!(sub.len(), 2);
-        assert!(outer.boolean_op(&far, PathBooleanOp::Subtract, 0.5).len() >= 1);
+        assert!(!outer.boolean_op(&far, PathBooleanOp::Subtract, 0.5).is_empty());
     }
     #[test]
     fn transform_applies_to_handles() {

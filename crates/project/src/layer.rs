@@ -83,6 +83,7 @@ pub enum ShapeType {
 /// The visual source and content type backing a layer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum LayerSource {
     Solid {
         color: Color,

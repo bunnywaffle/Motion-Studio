@@ -10,6 +10,7 @@ use super::mask::apply_masks;
 use super::pixel::Px;
 
 /// Full composition raster at `out_w` x `out_h` (canvas px).
+#[allow(clippy::too_many_arguments)]
 pub fn rasterize_comp(
     stack: &compositor::EvaluatedStack,
     comp_w: f32,
@@ -166,11 +167,10 @@ pub fn rasterize_comp(
                 }
                 match &eff.effect_type {
                     EvaluatedEffectType::GaussianBlur { radius } => blur_total += *radius,
-                    EvaluatedEffectType::Bloom { intensity, radius } => {
-                        if *intensity > 0.5 {
+                    EvaluatedEffectType::Bloom { intensity, radius }
+                        if *intensity > 0.5 => {
                             bloom = Some((*intensity, *radius));
                         }
-                    }
                     _ => {}
                 }
             }

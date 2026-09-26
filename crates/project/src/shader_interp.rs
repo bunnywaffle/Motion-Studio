@@ -148,7 +148,7 @@ impl IVal {
         Self::arith(a, b, |x, y| x * y, "mul")
     }
     fn div(a: &IVal, b: &IVal) -> Result<IVal, String> {
-        if b.components().iter().any(|v| *v == 0.0) {
+        if b.components().contains(&0.0) {
             return Err("division by zero".to_string());
         }
         Self::arith(a, b, |x, y| x / y, "div")
@@ -369,6 +369,7 @@ enum Expr {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::enum_variant_names)]
 enum Stmt {
     Decl(String, String, Option<Expr>),
     Assign(String, String, Expr),
@@ -1221,7 +1222,7 @@ fn eval_builtin(name: &str, args: &[IVal]) -> Result<Option<IVal>, String> {
                 .iter()
                 .map(|x| if name == "min" { x.min(s) } else { x.max(s) })
                 .collect();
-            return Ok(Some(IVal::from_comps(&out)?));
+            Ok(Some(IVal::from_comps(&out)?))
         }
         "clamp" => {
             if args.len() != 3 {
@@ -1246,7 +1247,7 @@ fn eval_builtin(name: &str, args: &[IVal]) -> Result<Option<IVal>, String> {
             }
             let (l, h) = (lc[0], hc[0]);
             let out: Vec<f32> = x.components().iter().map(|v| v.clamp(l, h)).collect();
-            return Ok(Some(IVal::from_comps(&out)?));
+            Ok(Some(IVal::from_comps(&out)?))
         }
         "mix" => {
             if args.len() != 3 {
@@ -1267,14 +1268,14 @@ fn eval_builtin(name: &str, args: &[IVal]) -> Result<Option<IVal>, String> {
                     a + (b - a) * k.clamp(0.0, 1.0)
                 })
                 .collect();
-            return Ok(Some(IVal::from_comps(&out)?));
+            Ok(Some(IVal::from_comps(&out)?))
         }
         "step" => {
             if args.len() != 2 {
                 return Err("step() takes 2 args".to_string());
             }
             let (edge, x) = (one(0)?, one(1)?);
-            return Ok(Some(IVal::F(if x < edge { 0.0 } else { 1.0 })));
+            Ok(Some(IVal::F(if x < edge { 0.0 } else { 1.0 })))
         }
         "smoothstep" => {
             if args.len() != 3 {
@@ -1282,13 +1283,13 @@ fn eval_builtin(name: &str, args: &[IVal]) -> Result<Option<IVal>, String> {
             }
             let (e0, e1, x) = (one(0)?, one(1)?, one(2)?);
             let t = ((x - e0) / (e1 - e0).max(1e-6)).clamp(0.0, 1.0);
-            return Ok(Some(IVal::F(t * t * (3.0 - 2.0 * t))));
+            Ok(Some(IVal::F(t * t * (3.0 - 2.0 * t))))
         }
         "pow" => {
             if args.len() != 2 {
                 return Err("pow() takes 2 args".to_string());
             }
-            return Ok(Some(IVal::F(one(0)?.max(0.0).powf(one(1)?))));
+            Ok(Some(IVal::F(one(0)?.max(0.0).powf(one(1)?))))
         }
         "mod" => {
             if args.len() != 2 {
@@ -1298,7 +1299,7 @@ fn eval_builtin(name: &str, args: &[IVal]) -> Result<Option<IVal>, String> {
             if y == 0.0 {
                 return Err("mod() by zero".to_string());
             }
-            return Ok(Some(IVal::F(x - y * (x / y).floor())));
+            Ok(Some(IVal::F(x - y * (x / y).floor())))
         }
         _ => Ok(None),
     }

@@ -846,14 +846,11 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     false
                 }
             }
-            EffectType::TextOutline { color, .. } => {
-                if field.eq_ignore_ascii_case("color") {
+            EffectType::TextOutline { color, .. }
+                if field.eq_ignore_ascii_case("color") => {
                     *color = next;
                     true
-                } else {
-                    false
                 }
-            }
             _ => false,
         }
     }

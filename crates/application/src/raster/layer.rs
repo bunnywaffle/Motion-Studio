@@ -675,11 +675,10 @@ pub fn rasterize_layer(
         }
         match &eff.effect_type {
             EvaluatedEffectType::GaussianBlur { radius } => blur_total += *radius,
-            EvaluatedEffectType::Bloom { intensity, radius } => {
-                if *intensity > 0.5 {
+            EvaluatedEffectType::Bloom { intensity, radius }
+                if *intensity > 0.5 => {
                     bloom = Some((*intensity, *radius));
                 }
-            }
             _ => {}
         }
     }
@@ -1062,11 +1061,10 @@ pub(crate) fn apply_adjustment(buf: &mut FloatBuf, effects: &[EvaluatedEffect], 
                     sharpen = Some((*amount, *radius));
                 }
             }
-            EvaluatedEffectType::Vignette { amount, softness } => {
-                if *amount > 0.05 {
+            EvaluatedEffectType::Vignette { amount, softness }
+                if *amount > 0.05 => {
                     vignette = Some((*amount, *softness));
                 }
-            }
             _ => {}
         }
     }

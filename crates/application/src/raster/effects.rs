@@ -253,15 +253,15 @@ pub fn apply_animated_noise(buf: &mut FloatBuf, amount: f32, monochrome: bool, f
                 continue;
             }
             // Deterministic per-pixel, per-frame hash in [0, 1).
-            let h1 = ((x as f32 * 12.9898 + y as f32 * 78.233 + seed * 45.164).sin() * 43758.5453).fract();
+            let h1 = ((x as f32 * 12.9898 + y as f32 * 78.233 + seed * 45.164).sin() * 43_758.547).fract();
             if monochrome {
                 let n = (h1 - 0.5) * k;
                 p.r = (p.r + n).clamp(0.0, 1.0);
                 p.g = (p.g + n).clamp(0.0, 1.0);
                 p.b = (p.b + n).clamp(0.0, 1.0);
             } else {
-                let h2 = ((x as f32 * 39.346 + y as f32 * 11.135 + seed * 93.422).sin() * 24634.6345).fract();
-                let h3 = ((x as f32 * 73.156 + y as f32 * 5.317 + seed * 17.123).sin() * 56445.2345).fract();
+                let h2 = ((x as f32 * 39.346 + y as f32 * 11.135 + seed * 93.422).sin() * 24_634.635).fract();
+                let h3 = ((x as f32 * 73.156 + y as f32 * 5.317 + seed * 17.123).sin() * 56_445.234).fract();
                 p.r = (p.r + (h1 - 0.5) * k).clamp(0.0, 1.0);
                 p.g = (p.g + (h2 - 0.5) * k).clamp(0.0, 1.0);
                 p.b = (p.b + (h3 - 0.5) * k).clamp(0.0, 1.0);

@@ -101,7 +101,7 @@ pub fn raster_text(spec: &TextSpec) -> (FloatBuf, (f32, f32, f32, f32)) {
                     // Treat subpixel coverage as luminance mask.
                     let lum: Vec<u8> = img
                         .data
-                        .chunks_exact(4)
+                        .as_chunks::<4>().0.iter()
                         .map(|p| ((p[0] as u32 + p[1] as u32 + p[2] as u32) / 3) as u8)
                         .collect();
                     (img.placement.width, img.placement.height, lum)

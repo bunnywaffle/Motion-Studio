@@ -187,16 +187,16 @@ mod tests {
         gaussian_blur_rgba(&mut px, 5, 1, 2.0);
         // Center must have dimmed and neighbors must have received energy.
         assert!(px[2 * 4] < 255);
-        assert!(px[1 * 4] > 0);
+        assert!(px[4] > 0);
         assert!(px[3 * 4] > 0);
         // Total red energy is approximately preserved (clamp-edge losses aside).
         let total: u32 = (0..5).map(|x| px[x * 4] as u32).sum();
-        assert!(total >= 200 && total <= 255, "total {total}");
+        assert!((200..=255).contains(&total), "total {total}");
     }
 
     #[test]
     fn test_blur_uniform_field_is_unchanged() {
-        let mut px = vec![128u8, 64, 32, 255].repeat(16);
+        let mut px = [128u8, 64, 32, 255].repeat(16);
         let before = px.clone();
         gaussian_blur_rgba(&mut px, 4, 4, 3.0);
         assert_eq!(px, before);

@@ -352,8 +352,8 @@ fn transpile_to_wgsl(source: &str) -> Result<(CachedShader, Vec<ShaderParam>), S
 
     for (lineno, raw) in source.lines().enumerate() {
         let line = raw.trim();
-        if line.starts_with('#') {
-            let directive = line[1..].trim_start();
+        if let Some(rest) = line.strip_prefix('#') {
+            let directive = rest.trim_start();
             if directive.starts_with("version") || directive.starts_with("precision") {
                 continue; // meaningless in WGSL, safe to drop.
             }
@@ -560,9 +560,9 @@ impl ShaderLabCache {
     /// never inserted, so the previous working shader stays active.
     pub fn get_or_compile(&mut self, source: &str) -> Result<&CachedShader, String> {
         let key = hash_source(source);
-        if !self.entries.contains_key(&key) {
+        if let std::collections::hash_map::Entry::Vacant(e) = self.entries.entry(key) {
             let (cached, _) = compile_source(source)?;
-            self.entries.insert(key, cached);
+            e.insert(cached);
         }
         Ok(&self.entries[&key])
     }
@@ -777,6 +777,7 @@ impl ShaderLabPipeline {
     }
 
     /// Upload one frame of uniforms (runtime + resolved user values).
+    #[allow(clippy::too_many_arguments)]
     pub fn write_frame(
         &self,
         gpu: &GpuContext,

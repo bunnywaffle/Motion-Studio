@@ -2,7 +2,7 @@ pub(crate) mod panels;
 pub mod raster;
 pub mod state;
 pub mod widgets;
-use state::EditorState;
+use state::{EditorState, EditorTool};
 
 use std::rc::Rc;
 
@@ -94,7 +94,7 @@ impl AppView {
                         let now = std::time::Instant::now();
                         let dt = now - last_instant;
                         last_instant = now;
-                        let _ = cx.update(|cx| {
+                        cx.update(|cx| {
                             state.update(cx, |editor, cx| {
                                 if editor.is_playing {
                                     let changed = editor.tick(dt);
@@ -229,7 +229,7 @@ fn request_open_project(app: &Entity<AppView>, state: &Entity<EditorState>, cx: 
                     let _ = tx.send(file);
                 });
             if let Ok(Some(path)) = rx.recv() {
-                let _ = cx.update(|cx| {
+                cx.update(|cx| {
                     s_open.update(cx, |s, cx| {
                         match s.load_project_from(&path) {
                             Ok(()) => {
@@ -282,7 +282,7 @@ fn request_save_project_as(app: &Entity<AppView>, state: &Entity<EditorState>, c
                     let _ = tx.send(file);
                 });
             if let Ok(Some(path)) = rx.recv() {
-                let _ = cx.update(|cx| {
+                cx.update(|cx| {
                     s_save.update(cx, |s, cx| {
                         match s.save_project_to(&path) {
                             Ok(()) => {
@@ -1999,6 +1999,35 @@ impl Render for AppView {
                         let _ = s.trim_selected_layer_out_to_playhead();
                         cx.notify();
                     });
+                } else if !ctrl && !mods.alt && state_key.read(cx).value_editor.is_none() {
+                    if key == "v" {
+                        state_key.update(cx, |s, cx| {
+                            s.select_tool(EditorTool::Move);
+                            cx.notify();
+                        });
+                    } else if key == "g" {
+                        state_key.update(cx, |s, cx| {
+                            s.select_tool(EditorTool::Pen);
+                            cx.notify();
+                        });
+                    } else if key == "q" {
+                        state_key.update(cx, |s, cx| {
+                            s.cycle_shape_tool();
+                            cx.notify();
+                        });
+                    } else if key == "m" {
+                        let panels = app_key.read(cx).panels().clone();
+                        state_key.update(cx, |s, cx| {
+                            let (rev, _is_all) = s.handle_m_shortcut();
+                            if let Some(lid) = s.selected_layer_id.clone() {
+                                panels.timeline.update(cx, |tl, cx| {
+                                    tl.set_layer_expanded(&lid, rev);
+                                    cx.notify();
+                                });
+                            }
+                            cx.notify();
+                        });
+                    }
                 }
             })
             .child(menubar)
@@ -2036,6 +2065,8 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::AppView;
+    use crate::state::EditorState;
+    use project::Vec2;
     use gpui_kit::component::dock::{DockPlacement, PanelId};
     use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
     use gpui_kit::test::TestWindowExt;
@@ -4428,8 +4459,10 @@ mod tests {
         assert_eq!(mask.mode, project::MaskMode::Add);
         assert!(mask.path.is_animated());
         // Work-area range also works (capped internally).
-        let mut wa = AutoTraceOptions::default();
-        wa.range = TraceRange::WorkArea;
+        let wa = AutoTraceOptions {
+            range: TraceRange::WorkArea,
+            ..Default::default()
+        };
         assert!(!state.auto_trace_masks("layer_accent", &wa).unwrap().is_empty());
         // Text layer becomes a masked solid; source hides.
         let text = state.add_text_layer("Hi", None).unwrap();
@@ -6236,5 +6269,138 @@ mod tests {
             let layer = comp.get_layer(sel_id).unwrap();
             assert!(layer.masks[0].path.value.closed, "Mask is now closed");
         }
+    }
+
+    #[gpui_kit::test]
+    async fn test_shape_tool_creates_mask_when_layer_selected_and_shape_layer_when_none(_cx: &mut gpui::TestAppContext) {
+        let mut state = EditorState::new();
+
+        // 1. With a layer selected (e.g. layer_accent), adding a shaped mask creates a mask on it
+        let sel_id = "layer_accent";
+        state.select_layer(Some(sel_id.to_string()));
+        let initial_layer_count = state.active_composition().unwrap().layers.len();
+
+        let mid_rect = state
+            .add_shaped_mask_at(sel_id, project::MaskShapeKind::Rectangle, Some(Vec2::new(50.0, 50.0)), Some((100.0, 80.0)))
+            .expect("add rect mask");
+        let mid_ellipse = state
+            .add_shaped_mask_at(sel_id, project::MaskShapeKind::Ellipse, Some(Vec2::new(200.0, 150.0)), Some((80.0, 80.0)))
+            .expect("add ellipse mask");
+
+        // Layers count did NOT increase (they are masks on the layer)
+        assert_eq!(state.active_composition().unwrap().layers.len(), initial_layer_count);
+
+        let comp = state.active_composition().unwrap();
+        let layer = comp.get_layer(sel_id).unwrap();
+        assert_eq!(layer.masks.len(), 2);
+        assert_eq!(layer.masks[0].id, mid_rect);
+        assert_eq!(layer.masks[1].id, mid_ellipse);
+        assert!(layer.masks[0].path.value.closed);
+        assert!(layer.masks[1].path.value.closed);
+
+        // 2. When NO layer is selected, adding rectangle / ellipse shape adds new shape layers
+        state.select_layer(None);
+        let rect_layer_id = state.add_rectangle_shape_layer(300.0, 200.0, Some(Vec2::new(0.0, 0.0))).expect("rect shape layer");
+        assert_eq!(state.active_composition().unwrap().layers.len(), initial_layer_count + 1);
+        let rect_layer = state.active_composition().unwrap().get_layer(&rect_layer_id).unwrap();
+        assert!(matches!(rect_layer.source, project::LayerSource::Shape { shape_type: project::ShapeType::Rectangle { .. } }));
+    }
+
+    #[gpui_kit::test]
+    async fn test_pen_tangent_dragging_promotes_symmetric_and_alt_breaks(_cx: &mut gpui::TestAppContext) {
+        let mut state = EditorState::new();
+        let sel_id = "layer_accent";
+        state.select_layer(Some(sel_id.to_string()));
+
+        // Add a mask to layer_accent
+        let mid = state.add_mask_to_layer(sel_id).expect("mask");
+        state.append_mask_point(sel_id, &mid, Vec2::new(100.0, 100.0)).expect("pt 0");
+        let pt_idx = {
+            let comp = state.active_composition().unwrap();
+            let mask = comp.get_layer(sel_id).unwrap().get_mask(&mid).unwrap();
+            mask.path.value.points.len() - 1
+        };
+
+        // Point starts as corner with zero tangents
+        {
+            let comp = state.active_composition().unwrap();
+            let mask = comp.get_layer(sel_id).unwrap().get_mask(&mid).unwrap();
+            assert_eq!(mask.path.value.points[pt_idx].kind, project::PathPointKind::Corner);
+            assert_eq!(mask.path.value.points[pt_idx].out_tan, Vec2::ZERO);
+            assert_eq!(mask.path.value.points[pt_idx].in_tan, Vec2::ZERO);
+        }
+
+        // Pulling tangent with move_mask_handle_live promotes it to Symmetric and sets mirrored handles!
+        state.move_mask_handle_live(sel_id, &mid, pt_idx, false, Vec2::new(150.0, 100.0)).expect("pull handle");
+        {
+            let comp = state.active_composition().unwrap();
+            let mask = comp.get_layer(sel_id).unwrap().get_mask(&mid).unwrap();
+            let pt = &mask.path.value.points[pt_idx];
+            assert_eq!(pt.kind, project::PathPointKind::Symmetric);
+            assert_eq!(pt.out_tan, Vec2::new(50.0, 0.0));
+            assert_eq!(pt.in_tan, Vec2::new(-50.0, 0.0)); // Mirrored!
+        }
+
+        // Alt-dragging with move_mask_handle_live_break breaks symmetry into Corner!
+        state.move_mask_handle_live_break(sel_id, &mid, pt_idx, false, Vec2::new(130.0, 120.0)).expect("break handle");
+        {
+            let comp = state.active_composition().unwrap();
+            let mask = comp.get_layer(sel_id).unwrap().get_mask(&mid).unwrap();
+            let pt = &mask.path.value.points[pt_idx];
+            assert_eq!(pt.kind, project::PathPointKind::Corner);
+            assert_eq!(pt.out_tan, Vec2::new(30.0, 20.0));
+            assert_eq!(pt.in_tan, Vec2::new(-50.0, 0.0)); // Preserved independently!
+        }
+    }
+
+    #[gpui_kit::test]
+    async fn test_timeline_mask_shortcuts_m_and_mm_and_property_integration(_cx: &mut gpui::TestAppContext) {
+        let mut state = EditorState::new();
+        let sel_id = "layer_accent";
+        state.select_layer(Some(sel_id.to_string()));
+
+        // Single 'M' press: toggles timeline_masks_reveal_path
+        let (rev1, is_all1) = state.handle_m_shortcut();
+        assert!(rev1);
+        assert!(!is_all1);
+        assert!(state.timeline_masks_reveal_path);
+
+        // Immediate second 'M' press (<350ms): triggers MM (reveal all mask properties)
+        let (rev2, is_all2) = state.handle_m_shortcut();
+        assert!(rev2);
+        assert!(is_all2);
+        assert!(state.timeline_masks_reveal_all);
+
+        // Add mask and test stopwatch / keyframing navigation for mask: params
+        let mid = state.add_shaped_mask(sel_id, project::MaskShapeKind::Rectangle).expect("mask");
+
+        // Toggle mask path keyframe
+        let path_key = format!("mask:{}:path", mid);
+        state.toggle_layer_property_animation(sel_id, &path_key);
+        {
+            let comp = state.active_composition().unwrap();
+            let mask = comp.get_layer(sel_id).unwrap().get_mask(&mid).unwrap();
+            assert!(mask.path.is_animated());
+        }
+
+        // Toggle feather animation
+        let feather_key = format!("mask:{}:feather", mid);
+        state.toggle_layer_property_animation(sel_id, &feather_key);
+        {
+            let comp = state.active_composition().unwrap();
+            let mask = comp.get_layer(sel_id).unwrap().get_mask(&mid).unwrap();
+            assert!(mask.feather.is_animated());
+        }
+
+        // Nudge feather via timeline value
+        state.nudge_timeline_value(sel_id, &feather_key, 25.0);
+        let cur_f = state.timeline_current_value(sel_id, &feather_key).expect("feather val");
+        assert_eq!(cur_f, 25.0);
+
+        // Nudge opacity via timeline value
+        let opacity_key = format!("mask:{}:opacity", mid);
+        state.set_timeline_value(sel_id, &opacity_key, 75.0);
+        let cur_o = state.timeline_current_value(sel_id, &opacity_key).expect("opacity val");
+        assert_eq!(cur_o, 75.0);
     }
 }

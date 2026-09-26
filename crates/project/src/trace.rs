@@ -213,7 +213,7 @@ pub fn trace_field(w: u32, h: u32, field: &[f32], opts: &AutoTraceOptions) -> Ve
         contours.push(TracedContour { points: poly, is_hole: true, area: comp.area });
     }
     // Islands first (Add), holes after (Subtract) — combination order.
-    contours.sort_by(|a, b| (a.is_hole as u8).cmp(&(b.is_hole as u8)));
+    contours.sort_by_key(|a| a.is_hole as u8);
     contours
 }
 
@@ -436,8 +436,8 @@ fn douglas_peucker(pts: &[Vec2], eps: f32) -> Vec<Vec2> {
         let (pa, pb) = (ordered[a], ordered[b]);
         let mut best = 0.0f32;
         let mut idx = a;
-        for i in a + 1..b {
-            let d = point_seg_dist(ordered[i], pa, pb);
+        for (i, p) in ordered.iter().enumerate().take(b).skip(a + 1) {
+            let d = point_seg_dist(*p, pa, pb);
             if d > best {
                 best = d;
                 idx = i;
@@ -550,8 +550,10 @@ mod tests {
     fn min_area_filters_speckle() {
         let mut f = field_rect(64, 64, 8, 8, 56, 56);
         f[2 * 64 + 2] = 1.0; // lone speckle pixel
-        let mut opts = AutoTraceOptions::default();
-        opts.min_area_px = 4.0;
+        let opts = AutoTraceOptions {
+            min_area_px: 4.0,
+            ..Default::default()
+        };
         let cs = trace_field(64, 64, &f, &opts);
         assert_eq!(cs.len(), 1, "{cs:?}");
     }
@@ -560,8 +562,10 @@ mod tests {
     fn invert_and_threshold_behave() {
         // Full-white field inverted at 50% -> nothing.
         let f = vec![1.0f32; 32 * 32];
-        let mut opts = AutoTraceOptions::default();
-        opts.invert = true;
+        let mut opts = AutoTraceOptions {
+            invert: true,
+            ..Default::default()
+        };
         assert!(trace_field(32, 32, &f, &opts).is_empty());
         // 40% gray passes a 30% threshold, fails a 50% one.
         let g = vec![0.4f32; 32 * 32];
@@ -575,8 +579,10 @@ mod tests {
     #[test]
     fn roundness_smooths_without_collapse() {
         let f = field_rect(64, 64, 10, 10, 50, 50);
-        let mut opts = AutoTraceOptions::default();
-        opts.corner_roundness = 100.0;
+        let opts = AutoTraceOptions {
+            corner_roundness: 100.0,
+            ..Default::default()
+        };
         let cs = trace_field(64, 64, &f, &opts);
         assert_eq!(cs.len(), 1);
         assert!(cs[0].points.len() >= 8, "chaikin doubles corners");

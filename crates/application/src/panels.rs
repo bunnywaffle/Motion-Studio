@@ -869,7 +869,7 @@ impl Render for ProjectPanel {
                     .filter(|l| matches!(&l.source, LayerSource::Solid { .. }))
                     .collect();
                 if self.sort_mode == ProjectSortMode::Name {
-                    solids.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                    solids.sort_by_key(|a| a.name.to_lowercase());
                 }
 
                 bin_items.push(
@@ -2170,6 +2170,7 @@ impl Render for CompositionViewerPanel {
                         // copies per handle: every mouse handler owns its own).
                         // Snapshot the evaluated layer for drag-start math.
                         // Rc-shared: every handle captures it without moves.
+                        #[allow(clippy::type_complexity)]
                         let snap_layer: Rc<
                             dyn Fn(&mut App) -> Option<compositor::EvaluatedLayer>,
                         > = Rc::new({
@@ -2873,24 +2874,44 @@ impl Render for CompositionViewerPanel {
                                     r.is_ok()
                                 }),
                             MaskDragKind::InHandle => st.update(cx, |s, cx| {
-                                let r = s.move_mask_handle_live(
-                                    &mdrag.layer_id,
-                                    &mdrag.mask_id,
-                                    mdrag.index,
-                                    true,
-                                    loc,
-                                );
+                                let r = if event.modifiers.alt {
+                                    s.move_mask_handle_live_break(
+                                        &mdrag.layer_id,
+                                        &mdrag.mask_id,
+                                        mdrag.index,
+                                        true,
+                                        loc,
+                                    )
+                                } else {
+                                    s.move_mask_handle_live(
+                                        &mdrag.layer_id,
+                                        &mdrag.mask_id,
+                                        mdrag.index,
+                                        true,
+                                        loc,
+                                    )
+                                };
                                 cx.notify();
                                 r.is_ok()
                             }),
                             MaskDragKind::OutHandle => st.update(cx, |s, cx| {
-                                let r = s.move_mask_handle_live(
-                                    &mdrag.layer_id,
-                                    &mdrag.mask_id,
-                                    mdrag.index,
-                                    false,
-                                    loc,
-                                );
+                                let r = if event.modifiers.alt {
+                                    s.move_mask_handle_live_break(
+                                        &mdrag.layer_id,
+                                        &mdrag.mask_id,
+                                        mdrag.index,
+                                        false,
+                                        loc,
+                                    )
+                                } else {
+                                    s.move_mask_handle_live(
+                                        &mdrag.layer_id,
+                                        &mdrag.mask_id,
+                                        mdrag.index,
+                                        false,
+                                        loc,
+                                    )
+                                };
                                 cx.notify();
                                 r.is_ok()
                             }),
@@ -3203,7 +3224,6 @@ impl Render for CompositionViewerPanel {
                                         let fit_pick = fit;
                                         let comp_pw = comp_w;
                                         let comp_ph = comp_h;
-                                        let frame_org = frame_org;
                                         move |event, _window, cx| {
                                             // Gizmo handles set their own drag first (they
                                             // bubble through here); never start a canvas op.
@@ -3274,13 +3294,23 @@ impl Render for CompositionViewerPanel {
                                                 }
                                                 EditorTool::ShapeRect => {
                                                     s_tool.update(cx, |s, cx| {
-                                                        let _ = s.add_rectangle_shape_layer(300.0, 200.0, Some(Vec2::new(comp_x, comp_y)));
+                                                        let sel = s.selected_layer_id.clone();
+                                                        if let Some(lid) = sel {
+                                                            let _ = s.add_shaped_mask_at(&lid, project::MaskShapeKind::Rectangle, Some(Vec2::new(comp_x, comp_y)), Some((300.0, 200.0)));
+                                                        } else {
+                                                            let _ = s.add_rectangle_shape_layer(300.0, 200.0, Some(Vec2::new(comp_x, comp_y)));
+                                                        }
                                                         cx.notify();
                                                     });
                                                 }
                                                 EditorTool::ShapeEllipse => {
                                                     s_tool.update(cx, |s, cx| {
-                                                        let _ = s.add_ellipse_shape_layer(150.0, 150.0, Some(Vec2::new(comp_x, comp_y)));
+                                                        let sel = s.selected_layer_id.clone();
+                                                        if let Some(lid) = sel {
+                                                            let _ = s.add_shaped_mask_at(&lid, project::MaskShapeKind::Ellipse, Some(Vec2::new(comp_x, comp_y)), Some((200.0, 200.0)));
+                                                        } else {
+                                                            let _ = s.add_ellipse_shape_layer(150.0, 150.0, Some(Vec2::new(comp_x, comp_y)));
+                                                        }
                                                         cx.notify();
                                                     });
                                                 }
@@ -3288,6 +3318,7 @@ impl Render for CompositionViewerPanel {
                                                     // In After Effects, when a layer is selected, the Pen
                                                     // tool draws and edits a mask on it by default.
                                                     let pick = p_drag.read(cx).pick_top_at(comp_x, comp_y);
+                                                    let mut armed_drag: Option<(String, String, usize)> = None;
                                                     s_tool.update(cx, |s, cx| {
                                                         let sel = s.selected_layer_id.clone();
                                                         let is_path_shape = sel.as_deref().and_then(|id| s.active_composition()?.get_layer(id)).map(|l| matches!(&l.source, LayerSource::Shape { shape_type: ShapeType::Path { .. } })).unwrap_or(false);
@@ -3296,9 +3327,30 @@ impl Render for CompositionViewerPanel {
                                                         } else {
                                                             pick.or(sel)
                                                         };
-                                                        let _ = s.pen_press_at(Vec2::new(comp_x, comp_y), target_pick);
+                                                        if let Ok(lid) = s.pen_press_at(Vec2::new(comp_x, comp_y), target_pick) {
+                                                            if let Some((active_lid, active_mid)) = s.active_mask_edit.clone() {
+                                                                if active_lid == lid {
+                                                                    if let Some(m) = s.active_composition().and_then(|c| c.get_layer(&lid)).and_then(|l| l.get_mask(&active_mid)) {
+                                                                        let idx = m.path.value.points.len().saturating_sub(1);
+                                                                        armed_drag = Some((active_lid, active_mid, idx));
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
                                                         cx.notify();
                                                     });
+                                                    if let Some((lid, mid, idx)) = armed_drag {
+                                                        p_drag.update(cx, |this, _cx| {
+                                                            this.mask_drag = Some(MaskDrag {
+                                                                layer_id: lid,
+                                                                mask_id: mid,
+                                                                index: idx,
+                                                                kind: MaskDragKind::OutHandle,
+                                                            });
+                                                            this.mask_edit_point = Some(idx);
+                                                            this.mask_down_moved = false;
+                                                        });
+                                                    }
                                                 }
                                                 EditorTool::Rotate => {
                                                     s_tool.update(cx, |s, cx| {
@@ -3597,6 +3649,7 @@ pub struct PropertiesPanel {
     pub shape_clipboard: Option<String>,
     /// Retained Select states per ShaderLab enum param
     /// (`effect_id`, `param`, selected index).
+    #[allow(clippy::type_complexity)]
     pub select_states: HashMap<(String, String, usize), Entity<SelectState<SearchableVec<String>>>>,
     /// Confirm subscriptions for the retained Select states.
     pub select_subs: HashMap<(String, String, usize), Subscription>,
@@ -5147,6 +5200,7 @@ fn fx_color_fields(effect: &project::Effect) -> Vec<&'static str> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn fx_swatch_row(
     state: &Entity<EditorState>,
     layer_id: &str,
@@ -5675,6 +5729,7 @@ fn text_param_row(
 /// numeric shapes, full-layer, shape/motion/text/trace sources), per-mask
 /// enable, lock, rename, combine mode, invert, edit target, path keyframe
 /// nav, scalar rows, shape dialog, delete.
+#[allow(clippy::too_many_arguments)]
 fn render_masks_section(
     state: &Entity<EditorState>,
     layer: &project::Layer,
@@ -5954,6 +6009,7 @@ fn render_masks_section(
         let lid_run = lid.clone();
         let opts_run = trace_opts.clone();
         // Small -/value/+ stepper (mutates panel.trace_opts directly).
+        #[allow(clippy::too_many_arguments)]
         fn trace_stepper(
             _id_prefix: &str,
             label: &str,
@@ -6712,6 +6768,7 @@ fn render_masks_section(
     col.into_any_element()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_applied_effects(
     state: &Entity<EditorState>,
     layer: &project::Layer,
@@ -7259,8 +7316,8 @@ fn render_applied_effects(
                                     _ => (4, &["R", "G", "B", "A"]),
                                 };
                                 let mut values = vec![0.0f32; count];
-                                for i in 0..count {
-                                    values[i] = match resolved.get(pname.as_str()) {
+                                for (i, slot) in values.iter_mut().enumerate().take(count) {
+                                    *slot = match resolved.get(pname.as_str()) {
                                         Some(ShaderParamValue::Vec2(a)) => a.get(i).copied().unwrap_or(0.0),
                                         Some(ShaderParamValue::Vec3(a)) => a.get(i).copied().unwrap_or(0.0),
                                         Some(ShaderParamValue::Vec4(a)) => a.get(i).copied().unwrap_or(0.0),
@@ -7958,8 +8015,8 @@ impl Render for PropertiesPanel {
                         });
                     }
                 }
-                LayerSource::Solid { color, .. } => {
-                    if !is_open {
+                LayerSource::Solid { color, .. }
+                    if !is_open => {
                         let c = *color;
                         let hsla: Hsla = Rgba { r: c.r, g: c.g, b: c.b, a: c.a }.into();
                         let picker_ent = inspector_color.read(cx).state.clone();
@@ -7967,7 +8024,6 @@ impl Render for PropertiesPanel {
                             p.set_value(hsla, window, cx);
                         });
                     }
-                }
                 _ => {}
             }
         }
@@ -11130,6 +11186,7 @@ fn timeline_stopwatch_nav(
         .child(nav)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn timeline_keyframe_lane(
     layer_id: &str,
     prop_path: &str,
@@ -11219,6 +11276,7 @@ fn timeline_keyframe_lane(
     lane
 }
 
+#[allow(clippy::too_many_arguments)]
 fn timeline_scrub(
     id: impl Into<ElementId>,
     label: &'static str,
@@ -12120,7 +12178,7 @@ fn render_graph_view(
             a_max = a_max.max(k.v);
         }
     }
-    if !(a_min < a_max) {
+    if a_min >= a_max {
         a_min -= 1.0;
         a_max += 1.0;
     }
@@ -12160,7 +12218,7 @@ fn render_graph_view(
                 b = b.max(v);
             }
         }
-        if !(a < b) {
+        if a >= b {
             a -= 1.0;
             b += 1.0;
         }
@@ -12925,6 +12983,14 @@ impl TimelinePanel {
         }
     }
 
+    pub fn set_layer_expanded(&mut self, id: &str, expanded: bool) {
+        if expanded {
+            self.expanded_layers.insert(id.to_string());
+        } else {
+            self.expanded_layers.remove(id);
+        }
+    }
+
     pub fn is_group_expanded(&self, key: &str) -> bool {
         self.expanded_groups.contains(key)
     }
@@ -12934,6 +13000,14 @@ impl TimelinePanel {
             self.expanded_groups.remove(key);
         } else {
             self.expanded_groups.insert(key.to_string());
+        }
+    }
+
+    pub fn set_group_expanded(&mut self, key: &str, expanded: bool) {
+        if expanded {
+            self.expanded_groups.insert(key.to_string());
+        } else {
+            self.expanded_groups.remove(key);
         }
     }
 
@@ -13079,12 +13153,11 @@ impl Render for TimelinePanel {
                         let y = event.position.y / px(1.0);
                         p_reorder_hover.update(cx, |this, cx| {
                             if let Some((_, from)) = this.reorder_drag.clone() {
-                                if (y - this.reorder_start_y).abs() > 4.0 && from != row_idx {
-                                    if this.reorder_hover != Some(row_idx) {
+                                if (y - this.reorder_start_y).abs() > 4.0 && from != row_idx
+                                    && this.reorder_hover != Some(row_idx) {
                                         this.reorder_hover = Some(row_idx);
                                         cx.notify();
                                     }
-                                }
                             }
                         });
                     })
@@ -13999,6 +14072,401 @@ impl Render for TimelinePanel {
                                                 .child(param_left)
                                                 .child(param_lane),
                                         );
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Group: Masks (After Effects parity: Masks twirl-down with Mode, Invert, Feather, Opacity, Expansion)
+                    if !layer.masks.is_empty() {
+                        let masks_grp_key = format!("{}:masks", layer.id);
+                        let is_masks_grp_exp = self.expanded_groups.contains(&masks_grp_key)
+                            || (is_selected && (state.timeline_masks_reveal_all || state.timeline_masks_reveal_path));
+                        let p_masks_grp = panel_entity.clone();
+                        let masks_grp_click = masks_grp_key.clone();
+
+                        let masks_header_left = h_flex()
+                            .w(px(380.))
+                            .h(px(24.))
+                            .pl_6()
+                            .pr_2()
+                            .border_r_1()
+                            .border_color(cx.theme().border)
+                            .items_center()
+                            .justify_between()
+                            .bg(cx.theme().secondary.opacity(0.4))
+                            .text_xs()
+                            .font_semibold()
+                            .text_color(cx.theme().foreground)
+                            .cursor_pointer()
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                p_masks_grp.update(cx, |this, cx| {
+                                    this.toggle_group_expanded(&masks_grp_click);
+                                    cx.notify();
+                                });
+                            })
+                            .child(
+                                h_flex()
+                                    .gap_1p5()
+                                    .items_center()
+                                    .child(div().w(px(10.)).child(if is_masks_grp_exp { "▾" } else { "▸" }))
+                                    .child(icon_box(IconName::Scissors))
+                                    .child(format!("Masks ({})", layer.masks.len())),
+                            );
+
+                        let masks_header_lane = div()
+                            .flex_1()
+                            .h(px(24.))
+                            .relative()
+                            .bg(cx.theme().secondary.opacity(0.2))
+                            .border_b_1()
+                            .border_color(cx.theme().border.opacity(0.2))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .bottom_0()
+                                    .w(px(1.))
+                                    .bg(rgb(0xef4444))
+                                    .left(relative(playhead_percent / 100.0)),
+                            );
+
+                        timeline_rows.push(
+                            h_flex()
+                                .h(px(24.))
+                                .border_b_1()
+                                .border_color(cx.theme().border)
+                                .items_center()
+                                .child(masks_header_left)
+                                .child(masks_header_lane),
+                        );
+
+                        if is_masks_grp_exp {
+                            for mask in &layer.masks {
+                                let mask_item_key = format!("{}:mask:{}", layer.id, mask.id);
+                                let is_mask_item_exp = self.expanded_groups.contains(&mask_item_key)
+                                    || (is_selected && (state.timeline_masks_reveal_all || state.timeline_masks_reveal_path));
+                                let p_m_item = panel_entity.clone();
+                                let m_item_click = mask_item_key.clone();
+                                let s_mode = self.state.clone();
+                                let s_inv = self.state.clone();
+                                let s_del = self.state.clone();
+                                let s_lock = self.state.clone();
+                                let lid_m = layer.id.clone();
+                                let mid_m = mask.id.clone();
+                                let mid_inv = mask.id.clone();
+                                let mid_del = mask.id.clone();
+                                let mid_lock = mask.id.clone();
+                                let m_mode = mask.mode;
+                                let m_inv = mask.invert;
+                                let m_locked = mask.locked;
+
+                                let mask_item_left = h_flex()
+                                    .w(px(380.))
+                                    .h(px(24.))
+                                    .pl(px(32.))
+                                    .pr_2()
+                                    .border_r_1()
+                                    .border_color(cx.theme().border)
+                                    .items_center()
+                                    .justify_between()
+                                    .bg(cx.theme().secondary.opacity(0.25))
+                                    .text_xs()
+                                    .child(
+                                        h_flex()
+                                            .gap_1p5()
+                                            .items_center()
+                                            .child(
+                                                div()
+                                                    .cursor_pointer()
+                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                        p_m_item.update(cx, |this, cx| {
+                                                            this.toggle_group_expanded(&m_item_click);
+                                                            cx.notify();
+                                                        });
+                                                    })
+                                                    .child(div().w(px(10.)).child(if is_mask_item_exp { "▾" } else { "▸" }))
+                                            )
+                                            .child(
+                                                div()
+                                                    .w(px(10.))
+                                                    .h(px(10.))
+                                                    .rounded_xs()
+                                                    .bg(rgb(0xa855f7))
+                                            )
+                                            .child(
+                                                div()
+                                                    .font_medium()
+                                                    .text_color(cx.theme().foreground)
+                                                    .child(mask.name.clone())
+                                            )
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .gap_1()
+                                            .items_center()
+                                            .child(
+                                                div()
+                                                    .id(SharedString::from(format!("tl_mask_mode_{}_{}", layer.id, mask.id)))
+                                                    .test_support()
+                                                    .cursor_pointer()
+                                                    .px_1p5()
+                                                    .py_0p5()
+                                                    .rounded_sm()
+                                                    .bg(cx.theme().muted)
+                                                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                                    .text_xs()
+                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                        let (l, m) = (lid_m.clone(), mid_m.clone());
+                                                        s_mode.update(cx, |s, cx| {
+                                                            let _ = s.cycle_mask_mode(&l, &m);
+                                                            cx.notify();
+                                                        });
+                                                    })
+                                                    .child(m_mode.label())
+                                            )
+                                            .child(
+                                                div()
+                                                    .id(SharedString::from(format!("tl_mask_inv_{}_{}", layer.id, mask.id)))
+                                                    .test_support()
+                                                    .cursor_pointer()
+                                                    .px_1p5()
+                                                    .py_0p5()
+                                                    .rounded_sm()
+                                                    .bg(if m_inv { cx.theme().accent } else { cx.theme().muted })
+                                                    .text_color(if m_inv { cx.theme().accent_foreground } else { cx.theme().muted_foreground })
+                                                    .text_xs()
+                                                    .on_mouse_down(MouseButton::Left, {
+                                                        let lid = layer.id.clone();
+                                                        move |_event, _window, cx| {
+                                                            let (l, m) = (lid.clone(), mid_inv.clone());
+                                                            s_inv.update(cx, |s, cx| {
+                                                                let _ = s.toggle_mask_invert(&l, &m);
+                                                                cx.notify();
+                                                            });
+                                                        }
+                                                    })
+                                                    .child("Inv")
+                                            )
+                                            .child(
+                                                div()
+                                                    .cursor_pointer()
+                                                    .px_1()
+                                                    .py_0p5()
+                                                    .rounded_sm()
+                                                    .bg(if m_locked { rgb(0xf59e0b).opacity(0.3) } else { Rgba::from(cx.theme().muted) })
+                                                    .text_color(if m_locked { rgb(0xf59e0b) } else { Rgba::from(cx.theme().muted_foreground) })
+                                                    .text_xs()
+                                                    .on_mouse_down(MouseButton::Left, {
+                                                        let lid = layer.id.clone();
+                                                        move |_event, _window, cx| {
+                                                            let (l, m) = (lid.clone(), mid_lock.clone());
+                                                            s_lock.update(cx, |s, cx| {
+                                                                let _ = s.toggle_mask_lock(&l, &m);
+                                                                cx.notify();
+                                                            });
+                                                        }
+                                                    })
+                                                    .child(if m_locked { "🔒" } else { "🔓" })
+                                            )
+                                            .child(
+                                                div()
+                                                    .cursor_pointer()
+                                                    .px_1()
+                                                    .py_0p5()
+                                                    .rounded_sm()
+                                                    .hover(|s| s.bg(rgb(0xef4444).opacity(0.3)))
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .text_xs()
+                                                    .on_mouse_down(MouseButton::Left, {
+                                                        let lid = layer.id.clone();
+                                                        move |_event, _window, cx| {
+                                                            let (l, m) = (lid.clone(), mid_del.clone());
+                                                            s_del.update(cx, |s, cx| {
+                                                                let _ = s.delete_mask(&l, &m);
+                                                                cx.notify();
+                                                            });
+                                                        }
+                                                    })
+                                                    .child("✕")
+                                            )
+                                    );
+
+                                let mask_item_lane = div()
+                                    .flex_1()
+                                    .h(px(24.))
+                                    .relative()
+                                    .border_b_1()
+                                    .border_color(cx.theme().border.opacity(0.2))
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .top_0()
+                                            .bottom_0()
+                                            .w(px(1.))
+                                            .bg(rgb(0xef4444))
+                                            .left(relative(playhead_percent / 100.0)),
+                                    );
+
+                                timeline_rows.push(
+                                    h_flex()
+                                        .h(px(24.))
+                                        .border_b_1()
+                                        .border_color(cx.theme().border)
+                                        .items_center()
+                                        .child(mask_item_left)
+                                        .child(mask_item_lane),
+                                );
+
+                                if is_mask_item_exp {
+                                    // 1. Mask Path property row
+                                    let path_prop_path = format!("mask:{}:path", mask.id);
+                                    let is_path_anim = mask.path.is_animated();
+                                    let path_has_kf = mask.path.has_keyframe_at(&current_tc);
+                                    let path_prev = mask.path.previous_keyframe_time(&current_tc).is_some();
+                                    let path_next = mask.path.next_keyframe_time(&current_tc).is_some();
+                                    let path_kf_times: Vec<f64> = mask.path.keyframes().iter().map(|k| k.time_seconds()).collect();
+
+                                    let path_left = h_flex()
+                                        .w(px(380.))
+                                        .h(px(24.))
+                                        .pl(px(44.))
+                                        .pr_2()
+                                        .border_r_1()
+                                        .border_color(cx.theme().border)
+                                        .items_center()
+                                        .justify_between()
+                                        .text_xs()
+                                        .child(
+                                            h_flex()
+                                                .gap_1()
+                                                .items_center()
+                                                .child(timeline_stopwatch_nav(&self.state, &layer.id, &path_prop_path, is_path_anim, path_has_kf, path_prev, path_next, cx))
+                                                .child(div().w(px(100.)).text_color(cx.theme().foreground).child("Mask Path")),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(format!("{} pts{}", mask.path.value.points.len(), if mask.path.value.closed { " (closed)" } else { "" }))
+                                        );
+
+                                    let path_lane = timeline_keyframe_lane(&layer.id, &path_prop_path, &path_kf_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, cx);
+
+                                    timeline_rows.push(
+                                        h_flex()
+                                            .h(px(24.))
+                                            .border_b_1()
+                                            .border_color(cx.theme().border)
+                                            .items_center()
+                                            .child(path_left)
+                                            .child(path_lane),
+                                    );
+
+                                    let show_sub_props = state.timeline_masks_reveal_all || !state.timeline_masks_reveal_path;
+                                    if show_sub_props {
+                                        // 2. Mask Feather
+                                        let feather_val = mask.feather.evaluate_at(&current_tc);
+                                        let f_anim = mask.feather.is_animated();
+                                        let f_has_kf = mask.feather.has_keyframe_at(&current_tc);
+                                        let f_prev = mask.feather.previous_keyframe_time(&current_tc).is_some();
+                                        let f_next = mask.feather.next_keyframe_time(&current_tc).is_some();
+                                        let f_kf_times: Vec<f64> = mask.feather.keyframes().iter().map(|k| k.time_seconds()).collect();
+                                        let f_prop_path = format!("mask:{}:feather", mask.id);
+                                        let f_key = format!("mask:{}:feather", mask.id);
+
+                                        let feather_left = h_flex()
+                                            .w(px(380.))
+                                            .h(px(24.))
+                                            .pl(px(44.))
+                                            .pr_2()
+                                            .border_r_1()
+                                            .border_color(cx.theme().border)
+                                            .items_center()
+                                            .justify_between()
+                                            .text_xs()
+                                            .child(
+                                                h_flex()
+                                                    .gap_1()
+                                                    .items_center()
+                                                    .child(timeline_stopwatch_nav(&self.state, &layer.id, &f_prop_path, f_anim, f_has_kf, f_prev, f_next, cx))
+                                                    .child(div().w(px(100.)).text_color(cx.theme().foreground).child("Mask Feather")),
+                                            )
+                                            .child(
+                                                timeline_scrub(SharedString::from(format!("tl_scrub_{}_{}_feather", layer.id, mask.id)), "px", format!("{:.1}", feather_val), layer.id.clone(), f_key, 0.5, 1.0, &self.state, &panel_entity, cx),
+                                            );
+                                        let feather_lane = timeline_keyframe_lane(&layer.id, &f_prop_path, &f_kf_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, cx);
+
+                                        timeline_rows.push(h_flex().h(px(24.)).border_b_1().border_color(cx.theme().border).items_center().child(feather_left).child(feather_lane));
+
+                                        // 3. Mask Opacity
+                                        let opacity_val = mask.opacity.evaluate_at(&current_tc);
+                                        let o_anim = mask.opacity.is_animated();
+                                        let o_has_kf = mask.opacity.has_keyframe_at(&current_tc);
+                                        let o_prev = mask.opacity.previous_keyframe_time(&current_tc).is_some();
+                                        let o_next = mask.opacity.next_keyframe_time(&current_tc).is_some();
+                                        let o_kf_times: Vec<f64> = mask.opacity.keyframes().iter().map(|k| k.time_seconds()).collect();
+                                        let o_prop_path = format!("mask:{}:opacity", mask.id);
+                                        let o_key = format!("mask:{}:opacity", mask.id);
+
+                                        let opacity_left = h_flex()
+                                            .w(px(380.))
+                                            .h(px(24.))
+                                            .pl(px(44.))
+                                            .pr_2()
+                                            .border_r_1()
+                                            .border_color(cx.theme().border)
+                                            .items_center()
+                                            .justify_between()
+                                            .text_xs()
+                                            .child(
+                                                h_flex()
+                                                    .gap_1()
+                                                    .items_center()
+                                                    .child(timeline_stopwatch_nav(&self.state, &layer.id, &o_prop_path, o_anim, o_has_kf, o_prev, o_next, cx))
+                                                    .child(div().w(px(100.)).text_color(cx.theme().foreground).child("Mask Opacity")),
+                                            )
+                                            .child(
+                                                timeline_scrub(SharedString::from(format!("tl_scrub_{}_{}_opacity", layer.id, mask.id)), "%", format!("{:.0}%", opacity_val), layer.id.clone(), o_key, 0.5, 1.0, &self.state, &panel_entity, cx),
+                                            );
+                                        let opacity_lane = timeline_keyframe_lane(&layer.id, &o_prop_path, &o_kf_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, cx);
+
+                                        timeline_rows.push(h_flex().h(px(24.)).border_b_1().border_color(cx.theme().border).items_center().child(opacity_left).child(opacity_lane));
+
+                                        // 4. Mask Expansion
+                                        let exp_val = mask.expansion.evaluate_at(&current_tc);
+                                        let e_anim = mask.expansion.is_animated();
+                                        let e_has_kf = mask.expansion.has_keyframe_at(&current_tc);
+                                        let e_prev = mask.expansion.previous_keyframe_time(&current_tc).is_some();
+                                        let e_next = mask.expansion.next_keyframe_time(&current_tc).is_some();
+                                        let e_kf_times: Vec<f64> = mask.expansion.keyframes().iter().map(|k| k.time_seconds()).collect();
+                                        let e_prop_path = format!("mask:{}:expansion", mask.id);
+                                        let e_key = format!("mask:{}:expansion", mask.id);
+
+                                        let exp_left = h_flex()
+                                            .w(px(380.))
+                                            .h(px(24.))
+                                            .pl(px(44.))
+                                            .pr_2()
+                                            .border_r_1()
+                                            .border_color(cx.theme().border)
+                                            .items_center()
+                                            .justify_between()
+                                            .text_xs()
+                                            .child(
+                                                h_flex()
+                                                    .gap_1()
+                                                    .items_center()
+                                                    .child(timeline_stopwatch_nav(&self.state, &layer.id, &e_prop_path, e_anim, e_has_kf, e_prev, e_next, cx))
+                                                    .child(div().w(px(100.)).text_color(cx.theme().foreground).child("Mask Expansion")),
+                                            )
+                                            .child(
+                                                timeline_scrub(SharedString::from(format!("tl_scrub_{}_{}_expansion", layer.id, mask.id)), "px", format!("{:.1}", exp_val), layer.id.clone(), e_key, 0.5, 1.0, &self.state, &panel_entity, cx),
+                                            );
+                                        let exp_lane = timeline_keyframe_lane(&layer.id, &e_prop_path, &e_kf_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, cx);
+
+                                        timeline_rows.push(h_flex().h(px(24.)).border_b_1().border_color(cx.theme().border).items_center().child(exp_left).child(exp_lane));
                                     }
                                 }
                             }

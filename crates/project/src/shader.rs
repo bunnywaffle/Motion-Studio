@@ -140,7 +140,7 @@ impl ShaderParam {
             ShaderParamType::Int => ShaderParamValue::Int(v.round() as i32),
             ShaderParamType::Bool => ShaderParamValue::Bool(v >= 0.5),
             ShaderParamType::Enum { options } => {
-                let max_idx = options.len().saturating_sub(1).max(0) as f32;
+                let max_idx = options.len().saturating_sub(1) as f32;
                 ShaderParamValue::Int(v.round().clamp(0.0, max_idx) as i32)
             }
             ShaderParamType::Vec2 => ShaderParamValue::Vec2([v, v]),
@@ -212,7 +212,7 @@ fn parse_param_metadata(comment: &str) -> HashMap<String, String> {
 }
 
 fn parse_float_list(s: &str) -> Vec<f32> {
-    s.split(|c| c == ',' || c == ' ' || c == '\t')
+    s.split([',', ' ', '\t'])
         .filter(|t| !t.is_empty())
         .filter_map(|t| t.parse::<f32>().ok())
         .collect()

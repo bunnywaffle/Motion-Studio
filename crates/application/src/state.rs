@@ -175,6 +175,12 @@ pub struct EditorState {
     /// Mask node-edit target `(layer_id, mask_id)` for the viewport Path
     /// Editor. Pen clicks append to it while set (UI state, not undoable).
     pub active_mask_edit: Option<(String, String)>,
+    /// Last timestamp 'M' was pressed in timeline for M / MM double-tap detection.
+    pub last_m_press_time: Option<std::time::Instant>,
+    /// True when MM shortcut expanded all mask properties.
+    pub timeline_masks_reveal_all: bool,
+    /// True when M shortcut toggled mask path visibility.
+    pub timeline_masks_reveal_path: bool,
 }
 
 /// One undo/redo snapshot: the whole project plus UI context.
@@ -350,9 +356,9 @@ fn graph_prop_mut<'a>(layer: &'a mut Layer, path: &str) -> Option<&'a mut Proper
         },
         _ => {
             let rest = base.strip_prefix("effect:")?;
-            let mut parts = rest.splitn(2, ':');
-            let eid = parts.next()?;
-            let pname = parts.next()?;
+            let (eid, pname) = rest.split_once(':')?;
+            
+            
             let fx = layer.get_effect_mut(eid)?;
             Some(fx.get_param_property_mut(pname)?)
         }
@@ -714,6 +720,9 @@ impl EditorState {
             spline_editor_open: false,
             spline_prop_path: "transform.position".to_string(),
             active_mask_edit: None,
+            last_m_press_time: None,
+            timeline_masks_reveal_all: false,
+            timeline_masks_reveal_path: false,
         }
     }
 
@@ -2061,6 +2070,7 @@ impl EditorState {
         delta: f32,
     ) -> Result<(), String> {
         self.checkpoint();
+        let current_tc = self.clock.timecode();
         let comp = self
             .active_composition_mut()
             .ok_or_else(|| "No active composition".to_string())?;
@@ -2073,7 +2083,22 @@ impl EditorState {
         if mask.locked {
             return Err(format!("Mask {mask_id} is locked"));
         }
-        if mask.nudge_param(param_name, delta) {
+        if let Some(prop) = mask.get_param_property_mut(param_name) {
+            let cur = if prop.is_animated() {
+                prop.evaluate_at(&current_tc)
+            } else {
+                prop.value
+            };
+            let new_val = match param_name.to_lowercase().as_str() {
+                "opacity" => (cur + delta).clamp(0.0, 100.0),
+                "feather" => (cur + delta).max(0.0),
+                "expansion" => (cur + delta).clamp(-500.0, 500.0),
+                _ => cur + delta,
+            };
+            prop.set_value(new_val);
+            if prop.is_animated() {
+                prop.add_keyframe(Keyframe::new(current_tc, new_val));
+            }
             Ok(())
         } else {
             Err(format!("Unknown mask param {param_name}"))
@@ -2207,6 +2232,30 @@ impl EditorState {
         is_in: bool,
         tip: Vec2,
     ) -> Result<(), String> {
+        self.move_mask_handle_live_internal(layer_id, mask_id, index, is_in, tip, false)
+    }
+
+    /// Rewrite one mask tangent handle with Alt breaking (sharp cusp).
+    pub fn move_mask_handle_live_break(
+        &mut self,
+        layer_id: &str,
+        mask_id: &str,
+        index: usize,
+        is_in: bool,
+        tip: Vec2,
+    ) -> Result<(), String> {
+        self.move_mask_handle_live_internal(layer_id, mask_id, index, is_in, tip, true)
+    }
+
+    fn move_mask_handle_live_internal(
+        &mut self,
+        layer_id: &str,
+        mask_id: &str,
+        index: usize,
+        is_in: bool,
+        tip: Vec2,
+        break_tangent: bool,
+    ) -> Result<(), String> {
         let current_tc = self.clock.timecode();
         let comp = self
             .active_composition_mut()
@@ -2225,6 +2274,12 @@ impl EditorState {
             .ok_or_else(|| format!("Mask node {index} out of range"))?;
         if mask.locked {
             return Err(format!("Mask {mask_id} is locked"));
+        }
+        if break_tangent {
+            node.kind = project::PathPointKind::Corner;
+        } else if node.kind == project::PathPointKind::Corner {
+            // Dragging handle promotes corner to symmetric Bézier curve
+            node.kind = project::PathPointKind::Symmetric;
         }
         if is_in {
             node.set_in_abs(tip);
@@ -2446,9 +2501,26 @@ impl EditorState {
         Ok(())
     }
 
+    /// Toggle mask locked status.
+    pub fn toggle_mask_lock(&mut self, layer_id: &str, mask_id: &str) -> Result<(), String> {
+        let is_locked = {
+            let comp = self.active_composition().ok_or_else(|| "No active composition".to_string())?;
+            let layer = comp.get_layer(layer_id).ok_or_else(|| format!("Layer {layer_id} not found"))?;
+            let mask = layer.get_mask(mask_id).ok_or_else(|| format!("Mask {mask_id} not found"))?;
+            mask.locked
+        };
+        self.set_mask_locked(layer_id, mask_id, !is_locked)
+    }
+
+    /// Delete a mask from a layer (alias for remove_layer_mask).
+    pub fn delete_mask(&mut self, layer_id: &str, mask_id: &str) -> Result<(), String> {
+        self.remove_layer_mask(layer_id, mask_id)
+    }
+
     /// Rewrite a mask path from a numeric bounding box (the Mask Shape
     /// dialog: Rectangle / Ellipse + explicit x/y/w/h in layer-local px).
     /// Snapshots a keyframe when the path is animated.
+    #[allow(clippy::too_many_arguments)]
     pub fn set_mask_shape_numeric(
         &mut self,
         layer_id: &str,
@@ -2516,6 +2588,17 @@ impl EditorState {
         layer_id: &str,
         kind: MaskShapeKind,
     ) -> Result<String, String> {
+        self.add_shaped_mask_at(layer_id, kind, None, None)
+    }
+
+    /// Add a shaped mask (rectangle/ellipse) with optional canvas center position and size.
+    pub fn add_shaped_mask_at(
+        &mut self,
+        layer_id: &str,
+        kind: MaskShapeKind,
+        comp_center: Option<Vec2>,
+        desired_size: Option<(f32, f32)>,
+    ) -> Result<String, String> {
         let (w, h) = {
             let comp = self
                 .active_composition()
@@ -2525,7 +2608,17 @@ impl EditorState {
                 .ok_or_else(|| format!("Layer {layer_id} not found"))?;
             self.layer_content_dims(layer)
         };
-        let (bw, bh) = (w.min(400.0).max(8.0), h.min(300.0).max(8.0));
+        let (bw, bh) = match desired_size {
+            Some((sw, sh)) => (sw.max(8.0), sh.max(8.0)),
+            None => (w.clamp(8.0, 400.0), h.clamp(8.0, 300.0)),
+        };
+        let (x, y) = match comp_center {
+            Some(cc) => {
+                let local = self.comp_to_layer_local(layer_id, cc).unwrap_or(cc);
+                (local.x - bw / 2.0, local.y - bh / 2.0)
+            }
+            None => ((w - bw) / 2.0, (h - bh) / 2.0),
+        };
         self.checkpoint();
         let comp = self
             .active_composition_mut()
@@ -2535,8 +2628,9 @@ impl EditorState {
             .ok_or_else(|| format!("Layer {layer_id} not found"))?;
         let id = next_mask_id(layer);
         let name = format!("Mask {}", layer.masks.len() + 1);
-        let path = kind.path((w - bw) / 2.0, (h - bh) / 2.0, bw, bh);
+        let path = kind.path(x, y, bw, bh);
         layer.masks.push(Mask::with_path(&id, name, path));
+        self.active_mask_edit = Some((layer_id.to_string(), id.clone()));
         Ok(id)
     }
 
@@ -2636,9 +2730,9 @@ impl EditorState {
                 .ok_or_else(|| format!("Layer {src_layer_id} not found"))?;
             let keys = src.transform.position.keyframes();
             if keys.is_empty() {
-                vec![(current_tc.clone(), src.transform.position.value)]
+                vec![(current_tc, src.transform.position.value)]
             } else {
-                keys.iter().map(|k| (k.time.clone(), k.value)).collect()
+                keys.iter().map(|k| (k.time, k.value)).collect()
             }
         };
         if samples.len() < 2 {
@@ -2671,7 +2765,7 @@ impl EditorState {
         let mut mask = Mask::with_path(&id, "Motion Path", path);
         mask.path.set_animated(true);
         for (tc, _) in &samples {
-            mask.path.add_keyframe(Keyframe::new(tc.clone(), mask.path.value.clone()));
+            mask.path.add_keyframe(Keyframe::new(*tc, mask.path.value.clone()));
         }
         layer.masks.push(mask);
         Ok(id)
@@ -2871,7 +2965,7 @@ impl EditorState {
                 id = format!("layer_traced_{counter}");
             }
             let tc0 = TimeCode::zero(frame_rate);
-            let dur = comp.duration.clone();
+            let dur = comp.duration;
             let mut solid = Layer::solid(&id, "Traced Masks", Color::WHITE, w as u32, h as u32, tc0, dur);
             // Match the source transform so traced coords line up.
             solid.transform = src_transform;
@@ -2908,17 +3002,17 @@ impl EditorState {
                     // frames with different topology simply hold.
                     if same_shape {
                         if let Some((fp, _)) = frame_paths.get(i) {
-                            mask.path.add_keyframe(Keyframe::new(tc.clone(), fp.clone()));
+                            mask.path.add_keyframe(Keyframe::new(*tc, fp.clone()));
                         }
                     }
                 }
                 // Guarantee the playhead frame holds.
                 if !mask.path.has_keyframe_at(&frames[0]) {
-                    mask.path.add_keyframe(Keyframe::new(frames[0].clone(), path.clone()));
+                    mask.path.add_keyframe(Keyframe::new(frames[0], path.clone()));
                 }
             } else {
                 mask.path.set_animated(true);
-                mask.path.add_keyframe(Keyframe::new(frames[0].clone(), path.clone()));
+                mask.path.add_keyframe(Keyframe::new(frames[0], path.clone()));
             }
             ids.push(id.clone());
             layer.masks.push(mask);
@@ -2967,10 +3061,12 @@ impl EditorState {
             let (bw, bh) =
                 crate::raster::layer::layer_base_dims(&elayer, comp_w, comp_h, &assets);
             // Text needs a lower threshold to keep soft glyph edges.
-            let mut opts = AutoTraceOptions::default();
-            opts.threshold_pct = 20.0;
-            opts.min_area_px = 4.0;
-            opts.tolerance_px = 0.75;
+            let opts = AutoTraceOptions {
+                threshold_pct: 20.0,
+                min_area_px: 4.0,
+                tolerance_px: 0.75,
+                ..Default::default()
+            };
             let traced = self
                 .trace_frame_paths(&elayer, comp_w, comp_h, &opts)
                 .unwrap_or_default();
@@ -3001,7 +3097,7 @@ impl EditorState {
             w,
             h,
             TimeCode::zero(frame_rate),
-            comp.duration.clone(),
+            comp.duration,
         );
         solid.transform = src_transform;
         comp.insert_layer(0, solid)
@@ -3017,7 +3113,7 @@ impl EditorState {
                 mask.mode = project::MaskMode::Subtract;
             }
             mask.path.set_animated(true);
-            mask.path.add_keyframe(Keyframe::new(current_tc.clone(), path.clone()));
+            mask.path.add_keyframe(Keyframe::new(current_tc, path.clone()));
             ids.push(id.clone());
             layer.masks.push(mask);
         }
@@ -4076,9 +4172,7 @@ impl EditorState {
         let effect = layer
             .get_effect_mut(effect_id)
             .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
-        if effect.set_color_value(field, color) {
-            Ok(())
-        } else if effect.set_stock_color(field, color) {
+        if effect.set_color_value(field, color) || effect.set_stock_color(field, color) {
             Ok(())
         } else {
             Err(format!("Color field {field} not found on effect {effect_id}"))
@@ -4165,6 +4259,11 @@ impl EditorState {
                         let _ =
                             self.nudge_layer_effect_param(layer_id, parts[0], parts[1], delta);
                     }
+                } else if let Some(rest) = key.strip_prefix("mask:") {
+                    let parts: Vec<&str> = rest.split(':').collect();
+                    if parts.len() >= 2 {
+                        let _ = self.nudge_mask_param(layer_id, parts[0], parts[1], delta);
+                    }
                 }
             }
         }
@@ -4200,13 +4299,24 @@ impl EditorState {
             "rotation" => Some(eval_num(&layer.transform.rotation)),
             "opacity" => Some(eval_num(&layer.opacity)),
             _ => {
-                let rest = key.strip_prefix("fx:")?;
-                let parts: Vec<&str> = rest.split(':').collect();
-                if parts.len() < 2 {
-                    return None;
+                if let Some(rest) = key.strip_prefix("fx:") {
+                    let parts: Vec<&str> = rest.split(':').collect();
+                    if parts.len() < 2 {
+                        return None;
+                    }
+                    let prop = layer.get_effect(parts[0])?.get_param_property(parts[1])?;
+                    Some(eval_num(prop))
+                } else if let Some(rest) = key.strip_prefix("mask:") {
+                    let parts: Vec<&str> = rest.split(':').collect();
+                    if parts.len() < 2 {
+                        return None;
+                    }
+                    let mask = layer.get_mask(parts[0])?;
+                    let prop = mask.get_param_property(parts[1])?;
+                    Some(eval_num(prop))
+                } else {
+                    None
                 }
-                let prop = layer.get_effect(parts[0])?.get_param_property(parts[1])?;
-                Some(eval_num(prop))
             }
         }
     }
@@ -4279,20 +4389,31 @@ impl EditorState {
                 true
             }
             _ => {
-                let rest = match key.strip_prefix("fx:") {
-                    Some(r) => r,
-                    None => return false,
-                };
-                let parts: Vec<&str> = rest.split(':').collect();
-                if parts.len() < 2 {
-                    return false;
+                if let Some(rest) = key.strip_prefix("fx:") {
+                    let parts: Vec<&str> = rest.split(':').collect();
+                    if parts.len() < 2 {
+                        return false;
+                    }
+                    let cur = match self.timeline_current_value(&lid, key) {
+                        Some(c) => c,
+                        None => return false,
+                    };
+                    self.nudge_layer_effect_param(&lid, parts[0], parts[1], v - cur)
+                        .is_ok()
+                } else if let Some(rest) = key.strip_prefix("mask:") {
+                    let parts: Vec<&str> = rest.split(':').collect();
+                    if parts.len() < 2 {
+                        return false;
+                    }
+                    let cur = match self.timeline_current_value(&lid, key) {
+                        Some(c) => c,
+                        None => return false,
+                    };
+                    self.nudge_mask_param(&lid, parts[0], parts[1], v - cur)
+                        .is_ok()
+                } else {
+                    false
                 }
-                let cur = match self.timeline_current_value(&lid, key) {
-                    Some(c) => c,
-                    None => return false,
-                };
-                self.nudge_layer_effect_param(&lid, parts[0], parts[1], v - cur)
-                    .is_ok()
             }
         }
     }
@@ -4449,12 +4570,35 @@ impl EditorState {
                             }
                         }
                     }
+                } else if let Some(rest) = prop_path.strip_prefix("mask:") {
+                    let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                    if parts.len() == 2 {
+                        let mask_id = parts[0];
+                        let param_name = parts[1];
+                        if param_name == "path" {
+                            if let Some(mask) = layer.get_mask_mut(mask_id) {
+                                if mask.path.is_animated() {
+                                    mask.path.clear_keyframes();
+                                } else {
+                                    let val = mask.path.value.clone();
+                                    mask.path.add_keyframe(Keyframe::new(current_tc, val));
+                                }
+                            }
+                        } else if let Some(mask) = layer.get_mask_mut(mask_id) {
+                            if let Some(prop) = mask.get_param_property_mut(param_name) {
+                                if prop.is_animated() {
+                                    prop.clear_keyframes();
+                                } else {
+                                    let val = prop.value;
+                                    prop.add_keyframe(Keyframe::new(current_tc, val));
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
     }
-
-    /// Toggle a keyframe at the current playback timecode for a property path on the layer.
 
     /// Add a keyframe at an absolute time (value sampled from the track).
     pub fn add_graph_keyframe(&mut self, layer_id: &str, path: &str, t_s: f64) -> bool {
@@ -4511,7 +4655,7 @@ impl EditorState {
 
                     Some(_) => done,
 
-                    None => return false,
+                    None => false,
 
                 }
             }
@@ -4538,7 +4682,8 @@ impl EditorState {
             Some(v) => v,
             None => return false,
         };
-        let found = match base {
+        
+        match base {
             "transform.anchor_point" => {
                 layer.transform.anchor_point.remove_keyframe_at(&tc).is_some()
             }
@@ -4551,13 +4696,11 @@ impl EditorState {
                 }) {
 
                     Some(_) => done,
-
-                    None => return false,
+                    None => false,
 
                 }
             }
-        };
-        found
+        }
     }
 
     /// Cycle a keyframe's interpolation Linear -> Bezier -> Hold.
@@ -4630,7 +4773,7 @@ impl EditorState {
 
                     Some(_) => done,
 
-                    None => return false,
+                    None => false,
 
                 }
             }
@@ -4733,7 +4876,7 @@ impl EditorState {
 
                     Some(_) => done,
 
-                    None => return false,
+                    None => false,
 
                 }
             }
@@ -4850,8 +4993,6 @@ impl EditorState {
         })
     }
 
-    /// Find a keyframe index on a scalar prop near `at_s` (half-frame window).
-
     /// Move a keyframe to a new time/value, preserving interpolation.
     pub fn move_graph_keyframe(
         &mut self,
@@ -4943,15 +5084,14 @@ impl EditorState {
 
                     Some(_) => done,
 
-                    None => return false,
+                    None => false,
 
                 }
             }
         }
     }
 
-    /// Helper: run a closure over a scalar (f32) graph property.
-
+    /// Toggle a keyframe at the current playback timecode for a property path on the layer.
     pub fn toggle_layer_keyframe_at_current_time(&mut self, layer_id: &str, prop_path: &str) {
         self.checkpoint();        let current_tc = self.clock.timecode();
         let comp = match self.active_composition_mut() {
@@ -5141,6 +5281,31 @@ impl EditorState {
                             }
                         }
                     }
+                } else if let Some(rest) = prop_path.strip_prefix("mask:") {
+                    let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                    if parts.len() == 2 {
+                        let mask_id = parts[0];
+                        let param_name = parts[1];
+                        if param_name == "path" {
+                            if let Some(mask) = layer.get_mask_mut(mask_id) {
+                                let val = if mask.path.is_animated() {
+                                    mask.path.evaluate_at(&current_tc)
+                                } else {
+                                    mask.path.value.clone()
+                                };
+                                mask.path.toggle_keyframe(current_tc, val);
+                            }
+                        } else if let Some(mask) = layer.get_mask_mut(mask_id) {
+                            if let Some(prop) = mask.get_param_property_mut(param_name) {
+                                let val = if prop.is_animated() {
+                                    prop.evaluate_at(&current_tc)
+                                } else {
+                                    prop.value
+                                };
+                                prop.toggle_keyframe(current_tc, val);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -5246,6 +5411,22 @@ impl EditorState {
                         } else {
                             None
                         }
+                    } else if let Some(rest) = prop_path.strip_prefix("mask:") {
+                        let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                        if parts.len() == 2 {
+                            let mask_id = parts[0];
+                            let param_name = parts[1];
+                            if param_name == "path" {
+                                layer.get_mask(mask_id)
+                                    .and_then(|m| m.path.previous_keyframe_time(&current_tc))
+                            } else {
+                                layer.get_mask(mask_id)
+                                    .and_then(|m| m.get_param_property(param_name))
+                                    .and_then(|prop| prop.previous_keyframe_time(&current_tc))
+                            }
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     }
@@ -5348,6 +5529,22 @@ impl EditorState {
                         } else {
                             None
                         }
+                    } else if let Some(rest) = prop_path.strip_prefix("mask:") {
+                        let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                        if parts.len() == 2 {
+                            let mask_id = parts[0];
+                            let param_name = parts[1];
+                            if param_name == "path" {
+                                layer.get_mask(mask_id)
+                                    .and_then(|m| m.path.next_keyframe_time(&current_tc))
+                            } else {
+                                layer.get_mask(mask_id)
+                                    .and_then(|m| m.get_param_property(param_name))
+                                    .and_then(|prop| prop.next_keyframe_time(&current_tc))
+                            }
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     }
@@ -5368,6 +5565,33 @@ impl EditorState {
     /// Set the active property inspected in the Spline Editor.
     pub fn set_spline_prop_path(&mut self, path: &str) {
         self.spline_prop_path = path.to_string();
+    }
+
+    /// Select active editing tool.
+    pub fn select_tool(&mut self, tool: EditorTool) {
+        self.active_tool = tool;
+    }
+
+    /// Handle 'M' / 'MM' key shortcut (After Effects parity):
+    /// - Pressing 'M' reveals the Mask Path property for the selected layer.
+    /// - Pressing 'MM' (double-tap within 350ms) reveals ALL mask properties (Path, Feather, Opacity, Expansion).
+    ///
+    /// Returns `(revealed, is_all)`.
+    pub fn handle_m_shortcut(&mut self) -> (bool, bool) {
+        let now = std::time::Instant::now();
+        let is_double = if let Some(last) = self.last_m_press_time {
+            now.duration_since(last) < std::time::Duration::from_millis(350)
+        } else {
+            false
+        };
+        self.last_m_press_time = Some(now);
+        if is_double {
+            self.timeline_masks_reveal_all = true;
+            (true, true)
+        } else {
+            self.timeline_masks_reveal_path = !self.timeline_masks_reveal_path;
+            (true, false)
+        }
     }
 
     /// Apply an easing preset (Linear, Ease In, Ease Out, Easy Ease, Hold) to all keyframes
@@ -5709,7 +5933,7 @@ impl EditorState {
         for (anchor, pos, scale, rot) in chain.iter().rev() {
             let local =
                 AffineTransform2D::from_transform_components(*pos, *scale, *rot, *anchor);
-            world = world * local;
+            world *= local;
         }
         Some(world)
     }
@@ -5961,6 +6185,7 @@ impl EditorState {
     /// 2. picked Path shape → select + append (layer-local),
     /// 3. picked Text layer → select + baseline point (layer-local),
     /// 4. otherwise → new Path layer.
+    ///
     /// Returns the affected layer id.
     pub fn pen_press_at(
         &mut self,

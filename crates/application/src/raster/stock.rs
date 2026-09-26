@@ -141,7 +141,7 @@ fn screen_over(buf: &mut FloatBuf, glow: &FloatBuf, k: f32) {
 
 /// Deterministic 2D hash in [0, 1).
 pub fn hash2(x: f32, y: f32, seed: f32) -> f32 {
-    ((x * 12.9898 + y * 78.233 + seed * 37.719).sin() * 43758.5453).fract()
+    ((x * 12.9898 + y * 78.233 + seed * 37.719).sin() * 43_758.547).fract()
 }
 
 /// Smooth value noise in [0, 1].
@@ -165,7 +165,7 @@ pub fn fbm(x: f32, y: f32, octaves: usize, seed: f32) -> f32 {
     let mut amp = 0.5;
     let mut fx = x;
     let mut fy = y;
-    for i in 0..octaves.max(1).min(8) {
+    for i in 0..octaves.clamp(1, 8) {
         v += amp * vnoise(fx, fy, seed + i as f32 * 13.7);
         amp *= 0.5;
         fx = fx * 2.03 + 17.3;
@@ -1305,6 +1305,7 @@ fn k_crop(buf: &mut FloatBuf, p: &[f32], plugin: StockPlugin) {
 /// Solve the projective map from unit-square corners to `dst` quad corners
 /// (8x8 Gaussian elimination). Returns row-major homography or None when
 /// the quad is degenerate.
+#[allow(clippy::needless_range_loop)]
 fn homography(dst: [(f32, f32); 4]) -> Option<[f32; 9]> {
     // Source corners in order: UL(0,0) UR(1,0) LR(1,1) LL(0,1).
     let src = [(0.0f32, 0.0f32), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
@@ -1387,7 +1388,7 @@ fn k_corner_pin(buf: &mut FloatBuf, p: &[f32], plugin: StockPlugin) {
 
 fn k_mirror(buf: &mut FloatBuf, p: &[f32], plugin: StockPlugin) {
     let (mode, center) = (stock_p(plugin, p, 0).round() as i32, stock_p(plugin, p, 1) / 100.0);
-    if mode < 0 || mode > 2 {
+    if !(0..=2).contains(&mode) {
         return;
     }
     remap(buf, |x, y, w, h| {
