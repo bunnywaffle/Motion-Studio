@@ -4578,6 +4578,74 @@ mod tests {
     }
 
     #[test]
+    fn test_pen_draws_mask_by_default_on_non_shape_layer() {
+        use crate::state::EditorState;
+        use project::{LayerSource, Vec2};
+
+        let mut state = EditorState::new();
+        let layer_id = "layer_accent";
+        assert!(matches!(
+            state.active_composition().unwrap().get_layer(layer_id).unwrap().source,
+            LayerSource::Solid { .. }
+        ));
+
+        // 1. First pen click on the solid layer creates a mask and adds vertex 1.
+        let ret1 = state.pen_press_at(Vec2::new(10.0, 10.0), Some(layer_id.to_string())).expect("point 1");
+        assert_eq!(ret1, layer_id);
+        assert!(state.active_mask_edit.is_some());
+        {
+            let comp = state.active_composition().unwrap();
+            let layer = comp.get_layer(layer_id).unwrap();
+            assert_eq!(layer.masks.len(), 1);
+            let mask = &layer.masks[0];
+            assert_eq!(mask.path.value.points.len(), 1);
+            assert!(!mask.path.value.closed);
+        }
+
+        // 2. Open / incomplete mask must NOT zero out the layer during rasterization.
+        let eval = state.evaluate_current_frame().expect("evaluate");
+        let eval_layer = eval.get_layer(layer_id).expect("layer evaluated");
+        let (buf, _, _) = crate::raster::rasterize_layer(
+            eval_layer,
+            300.0,
+            300.0,
+            100,
+            100,
+            1920.0,
+            1080.0,
+            project::Color::BLACK,
+            0.0,
+            0,
+            false,
+            5.0,
+            &std::collections::HashMap::new(),
+        );
+        let has_visible_pixels = buf.px.iter().any(|p| p.a > 0.5);
+        assert!(has_visible_pixels, "Layer must remain visible while mask is being drawn");
+
+        // 3. Second and third pen clicks append vertices point by point to the active mask.
+        state.pen_press_at(Vec2::new(50.0, 10.0), None).expect("point 2");
+        state.pen_press_at(Vec2::new(50.0, 50.0), None).expect("point 3");
+        {
+            let comp = state.active_composition().unwrap();
+            let layer = comp.get_layer(layer_id).unwrap();
+            let mask = &layer.masks[0];
+            assert_eq!(mask.path.value.points.len(), 3);
+            assert!(!mask.path.value.closed);
+        }
+
+        // 4. Fourth click near point 1 closes the mask and ends active mask edit.
+        state.pen_press_at(Vec2::new(12.0, 11.0), None).expect("point 4 close");
+        assert!(state.active_mask_edit.is_none());
+        {
+            let comp = state.active_composition().unwrap();
+            let layer = comp.get_layer(layer_id).unwrap();
+            let mask = &layer.masks[0];
+            assert!(mask.path.value.closed, "Mask must be closed when clicking near first vertex");
+        }
+    }
+
+    #[test]
     fn test_layer_drag_reorder() {
         use crate::state::EditorState;
 

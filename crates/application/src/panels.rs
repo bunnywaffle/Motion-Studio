@@ -2390,13 +2390,32 @@ impl Render for CompositionViewerPanel {
                                         )
                                         .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
                                             let (mx, my) = (event.position.x / px(1.0), event.position.y / px(1.0));
+                                            let mut closed = false;
                                             s_h.update(cx, |s, cx| {
                                                 s.checkpoint();
                                                 s.select_layer(Some(lid_h.clone()));
+                                                if s.active_tool == EditorTool::Pen && idx == 0 {
+                                                    if let Some(comp) = s.active_composition_mut() {
+                                                        if let Some(layer) = comp.get_layer_mut(&lid_h) {
+                                                            if let Some(mask) = layer.get_mask_mut(&mid_h) {
+                                                                if mask.path.value.points.len() >= 3 && !mask.path.value.closed {
+                                                                    mask.path.value.close();
+                                                                    s.set_active_mask_edit(None);
+                                                                    closed = true;
+                                                                    cx.notify();
+                                                                    return;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
                                                 s.set_active_mask_edit(Some((lid_h.clone(), mid_h.clone())));
                                                 s.preview_fast = true;
                                                 cx.notify();
                                             });
+                                            if closed {
+                                                return;
+                                            }
                                             let _ = gizmo_to_comp(mx, my, h_frame, h_fit, h_cw, h_ch);
                                             p_h.update(cx, |this, cx| {
                                                 this.mask_edit_point = Some(idx);
@@ -3607,6 +3626,7 @@ impl PropertiesPanel {
 
     pub fn apply_scrub_delta(&mut self, prop: &str, dx: f32, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
+            s.preview_fast = true;
             match prop {
                 "anchor_x" => s.nudge_anchor(dx * 1.0, 0.0),
                 "anchor_y" => s.nudge_anchor(0.0, dx * 1.0),
@@ -14109,6 +14129,7 @@ impl Render for TimelinePanel {
                         if dx != 0.0 {
                             let factor = scrub.3;
                             s_root_move.update(cx, |s, cx| {
+                                s.preview_fast = true;
                                 s.nudge_timeline_value(&lid, &key, dx * factor);
                                 cx.notify();
                             });

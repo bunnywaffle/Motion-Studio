@@ -5944,14 +5944,29 @@ impl EditorState {
     ) -> Result<String, String> {
         // 1. Mask editing wins while armed and valid.
         if let Some((lid, mid)) = self.active_mask_edit.clone() {
-            let valid = self
+            let mask_opt = self
                 .active_composition()
                 .and_then(|c| c.get_layer(&lid))
                 .and_then(|l| l.get_mask(&mid))
-                .is_some();
-            if valid {
+                .cloned();
+            if let Some(mask) = mask_opt {
                 if let Some(local) = self.comp_to_layer_local(&lid, point) {
                     self.checkpoint();
+                    // Close the mask when clicking near the first point (if it has >= 3 points)
+                    if mask.path.value.points.len() >= 3 {
+                        let first_p = mask.path.value.points[0].pos;
+                        if (local - first_p).length() <= 20.0 {
+                            if let Some(comp) = self.active_composition_mut() {
+                                if let Some(layer) = comp.get_layer_mut(&lid) {
+                                    if let Some(m) = layer.get_mask_mut(&mid) {
+                                        m.path.value.close();
+                                    }
+                                }
+                            }
+                            self.active_mask_edit = None;
+                            return Ok(lid);
+                        }
+                    }
                     self.append_mask_point(&lid, &mid, local)?;
                     return Ok(lid);
                 }
@@ -5959,18 +5974,19 @@ impl EditorState {
                 self.active_mask_edit = None;
             }
         }
-        // 2/3. Route by what is actually under the cursor.
+
+        // 2. Route by picked layer under the cursor
         if let Some(pid) = picked {
-            let kind = self
+            let (is_path_shape, is_text) = self
                 .active_composition()
                 .and_then(|c| c.get_layer(&pid))
-                .map(|l| match &l.source {
-                    LayerSource::Shape { shape_type: ShapeType::Path { .. } } => 1,
-                    LayerSource::Text { .. } => 2,
-                    _ => 0,
-                })
-                .unwrap_or(0);
-            if kind == 1 {
+                .map(|l| (
+                    matches!(&l.source, LayerSource::Shape { shape_type: ShapeType::Path { .. } }),
+                    matches!(&l.source, LayerSource::Text { .. }),
+                ))
+                .unwrap_or((false, false));
+
+            if is_path_shape {
                 self.checkpoint();
                 self.select_layer(Some(pid.clone()));
                 if let Some(local) = self.comp_to_layer_local(&pid, point) {
@@ -5991,17 +6007,55 @@ impl EditorState {
                     }
                 }
                 return Ok(pid);
-            } else if kind == 2 {
+            } else if is_text {
                 self.checkpoint();
                 self.select_layer(Some(pid.clone()));
                 if let Some(local) = self.comp_to_layer_local(&pid, point) {
                     self.append_text_path_point(&pid, local)?;
                 }
                 return Ok(pid);
+            } else {
+                // For any other layer (Solid, Image, Video, Shape Rect/Ellipse):
+                // PEN TOOL CREATES & EDITS A MASK BY DEFAULT!
+                if let Some(local) = self.comp_to_layer_local(&pid, point) {
+                    self.checkpoint();
+                    self.select_layer(Some(pid.clone()));
+                    let comp = self
+                        .active_composition_mut()
+                        .ok_or_else(|| "No active composition".to_string())?;
+                    let layer = comp
+                        .get_layer_mut(&pid)
+                        .ok_or_else(|| format!("Layer {pid} not found"))?;
+
+                    // If layer has an unclosed mask, continue drawing on it:
+                    if let Some(unclosed_m) = layer.masks.iter_mut().rev().find(|m| !m.path.value.closed) {
+                        let mid = unclosed_m.id.clone();
+                        if unclosed_m.path.value.points.len() >= 3 {
+                            let first_p = unclosed_m.path.value.points[0].pos;
+                            if (local - first_p).length() <= 20.0 {
+                                unclosed_m.path.value.close();
+                                self.set_active_mask_edit(None);
+                                return Ok(pid);
+                            }
+                        }
+                        unclosed_m.path.value.line_to(local);
+                        self.set_active_mask_edit(Some((pid.clone(), mid)));
+                        return Ok(pid);
+                    }
+
+                    // Otherwise create a new mask starting with this point:
+                    let mid = next_mask_id(layer);
+                    let name = format!("Mask {}", layer.masks.len() + 1);
+                    let mut initial_path = Path::new();
+                    initial_path.line_to(local);
+                    layer.masks.push(Mask::with_path(&mid, name, initial_path));
+                    self.set_active_mask_edit(Some((pid.clone(), mid)));
+                    return Ok(pid);
+                }
             }
         }
-        // 4. Fresh path layer (delegates to the legacy creator, which also
-        // selects it).
+
+        // 3. No layer picked under cursor (empty space): fresh path layer
         self.add_pen_point(point)
     }
 
@@ -6054,10 +6108,7 @@ impl EditorState {
             }
         }
         // Check if selected layer is a Path shape: append in LAYER-LOCAL
-        // coords (the click arrives in comp coords). Appending raw comp
-        // coords corrupts the path as soon as the layer is transformed or
-        // parented (world != local), stretching its bounds off-screen so
-        // the layer seemingly "disappears".
+        // coords (the click arrives in comp coords).
         let sel_id = self.selected_layer_id.clone();
         if let Some(id) = sel_id {
             // Resolve local first (read-only borrow), then mutate.

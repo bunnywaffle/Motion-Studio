@@ -167,6 +167,11 @@ pub fn apply_masks(buf: &mut FloatBuf, masks: &[EvaluatedMask]) {
         if !mask.enabled || mask.mode == MaskMode::None {
             continue;
         }
+        // An unclosed mask path or mask with fewer than 3 vertices cannot enclose any 2D area.
+        // In After Effects, open/incomplete masks do NOT clip the layer content.
+        if !mask.path.closed || mask.path.points.len() < 3 {
+            continue;
+        }
         // 1. Coverage from the transformed path.
         let mut cov = mask_coverage(buf.w, buf.h, &mask.path, &mask.transform);
         // 2. Expansion (positive dilates, negative erodes).
