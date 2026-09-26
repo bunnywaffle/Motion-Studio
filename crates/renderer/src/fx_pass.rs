@@ -195,10 +195,73 @@ impl FxPass {
         Ok(Self { pipeline, bind_group_layout, sampler })
     }
 
-    /// Run the pass: `source_view` -> `target` with packed uniforms.
-    pub fn render(
+    /// Compile a pass for a supported stock plugin.
+    pub fn for_stock(
+        gpu: &GpuContext,
+        plugin: StockPlugin,
+        target_format: wgpu::TextureFormat,
+    ) -> Result<Self, String> {
+        let (body, call, uv_calls): (&str, &str, &[&str]) = match plugin {
+            StockPlugin::Posterize => (
+                crate::effect_filters::stock_posterize().wgsl,
+                "fx_stock_posterize(uv, color, u.params[0].x)",
+                &[],
+            ),
+            StockPlugin::Threshold => (
+                crate::effect_filters::stock_threshold().wgsl,
+                "fx_stock_threshold(uv, color, u.params[0].x)",
+                &[],
+            ),
+            StockPlugin::FilmGrain => (
+                crate::effect_filters::stock_film_grain().wgsl,
+                "fx_stock_film_grain(uv, color, u.params[0].x, u.misc.x, u.params[0].y)",
+                &[],
+            ),
+            StockPlugin::Scanlines => (
+                crate::effect_filters::stock_scanlines().wgsl,
+                "fx_stock_scanlines(uv, color, u.params[0].x, u.params[0].y, u.misc.z)",
+                &[],
+            ),
+            StockPlugin::Mosaic => (
+                crate::effect_filters::stock_mosaic().wgsl,
+                "fx_stock_mosaic(uv, color, u.params[0].x)",
+                &[],
+            ),
+            StockPlugin::Crop => (
+                crate::effect_filters::stock_crop().wgsl,
+                "fx_stock_crop(uv, color, u.params[0])",
+                &[],
+            ),
+            StockPlugin::TemperatureTint => (
+                crate::effect_filters::stock_temperature_tint().wgsl,
+                "fx_stock_temperature_tint(uv, color, u.params[0].xy)",
+                &[],
+            ),
+            StockPlugin::SpillSuppress => (
+                crate::effect_filters::stock_spill_suppress().wgsl,
+                "fx_stock_spill_suppress(uv, color, u.params[0].x, u.params[0].y)",
+                &[],
+            ),
+            StockPlugin::DifferenceKey => (
+                crate::effect_filters::stock_difference_key().wgsl,
+                "fx_stock_difference_key(uv, color, u.params[0].xyz, u.params[0].w)",
+                &[],
+            ),
+            _ => {
+                return Err(format!("No native WGSL pass implemented for stock plugin {:?}", plugin));
+            }
+        };
+        let fragment_src = fx_fragment_src(body, uv_calls, call);
+        let full_src = format!("{FX_VERT}\n{fragment_src}");
+        let label = format!("FxPass_{:?}", plugin);
+        Self::new(gpu, target_format, &label, &full_src)
+    }
+
+    /// Record the pass into `encoder`: `source_view` -> `target` with packed uniforms.
+    pub fn record_into(
         &self,
         gpu: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
         source_view: &wgpu::TextureView,
         target: &RenderTarget,
         uniforms: FxUniforms,
@@ -228,9 +291,6 @@ impl FxPass {
                 },
             ],
         });
-        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Fx Command Encoder"),
-        });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Fx Render Pass"),
@@ -250,6 +310,20 @@ impl FxPass {
             pass.set_bind_group(0, &bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
+    }
+
+    /// Run the pass: `source_view` -> `target` with packed uniforms.
+    pub fn render(
+        &self,
+        gpu: &GpuContext,
+        source_view: &wgpu::TextureView,
+        target: &RenderTarget,
+        uniforms: FxUniforms,
+    ) {
+        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Fx Command Encoder"),
+        });
+        self.record_into(gpu, &mut encoder, source_view, target, uniforms);
         gpu.queue.submit(std::iter::once(encoder.finish()));
     }
 }

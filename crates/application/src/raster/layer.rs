@@ -615,7 +615,100 @@ pub fn rasterize_layer(
     let (ow, oh) = (out_w.max(1), out_h.max(1));
     let mut out = FloatBuf::clear(ow, oh);
     if matches!(&layer.source, LayerSource::Adjustment) {
-        return (out, backdrop, true);
+        let fx = RasterFx {
+            time_s,
+            frame,
+            res_w: comp_w,
+            res_h: comp_h,
+            duration_s,
+            playing,
+        };
+        // 1. Initial backdrop buffer (either sliced beneath layer, or fallback backdrop color)
+        let mut work = if let Some(b) = backdrop_buf {
+            if b.w == ow && b.h == oh {
+                b.clone()
+            } else {
+                let mut resized = FloatBuf::clear(ow, oh);
+                for y in 0..oh {
+                    let sy = (y as f32 / oh as f32) * b.h as f32;
+                    for x in 0..ow {
+                        let sx = (x as f32 / ow as f32) * b.w as f32;
+                        resized.put(x as i32, y as i32, b.sample(sx, sy));
+                    }
+                }
+                resized
+            }
+        } else {
+            let mut fill = FloatBuf::clear(ow, oh);
+            let p = Px::from_color(backdrop);
+            for px in fill.px.iter_mut() {
+                *px = p;
+            }
+            fill
+        };
+
+        let pristine = work.clone();
+
+        // 2. Post-process the backdrop with layer's effects
+        apply_adjustment(&mut work, &layer.effects, &fx);
+
+        // 3. Evaluate masks (if any)
+        // Masks on an adjustment layer define WHERE the adjustment applies.
+        // Inside mask -> adjusted; outside mask -> pristine backdrop.
+        let mask_cov = if !layer.masks.is_empty() {
+            let sx = ow as f32 / base_w.max(1.0);
+            let sy = oh as f32 / base_h.max(1.0);
+            let scale_xform = AffineTransform2D::from_scale(Vec2::new(sx, sy));
+            let scaled_masks: Vec<compositor::EvaluatedMask> = layer
+                .masks
+                .iter()
+                .map(|m| {
+                    let mut sm = m.clone();
+                    sm.transform.local_matrix = scale_xform * sm.transform.local_matrix;
+                    sm.feather *= (sx + sy) * 0.5;
+                    sm.expansion *= (sx + sy) * 0.5;
+                    sm
+                })
+                .collect();
+            crate::raster::mask::evaluate_mask_coverage(ow, oh, &scaled_masks)
+        } else {
+            None
+        };
+
+        // 4. Blend adjusted result over pristine backdrop using mask coverage, opacity, and blend mode
+        let eff_op = layer.effective_opacity.clamp(0.0, 1.0);
+        for y in 0..oh {
+            for x in 0..ow {
+                let idx = (y * ow + x) as usize;
+                let orig = pristine.px[idx];
+                let adj = work.px[idx];
+                let m = mask_cov.as_ref().map(|cov| cov[idx]).unwrap_or(1.0);
+                let alpha = (m * eff_op).clamp(0.0, 1.0);
+
+                if alpha <= 0.001 {
+                    out.px[idx] = Px::clear();
+                    continue;
+                }
+
+                let target_px = if layer.blend_mode == BlendMode::Normal {
+                    adj
+                } else {
+                    let mut b = orig;
+                    b.blend_over_at(adj, layer.blend_mode, x as i32, y as i32);
+                    b
+                };
+
+                out.px[idx] = Px {
+                    r: target_px.r * alpha,
+                    g: target_px.g * alpha,
+                    b: target_px.b * alpha,
+                    a: target_px.a * alpha,
+                };
+            }
+        }
+
+        let avg = out.average();
+        return (out, avg, false);
     }
     // World map (local -> output px of this AABB box).
     //

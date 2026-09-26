@@ -10,6 +10,8 @@ pub enum GpuError {
     BufferAsyncError(String),
     #[error("Texture dimensions invalid: {width}x{height}")]
     InvalidDimensions { width: u32, height: u32 },
+    #[error("Shader compilation failed: {0}")]
+    ShaderCompilation(String),
 }
 
 /// GPU Context encapsulating wgpu instance, adapter, device, and command queue.
@@ -127,6 +129,17 @@ impl RenderTarget {
             depth_or_array_layers: 1,
         };
 
+        let mut usage = wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::TEXTURE_BINDING;
+        if format == wgpu::TextureFormat::Rgba8Unorm
+            || format == wgpu::TextureFormat::Rgba16Float
+            || format == wgpu::TextureFormat::R32Float
+        {
+            usage |= wgpu::TextureUsages::STORAGE_BINDING;
+        }
+
         let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("RenderTarget Texture"),
             size,
@@ -134,9 +147,7 @@ impl RenderTarget {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::COPY_SRC
-                | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage,
             view_formats: &[],
         });
 
@@ -169,6 +180,29 @@ impl RenderTarget {
 
     pub fn view(&self) -> &wgpu::TextureView {
         &self.view
+    }
+
+    /// Upload CPU RGBA8 bytes directly into this render target texture.
+    pub fn write_texture_rgba(&self, gpu: &GpuContext, rgba: &[u8]) {
+        gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(self.width * 4),
+                rows_per_image: Some(self.height),
+            },
+            wgpu::Extent3d {
+                width: self.width,
+                height: self.height,
+                depth_or_array_layers: 1,
+            },
+        );
     }
 
     /// Read the render target texture back to CPU memory (RGBA8 format).

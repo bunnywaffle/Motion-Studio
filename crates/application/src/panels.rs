@@ -1723,7 +1723,7 @@ impl Render for CompositionViewerPanel {
                 let mut rendered_regions: Vec<(f32, f32, f32, f32, Color)> = Vec::new();
                 let mut pick_list: Vec<PickBox> = Vec::new();
 
-                let needs_canvas_comp = stack.render_layers().iter().any(|l| l.blend_mode != BlendMode::Normal);
+                let needs_canvas_comp = stack.render_layers().iter().any(|l| matches!(&l.source, LayerSource::Adjustment) || l.blend_mode != BlendMode::Normal);
                 let mut canvas_comp = if needs_canvas_comp {
                     let cw = canvas_w.ceil().max(1.0) as u32;
                     let ch = canvas_h.ceil().max(1.0) as u32;
@@ -1864,7 +1864,7 @@ impl Render for CompositionViewerPanel {
                             crate::raster::decoded_asset(&mut self.asset_cache, asset_id, &path);
                         }
                     }
-                    let (backdrop_buf, backdrop_hash) = if layer.blend_mode != BlendMode::Normal {
+                    let (backdrop_buf, backdrop_hash) = if is_adjustment || layer.blend_mode != BlendMode::Normal {
                         if let Some(ref comp_buf) = canvas_comp {
                             let mut b_slice = crate::raster::FloatBuf::clear(rw, rh);
                             let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -1943,7 +1943,7 @@ impl Render for CompositionViewerPanel {
 
                     // Blit layer pixels into canvas_comp for subsequent overlying layers
                     if let Some(ref mut comp_buf) = canvas_comp {
-                        if !entry.empty && !is_adjustment {
+                        if !entry.empty {
                             let cw = comp_buf.w;
                             let ch = comp_buf.h;
                             for by in 0..rh {
@@ -1963,8 +1963,8 @@ impl Render for CompositionViewerPanel {
                                             let r = entry.bgra[idx + 2] as f32 / 255.0;
                                             let g = entry.bgra[idx + 1] as f32 / 255.0;
                                             let b = entry.bgra[idx] as f32 / 255.0;
-                                            let s = crate::raster::Px { r, g, b, a };
-                                            if layer.blend_mode == BlendMode::Normal {
+                                            let s = crate::raster::Px { r: r * a, g: g * a, b: b * a, a };
+                                            if is_adjustment || layer.blend_mode == BlendMode::Normal {
                                                 let mut d = comp_buf.get(cx, cy);
                                                 d.over(s);
                                                 comp_buf.put(cx, cy, d);
@@ -2135,7 +2135,7 @@ impl Render for CompositionViewerPanel {
                     // without moving pixels). All math runs in composition
                     // px through the evaluated world matrix, so rotation,
                     // parenting, and off-center anchors stay exact.
-                    if is_selected && !is_adjustment && layer.is_visible {
+                    if is_selected && layer.is_visible {
                         let giz_panel = cx.entity().clone();
                         let giz_state = self.state.clone();
                         let giz_lid = layer.id.clone();

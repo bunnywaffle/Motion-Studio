@@ -4,6 +4,7 @@ use project::Color;
 // Buffers
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Debug)]
 pub struct FloatBuf {
     pub w: u32,
     pub h: u32,
@@ -113,14 +114,46 @@ impl FloatBuf {
     }
 }
 
-/// Gaussian blur a straight-alpha buffer in place (delegates to the
-/// tested renderer CPU kernel on packed bytes). Radius is capped for
-/// preview speed; export uses the full value.
+use std::sync::{Mutex, OnceLock};
+use renderer::{GpuContext, GpuEffectEngine};
+
+static GPU_ENGINE: OnceLock<Mutex<Option<GpuEffectEngine>>> = OnceLock::new();
+
+fn get_gpu_engine() -> &'static Mutex<Option<GpuEffectEngine>> {
+    GPU_ENGINE.get_or_init(|| {
+        let engine = GpuContext::new_headless().ok().and_then(|gpu| GpuEffectEngine::new(gpu).ok());
+        Mutex::new(engine)
+    })
+}
+
+/// Gaussian blur a straight-alpha buffer in place.
+/// Uses GPU Compute Shader blur with workgroup shared memory tiles when available,
+/// falling back seamlessly to the CPU kernel.
 pub fn blur_buffer(buf: &mut FloatBuf, radius_px: f32) {
     let radius_px = radius_px.clamp(0.0, 48.0);
     if radius_px < 0.5 || buf.w == 0 || buf.h == 0 {
         return;
     }
+    // Attempt GPU compute blur
+    if let Ok(mut lock) = get_gpu_engine().lock() {
+        if let Some(engine) = lock.as_mut() {
+            let bytes = buf.to_rgba8();
+            if let Ok(out_rgba) = engine.blur_rgba(&bytes, buf.w, buf.h, radius_px) {
+                for (i, p) in buf.px.iter_mut().enumerate() {
+                    let a = out_rgba[i * 4 + 3] as f32 / 255.0;
+                    *p = Px {
+                        r: out_rgba[i * 4] as f32 / 255.0 * a,
+                        g: out_rgba[i * 4 + 1] as f32 / 255.0 * a,
+                        b: out_rgba[i * 4 + 2] as f32 / 255.0 * a,
+                        a,
+                    };
+                }
+                return;
+            }
+        }
+    }
+
+    // Fallback to CPU kernel
     let mut bytes = buf.to_rgba8();
     renderer::gaussian_blur_rgba(&mut bytes, buf.w, buf.h, radius_px);
     for (i, p) in buf.px.iter_mut().enumerate() {

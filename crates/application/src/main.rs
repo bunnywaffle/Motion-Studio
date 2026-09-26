@@ -6403,4 +6403,224 @@ mod tests {
         let cur_o = state.timeline_current_value(sel_id, &opacity_key).expect("opacity val");
         assert_eq!(cur_o, 75.0);
     }
+
+    #[test]
+    fn test_adjustment_layer_raster_and_mask_stenciling() {
+        use crate::raster::{FloatBuf, Px, rasterize_layer};
+        use compositor::{LayerStackEvaluator, SceneGraph};
+        use project::{Color, Composition, Effect, EffectType, Layer, Mask, Path, Project, Property, TimeCode};
+        use std::collections::HashMap;
+
+        let mut project = Project::new("p", "Proj");
+        let tc = TimeCode::from_frames(0, 30.0);
+        let tc_end = TimeCode::from_frames(150, 30.0);
+        let mut comp = Composition::new("c", "Comp", 100, 100, 30.0, tc_end);
+
+        let mut adj = Layer::adjustment("adj1", "Adj Layer", tc, tc_end);
+        adj.effects.push(Effect {
+            id: "inv1".to_string(),
+            name: "Invert".to_string(),
+            enabled: true,
+            effect_type: EffectType::Invert {
+                amount: Property::new("Amount", 100.0),
+            },
+        });
+        comp.add_layer(adj).unwrap();
+        project.add_composition(comp).unwrap();
+
+        let graph = SceneGraph::from_project(&project, "c").unwrap();
+        let evaluator = LayerStackEvaluator::new();
+        let stack = evaluator.evaluate(&graph, &tc);
+        let evaluated_adj = stack.get_layer("adj1").unwrap();
+
+        // Backdrop: solid red 100x100
+        let mut backdrop = FloatBuf::clear(100, 100);
+        for p in backdrop.px.iter_mut() {
+            *p = Px { r: 1.0, g: 0.0, b: 0.0, a: 1.0 };
+        }
+        let assets = HashMap::new();
+
+        // 1. Without masks: full invert of red backdrop -> cyan (0.0, 1.0, 1.0)
+        let (out, _avg, empty) = rasterize_layer(
+            evaluated_adj,
+            100.0,
+            100.0,
+            100,
+            100,
+            100.0,
+            100.0,
+            Color::RED,
+            Some(&backdrop),
+            0.0,
+            0,
+            false,
+            5.0,
+            &assets,
+        );
+        assert!(!empty, "adjustment layer must not be marked empty");
+        let center_px = out.get(50, 50);
+        assert!(center_px.r < 0.1, "red should be inverted to cyan");
+        assert!(center_px.g > 0.9, "green should be inverted to cyan");
+        assert!(center_px.b > 0.9, "blue should be inverted to cyan");
+        assert_eq!(center_px.a, 1.0);
+
+        // 2. With Mask: rectangular mask covering left half (x from 0 to 50, y from 0 to 100)
+        let rect_path = Path::rectangle(0.0, 0.0, 50.0, 100.0);
+        let mask = Mask::with_path("m1", "Mask 1", rect_path);
+        let comp_mut = project.get_composition_mut("c").unwrap();
+        comp_mut.get_layer_mut("adj1").unwrap().masks.push(mask);
+
+        let graph2 = SceneGraph::from_project(&project, "c").unwrap();
+        let stack2 = evaluator.evaluate(&graph2, &tc);
+        let evaluated_adj2 = stack2.get_layer("adj1").unwrap();
+
+        let (out_masked, _avg, empty_masked) = rasterize_layer(
+            evaluated_adj2,
+            100.0,
+            100.0,
+            100,
+            100,
+            100.0,
+            100.0,
+            Color::RED,
+            Some(&backdrop),
+            0.0,
+            0,
+            false,
+            5.0,
+            &assets,
+        );
+        assert!(!empty_masked);
+
+        // Inside mask (x = 25, y = 50): inverted cyan
+        let inside = out_masked.get(25, 50);
+        assert!(inside.a > 0.9, "inside mask should have full coverage");
+        assert!(inside.r < 0.1);
+        assert!(inside.g > 0.9);
+
+        // Outside mask (x = 75, y = 50): transparent contribution (a == 0)
+        let outside = out_masked.get(75, 50);
+        assert_eq!(outside.a, 0.0, "outside mask should be transparent contribution");
+
+        // 3. Opacity: 50% opacity
+        let comp_mut2 = project.get_composition_mut("c").unwrap();
+        let l = comp_mut2.get_layer_mut("adj1").unwrap();
+        l.masks.clear();
+        l.opacity.set_value(50.0);
+
+        let graph3 = SceneGraph::from_project(&project, "c").unwrap();
+        let stack3 = evaluator.evaluate(&graph3, &tc);
+        let evaluated_adj3 = stack3.get_layer("adj1").unwrap();
+
+        let (out_50, _avg, _) = rasterize_layer(
+            evaluated_adj3,
+            100.0,
+            100.0,
+            100,
+            100,
+            100.0,
+            100.0,
+            Color::RED,
+            Some(&backdrop),
+            0.0,
+            0,
+            false,
+            5.0,
+            &assets,
+        );
+        let mid_px = out_50.get(50, 50);
+        assert!((mid_px.a - 0.5).abs() < 0.05, "alpha should reflect 50% opacity");
+    }
+
+    #[test]
+    fn test_adjustment_layer_comp_rasterization() {
+        use crate::raster::comp::rasterize_comp;
+        use compositor::{LayerStackEvaluator, SceneGraph};
+        use project::{Color, Composition, Effect, EffectType, Layer, Project, Property, TimeCode};
+        use std::collections::HashMap;
+
+        let mut project = Project::new("p", "Proj");
+        let tc = TimeCode::from_frames(0, 30.0);
+        let tc_end = TimeCode::from_frames(150, 30.0);
+        let mut comp = Composition::new("c", "Comp", 64, 64, 30.0, tc_end);
+
+        // Top layer (index 0): Adjustment layer with Invert effect
+        let mut adj = Layer::adjustment("adj", "Adjustment", tc, tc_end);
+        adj.effects.push(Effect {
+            id: "inv".to_string(),
+            name: "Invert".to_string(),
+            enabled: true,
+            effect_type: EffectType::Invert {
+                amount: Property::new("Amount", 100.0),
+            },
+        });
+        comp.add_layer(adj).unwrap();
+
+        // Bottom layer (index 1): Solid green background
+        let green_solid = Layer::solid("bg", "Background", Color::rgba(0.0, 1.0, 0.0, 1.0), 64, 64, tc, tc_end);
+        comp.add_layer(green_solid).unwrap();
+        project.add_composition(comp).unwrap();
+
+        let graph = SceneGraph::from_project(&project, "c").unwrap();
+        let evaluator = LayerStackEvaluator::new();
+        let stack = evaluator.evaluate(&graph, &tc);
+
+        let mut assets = HashMap::new();
+        let comp_out = rasterize_comp(
+            &stack,
+            64.0,
+            64.0,
+            Color::BLACK,
+            64,
+            64,
+            0.0,
+            0,
+            false,
+            5.0,
+            &mut assets,
+        );
+
+        // Green inverted is Magenta: (1.0, 0.0, 1.0)
+        let p = comp_out.get(32, 32);
+        assert!(p.r > 0.9, "red should be high in magenta");
+        assert!(p.g < 0.1, "green should be inverted to 0");
+        assert!(p.b > 0.9, "blue should be high in magenta");
+    }
+
+    #[gpui_kit::test]
+    fn test_adjustment_layer_viewer_selection_and_gizmo(cx: &mut TestAppContext) {
+        let (_root, app_view) = setup_test_window(cx);
+        cx.run_until_parked();
+
+        let state_entity = app_view.read_with(cx, |v, _| v.state().clone());
+
+        // Add an adjustment layer to the composition
+        state_entity.update(cx, |s, cx| {
+            let tc = project::TimeCode::from_frames(0, 30.0);
+            let mut layer = project::Layer::adjustment("test_adj", "My Adjustment Layer", tc, project::TimeCode::from_frames(300, 30.0));
+            layer.effects.push(project::Effect {
+                id: "blur_fx".to_string(),
+                name: "Gaussian Blur".to_string(),
+                enabled: true,
+                effect_type: project::EffectType::GaussianBlur {
+                    radius: project::Property::new("Radius", 10.0),
+                },
+            });
+            let comp = s.active_composition_mut().expect("active comp");
+            comp.add_layer(layer).unwrap();
+            s.select_layer(Some("test_adj".to_string()));
+            cx.notify();
+        });
+
+        cx.run_until_parked();
+
+        // Verify layer selection
+        state_entity.read_with(cx, |s, _| {
+            assert_eq!(s.selected_layer().unwrap().id, "test_adj");
+            let comp = s.active_composition().unwrap();
+            let adj = comp.get_layer("test_adj").unwrap();
+            assert_eq!(adj.source, project::LayerSource::Adjustment);
+            assert_eq!(adj.effects.len(), 1);
+        });
+    }
 }

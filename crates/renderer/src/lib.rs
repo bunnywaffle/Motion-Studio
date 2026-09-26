@@ -1,15 +1,19 @@
 pub mod blit;
 pub mod blur;
 pub mod cache;
+pub mod compute_blur;
 pub mod device;
 pub mod effect_filters;
 pub mod fx_pass;
+pub mod gpu_effect_engine;
 pub mod shader;
 pub mod shader_lab;
 
 pub use blit::{BlitPipeline, BlitUniforms};
 pub use blur::{gaussian_blur_rgba, gaussian_kernel_1d, BLUR_WGSL};
+pub use compute_blur::{ComputeBlurPipeline, ComputeBlurUniforms, COMPUTE_BLUR_WGSL};
 pub use fx_pass::{FxPass, FxUniforms, fx_fragment_src, stock_wgsl_plugins, FX_VERT};
+pub use gpu_effect_engine::GpuEffectEngine;
 pub use shader_lab::{
     build_uniform_buffer, compile_source, hash_source, CachedShader, ShaderLabCache,
     ShaderLabPipeline, UniformField, RUNTIME_UNIFORMS,
@@ -176,6 +180,62 @@ mod tests {
             assert_eq!(pixels[1], 0);
             assert!(pixels[2] > 200); // Blue
             assert_eq!(pixels[3], 255);
+        }
+    }
+
+    #[test]
+    fn test_compute_blur_with_workgroup_shared_memory() {
+        if let Ok(gpu) = GpuContext::new_headless() {
+            let blur = ComputeBlurPipeline::new(&gpu).expect("create compute blur pipeline");
+            let format = wgpu::TextureFormat::Rgba8Unorm;
+            let src = RenderTarget::with_format(&gpu, 32, 32, format).expect("src target");
+            let intermediate = RenderTarget::with_format(&gpu, 32, 32, format).expect("intermediate target");
+            let dst = RenderTarget::with_format(&gpu, 32, 32, format).expect("dst target");
+
+            // Write single hot center pixel (16, 16)
+            let mut img = vec![0u8; 32 * 32 * 4];
+            let center_idx = (16 * 32 + 16) * 4;
+            img[center_idx] = 255;
+            img[center_idx + 3] = 255;
+            src.write_texture_rgba(&gpu, &img);
+
+            let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Test Blur Encoder"),
+            });
+            blur.record_blur(&gpu, &mut encoder, &src, &intermediate, &dst, 4.0);
+            gpu.queue.submit(std::iter::once(encoder.finish()));
+
+            let out_pixels = dst.read_texture_to_cpu(&gpu).expect("read blurred pixels");
+            assert_eq!(out_pixels.len(), 32 * 32 * 4);
+            // Center must have diffused
+            assert!(out_pixels[center_idx] < 255, "center should have diffused");
+            // Immediate neighbor (16, 17) must have received energy
+            let neighbor_idx = (16 * 32 + 17) * 4;
+            assert!(out_pixels[neighbor_idx] > 0, "neighbor should receive energy");
+        }
+    }
+
+    #[test]
+    fn test_gpu_effect_engine_processing() {
+        if let Ok(gpu) = GpuContext::new_headless() {
+            let mut engine = GpuEffectEngine::new(gpu).expect("create gpu effect engine");
+            let mut img = vec![0u8; 16 * 16 * 4];
+            for i in (0..img.len()).step_by(4) {
+                img[i] = 128;
+                img[i + 1] = 64;
+                img[i + 2] = 32;
+                img[i + 3] = 255;
+            }
+
+            // Test GaussianBlur effect
+            let eff = compositor::EvaluatedEffect {
+                id: "blur_1".to_string(),
+                name: "Blur".to_string(),
+                enabled: true,
+                effect_type: compositor::EvaluatedEffectType::GaussianBlur { radius: 2.0 },
+            };
+            let res = engine.process_rgba_frame(&img, 16, 16, &[eff], 0.0).expect("process frame");
+            assert_eq!(res.len(), 16 * 16 * 4);
         }
     }
 }

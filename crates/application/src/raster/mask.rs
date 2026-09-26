@@ -157,11 +157,13 @@ fn feather_coverage(cov: &[f32], w: u32, h: u32, radius: f32) -> Vec<f32> {
 
 /// Apply the full mask stack to `buf` alpha (premultiplied scale).
 /// No-op when no mask constrains (zero enabled non-None masks).
-pub fn apply_masks(buf: &mut FloatBuf, masks: &[EvaluatedMask]) {
-    if buf.w == 0 || buf.h == 0 {
-        return;
+/// Compute the combined mask coverage alpha map (0.0..=1.0) for a given buffer size.
+/// Returns None if no enabled, closed masks constrain the area.
+pub fn evaluate_mask_coverage(w: u32, h: u32, masks: &[EvaluatedMask]) -> Option<Vec<f32>> {
+    if w == 0 || h == 0 {
+        return None;
     }
-    let mut acc = vec![1.0f32; (buf.w * buf.h) as usize];
+    let mut acc = vec![1.0f32; (w * h) as usize];
     let mut has = false;
     for mask in masks {
         if !mask.enabled || mask.mode == MaskMode::None {
@@ -173,15 +175,15 @@ pub fn apply_masks(buf: &mut FloatBuf, masks: &[EvaluatedMask]) {
             continue;
         }
         // 1. Coverage from the transformed path.
-        let mut cov = mask_coverage(buf.w, buf.h, &mask.path, &mask.transform);
+        let mut cov = mask_coverage(w, h, &mask.path, &mask.transform);
         // 2. Expansion (positive dilates, negative erodes).
         if mask.expansion > 0.05 {
-            cov = box_extremum(&cov, buf.w, buf.h, mask.expansion, true);
+            cov = box_extremum(&cov, w, h, mask.expansion, true);
         } else if mask.expansion < -0.05 {
-            cov = box_extremum(&cov, buf.w, buf.h, -mask.expansion, false);
+            cov = box_extremum(&cov, w, h, -mask.expansion, false);
         }
         // 3. Feather.
-        cov = feather_coverage(&cov, buf.w, buf.h, mask.feather);
+        cov = feather_coverage(&cov, w, h, mask.feather);
         // 4. Invert.
         if mask.invert {
             for c in cov.iter_mut() {
@@ -192,21 +194,32 @@ pub fn apply_masks(buf: &mut FloatBuf, masks: &[EvaluatedMask]) {
         let n = mask.mode.neutral();
         let o = (mask.opacity / 100.0).clamp(0.0, 1.0);
         // 6. Combine in mask order.
+        let mut next_has = has;
         for (a, c) in acc.iter_mut().zip(cov.iter()) {
             let ce = n + (c - n) * o;
             let (v, h) = project::mask::combine_mask_coverage(mask.mode, *a, ce, has);
             *a = v;
-            has = h;
+            next_has = h;
         }
+        has = next_has;
     }
-    if !has {
-        return;
+    if has {
+        Some(acc)
+    } else {
+        None
     }
-    for (p, &m) in buf.px.iter_mut().zip(acc.iter()) {
-        p.r *= m;
-        p.g *= m;
-        p.b *= m;
-        p.a *= m;
+}
+
+/// Apply the full mask stack to `buf` alpha (premultiplied scale).
+/// No-op when no mask constrains (zero enabled non-None masks).
+pub fn apply_masks(buf: &mut FloatBuf, masks: &[EvaluatedMask]) {
+    if let Some(acc) = evaluate_mask_coverage(buf.w, buf.h, masks) {
+        for (p, &m) in buf.px.iter_mut().zip(acc.iter()) {
+            p.r *= m;
+            p.g *= m;
+            p.b *= m;
+            p.a *= m;
+        }
     }
 }
 

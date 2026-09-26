@@ -68,8 +68,61 @@ pub fn rasterize_comp(
         }
         if matches!(&layer.source, LayerSource::Adjustment) {
             // True AE semantics: adjustment layers post-process everything
-            // composited beneath them.
-            apply_adjustment(&mut dst, &layer.effects, &fx);
+            // composited beneath them, respecting masks, opacity, and blend mode.
+            let (base_w, base_h) = layer_base_dims(layer, comp_w, comp_h, assets);
+            let pristine = dst.clone();
+            let mut work = dst.clone();
+            apply_adjustment(&mut work, &layer.effects, &fx);
+
+            let mask_cov = if !layer.masks.is_empty() {
+                let sx = ow as f32 / base_w.max(1.0);
+                let sy = oh as f32 / base_h.max(1.0);
+                let scale_xform = compositor::AffineTransform2D::from_scale(project::Vec2::new(sx, sy));
+                let scaled_masks: Vec<compositor::EvaluatedMask> = layer
+                    .masks
+                    .iter()
+                    .map(|m| {
+                        let mut sm = m.clone();
+                        sm.transform.local_matrix = scale_xform * sm.transform.local_matrix;
+                        sm.feather *= (sx + sy) * 0.5;
+                        sm.expansion *= (sx + sy) * 0.5;
+                        sm
+                    })
+                    .collect();
+                crate::raster::mask::evaluate_mask_coverage(ow, oh, &scaled_masks)
+            } else {
+                None
+            };
+
+            let eff_op = layer.effective_opacity.clamp(0.0, 1.0);
+            for y in 0..oh {
+                for x in 0..ow {
+                    let idx = (y * ow + x) as usize;
+                    let orig = pristine.px[idx];
+                    let adj = work.px[idx];
+                    let m = mask_cov.as_ref().map(|cov| cov[idx]).unwrap_or(1.0);
+                    let alpha = (m * eff_op).clamp(0.0, 1.0);
+
+                    if alpha <= 0.001 {
+                        continue;
+                    }
+
+                    let target_px = if layer.blend_mode == BlendMode::Normal {
+                        adj
+                    } else {
+                        let mut b = orig;
+                        b.blend_over_at(adj, layer.blend_mode, x as i32, y as i32);
+                        b
+                    };
+
+                    dst.px[idx] = Px {
+                        r: orig.r + (target_px.r - orig.r) * alpha,
+                        g: orig.g + (target_px.g - orig.g) * alpha,
+                        b: orig.b + (target_px.b - orig.b) * alpha,
+                        a: orig.a + (target_px.a - orig.a) * alpha,
+                    };
+                }
+            }
             continue;
         }
         // Base dims mirror the viewer estimate (anchor/pivot consistent).
