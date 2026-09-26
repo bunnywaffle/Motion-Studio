@@ -7,7 +7,7 @@ use project::{
     PathPointKind, PlaybackClock, Project, Property, ShapeType, TimeCode, TraceRange,
     TrackMatteMode, Vec2,
 };
-use std::path::PathBuf;
+use std::path::{Path as StdPath, PathBuf};
 use std::time::Duration;
 
 /// Active editing tool mimicking After Effects tools palette.
@@ -1305,6 +1305,11 @@ impl EditorState {
         self.recent_projects.truncate(8);
     }
 
+    /// Clear all remembered recent project paths.
+    pub fn clear_recent_projects(&mut self) {
+        self.recent_projects.clear();
+    }
+
     /// Toggle play/pause transport state.
     pub fn toggle_playback(&mut self) {
         self.is_playing = !self.is_playing;
@@ -1611,6 +1616,78 @@ impl EditorState {
 
         self.selected_layer_id = Some(layer_id.clone());
         Ok(layer_id)
+    }
+
+    /// Import multiple media files at once, registering them in project assets
+    /// and adding them to the active composition.
+    pub fn import_multiple_media_files(&mut self, paths: &[PathBuf]) -> Result<usize, String> {
+        if paths.is_empty() {
+            return Ok(0);
+        }
+        self.checkpoint();
+        let mut count = 0;
+        for path in paths {
+            if self.import_media_file(path.clone()).is_ok() {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    /// Import all supported media files in a directory.
+    pub fn import_media_folder(&mut self, folder: &StdPath) -> Result<usize, String> {
+        let entries = std::fs::read_dir(folder).map_err(|e| e.to_string())?;
+        let supported = ["png", "jpg", "jpeg", "mp4", "mov", "webm", "wav", "mp3", "ogg"];
+        let mut paths = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                    if supported.iter().any(|&s| s.eq_ignore_ascii_case(ext)) {
+                        paths.push(path);
+                    }
+                }
+            }
+        }
+        paths.sort();
+        self.import_multiple_media_files(&paths)
+    }
+
+    /// Export the current frame of the active composition as a PNG image to the given path.
+    pub fn export_frame_as_png(&self, path: &StdPath) -> Result<(), String> {
+        let comp = self
+            .active_composition()
+            .ok_or_else(|| "No active composition to export".to_string())?;
+        let comp_w = comp.width;
+        let comp_h = comp.height;
+        let stack = self
+            .evaluate_current_frame()
+            .map_err(|e| format!("Failed to evaluate frame: {e}"))?;
+        let mut assets = std::collections::HashMap::new();
+        let current_frame = self.clock.current_frame();
+        let fps = comp.frame_rate.max(1.0) as f32;
+        let time_s = current_frame as f32 / fps;
+        let duration_s = comp.duration.seconds() as f32;
+
+        let buf = crate::raster::comp::rasterize_comp(
+            &stack,
+            comp_w as f32,
+            comp_h as f32,
+            comp.background_color,
+            comp_w,
+            comp_h,
+            time_s,
+            current_frame,
+            false,
+            duration_s,
+            &mut assets,
+        );
+
+        let rgba_bytes = buf.to_rgba8();
+        let img = image::RgbaImage::from_raw(comp_w, comp_h, rgba_bytes)
+            .ok_or_else(|| "Failed to construct RGBA image from buffer".to_string())?;
+        img.save(path).map_err(|e| format!("Failed to save PNG: {e}"))?;
+        Ok(())
     }
 
     /// Add an existing asset from the project into the active composition as a layer.

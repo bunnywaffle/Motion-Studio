@@ -210,6 +210,21 @@ impl TopMenu {
     }
 }
 
+/// Reset the project to a fresh untitled project.
+fn request_new_project(app: &Entity<AppView>, state: &Entity<EditorState>, cx: &mut App) {
+    let s = state.clone();
+    let a = app.clone();
+    s.update(cx, |s, cx| {
+        s.new_project("Untitled Project");
+        cx.notify();
+    });
+    a.update(cx, |a, cx| {
+        a.open_menu = None;
+        a.menu_note = Some("Created new project".to_string());
+        cx.notify();
+    });
+}
+
 /// Ask the OS for a project file to open (rfd on a worker thread so the
 /// UI never blocks), then load it into the session.
 fn request_open_project(app: &Entity<AppView>, state: &Entity<EditorState>, cx: &mut App) {
@@ -337,6 +352,200 @@ fn request_save_project(app: &Entity<AppView>, state: &Entity<EditorState>, cx: 
     });
 }
 
+/// Ask the OS for a single media file to import (image, video, audio).
+fn request_import_file(app: &Entity<AppView>, state: &Entity<EditorState>, cx: &mut App) {
+    let s_import = state.clone();
+    let a_import = app.clone();
+    cx.spawn(|cx: &mut AsyncApp| {
+        let cx = cx.clone();
+        async move {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let _ = std::thread::Builder::new()
+                .name("file-dialog-worker".to_string())
+                .stack_size(8 * 1024 * 1024)
+                .spawn(move || {
+                    let file = rfd::FileDialog::new()
+                        .add_filter("All Supported Media", &["png", "jpg", "jpeg", "mp4", "mov", "webm", "wav", "mp3", "ogg"])
+                        .add_filter("Images", &["png", "jpg", "jpeg"])
+                        .add_filter("Videos", &["mp4", "mov", "webm"])
+                        .add_filter("Audio", &["wav", "mp3", "ogg"])
+                        .pick_file();
+                    let _ = tx.send(file);
+                });
+            if let Ok(Some(path)) = rx.recv() {
+                cx.update(|cx| {
+                    s_import.update(cx, |s, cx| {
+                        match s.import_media_file(path.clone()) {
+                            Ok(_) => {
+                                a_import.update(cx, |a, cx| {
+                                    a.menu_note = Some(format!(
+                                        "Imported {}",
+                                        path.file_name().and_then(|n| n.to_str()).unwrap_or("media")
+                                    ));
+                                    cx.notify();
+                                });
+                            }
+                            Err(e) => {
+                                a_import.update(cx, |a, cx| {
+                                    a.menu_note = Some(format!("Import failed: {e}"));
+                                    cx.notify();
+                                });
+                            }
+                        }
+                        cx.notify();
+                    });
+                });
+            }
+        }
+    })
+    .detach();
+}
+
+/// Ask the OS for multiple media files to import.
+fn request_import_multiple(app: &Entity<AppView>, state: &Entity<EditorState>, cx: &mut App) {
+    let s_import = state.clone();
+    let a_import = app.clone();
+    cx.spawn(|cx: &mut AsyncApp| {
+        let cx = cx.clone();
+        async move {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let _ = std::thread::Builder::new()
+                .name("file-dialog-worker".to_string())
+                .stack_size(8 * 1024 * 1024)
+                .spawn(move || {
+                    let files = rfd::FileDialog::new()
+                        .add_filter("All Supported Media", &["png", "jpg", "jpeg", "mp4", "mov", "webm", "wav", "mp3", "ogg"])
+                        .add_filter("Images", &["png", "jpg", "jpeg"])
+                        .add_filter("Videos", &["mp4", "mov", "webm"])
+                        .pick_files();
+                    let _ = tx.send(files);
+                });
+            if let Ok(Some(paths)) = rx.recv() {
+                if !paths.is_empty() {
+                    cx.update(|cx| {
+                        s_import.update(cx, |s, cx| {
+                            match s.import_multiple_media_files(&paths) {
+                                Ok(count) => {
+                                    a_import.update(cx, |a, cx| {
+                                        a.menu_note = Some(format!("Imported {count} files"));
+                                        cx.notify();
+                                    });
+                                }
+                                Err(e) => {
+                                    a_import.update(cx, |a, cx| {
+                                        a.menu_note = Some(format!("Import error: {e}"));
+                                        cx.notify();
+                                    });
+                                }
+                            }
+                            cx.notify();
+                        });
+                    });
+                }
+            }
+        }
+    })
+    .detach();
+}
+
+/// Ask the OS for a directory to recursively scan and import supported media.
+fn request_import_folder(app: &Entity<AppView>, state: &Entity<EditorState>, cx: &mut App) {
+    let s_import = state.clone();
+    let a_import = app.clone();
+    cx.spawn(|cx: &mut AsyncApp| {
+        let cx = cx.clone();
+        async move {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let _ = std::thread::Builder::new()
+                .name("file-dialog-worker".to_string())
+                .stack_size(8 * 1024 * 1024)
+                .spawn(move || {
+                    let folder = rfd::FileDialog::new().pick_folder();
+                    let _ = tx.send(folder);
+                });
+            if let Ok(Some(folder)) = rx.recv() {
+                cx.update(|cx| {
+                    s_import.update(cx, |s, cx| {
+                        match s.import_media_folder(&folder) {
+                            Ok(count) => {
+                                a_import.update(cx, |a, cx| {
+                                    a.menu_note = Some(format!(
+                                        "Imported {count} items from {}",
+                                        folder.file_name().and_then(|n| n.to_str()).unwrap_or("folder")
+                                    ));
+                                    cx.notify();
+                                });
+                            }
+                            Err(e) => {
+                                a_import.update(cx, |a, cx| {
+                                    a.menu_note = Some(format!("Import error: {e}"));
+                                    cx.notify();
+                                });
+                            }
+                        }
+                        cx.notify();
+                    });
+                });
+            }
+        }
+    })
+    .detach();
+}
+
+/// Export the current frame as a PNG image.
+fn request_export_frame(app: &Entity<AppView>, state: &Entity<EditorState>, cx: &mut App) {
+    let s_export = state.clone();
+    let a_export = app.clone();
+    let cur_frame = state.read(cx).clock.current_frame();
+    let default_name = format!("frame_{:04}.png", cur_frame);
+    cx.spawn(|cx: &mut AsyncApp| {
+        let cx = cx.clone();
+        async move {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let _ = std::thread::Builder::new()
+                .name("file-dialog-worker".to_string())
+                .stack_size(8 * 1024 * 1024)
+                .spawn(move || {
+                    let file = rfd::FileDialog::new()
+                        .add_filter("PNG Image (*.png)", &["png"])
+                        .set_file_name(default_name)
+                        .save_file();
+                    let _ = tx.send(file);
+                });
+            if let Ok(Some(path)) = rx.recv() {
+                cx.update(|cx| {
+                    s_export.update(cx, |s, cx| {
+                        match s.export_frame_as_png(&path) {
+                            Ok(()) => {
+                                a_export.update(cx, |a, cx| {
+                                    a.menu_note = Some(format!(
+                                        "Exported frame to {}",
+                                        path.file_name().and_then(|n| n.to_str()).unwrap_or("frame.png")
+                                    ));
+                                    cx.notify();
+                                });
+                            }
+                            Err(e) => {
+                                a_export.update(cx, |a, cx| {
+                                    a.menu_note = Some(format!("Export failed: {e}"));
+                                    cx.notify();
+                                });
+                            }
+                        }
+                        cx.notify();
+                    });
+                });
+            }
+        }
+    })
+    .detach();
+}
+
+/// Quit application immediately.
+fn request_quit() {
+    std::process::exit(0);
+}
+
 /// One menu-bar dropdown item (label + optional shortcut hint).
 fn menu_item<F>(id: String, label: String, hint: Option<String>, enabled: bool, cx: &App, on_pick: F) -> AnyElement
 where
@@ -408,6 +617,7 @@ fn render_menubar(
         let mut btn = div()
             .id(SharedString::from(format!("menubar_{:?}", menu).to_lowercase()))
             .test_support()
+            .relative()
             .cursor_pointer()
             .px_2()
             .py_1()
@@ -424,55 +634,46 @@ fn render_menubar(
             .child(menu.label());
         if is_open {
             btn = btn.bg(cx.theme().muted);
-            let mut items = v_flex().gap_0p5().p_1().min_w(px(220.));
+            let mut items = v_flex().gap_0p5().p_1().min_w(px(250.));
             match menu {
                 TopMenu::File => {
-                    {
-                        let a = app.clone();
-                        items = items.child(menu_item("menu_new_project".to_string(), "New Project…".to_string(), None, true, cx, move |cx| {
-                            a.update(cx, |this, cx| {
-                                this.open_menu = None;
-                                this.show_new_project = true;
-                                cx.notify();
-                            });
-                        }));
-                    }
+                    // --- New Group ---
                     {
                         let (a, s) = (app.clone(), state.clone());
-                        items = items.child(menu_item("menu_open_project".to_string(), "Open Project…".to_string(), Some("Ctrl+O".to_string()), true, cx, move |cx| {
-                            a.update(cx, |this, cx| {
-                                this.open_menu = None;
-                                cx.notify();
-                            });
-                            request_open_project(&a, &s, cx);
-                        }));
-                    }
-                    {
-                        let (a, s) = (app.clone(), state.clone());
-                        items = items.child(menu_item("menu_save_project".to_string(), "Save".to_string(), Some("Ctrl+S".to_string()), true, cx, move |cx| {
-                            a.update(cx, |this, cx| {
-                                this.open_menu = None;
-                                cx.notify();
-                            });
-                            request_save_project(&a, &s, cx);
-                        }));
-                    }
-                    {
-                        let (a, s) = (app.clone(), state.clone());
-                        items = items.child(menu_item("menu_save_as".to_string(), "Save As…".to_string(), None, true, cx, move |cx| {
-                            a.update(cx, |this, cx| {
-                                this.open_menu = None;
-                                cx.notify();
-                            });
-                            request_save_project_as(&a, &s, cx);
-                        }));
+                        items = items.child(menu_item(
+                            "menu_new_project".to_string(),
+                            "New Project".to_string(),
+                            Some("Ctrl+N".to_string()),
+                            true,
+                            cx,
+                            move |cx| {
+                                request_new_project(&a, &s, cx);
+                            },
+                        ));
                     }
                     {
                         let a = app.clone();
                         items = items.child(menu_item(
-                            "menu_project_manager".to_string(),
-                            "Project Settings & Manager…".to_string(),
+                            "menu_new_project_named".to_string(),
+                            "New Project with Name…".to_string(),
                             None,
+                            true,
+                            cx,
+                            move |cx| {
+                                a.update(cx, |this, cx| {
+                                    this.open_menu = None;
+                                    this.show_new_project = true;
+                                    cx.notify();
+                                });
+                            },
+                        ));
+                    }
+                    {
+                        let a = app.clone();
+                        items = items.child(menu_item(
+                            "menu_new_comp".to_string(),
+                            "New Composition…".to_string(),
+                            Some("Ctrl+K".to_string()),
                             true,
                             cx,
                             move |cx| {
@@ -484,9 +685,26 @@ fn render_menubar(
                             },
                         ));
                     }
-                    items = items.child(
-                        div().h(px(1.)).my_0p5().bg(cx.theme().border),
-                    );
+                    items = items.child(div().h(px(1.)).my_0p5().bg(cx.theme().border));
+
+                    // --- Open Group ---
+                    {
+                        let (a, s) = (app.clone(), state.clone());
+                        items = items.child(menu_item(
+                            "menu_open_project".to_string(),
+                            "Open Project…".to_string(),
+                            Some("Ctrl+O".to_string()),
+                            true,
+                            cx,
+                            move |cx| {
+                                a.update(cx, |this, cx| {
+                                    this.open_menu = None;
+                                    cx.notify();
+                                });
+                                request_open_project(&a, &s, cx);
+                            },
+                        ));
+                    }
                     if recents.is_empty() {
                         items = items.child(
                             div()
@@ -497,7 +715,7 @@ fn render_menubar(
                                 .child("No recent projects"),
                         );
                     } else {
-                        for (idx, path) in recents.iter().take(6).enumerate() {
+                        for (idx, path) in recents.iter().take(5).enumerate() {
                             let (a, s) = (app.clone(), state.clone());
                             let p = path.clone();
                             let label = p
@@ -507,7 +725,7 @@ fn render_menubar(
                                 .to_string();
                             items = items.child(menu_item(
                                 format!("menu_recent_{idx}"),
-                                label.clone(),
+                                format!("  {label}"),
                                 None,
                                 true,
                                 cx,
@@ -539,6 +757,190 @@ fn render_menubar(
                                 },
                             ));
                         }
+                        {
+                            let (a, s) = (app.clone(), state.clone());
+                            items = items.child(menu_item(
+                                "menu_clear_recents".to_string(),
+                                "  Clear Recent Projects".to_string(),
+                                None,
+                                true,
+                                cx,
+                                move |cx| {
+                                    s.update(cx, |s, cx| {
+                                        s.clear_recent_projects();
+                                        cx.notify();
+                                    });
+                                    a.update(cx, |this, cx| {
+                                        this.open_menu = None;
+                                        this.menu_note = Some("Cleared recent projects".to_string());
+                                        cx.notify();
+                                    });
+                                },
+                            ));
+                        }
+                    }
+                    items = items.child(div().h(px(1.)).my_0p5().bg(cx.theme().border));
+
+                    // --- Save Group ---
+                    {
+                        let (a, s) = (app.clone(), state.clone());
+                        items = items.child(menu_item(
+                            "menu_save_project".to_string(),
+                            "Save Project".to_string(),
+                            Some("Ctrl+S".to_string()),
+                            true,
+                            cx,
+                            move |cx| {
+                                a.update(cx, |this, cx| {
+                                    this.open_menu = None;
+                                    cx.notify();
+                                });
+                                request_save_project(&a, &s, cx);
+                            },
+                        ));
+                    }
+                    {
+                        let (a, s) = (app.clone(), state.clone());
+                        items = items.child(menu_item(
+                            "menu_save_as".to_string(),
+                            "Save Project As…".to_string(),
+                            Some("Ctrl+Shift+S".to_string()),
+                            true,
+                            cx,
+                            move |cx| {
+                                a.update(cx, |this, cx| {
+                                    this.open_menu = None;
+                                    cx.notify();
+                                });
+                                request_save_project_as(&a, &s, cx);
+                            },
+                        ));
+                    }
+                    items = items.child(div().h(px(1.)).my_0p5().bg(cx.theme().border));
+
+                    // --- Import Group ---
+                    {
+                        let (a, s) = (app.clone(), state.clone());
+                        items = items.child(menu_item(
+                            "menu_import_file".to_string(),
+                            "Import File…".to_string(),
+                            Some("Ctrl+I".to_string()),
+                            true,
+                            cx,
+                            move |cx| {
+                                a.update(cx, |this, cx| {
+                                    this.open_menu = None;
+                                    cx.notify();
+                                });
+                                request_import_file(&a, &s, cx);
+                            },
+                        ));
+                    }
+                    {
+                        let (a, s) = (app.clone(), state.clone());
+                        items = items.child(menu_item(
+                            "menu_import_multiple".to_string(),
+                            "Import Multiple Files…".to_string(),
+                            None,
+                            true,
+                            cx,
+                            move |cx| {
+                                a.update(cx, |this, cx| {
+                                    this.open_menu = None;
+                                    cx.notify();
+                                });
+                                request_import_multiple(&a, &s, cx);
+                            },
+                        ));
+                    }
+                    {
+                        let (a, s) = (app.clone(), state.clone());
+                        items = items.child(menu_item(
+                            "menu_import_folder".to_string(),
+                            "Import Folder…".to_string(),
+                            None,
+                            true,
+                            cx,
+                            move |cx| {
+                                a.update(cx, |this, cx| {
+                                    this.open_menu = None;
+                                    cx.notify();
+                                });
+                                request_import_folder(&a, &s, cx);
+                            },
+                        ));
+                    }
+                    items = items.child(div().h(px(1.)).my_0p5().bg(cx.theme().border));
+
+                    // --- Export Group ---
+                    {
+                        let (a, s) = (app.clone(), state.clone());
+                        items = items.child(menu_item(
+                            "menu_export_frame".to_string(),
+                            "Export Current Frame As Image…".to_string(),
+                            None,
+                            true,
+                            cx,
+                            move |cx| {
+                                a.update(cx, |this, cx| {
+                                    this.open_menu = None;
+                                    cx.notify();
+                                });
+                                request_export_frame(&a, &s, cx);
+                            },
+                        ));
+                    }
+                    {
+                        let (a, s) = (app.clone(), state.clone());
+                        items = items.child(menu_item(
+                            "menu_export_json".to_string(),
+                            "Export Project JSON…".to_string(),
+                            None,
+                            true,
+                            cx,
+                            move |cx| {
+                                a.update(cx, |this, cx| {
+                                    this.open_menu = None;
+                                    cx.notify();
+                                });
+                                request_save_project_as(&a, &s, cx);
+                            },
+                        ));
+                    }
+                    items = items.child(div().h(px(1.)).my_0p5().bg(cx.theme().border));
+
+                    // --- Project Settings & Manager ---
+                    {
+                        let a = app.clone();
+                        items = items.child(menu_item(
+                            "menu_project_manager".to_string(),
+                            "Project Settings & Manager…".to_string(),
+                            None,
+                            true,
+                            cx,
+                            move |cx| {
+                                a.update(cx, |this, cx| {
+                                    this.open_menu = None;
+                                    this.show_project_manager = true;
+                                    cx.notify();
+                                });
+                            },
+                        ));
+                    }
+                    items = items.child(div().h(px(1.)).my_0p5().bg(cx.theme().border));
+
+                    // --- Quit Section ---
+                    {
+                        items = items.child(menu_item(
+                            "menu_quit".to_string(),
+                            "Quit Motion Studio".to_string(),
+                            Some("Ctrl+Q".to_string()),
+                            true,
+                            cx,
+                            |_cx| {
+                                request_quit();
+                            },
+                        ));
                     }
                 }
                 TopMenu::Edit => {
@@ -1919,7 +2321,22 @@ impl Render for AppView {
                         cx.notify();
                     });
                     return;
-                } else if ctrl && key == "s" {
+                } else if ctrl && key == "n" {
+                    let (a, s) = (app_key.clone(), state_key.clone());
+                    request_new_project(&a, &s, cx);
+                    return;
+                } else if ctrl && key == "k" {
+                    app_key.update(cx, |this, cx| {
+                        this.open_menu = None;
+                        this.show_project_manager = true;
+                        cx.notify();
+                    });
+                    return;
+                } else if ctrl && key == "s" && mods.shift {
+                    let (a, s) = (app_key.clone(), state_key.clone());
+                    request_save_project_as(&a, &s, cx);
+                    return;
+                } else if ctrl && key == "s" && !mods.shift {
                     let (a, s) = (app_key.clone(), state_key.clone());
                     request_save_project(&a, &s, cx);
                     return;
@@ -1927,6 +2344,12 @@ impl Render for AppView {
                     let (a, s) = (app_key.clone(), state_key.clone());
                     request_open_project(&a, &s, cx);
                     return;
+                } else if ctrl && key == "i" {
+                    let (a, s) = (app_key.clone(), state_key.clone());
+                    request_import_file(&a, &s, cx);
+                    return;
+                } else if ctrl && key == "q" {
+                    request_quit();
                 } else if ctrl && key == "d" {
                     state_key.update(cx, |s, cx| {
                         if let Some(id) = s.selected_layer_id.clone() {
@@ -6621,6 +7044,105 @@ mod tests {
             let adj = comp.get_layer("test_adj").unwrap();
             assert_eq!(adj.source, project::LayerSource::Adjustment);
             assert_eq!(adj.effects.len(), 1);
+        });
+    }
+
+    #[test]
+    fn test_file_menu_new_project_reset() {
+        let mut state = EditorState::new();
+        // Mutate state with custom layers
+        let _ = state.add_solid_layer("Temporary Layer", project::Color::WHITE, 200, 200);
+        assert!(state.active_composition().unwrap().layers.len() > 3);
+
+        state.new_project("Brand New Project");
+        assert_eq!(state.project_display_name(), "Brand New Project");
+        assert_eq!(state.project.name, "Brand New Project");
+        let comp = state.active_composition().expect("active composition");
+        assert_eq!(comp.width, 1920);
+        assert_eq!(comp.height, 1080);
+        assert_eq!(state.clock.current_frame(), 0);
+    }
+
+    #[test]
+    fn test_file_menu_import_multiple_files_and_folder() {
+        let temp_dir = std::env::temp_dir().join(format!("motion_test_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // Create 2 test PNG images and 1 text file (which shouldn't be imported by folder scan)
+        let img1_path = temp_dir.join("asset1.png");
+        let img2_path = temp_dir.join("asset2.png");
+        let txt_path = temp_dir.join("notes.txt");
+
+        let img = image::RgbaImage::new(32, 32);
+        img.save(&img1_path).unwrap();
+        img.save(&img2_path).unwrap();
+        std::fs::write(&txt_path, "not a media file").unwrap();
+
+        let mut state = EditorState::new();
+
+        // Test multi-file import
+        let imported_count = state.import_multiple_media_files(&[img1_path.clone(), img2_path.clone()]).expect("import multiple");
+        assert_eq!(imported_count, 2);
+        assert!(state.project.assets.iter().any(|a| a.name.contains("asset1")));
+        assert!(state.project.assets.iter().any(|a| a.name.contains("asset2")));
+
+        // Test folder import
+        let mut state2 = EditorState::new();
+        let folder_count = state2.import_media_folder(&temp_dir).expect("import folder");
+        assert_eq!(folder_count, 2, "Only the 2 image files should be imported from folder");
+
+        // Clean up temp dir
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_file_menu_export_frame_as_png() {
+        let temp_dir = std::env::temp_dir().join(format!("motion_export_test_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let export_path = temp_dir.join("test_frame.png");
+
+        let state = EditorState::new();
+        state.export_frame_as_png(&export_path).expect("export frame as png");
+
+        assert!(export_path.exists());
+        let meta = std::fs::metadata(&export_path).unwrap();
+        assert!(meta.len() > 0, "exported PNG should not be empty");
+
+        // Verify valid image header and dimensions
+        let loaded = image::open(&export_path).expect("decode exported PNG");
+        assert_eq!(loaded.width(), 1920);
+        assert_eq!(loaded.height(), 1080);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_clear_recent_projects() {
+        let mut state = EditorState::new();
+        state.recent_projects.push(std::path::PathBuf::from("/fake/path1.json"));
+        state.recent_projects.push(std::path::PathBuf::from("/fake/path2.json"));
+        assert_eq!(state.recent_projects.len(), 2);
+
+        state.clear_recent_projects();
+        assert!(state.recent_projects.is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn test_file_menu_dropdown_elements(cx: &mut TestAppContext) {
+        use super::TopMenu;
+        let (_root, app_view) = setup_test_window(cx);
+        cx.run_until_parked();
+
+        // Open TopMenu::File
+        app_view.update(cx, |this, cx| {
+            this.open_menu = Some(TopMenu::File);
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        // Verify TopMenu::File is open in AppView
+        app_view.read_with(cx, |this, _| {
+            assert_eq!(this.open_menu, Some(TopMenu::File));
         });
     }
 }
