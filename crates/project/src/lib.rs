@@ -574,7 +574,7 @@ mod tests {
         assert_eq!(BlendMode::Screen.as_str(), "Screen");
         assert_eq!(BlendMode::Overlay.as_str(), "Overlay");
 
-        assert_eq!(BlendMode::ALL.len(), 19);
+        assert_eq!(BlendMode::ALL.len(), 26);
         assert_eq!(BlendMode::ALL[0], BlendMode::Normal);
 
         assert_eq!(BlendMode::from_name("multiply"), Some(BlendMode::Multiply));

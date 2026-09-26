@@ -151,8 +151,45 @@ pub(crate) fn blend_color(mode: BlendMode, dst: [f32; 3], src: [f32; 3]) -> [f32
             }
             BlendMode::Difference => (d - s).abs(),
             BlendMode::Exclusion => d + s - 2.0 * d * s,
-            BlendMode::Add => d + s,
+            BlendMode::Add | BlendMode::LinearDodge => d + s,
             BlendMode::Subtract => d - s,
+            BlendMode::LinearBurn => d + s - 1.0,
+            BlendMode::VividLight => {
+                if s <= 0.5 {
+                    if s <= 0.0 { 0.0 } else { 1.0 - (1.0 - d) / (2.0 * s) }
+                } else if s >= 1.0 {
+                    1.0
+                } else {
+                    d / (2.0 * (1.0 - s))
+                }
+            }
+            BlendMode::LinearLight => d + 2.0 * s - 1.0,
+            BlendMode::PinLight => {
+                if s > 0.5 {
+                    d.max(2.0 * (s - 0.5))
+                } else {
+                    d.min(2.0 * s)
+                }
+            }
+            BlendMode::HardMix => {
+                let vl = if s <= 0.5 {
+                    if s <= 0.0 { 0.0 } else { 1.0 - (1.0 - d) / (2.0 * s) }
+                } else if s >= 1.0 {
+                    1.0
+                } else {
+                    d / (2.0 * (1.0 - s))
+                };
+                if vl >= 0.5 { 1.0 } else { 0.0 }
+            }
+            BlendMode::Divide => {
+                if d <= 0.0 {
+                    0.0
+                } else if s <= 0.0 {
+                    1.0
+                } else {
+                    d / s
+                }
+            }
             _ => s,
         }
     };

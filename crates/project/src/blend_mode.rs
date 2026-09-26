@@ -25,11 +25,18 @@ pub enum BlendMode {
     Luminosity,
     Add,
     Subtract,
+    LinearBurn,
+    LinearDodge,
+    VividLight,
+    LinearLight,
+    PinLight,
+    HardMix,
+    Divide,
 }
 
 impl BlendMode {
-    /// All 19 compositing blend modes in standard display order.
-    pub const ALL: [Self; 19] = [
+    /// All 26 compositing blend modes in standard display order.
+    pub const ALL: [Self; 26] = [
         Self::Normal,
         Self::Dissolve,
         Self::Multiply,
@@ -49,6 +56,13 @@ impl BlendMode {
         Self::Luminosity,
         Self::Add,
         Self::Subtract,
+        Self::LinearBurn,
+        Self::LinearDodge,
+        Self::VividLight,
+        Self::LinearLight,
+        Self::PinLight,
+        Self::HardMix,
+        Self::Divide,
     ];
 
     /// Return the canonical display name of the blend mode.
@@ -73,6 +87,13 @@ impl BlendMode {
             Self::Luminosity => "Luminosity",
             Self::Add => "Add",
             Self::Subtract => "Subtract",
+            Self::LinearBurn => "Linear Burn",
+            Self::LinearDodge => "Linear Dodge (Add)",
+            Self::VividLight => "Vivid Light",
+            Self::LinearLight => "Linear Light",
+            Self::PinLight => "Pin Light",
+            Self::HardMix => "Hard Mix",
+            Self::Divide => "Divide",
         }
     }
 
@@ -98,6 +119,13 @@ impl BlendMode {
             Self::Luminosity => "luminosity",
             Self::Add => "add",
             Self::Subtract => "subtract",
+            Self::LinearBurn => "linear_burn",
+            Self::LinearDodge => "linear_dodge",
+            Self::VividLight => "vivid_light",
+            Self::LinearLight => "linear_light",
+            Self::PinLight => "pin_light",
+            Self::HardMix => "hard_mix",
+            Self::Divide => "divide",
         }
     }
 
@@ -125,6 +153,13 @@ impl BlendMode {
             "luminosity" => Some(Self::Luminosity),
             "add" => Some(Self::Add),
             "subtract" => Some(Self::Subtract),
+            "linear burn" | "linearburn" => Some(Self::LinearBurn),
+            "linear dodge" | "lineardodge" | "linear dodge (add)" => Some(Self::LinearDodge),
+            "vivid light" | "vividlight" => Some(Self::VividLight),
+            "linear light" | "linearlight" => Some(Self::LinearLight),
+            "pin light" | "pinlight" => Some(Self::PinLight),
+            "hard mix" | "hardmix" => Some(Self::HardMix),
+            "divide" => Some(Self::Divide),
             _ => None,
         }
     }
@@ -153,8 +188,45 @@ impl BlendMode {
             Self::SoftLight => soft_light(cb, cs),
             Self::Difference => (cb - cs).abs(),
             Self::Exclusion => cb + cs - 2.0 * cb * cs,
-            Self::Add => (cb + cs).min(1.0),
+            Self::Add | Self::LinearDodge => (cb + cs).min(1.0),
             Self::Subtract => (cb - cs).max(0.0),
+            Self::LinearBurn => (cb + cs - 1.0).max(0.0),
+            Self::VividLight => {
+                if cs <= 0.5 {
+                    if cs <= 0.0 { 0.0 } else { (1.0 - (1.0 - cb) / (2.0 * cs)).clamp(0.0, 1.0) }
+                } else if cs >= 1.0 {
+                    1.0
+                } else {
+                    (cb / (2.0 * (1.0 - cs))).clamp(0.0, 1.0)
+                }
+            }
+            Self::LinearLight => (cb + 2.0 * cs - 1.0).clamp(0.0, 1.0),
+            Self::PinLight => {
+                if cs > 0.5 {
+                    cb.max(2.0 * (cs - 0.5))
+                } else {
+                    cb.min(2.0 * cs)
+                }
+            }
+            Self::HardMix => {
+                let vl = if cs <= 0.5 {
+                    if cs <= 0.0 { 0.0 } else { (1.0 - (1.0 - cb) / (2.0 * cs)).clamp(0.0, 1.0) }
+                } else if cs >= 1.0 {
+                    1.0
+                } else {
+                    (cb / (2.0 * (1.0 - cs))).clamp(0.0, 1.0)
+                };
+                if vl >= 0.5 { 1.0 } else { 0.0 }
+            }
+            Self::Divide => {
+                if cb <= 0.0 {
+                    0.0
+                } else if cs <= 0.0 {
+                    1.0
+                } else {
+                    (cb / cs).min(1.0)
+                }
+            }
             Self::Hue | Self::Saturation | Self::Color | Self::Luminosity => unreachable!(),
         };
         Color::rgba(b(backdrop.r, source.r), b(backdrop.g, source.g), b(backdrop.b, source.b), source.a)
@@ -257,6 +329,8 @@ impl<'de> Deserialize<'de> for BlendMode {
                     "normal", "dissolve", "multiply", "screen", "overlay", "darken", "lighten",
                     "color_dodge", "color_burn", "hard_light", "soft_light", "difference",
                     "exclusion", "hue", "saturation", "color", "luminosity", "add", "subtract",
+                    "linear_burn", "linear_dodge", "vivid_light", "linear_light", "pin_light",
+                    "hard_mix", "divide",
                 ],
             )
         })

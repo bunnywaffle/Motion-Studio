@@ -6119,4 +6119,122 @@ mod tests {
         assert!(sample.g < 0.05, "Green channel must be near 0 under Multiply with pure blue: {}", sample.g);
         assert!(sample.b > 0.8, "Blue channel must remain high under Multiply: {}", sample.b);
     }
+
+    #[test]
+    fn test_all_26_blend_modes_evaluation() {
+        use project::{BlendMode, Color};
+
+        assert_eq!(BlendMode::ALL.len(), 26);
+        let c1 = Color::rgba(0.7, 0.4, 0.2, 1.0);
+        let c2 = Color::rgba(0.5, 0.8, 0.6, 1.0);
+
+        for mode in BlendMode::ALL {
+            let str_name = mode.as_str();
+            assert!(!str_name.is_empty());
+            let snake = mode.as_snake_case();
+            assert!(!snake.is_empty());
+            let parsed = BlendMode::from_name(str_name).expect("parse str");
+            assert_eq!(parsed, mode);
+            let parsed_snake = BlendMode::from_name(snake).expect("parse snake");
+            assert_eq!(parsed_snake, mode);
+
+            // Verify evaluation produces valid non-NaN RGBA
+            let blended = mode.blend_rgb(c1, c2);
+            assert!(blended.r >= 0.0 && blended.r <= 1.0 && !blended.r.is_nan());
+            assert!(blended.g >= 0.0 && blended.g <= 1.0 && !blended.g.is_nan());
+            assert!(blended.b >= 0.0 && blended.b <= 1.0 && !blended.b.is_nan());
+        }
+
+        // Test specific Linear Burn math: (cb + cs - 1.0).max(0.0)
+        let lb = BlendMode::LinearBurn.blend_rgb(Color::rgba(0.6, 0.8, 0.3, 1.0), Color::rgba(0.7, 0.1, 0.9, 1.0));
+        assert!((lb.r - (0.6 + 0.7 - 1.0)).abs() < 1e-4);
+        assert_eq!(lb.g, 0.0); // 0.8 + 0.1 - 1.0 = -0.1 -> 0.0
+        assert!((lb.b - (0.3 + 0.9 - 1.0)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_non_destructive_parenting_zero_jump() {
+        use crate::state::EditorState;
+        use project::Vec2;
+
+        let mut state = EditorState::new();
+        // Create parent layer with translation, rotation, and non-uniform scale
+        let parent_id = state.add_solid_layer("Parent", project::Color::RED, 200, 200).expect("add parent");
+        state.set_layer_position(&parent_id, Vec2::new(350.0, 250.0));
+        state.set_layer_rotation(&parent_id, 45.0);
+        state.set_layer_scale(&parent_id, 150.0, 80.0);
+
+        // Create child layer positioned in world space
+        let child_id = state.add_solid_layer("Child", project::Color::BLUE, 100, 100).expect("add child");
+        state.set_layer_position(&child_id, Vec2::new(400.0, 300.0));
+        state.set_layer_rotation(&child_id, 15.0);
+        state.set_layer_scale(&child_id, 120.0, 120.0);
+
+        // Capture child's world matrix and world point before parenting
+        let world_before = state.layer_world_matrix_fast(&child_id).expect("world before");
+        let test_pt = Vec2::new(50.0, 50.0);
+        let world_pt_before = world_before.transform_point(test_pt);
+
+        // 1. Parent Child to Parent:
+        assert!(state.set_layer_parent(&child_id, Some(parent_id.clone())));
+
+        // Verify child's world matrix after parenting matches world_before (zero visual jump!)
+        let world_after = state.layer_world_matrix_fast(&child_id).expect("world after");
+        let world_pt_after = world_after.transform_point(test_pt);
+        assert!((world_pt_after.x - world_pt_before.x).abs() < 1e-2, "X jumped on parenting: before={}, after={}", world_pt_before.x, world_pt_after.x);
+        assert!((world_pt_after.y - world_pt_before.y).abs() < 1e-2, "Y jumped on parenting: before={}, after={}", world_pt_before.y, world_pt_after.y);
+
+        // 2. Unparent Child:
+        assert!(state.set_layer_parent(&child_id, None));
+        let world_unparent = state.layer_world_matrix_fast(&child_id).expect("world unparent");
+        let world_pt_unparent = world_unparent.transform_point(test_pt);
+        assert!((world_pt_unparent.x - world_pt_before.x).abs() < 1e-2, "X jumped on unparenting: before={}, after={}", world_pt_before.x, world_pt_unparent.x);
+        assert!((world_pt_unparent.y - world_pt_before.y).abs() < 1e-2, "Y jumped on unparenting: before={}, after={}", world_pt_before.y, world_pt_unparent.y);
+    }
+
+    #[test]
+    fn test_pen_tool_mask_by_default_and_point_by_point() {
+        use crate::state::EditorState;
+        use project::Vec2;
+
+        let mut state = EditorState::new();
+        // Select an existing solid layer
+        let sel_id = "layer_accent";
+        state.select_layer(Some(sel_id.to_string()));
+
+        let initial_layer_count = state.active_composition().unwrap().layers.len();
+
+        // Click 1 with Pen tool on canvas: MUST NOT create a new layer! Must create Mask on selected layer!
+        let ret1 = state.pen_press_at(Vec2::new(10.0, 10.0), Some(sel_id.to_string())).expect("click 1");
+        assert_eq!(ret1, sel_id);
+        assert_eq!(state.active_composition().unwrap().layers.len(), initial_layer_count, "No new layer created");
+        assert!(state.active_mask_edit.is_some(), "Must enter active mask edit");
+
+        // Click 2: appends point 2 to mask
+        let ret2 = state.pen_press_at(Vec2::new(100.0, 20.0), None).expect("click 2");
+        assert_eq!(ret2, sel_id);
+        assert_eq!(state.active_composition().unwrap().layers.len(), initial_layer_count);
+
+        // Click 3: appends point 3 to mask
+        let ret3 = state.pen_press_at(Vec2::new(80.0, 120.0), None).expect("click 3");
+        assert_eq!(ret3, sel_id);
+        assert_eq!(state.active_composition().unwrap().layers.len(), initial_layer_count);
+
+        {
+            let comp = state.active_composition().unwrap();
+            let layer = comp.get_layer(sel_id).unwrap();
+            assert_eq!(layer.masks.len(), 1);
+            assert_eq!(layer.masks[0].path.value.points.len(), 3);
+            assert!(!layer.masks[0].path.value.closed);
+        }
+
+        // Click 4 near point 1: closes mask!
+        state.pen_press_at(Vec2::new(12.0, 11.0), None).expect("click 4 close");
+        assert!(state.active_mask_edit.is_none(), "Mask edit ended on close");
+        {
+            let comp = state.active_composition().unwrap();
+            let layer = comp.get_layer(sel_id).unwrap();
+            assert!(layer.masks[0].path.value.closed, "Mask is now closed");
+        }
+    }
 }

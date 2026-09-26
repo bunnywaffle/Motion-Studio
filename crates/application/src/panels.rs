@@ -1723,13 +1723,19 @@ impl Render for CompositionViewerPanel {
                 let mut rendered_regions: Vec<(f32, f32, f32, f32, Color)> = Vec::new();
                 let mut pick_list: Vec<PickBox> = Vec::new();
 
-                let cw = canvas_w.ceil().max(1.0) as u32;
-                let ch = canvas_h.ceil().max(1.0) as u32;
-                let mut canvas_comp = crate::raster::FloatBuf::clear(cw, ch);
-                let bg_p = crate::raster::Px::from_color(full_frame_backdrop);
-                for px in canvas_comp.px.iter_mut() {
-                    *px = bg_p;
-                }
+                let needs_canvas_comp = stack.render_layers().iter().any(|l| l.blend_mode != BlendMode::Normal);
+                let mut canvas_comp = if needs_canvas_comp {
+                    let cw = canvas_w.ceil().max(1.0) as u32;
+                    let ch = canvas_h.ceil().max(1.0) as u32;
+                    let mut comp = crate::raster::FloatBuf::clear(cw, ch);
+                    let bg_p = crate::raster::Px::from_color(full_frame_backdrop);
+                    for px in comp.px.iter_mut() {
+                        *px = bg_p;
+                    }
+                    Some(comp)
+                } else {
+                    None
+                };
 
                 for layer in stack.render_layers() {
                     let is_adjustment = matches!(&layer.source, LayerSource::Adjustment);
@@ -1859,25 +1865,29 @@ impl Render for CompositionViewerPanel {
                         }
                     }
                     let (backdrop_buf, backdrop_hash) = if layer.blend_mode != BlendMode::Normal {
-                        let mut b_slice = crate::raster::FloatBuf::clear(rw, rh);
-                        let mut h = std::collections::hash_map::DefaultHasher::new();
-                        for by in 0..rh {
-                            let cy = (l_y + (by as f32 / rh as f32) * l_h).floor() as i32;
-                            for bx in 0..rw {
-                                let cx = (l_x + (bx as f32 / rw as f32) * l_w).floor() as i32;
-                                let p = canvas_comp.get(cx, cy);
-                                b_slice.put(bx as i32, by as i32, p);
-                                if bx % 4 == 0 && by % 4 == 0 {
-                                    use std::hash::Hash;
-                                    p.r.to_bits().hash(&mut h);
-                                    p.g.to_bits().hash(&mut h);
-                                    p.b.to_bits().hash(&mut h);
-                                    p.a.to_bits().hash(&mut h);
+                        if let Some(ref comp_buf) = canvas_comp {
+                            let mut b_slice = crate::raster::FloatBuf::clear(rw, rh);
+                            let mut h = std::collections::hash_map::DefaultHasher::new();
+                            for by in 0..rh {
+                                let cy = (l_y + (by as f32 / rh as f32) * l_h).floor() as i32;
+                                for bx in 0..rw {
+                                    let cx = (l_x + (bx as f32 / rw as f32) * l_w).floor() as i32;
+                                    let p = comp_buf.get(cx, cy);
+                                    b_slice.put(bx as i32, by as i32, p);
+                                    if bx % 4 == 0 && by % 4 == 0 {
+                                        use std::hash::Hash;
+                                        p.r.to_bits().hash(&mut h);
+                                        p.g.to_bits().hash(&mut h);
+                                        p.b.to_bits().hash(&mut h);
+                                        p.a.to_bits().hash(&mut h);
+                                    }
                                 }
                             }
+                            use std::hash::Hasher;
+                            (Some(b_slice), h.finish())
+                        } else {
+                            (None, 0u64)
                         }
-                        use std::hash::Hasher;
-                        (Some(b_slice), h.finish())
                     } else {
                         (None, 0u64)
                     };
@@ -1932,31 +1942,35 @@ impl Render for CompositionViewerPanel {
                     };
 
                     // Blit layer pixels into canvas_comp for subsequent overlying layers
-                    if !entry.empty && !is_adjustment {
-                        for by in 0..rh {
-                            let cy = (l_y + (by as f32 / rh as f32) * l_h).floor() as i32;
-                            if cy < 0 || cy >= ch as i32 {
-                                continue;
-                            }
-                            for bx in 0..rw {
-                                let idx = ((by * rw + bx) * 4) as usize;
-                                if idx + 3 < entry.bgra.len() {
-                                    let a = entry.bgra[idx + 3] as f32 / 255.0;
-                                    if a > 0.003 {
-                                        let cx = (l_x + (bx as f32 / rw as f32) * l_w).floor() as i32;
-                                        if cx < 0 || cx >= cw as i32 {
-                                            continue;
-                                        }
-                                        let r = entry.bgra[idx + 2] as f32 / 255.0;
-                                        let g = entry.bgra[idx + 1] as f32 / 255.0;
-                                        let b = entry.bgra[idx] as f32 / 255.0;
-                                        let s = crate::raster::Px { r, g, b, a };
-                                        if layer.blend_mode == BlendMode::Normal {
-                                            let mut d = canvas_comp.get(cx, cy);
-                                            d.over(s);
-                                            canvas_comp.put(cx, cy, d);
-                                        } else {
-                                            canvas_comp.put(cx, cy, s);
+                    if let Some(ref mut comp_buf) = canvas_comp {
+                        if !entry.empty && !is_adjustment {
+                            let cw = comp_buf.w;
+                            let ch = comp_buf.h;
+                            for by in 0..rh {
+                                let cy = (l_y + (by as f32 / rh as f32) * l_h).floor() as i32;
+                                if cy < 0 || cy >= ch as i32 {
+                                    continue;
+                                }
+                                for bx in 0..rw {
+                                    let idx = ((by * rw + bx) * 4) as usize;
+                                    if idx + 3 < entry.bgra.len() {
+                                        let a = entry.bgra[idx + 3] as f32 / 255.0;
+                                        if a > 0.003 {
+                                            let cx = (l_x + (bx as f32 / rw as f32) * l_w).floor() as i32;
+                                            if cx < 0 || cx >= cw as i32 {
+                                                continue;
+                                            }
+                                            let r = entry.bgra[idx + 2] as f32 / 255.0;
+                                            let g = entry.bgra[idx + 1] as f32 / 255.0;
+                                            let b = entry.bgra[idx] as f32 / 255.0;
+                                            let s = crate::raster::Px { r, g, b, a };
+                                            if layer.blend_mode == BlendMode::Normal {
+                                                let mut d = comp_buf.get(cx, cy);
+                                                d.over(s);
+                                                comp_buf.put(cx, cy, d);
+                                            } else {
+                                                comp_buf.put(cx, cy, s);
+                                            }
                                         }
                                     }
                                 }
@@ -2405,20 +2419,46 @@ impl Render for CompositionViewerPanel {
                                 };
                                 // Sampled curve dots (bounded count).
                                 let flat = mask.path.flatten(0.75);
-                                let step = (flat.len() / 120).max(1);
-                                for p in flat.iter().step_by(step) {
-                                    let (cxp, cyp) = m2c(*p);
-                                    gizmo_els.push(
-                                        div()
-                                            .absolute()
-                                            .left(px(cxp - 1.5))
-                                            .top(px(cyp - 1.5))
-                                            .w(px(3.))
-                                            .h(px(3.))
-                                            .rounded_full()
-                                            .bg(curve_col)
-                                            .into_any_element(),
-                                    );
+                                if !flat.is_empty() {
+                                    let step = (flat.len() / 120).max(1);
+                                    for p in flat.iter().step_by(step) {
+                                        let (cxp, cyp) = m2c(*p);
+                                        gizmo_els.push(
+                                            div()
+                                                .absolute()
+                                                .left(px(cxp - 1.5))
+                                                .top(px(cyp - 1.5))
+                                                .w(px(3.))
+                                                .h(px(3.))
+                                                .rounded_full()
+                                                .bg(curve_col)
+                                                .into_any_element(),
+                                        );
+                                    }
+                                } else if mask.path.points.len() >= 2 {
+                                    let pts = &mask.path.points;
+                                    for i in 0..pts.len() - 1 {
+                                        let (x0, y0) = m2c(pts[i].pos);
+                                        let (x1, y1) = m2c(pts[i + 1].pos);
+                                        let dist = ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt();
+                                        let steps = (dist / 4.0).ceil().max(1.0) as usize;
+                                        for s in 0..=steps {
+                                            let t = s as f32 / steps as f32;
+                                            let lx = x0 + t * (x1 - x0);
+                                            let ly = y0 + t * (y1 - y0);
+                                            gizmo_els.push(
+                                                div()
+                                                    .absolute()
+                                                    .left(px(lx - 1.0))
+                                                    .top(px(ly - 1.0))
+                                                    .w(px(2.0))
+                                                    .h(px(2.0))
+                                                    .rounded_full()
+                                                    .bg(curve_col)
+                                                    .into_any_element(),
+                                            );
+                                        }
+                                    }
                                 }
                                 // Nodes (+ handles for the selected node).
                                 for (idx, node) in mask.path.points.iter().enumerate() {
@@ -2958,6 +2998,9 @@ impl Render for CompositionViewerPanel {
                 if let (true, Some((last_x, last_y))) = (this.is_dragging_canvas, this.last_canvas_mouse) {
                     let dx = curr_x - last_x;
                     let dy = curr_y - last_y;
+                    if dx.abs() < 0.25 && dy.abs() < 0.25 {
+                        return;
+                    }
                     let active_tool = this.state.read(cx).active_tool;
                     // Composition-aware factors (uniform fit scale): layers
                     // track the cursor 1:1 at any comp size or zoom.
@@ -3242,14 +3285,18 @@ impl Render for CompositionViewerPanel {
                                                     });
                                                 }
                                                 EditorTool::Pen => {
-                                                    // Explicit topmost routing
-                                                    // (mask target, path/text
-                                                    // under cursor, else new):
-                                                    // never depends on stale
-                                                    // selection.
+                                                    // In After Effects, when a layer is selected, the Pen
+                                                    // tool draws and edits a mask on it by default.
                                                     let pick = p_drag.read(cx).pick_top_at(comp_x, comp_y);
                                                     s_tool.update(cx, |s, cx| {
-                                                        let _ = s.pen_press_at(Vec2::new(comp_x, comp_y), pick);
+                                                        let sel = s.selected_layer_id.clone();
+                                                        let is_path_shape = sel.as_deref().and_then(|id| s.active_composition()?.get_layer(id)).map(|l| matches!(&l.source, LayerSource::Shape { shape_type: ShapeType::Path { .. } })).unwrap_or(false);
+                                                        let target_pick = if s.active_mask_edit.is_some() || is_path_shape {
+                                                            pick
+                                                        } else {
+                                                            pick.or(sel)
+                                                        };
+                                                        let _ = s.pen_press_at(Vec2::new(comp_x, comp_y), target_pick);
                                                         cx.notify();
                                                     });
                                                 }
@@ -10941,10 +10988,10 @@ impl Panel for EffectsPanel {
 
 pub const BLEND_MODE_GROUPS: &[(&str, &[BlendMode])] = &[
     ("Normal", &[BlendMode::Normal, BlendMode::Dissolve]),
-    ("Darken", &[BlendMode::Darken, BlendMode::Multiply, BlendMode::ColorBurn]),
-    ("Lighten", &[BlendMode::Lighten, BlendMode::Screen, BlendMode::ColorDodge, BlendMode::Add]),
-    ("Contrast", &[BlendMode::Overlay, BlendMode::SoftLight, BlendMode::HardLight]),
-    ("Inversion", &[BlendMode::Difference, BlendMode::Exclusion, BlendMode::Subtract]),
+    ("Darken", &[BlendMode::Darken, BlendMode::Multiply, BlendMode::ColorBurn, BlendMode::LinearBurn]),
+    ("Lighten", &[BlendMode::Lighten, BlendMode::Screen, BlendMode::ColorDodge, BlendMode::LinearDodge, BlendMode::Add]),
+    ("Contrast", &[BlendMode::Overlay, BlendMode::SoftLight, BlendMode::HardLight, BlendMode::VividLight, BlendMode::LinearLight, BlendMode::PinLight, BlendMode::HardMix]),
+    ("Inversion", &[BlendMode::Difference, BlendMode::Exclusion, BlendMode::Subtract, BlendMode::Divide]),
     ("Component", &[BlendMode::Hue, BlendMode::Saturation, BlendMode::Color, BlendMode::Luminosity]),
 ];
 

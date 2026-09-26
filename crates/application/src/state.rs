@@ -5642,10 +5642,35 @@ impl EditorState {
                 }
             }
         }
+        // --- Transform compensation: preserve world transform (zero visual jump) ---
+        let child_world = self.layer_world_matrix_fast(layer_id);
+        let new_parent_world = match &parent_id {
+            Some(pid) => self.layer_world_matrix_fast(pid),
+            None => Some(AffineTransform2D::IDENTITY),
+        };
+        let compensated = match (child_world, new_parent_world) {
+            (Some(cw), Some(pw)) => {
+                pw.inverse().and_then(|inv_pw| {
+                    let new_local = if parent_id.is_some() { inv_pw * cw } else { cw };
+                    let anchor = self.active_composition()
+                        .and_then(|c| c.get_layer(layer_id))
+                        .map(|l| *l.transform.anchor_point.value())
+                        .unwrap_or(Vec2::ZERO);
+                    AffineTransform2D::decompose_components(new_local, anchor)
+                })
+            }
+            _ => None,
+        };
+
         // --- Mutation phase (single undo step). ---
         self.checkpoint();
         if let Some(comp) = self.active_composition_mut() {
             if let Some(layer) = comp.get_layer_mut(layer_id) {
+                if let Some((pos, scale, rot)) = compensated {
+                    layer.transform.position.set_value(pos);
+                    layer.transform.scale.set_value(scale);
+                    layer.transform.rotation.set_value(rot);
+                }
                 layer.set_parent(parent_id);
             }
         }
@@ -5942,6 +5967,8 @@ impl EditorState {
         point: Vec2,
         picked: Option<String>,
     ) -> Result<String, String> {
+        self.checkpoint();
+
         // 1. Mask editing wins while armed and valid.
         if let Some((lid, mid)) = self.active_mask_edit.clone() {
             let mask_opt = self
@@ -5950,74 +5977,75 @@ impl EditorState {
                 .and_then(|l| l.get_mask(&mid))
                 .cloned();
             if let Some(mask) = mask_opt {
-                if let Some(local) = self.comp_to_layer_local(&lid, point) {
-                    self.checkpoint();
-                    // Close the mask when clicking near the first point (if it has >= 3 points)
-                    if mask.path.value.points.len() >= 3 {
-                        let first_p = mask.path.value.points[0].pos;
-                        if (local - first_p).length() <= 20.0 {
-                            if let Some(comp) = self.active_composition_mut() {
-                                if let Some(layer) = comp.get_layer_mut(&lid) {
-                                    if let Some(m) = layer.get_mask_mut(&mid) {
-                                        m.path.value.close();
-                                    }
+                let local = self.comp_to_layer_local(&lid, point).unwrap_or(point);
+                // Close the mask when clicking near the first point (if it has >= 3 points)
+                if mask.path.value.points.len() >= 3 {
+                    let first_p = mask.path.value.points[0].pos;
+                    if (local - first_p).length() <= 24.0 {
+                        if let Some(comp) = self.active_composition_mut() {
+                            if let Some(layer) = comp.get_layer_mut(&lid) {
+                                if let Some(m) = layer.get_mask_mut(&mid) {
+                                    m.path.value.close();
                                 }
                             }
-                            self.active_mask_edit = None;
-                            return Ok(lid);
                         }
+                        self.active_mask_edit = None;
+                        return Ok(lid);
                     }
-                    self.append_mask_point(&lid, &mid, local)?;
-                    return Ok(lid);
                 }
+                self.append_mask_point(&lid, &mid, local)?;
+                return Ok(lid);
             } else {
                 self.active_mask_edit = None;
             }
         }
 
-        // 2. If the currently selected layer is an unclosed Path shape, continue drawing on it!
+        // 2. If the currently selected layer is an unclosed Path shape or Text layer, continue drawing on it!
         if let Some(sel_id) = self.selected_layer_id.clone() {
-            let is_unclosed_path = self
+            let (is_unclosed_path, is_text) = self
                 .active_composition()
                 .and_then(|c| c.get_layer(&sel_id))
-                .map(|l| match &l.source {
-                    LayerSource::Shape {
-                        shape_type: ShapeType::Path { path_data, .. },
-                    } => {
-                        let p = Path::from_svg(path_data);
-                        !p.closed
-                    }
-                    _ => false,
+                .map(|l| {
+                    let is_unclosed_path = match &l.source {
+                        LayerSource::Shape {
+                            shape_type: ShapeType::Path { path_data, .. },
+                        } => !Path::from_svg(path_data).closed,
+                        _ => false,
+                    };
+                    let is_text = matches!(&l.source, LayerSource::Text { .. });
+                    (is_unclosed_path, is_text)
                 })
-                .unwrap_or(false);
+                .unwrap_or((false, false));
 
             if is_unclosed_path {
-                self.checkpoint();
-                if let Some(local) = self.comp_to_layer_local(&sel_id, point) {
-                    let comp = self
-                        .active_composition_mut()
-                        .ok_or_else(|| "No active composition".to_string())?;
-                    let layer = comp
-                        .get_layer_mut(&sel_id)
-                        .ok_or_else(|| format!("Layer {sel_id} not found"))?;
-                    if let LayerSource::Shape {
-                        shape_type: ShapeType::Path { path_data, .. },
-                    } = &mut layer.source
-                    {
-                        let mut path = Path::from_svg(path_data);
-                        if path.points.len() >= 3 {
-                            let first_p = path.points[0].pos;
-                            if (local - first_p).length() <= 20.0 {
-                                path.close();
-                                *path_data = path.to_svg();
-                                return Ok(sel_id);
-                            }
+                let local = self.comp_to_layer_local(&sel_id, point);
+                let p = local.unwrap_or(point);
+                let comp = self
+                    .active_composition_mut()
+                    .ok_or_else(|| "No active composition".to_string())?;
+                let layer = comp
+                    .get_layer_mut(&sel_id)
+                    .ok_or_else(|| format!("Layer {sel_id} not found"))?;
+                if let LayerSource::Shape {
+                    shape_type: ShapeType::Path { path_data, .. },
+                } = &mut layer.source
+                {
+                    let path = Path::from_svg(path_data);
+                    if path.points.len() >= 3 {
+                        let first_p = path.points[0].pos;
+                        if (p - first_p).length() <= 24.0 {
+                            let mut p_closed = path;
+                            p_closed.close();
+                            *path_data = p_closed.to_svg();
+                            return Ok(sel_id);
                         }
-                        path.line_to(local);
-                        *path_data = path.to_svg();
-                        return Ok(sel_id);
                     }
+                    path_data.push_str(&format!(" L {:.1} {:.1}", p.x, p.y));
+                    return Ok(sel_id);
                 }
+            } else if is_text {
+                let local = self.comp_to_layer_local(&sel_id, point).unwrap_or(point);
+                self.append_text_path_point(&sel_id, local)?;
                 return Ok(sel_id);
             }
         }
@@ -6039,165 +6067,74 @@ impl EditorState {
                 ))
                 .unwrap_or((false, false));
 
+            let local = self.comp_to_layer_local(&pid, point).unwrap_or(point);
+            self.select_layer(Some(pid.clone()));
+
             if is_path_shape {
-                self.checkpoint();
-                self.select_layer(Some(pid.clone()));
-                if let Some(local) = self.comp_to_layer_local(&pid, point) {
-                    let comp = self
-                        .active_composition_mut()
-                        .ok_or_else(|| "No active composition".to_string())?;
-                    let layer = comp
-                        .get_layer_mut(&pid)
-                        .ok_or_else(|| format!("Layer {pid} not found"))?;
-                    if let LayerSource::Shape {
-                        shape_type: ShapeType::Path { path_data, .. },
-                    } = &mut layer.source
-                    {
-                        let mut path = Path::from_svg(path_data);
-                        if path.points.len() >= 3 {
-                            let first_p = path.points[0].pos;
-                            if (local - first_p).length() <= 20.0 {
-                                path.close();
-                                *path_data = path.to_svg();
-                                return Ok(pid);
-                            }
+                let comp = self
+                    .active_composition_mut()
+                    .ok_or_else(|| "No active composition".to_string())?;
+                let layer = comp
+                    .get_layer_mut(&pid)
+                    .ok_or_else(|| format!("Layer {pid} not found"))?;
+                if let LayerSource::Shape {
+                    shape_type: ShapeType::Path { path_data, .. },
+                } = &mut layer.source
+                {
+                    let mut path = Path::from_svg(path_data);
+                    if path.points.len() >= 3 {
+                        let first_p = path.points[0].pos;
+                        if (local - first_p).length() <= 24.0 {
+                            path.close();
+                            *path_data = path.to_svg();
+                            return Ok(pid);
                         }
-                        path.line_to(local);
-                        *path_data = path.to_svg();
-                        return Ok(pid);
                     }
+                    path.line_to(local);
+                    *path_data = path.to_svg();
+                    return Ok(pid);
                 }
-                return Ok(pid);
             } else if is_text {
-                self.checkpoint();
-                self.select_layer(Some(pid.clone()));
-                if let Some(local) = self.comp_to_layer_local(&pid, point) {
-                    self.append_text_path_point(&pid, local)?;
-                }
+                self.append_text_path_point(&pid, local)?;
                 return Ok(pid);
             } else {
                 // For any other layer (Solid, Image, Video, Shape Rect/Ellipse):
                 // PEN TOOL CREATES & EDITS A MASK BY DEFAULT!
-                if let Some(local) = self.comp_to_layer_local(&pid, point) {
-                    self.checkpoint();
-                    self.select_layer(Some(pid.clone()));
-                    let comp = self
-                        .active_composition_mut()
-                        .ok_or_else(|| "No active composition".to_string())?;
-                    let layer = comp
-                        .get_layer_mut(&pid)
-                        .ok_or_else(|| format!("Layer {pid} not found"))?;
+                let comp = self
+                    .active_composition_mut()
+                    .ok_or_else(|| "No active composition".to_string())?;
+                let layer = comp
+                    .get_layer_mut(&pid)
+                    .ok_or_else(|| format!("Layer {pid} not found"))?;
 
-                    // If layer has an unclosed mask, continue drawing on it:
-                    if let Some(unclosed_m) = layer.masks.iter_mut().rev().find(|m| !m.path.value.closed) {
-                        let mid = unclosed_m.id.clone();
-                        if unclosed_m.path.value.points.len() >= 3 {
-                            let first_p = unclosed_m.path.value.points[0].pos;
-                            if (local - first_p).length() <= 20.0 {
-                                unclosed_m.path.value.close();
-                                self.set_active_mask_edit(None);
-                                return Ok(pid);
-                            }
+                // If layer already has an unclosed mask, continue drawing on it:
+                if let Some(unclosed_m) = layer.masks.iter_mut().rev().find(|m| !m.path.value.closed) {
+                    let mid = unclosed_m.id.clone();
+                    if unclosed_m.path.value.points.len() >= 3 {
+                        let first_p = unclosed_m.path.value.points[0].pos;
+                        if (local - first_p).length() <= 24.0 {
+                            unclosed_m.path.value.close();
+                            self.active_mask_edit = None;
+                            return Ok(pid);
                         }
-                        unclosed_m.path.value.line_to(local);
-                        self.set_active_mask_edit(Some((pid.clone(), mid)));
-                        return Ok(pid);
                     }
-
-                    // Otherwise create a new mask starting with this point:
-                    let mid = next_mask_id(layer);
-                    let name = format!("Mask {}", layer.masks.len() + 1);
-                    let mut initial_path = Path::new();
-                    initial_path.line_to(local);
-                    layer.masks.push(Mask::with_path(&mid, name, initial_path));
-                    self.set_active_mask_edit(Some((pid.clone(), mid)));
+                    unclosed_m.path.value.line_to(local);
+                    self.active_mask_edit = Some((pid.clone(), mid));
                     return Ok(pid);
                 }
+
+                // Otherwise create a new mask starting with this point:
+                let mid = next_mask_id(layer);
+                let name = format!("Mask {}", layer.masks.len() + 1);
+                let mut initial_path = Path::new();
+                initial_path.line_to(local);
+                layer.masks.push(Mask::with_path(&mid, name, initial_path));
+                self.active_mask_edit = Some((pid.clone(), mid));
+                return Ok(pid);
             }
         }
 
         // 5. No layer picked under cursor (empty space or background): fresh path layer
-        self.add_pen_point(point)
-    }
-
-    /// Text-tool press: select the topmost text layer under the cursor for
-    /// in-Properties editing, else create a new text layer at the point.
-    pub fn text_press_at(
-        &mut self,
-        point: Vec2,
-        picked: Option<String>,
-    ) -> Result<String, String> {
-        if let Some(pid) = picked {
-            let is_text = self
-                .active_composition()
-                .and_then(|c| c.get_layer(&pid))
-                .map(|l| matches!(l.source, LayerSource::Text { .. }))
-                .unwrap_or(false);
-            if is_text {
-                self.checkpoint();
-                self.select_layer(Some(pid.clone()));
-                return Ok(pid);
-            }
-        }
-        self.add_text_layer("New Text Layer", Some(point))
-    }
-
-    /// Add a vector path point using the Pen tool. If the currently selected layer is a Path shape,
-    /// appends the vertex; otherwise creates a new vector Path layer starting at `point`.
-    pub fn add_pen_point(&mut self, point: Vec2) -> Result<String, String> {
-        self.checkpoint();
-        // 1. Active mask edit target: pen appends to the mask path (the
-        // click arrives in comp coords; mask paths live in layer-local).
-        if let Some((lid, mid)) = self.active_mask_edit.clone() {
-            if let Some(local) = self.comp_to_layer_local(&lid, point) {
-                self.append_mask_point(&lid, &mid, local)?;
-                return Ok(lid);
-            }
-        }
-        // 2. Selected text layer: pen draws its baseline (text-on-path).
-        if let Some(sel) = self.selected_layer_id.clone() {
-            let is_text = self
-                .active_composition()
-                .and_then(|c| c.get_layer(&sel))
-                .map(|l| matches!(l.source, LayerSource::Text { .. }))
-                .unwrap_or(false);
-            if is_text {
-                if let Some(local) = self.comp_to_layer_local(&sel, point) {
-                    self.append_text_path_point(&sel, local)?;
-                    return Ok(sel);
-                }
-            }
-        }
-        // Check if selected layer is a Path shape: append in LAYER-LOCAL
-        // coords (the click arrives in comp coords).
-        let sel_id = self.selected_layer_id.clone();
-        if let Some(id) = sel_id {
-            // Resolve local first (read-only borrow), then mutate.
-            let local = self.comp_to_layer_local(&id, point);
-            let is_path = self
-                .active_composition()
-                .and_then(|c| c.get_layer(&id))
-                .map(|l| {
-                    matches!(
-                        &l.source,
-                        LayerSource::Shape { shape_type: ShapeType::Path { .. } }
-                    )
-                })
-                .unwrap_or(false);
-            if is_path {
-                if let Some(comp) = self.active_composition_mut() {
-                    if let Some(layer) = comp.get_layer_mut(&id) {
-                        if let LayerSource::Shape { shape_type: ShapeType::Path { path_data, .. } } = &mut layer.source {
-                            let p = local.unwrap_or(point);
-                            path_data.push_str(&format!(" L {:.1} {:.1}", p.x, p.y));
-                            return Ok(id);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Otherwise, create a new Path layer
         let (frame_rate, duration) = {
             let comp = self
                 .active_composition()
@@ -6241,6 +6178,34 @@ impl EditorState {
 
         self.selected_layer_id = Some(layer_id.clone());
         Ok(layer_id)
+    }
+
+    /// Text-tool press: select the topmost text layer under the cursor for
+    /// in-Properties editing, else create a new text layer at the point.
+    pub fn text_press_at(
+        &mut self,
+        point: Vec2,
+        picked: Option<String>,
+    ) -> Result<String, String> {
+        if let Some(pid) = picked {
+            let is_text = self
+                .active_composition()
+                .and_then(|c| c.get_layer(&pid))
+                .map(|l| matches!(l.source, LayerSource::Text { .. }))
+                .unwrap_or(false);
+            if is_text {
+                self.checkpoint();
+                self.select_layer(Some(pid.clone()));
+                return Ok(pid);
+            }
+        }
+        self.add_text_layer("New Text Layer", Some(point))
+    }
+
+    /// Add a vector path point using the Pen tool. Delegates to `pen_press_at`
+    /// to preserve mask-by-default behavior and point-by-point drawing.
+    pub fn add_pen_point(&mut self, point: Vec2) -> Result<String, String> {
+        self.pen_press_at(point, None)
     }
 
     /// Duplicate the specified layer in the active composition.
