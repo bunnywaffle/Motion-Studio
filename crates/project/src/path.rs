@@ -1432,7 +1432,7 @@ mod tests {
         let b = Path::rectangle(20.0, 20.0, 40.0, 40.0);
         // Union area = 1600 + 1600 - 400 = 2800.
         let u = a.boolean_op(&b, PathBooleanOp::Union, 0.5);
-        let areas: Vec<f32> = u.iter().map(|p| polygon_area(&p.flatten(0.5)).abs()).collect();
+        let _areas: Vec<f32> = u.iter().map(|p| polygon_area(&p.flatten(0.5)).abs()).collect();
             assert!((area_sum(&u.iter().map(|p| p.flatten(0.5)).collect::<Vec<_>>()) - 2800.0).abs() < 60.0, "{u:?}");
         // Intersect = 20x20 = 400.
         let i = a.boolean_op(&b, PathBooleanOp::Intersect, 0.5);

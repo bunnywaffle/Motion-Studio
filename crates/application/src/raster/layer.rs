@@ -241,6 +241,10 @@ pub fn layer_cache_key(
     for v in [wm.a, wm.b, wm.c, wm.d] {
         v.to_bits().hash(&mut h);
     }
+    if layer.blend_mode != BlendMode::Normal {
+        wm.tx.to_bits().hash(&mut h);
+        wm.ty.to_bits().hash(&mut h);
+    }
     layer.effective_opacity.to_bits().hash(&mut h);
     (layer.blend_mode as u8).hash(&mut h);
     layer.is_visible.hash(&mut h);

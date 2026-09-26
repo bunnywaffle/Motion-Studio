@@ -88,20 +88,26 @@ impl AppView {
             async move {
                 let mut last_instant = std::time::Instant::now();
                 loop {
-                    cx.background_executor().timer(std::time::Duration::from_millis(16)).await;
-                    let now = std::time::Instant::now();
-                    let dt = now - last_instant;
-                    last_instant = now;
-                    cx.update(|cx| {
-                        state.update(cx, |editor, cx| {
-                            if editor.is_playing {
-                                let changed = editor.tick(dt);
-                                if changed {
-                                    cx.notify();
+                    let is_playing = state.read_with(&cx, |editor, _| editor.is_playing);
+                    if is_playing {
+                        cx.background_executor().timer(std::time::Duration::from_millis(16)).await;
+                        let now = std::time::Instant::now();
+                        let dt = now - last_instant;
+                        last_instant = now;
+                        let _ = cx.update(|cx| {
+                            state.update(cx, |editor, cx| {
+                                if editor.is_playing {
+                                    let changed = editor.tick(dt);
+                                    if changed {
+                                        cx.notify();
+                                    }
                                 }
-                            }
+                            });
                         });
-                    });
+                    } else {
+                        cx.background_executor().timer(std::time::Duration::from_millis(80)).await;
+                        last_instant = std::time::Instant::now();
+                    }
                 }
             }
         });

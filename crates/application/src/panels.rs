@@ -1857,11 +1857,10 @@ impl Render for CompositionViewerPanel {
                         rh,
                         playing_now,
                     );
-                    // Exotic blend modes sample the backdrop average under
-                    // the box, which moves with translation — the
-                    // translation-stable key would go stale, so those
-                    // layers always re-rasterize.
-                    let cacheable = layer.blend_mode == BlendMode::Normal;
+                    // Translation is hashed into cache_key for non-Normal blend modes,
+                    // so all blend modes can be safely cached without re-rasterizing
+                    // on every mouse interaction when stationary.
+                    let cacheable = true;
                     let entry = match self.raster_cache.get(&layer.id) {
                         Some(e) if cacheable && e.key == cache_key && e.w == rw && e.h == rh => e.clone(),
                         _ => {
@@ -3034,11 +3033,13 @@ impl Render for CompositionViewerPanel {
                                     let ox = bounds.origin.x / px(1.0);
                                     let oy = bounds.origin.y / px(1.0);
                                     p_measure.update(cx, |this, cx| {
-                                        let changed = this.viewport_px != Some((w, h))
-                                            || this.viewport_origin != Some((ox, oy));
+                                        let size_changed = match this.viewport_px {
+                                            Some((ow, oh)) => (ow - w).abs() > 1.0 || (oh - h).abs() > 1.0,
+                                            None => true,
+                                        };
                                         this.viewport_px = Some((w, h));
                                         this.viewport_origin = Some((ox, oy));
-                                        if changed {
+                                        if size_changed {
                                             cx.notify();
                                         }
                                     });
@@ -3061,11 +3062,8 @@ impl Render for CompositionViewerPanel {
                                         move |bounds, _window, cx| {
                                             let ox = bounds.origin.x / px(1.0);
                                             let oy = bounds.origin.y / px(1.0);
-                                            p_frame.update(cx, |this, cx| {
-                                                if this.frame_origin != Some((ox, oy)) {
-                                                    this.frame_origin = Some((ox, oy));
-                                                    cx.notify();
-                                                }
+                                            p_frame.update(cx, |this, _cx| {
+                                                this.frame_origin = Some((ox, oy));
                                             });
                                         }
                                     })
@@ -11216,6 +11214,10 @@ pub struct TimelinePanel {
     pub active_parent_dropdown: Option<String>,
     pub context_menu: Option<ContextMenuState>,
     pub is_scrubbing_ruler: bool,
+    pub ruler_origin_x: f32,
+    pub ruler_width: f32,
+    pub graph_plot_origin_x: f32,
+    pub graph_plot_width: f32,
     /// Drag state for layer strip interactions (After Effects-style)
     pub drag_action: Option<TimelineDragAction>,
     pub drag_last_x: f32,
@@ -12147,28 +12149,36 @@ fn render_graph_view(
         }
     }
 
-    // Background seek slices (below curves/keys so keys stay clickable).
+    // Background seek on plot area (below curves/keys so keys stay clickable).
     // Mapped across the VIEW so Fit Sel seeks precisely.
-    for slice_idx in 0..120 {
-        let frac = slice_idx as f64 / 120.0;
-        let s_seek = state.clone();
-        let target = view.t0 + frac * tspan;
-        plot = plot.child(
-            div()
-                .absolute()
-                .top_0()
-                .bottom_0()
-                .left(relative(frac as f32))
-                .w(relative(1.0 / 120.0))
-                .cursor_col_resize()
-                .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
-                    s_seek.update(cx, |s, cx| {
-                        s.seek(target);
-                        cx.notify();
-                    });
-                }),
-        );
-    }
+    let p_plot_prep = panel_entity.clone();
+    let p_plot_down = panel_entity.clone();
+    let s_seek = state.clone();
+    let v_t0 = view.t0;
+    let v_tspan = tspan;
+    plot = plot
+        .cursor_col_resize()
+        .on_prepaint(move |bounds, _window, cx| {
+            let ox = bounds.origin.x / px(1.0);
+            let w = bounds.size.width / px(1.0);
+            p_plot_prep.update(cx, |this, _cx| {
+                this.graph_plot_origin_x = ox;
+                this.graph_plot_width = w;
+            });
+        })
+        .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+            let mx = event.position.x / px(1.0);
+            let (ox, w) = {
+                let p = p_plot_down.read(cx);
+                (p.graph_plot_origin_x, p.graph_plot_width)
+            };
+            let frac = ((mx - ox) / w.max(1.0)).clamp(0.0, 1.0) as f64;
+            let target = v_t0 + frac * v_tspan;
+            s_seek.update(cx, |s, cx| {
+                s.seek(target);
+                cx.notify();
+            });
+        });
 
     // Curves as dense dots (120 per series reads as a line).
     let speed_tab = tab == GraphTab::Speed;
@@ -12649,6 +12659,10 @@ impl TimelinePanel {
             active_parent_dropdown: None,
             context_menu: None,
             is_scrubbing_ruler: false,
+            ruler_origin_x: 380.0,
+            ruler_width: 1000.0,
+            graph_plot_origin_x: 0.0,
+            graph_plot_width: 1000.0,
             drag_action: None,
             drag_last_x: 0.0,
             scrub_layer: None,
@@ -13882,6 +13896,21 @@ impl Render for TimelinePanel {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .on_mouse_move(move |event, window, cx| {
+                if p_root_move.read(cx).is_scrubbing_ruler {
+                    let cur_x = event.position.x / px(1.0);
+                    let (ox, rw) = {
+                        let p = p_root_move.read(cx);
+                        (p.ruler_origin_x, p.ruler_width)
+                    };
+                    let frac = ((cur_x - ox) / rw.max(1.0)).clamp(0.0, 1.0) as f64;
+                    let target_time = frac * total_duration_secs;
+                    s_root_move.update(cx, |s, cx| {
+                        s.preview_fast = true;
+                        s.seek(target_time);
+                        cx.notify();
+                    });
+                    return;
+                }
                 // Tangent-handle drag wins over keyframe drags.
                 let ttdrag = p_root_move.read(cx).graph_tan_drag.clone();
                 if let Some(mut td) = ttdrag {
@@ -14460,6 +14489,7 @@ impl Render for TimelinePanel {
                     )
                     .child({
                         let p_ruler_down = panel_entity.clone();
+                        let p_ruler_prep = panel_entity.clone();
                         let s_ruler_down = self.state.clone();
                         let mut ruler_track = div()
                             .id("ruler_track")
@@ -14468,53 +14498,28 @@ impl Render for TimelinePanel {
                             .relative()
                             .h_full()
                             .cursor_col_resize()
-                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            .on_prepaint(move |bounds, _window, cx| {
+                                let ox = bounds.origin.x / px(1.0);
+                                let w = bounds.size.width / px(1.0);
+                                p_ruler_prep.update(cx, |this, _cx| {
+                                    this.ruler_origin_x = ox;
+                                    this.ruler_width = w;
+                                });
+                            })
+                            .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+                                let mx = event.position.x / px(1.0);
                                 p_ruler_down.update(cx, |this, cx| {
                                     this.is_scrubbing_ruler = true;
-                                    cx.notify();
-                                });
-                                s_ruler_down.update(cx, |s, cx| {
-                                    s.preview_fast = true;
+                                    let frac = ((mx - this.ruler_origin_x) / this.ruler_width.max(1.0)).clamp(0.0, 1.0) as f64;
+                                    let target_time = frac * total_duration_secs;
+                                    s_ruler_down.update(cx, |s, cx| {
+                                        s.preview_fast = true;
+                                        s.seek(target_time);
+                                        cx.notify();
+                                    });
                                     cx.notify();
                                 });
                             });
-
-                        // 200 interactive scrub slices across the timeline ruler track
-                        for slice_idx in 0..200 {
-                            let scrub_pct = (slice_idx as f64) / 200.0;
-                            let s_scrub = self.state.clone();
-                            let s_scrub_move = self.state.clone();
-                            let p_slice_down = panel_entity.clone();
-                            let p_slice_move = panel_entity.clone();
-                            let target_time = scrub_pct * total_duration_secs;
-                            ruler_track = ruler_track.child(
-                                div()
-                                    .absolute()
-                                    .top_0()
-                                    .bottom_0()
-                                    .left(relative(scrub_pct as f32))
-                                    .w(relative(1.0 / 200.0))
-                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                        p_slice_down.update(cx, |this, cx| {
-                                            this.is_scrubbing_ruler = true;
-                                            cx.notify();
-                                        });
-                                        s_scrub.update(cx, |s, cx| {
-                                            s.preview_fast = true;
-                                            s.seek(target_time);
-                                            cx.notify();
-                                        });
-                                    })
-                                    .on_mouse_move(move |event, _window, cx| {
-                                        if event.dragging() || p_slice_move.read(cx).is_scrubbing_ruler {
-                                            s_scrub_move.update(cx, |s, cx| {
-                                                s.seek(target_time);
-                                                cx.notify();
-                                            });
-                                        }
-                                    }),
-                            );
-                        }
 
                         ruler_track = ruler_track
                             .child(
