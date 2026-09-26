@@ -13,7 +13,7 @@ use super::effects::{RasterFx, apply_effect_pixels, apply_sharpen, apply_vignett
 use super::mask::apply_masks;
 use super::stock::apply_stock;
 use super::pixel::Px;
-use super::shapes::{fill_ellipse, fill_rect, stroke_path};
+use super::shapes::{fill_ellipse, fill_path, fill_rect, stroke_path};
 use super::text::{TextSpec, raster_text};
 
 // Layer + composition raster
@@ -88,6 +88,12 @@ pub fn raster_content(
                 }
                 ShapeType::Path { path_data, fill } => {
                     let (origin, _, _) = path_frame(path_data);
+                    fill_path(
+                        &mut buf,
+                        path_data,
+                        Px::from_color(*fill),
+                        origin,
+                    );
                     stroke_path(
                         &mut buf,
                         path_data,
@@ -216,12 +222,16 @@ pub fn layer_cache_key(
     out_w: u32,
     out_h: u32,
     playing: bool,
+    backdrop_hash: u64,
 ) -> u64 {
     let mut h = DefaultHasher::new();
     layer.id.hash(&mut h);
     out_w.hash(&mut h);
     out_h.hash(&mut h);
     playing.hash(&mut h);
+    if layer.blend_mode != BlendMode::Normal {
+        backdrop_hash.hash(&mut h);
+    }
     // Time-varying Shader Lab (`time`/`frame` uniforms) invalidates per
     // frame; everything else keys off evaluated values below. This avoids
     // the old `format!("{:?}")` whose AST dumps cost milliseconds per
@@ -595,6 +605,7 @@ pub fn rasterize_layer(
     comp_w: f32,
     comp_h: f32,
     backdrop: Color,
+    backdrop_buf: Option<&FloatBuf>,
     time_s: f32,
     frame: i64,
     playing: bool,
@@ -798,7 +809,11 @@ pub fn rasterize_layer(
             // Backdrop blend is positional (dissolve dither stability).
             let x = (i as u32 % bg.w) as i32;
             let y = (i as u32 / bg.w) as i32;
-            let mut d = Px::from_color(backdrop);
+            let mut d = if let Some(bb) = backdrop_buf {
+                bb.get(x, y)
+            } else {
+                Px::from_color(backdrop)
+            };
             d.blend_over_at(*s, layer.blend_mode, x, y);
             bg.px[i] = d;
         }
@@ -1123,15 +1138,15 @@ mod tests {
     fn fingerprint_stable_and_sensitive() {
         let (project, comp_id) = solid_layer();
         let layer = eval_first(&project, &comp_id);
-        let k1 = layer_cache_key(&layer, 0, 100, 100, false);
+        let k1 = layer_cache_key(&layer, 0, 100, 100, false, 0);
         // Same inputs -> same key (cache hit, no Debug formatting).
-        assert_eq!(k1, layer_cache_key(&layer, 0, 100, 100, false));
+        assert_eq!(k1, layer_cache_key(&layer, 0, 100, 100, false, 0));
         // Static layers ignore the frame (cross-frame hits during playback).
-        assert_eq!(k1, layer_cache_key(&layer, 99, 100, 100, false));
+        assert_eq!(k1, layer_cache_key(&layer, 99, 100, 100, false, 0));
         // Quality flag participates.
-        assert_ne!(k1, layer_cache_key(&layer, 0, 100, 100, true));
+        assert_ne!(k1, layer_cache_key(&layer, 0, 100, 100, true, 0));
         // Size participates.
-        assert_ne!(k1, layer_cache_key(&layer, 0, 50, 50, false));
+        assert_ne!(k1, layer_cache_key(&layer, 0, 50, 50, false, 0));
         // Pure translation does NOT change the key: the raster is relative
         // to the box origin, so move-drags hit the cache and cost only a
         // relayout. Rotation changes the linear part, so it must miss.
@@ -1148,7 +1163,7 @@ mod tests {
             project.add_composition(comp).unwrap();
             eval_first(&project, "c")
         };
-        assert_eq!(k1, layer_cache_key(&translated, 0, 100, 100, false));
+        assert_eq!(k1, layer_cache_key(&translated, 0, 100, 100, false, 0));
         let rotated = {
             let mut project = Project::new("p", "P");
             let mut comp = Composition::hd_1080p_30fps("c", "C", 5.0);
@@ -1159,7 +1174,7 @@ mod tests {
             project.add_composition(comp).unwrap();
             eval_first(&project, "c")
         };
-        assert_ne!(k1, layer_cache_key(&rotated, 0, 100, 100, false));
+        assert_ne!(k1, layer_cache_key(&rotated, 0, 100, 100, false, 0));
     }
 
     fn path_project() -> (Project, String) {
@@ -1207,6 +1222,7 @@ mod tests {
             1920.0,
             1080.0,
             Color::BLACK,
+            None,
             0.0,
             0,
             false,

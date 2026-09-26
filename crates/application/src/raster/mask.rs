@@ -15,7 +15,7 @@ use project::{MaskMode, Path};
 
 /// Even-odd scanline fill of a closed polygon into `coverage` (writes 1.0;
 /// caller clears first). Coordinates are buffer px.
-fn fill_even_odd(coverage: &mut [f32], w: u32, h: u32, poly: &[project::Vec2]) {
+pub(crate) fn fill_even_odd(coverage: &mut [f32], w: u32, h: u32, poly: &[project::Vec2]) {
     if poly.len() < 3 {
         return;
     }

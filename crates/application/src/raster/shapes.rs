@@ -60,6 +60,39 @@ pub(crate) fn fill_ellipse(buf: &mut FloatBuf, rx: f32, ry: f32, col: Px) {
     }
 }
 
+/// Fill a path through the shared path model using even-odd polygon fill.
+/// `origin` is the content-buffer frame origin in path-local coords.
+pub(crate) fn fill_path(
+    buf: &mut FloatBuf,
+    path_data: &str,
+    col: Px,
+    origin: project::Vec2,
+) {
+    let path = project::Path::from_svg(path_data);
+    let mut pts = path.flatten(0.5);
+    if pts.len() < 3 {
+        return;
+    }
+    for p in pts.iter_mut() {
+        *p = *p - origin;
+    }
+    let mut cov = vec![0.0f32; (buf.w * buf.h) as usize];
+    super::mask::fill_even_odd(&mut cov, buf.w, buf.h, &pts);
+    for y in 0..buf.h {
+        for x in 0..buf.w {
+            let a = cov[(y * buf.w + x) as usize];
+            if a > 0.0 {
+                let mut p = col;
+                p.scale(a);
+                let dst = buf.get(x as i32, y as i32);
+                let mut out = dst;
+                out.over(p);
+                buf.put(x as i32, y as i32, out);
+            }
+        }
+    }
+}
+
 /// Stroke a path through the shared path model (curves flatten to the
 /// polyline, then a round-ish nib walks it). Closed paths join up.
 /// `origin` is the content-buffer frame origin in path-local coords

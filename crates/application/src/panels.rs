@@ -1723,6 +1723,14 @@ impl Render for CompositionViewerPanel {
                 let mut rendered_regions: Vec<(f32, f32, f32, f32, Color)> = Vec::new();
                 let mut pick_list: Vec<PickBox> = Vec::new();
 
+                let cw = canvas_w.ceil().max(1.0) as u32;
+                let ch = canvas_h.ceil().max(1.0) as u32;
+                let mut canvas_comp = crate::raster::FloatBuf::clear(cw, ch);
+                let bg_p = crate::raster::Px::from_color(full_frame_backdrop);
+                for px in canvas_comp.px.iter_mut() {
+                    *px = bg_p;
+                }
+
                 for layer in stack.render_layers() {
                     let is_adjustment = matches!(&layer.source, LayerSource::Adjustment);
 
@@ -1850,16 +1858,38 @@ impl Render for CompositionViewerPanel {
                             crate::raster::decoded_asset(&mut self.asset_cache, asset_id, &path);
                         }
                     }
+                    let (backdrop_buf, backdrop_hash) = if layer.blend_mode != BlendMode::Normal {
+                        let mut b_slice = crate::raster::FloatBuf::clear(rw, rh);
+                        let mut h = std::collections::hash_map::DefaultHasher::new();
+                        for by in 0..rh {
+                            let cy = (l_y + (by as f32 / rh as f32) * l_h).floor() as i32;
+                            for bx in 0..rw {
+                                let cx = (l_x + (bx as f32 / rw as f32) * l_w).floor() as i32;
+                                let p = canvas_comp.get(cx, cy);
+                                b_slice.put(bx as i32, by as i32, p);
+                                if bx % 4 == 0 && by % 4 == 0 {
+                                    use std::hash::Hash;
+                                    p.r.to_bits().hash(&mut h);
+                                    p.g.to_bits().hash(&mut h);
+                                    p.b.to_bits().hash(&mut h);
+                                    p.a.to_bits().hash(&mut h);
+                                }
+                            }
+                        }
+                        use std::hash::Hasher;
+                        (Some(b_slice), h.finish())
+                    } else {
+                        (None, 0u64)
+                    };
+
                     let cache_key = crate::raster::layer_cache_key(
                         layer,
                         current_frame,
                         rw,
                         rh,
                         playing_now,
+                        backdrop_hash,
                     );
-                    // Translation is hashed into cache_key for non-Normal blend modes,
-                    // so all blend modes can be safely cached without re-rasterizing
-                    // on every mouse interaction when stationary.
                     let cacheable = true;
                     let entry = match self.raster_cache.get(&layer.id) {
                         Some(e) if cacheable && e.key == cache_key && e.w == rw && e.h == rh => e.clone(),
@@ -1873,6 +1903,7 @@ impl Render for CompositionViewerPanel {
                                 comp_w,
                                 comp_h,
                                 sampled_backdrop,
+                                backdrop_buf.as_ref(),
                                 time_s,
                                 current_frame,
                                 playing_now,
@@ -1899,6 +1930,39 @@ impl Render for CompositionViewerPanel {
                             e
                         }
                     };
+
+                    // Blit layer pixels into canvas_comp for subsequent overlying layers
+                    if !entry.empty && !is_adjustment {
+                        for by in 0..rh {
+                            let cy = (l_y + (by as f32 / rh as f32) * l_h).floor() as i32;
+                            if cy < 0 || cy >= ch as i32 {
+                                continue;
+                            }
+                            for bx in 0..rw {
+                                let idx = ((by * rw + bx) * 4) as usize;
+                                if idx + 3 < entry.bgra.len() {
+                                    let a = entry.bgra[idx + 3] as f32 / 255.0;
+                                    if a > 0.003 {
+                                        let cx = (l_x + (bx as f32 / rw as f32) * l_w).floor() as i32;
+                                        if cx < 0 || cx >= cw as i32 {
+                                            continue;
+                                        }
+                                        let r = entry.bgra[idx + 2] as f32 / 255.0;
+                                        let g = entry.bgra[idx + 1] as f32 / 255.0;
+                                        let b = entry.bgra[idx] as f32 / 255.0;
+                                        let s = crate::raster::Px { r, g, b, a };
+                                        if layer.blend_mode == BlendMode::Normal {
+                                            let mut d = canvas_comp.get(cx, cy);
+                                            d.over(s);
+                                            canvas_comp.put(cx, cy, d);
+                                        } else {
+                                            canvas_comp.put(cx, cy, s);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     let recorded_color = if entry.empty {
                         sampled_backdrop
                     } else {

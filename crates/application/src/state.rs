@@ -702,7 +702,7 @@ impl EditorState {
             evaluator: LayerStackEvaluator::new(),
             tool_font_size: 48.0,
             tool_text_color: Color::WHITE,
-            tool_shape_fill: Color::WHITE,
+            tool_shape_fill: Color::from_rgba_u8(168, 85, 247, 255),
             tool_solid_color: Color::from_rgba_u8(59, 130, 246, 255),
             tool_rotate_step: 15.0,
             preview_fast: false,
@@ -5975,7 +5975,60 @@ impl EditorState {
             }
         }
 
-        // 2. Route by picked layer under the cursor
+        // 2. If the currently selected layer is an unclosed Path shape, continue drawing on it!
+        if let Some(sel_id) = self.selected_layer_id.clone() {
+            let is_unclosed_path = self
+                .active_composition()
+                .and_then(|c| c.get_layer(&sel_id))
+                .map(|l| match &l.source {
+                    LayerSource::Shape {
+                        shape_type: ShapeType::Path { path_data, .. },
+                    } => {
+                        let p = Path::from_svg(path_data);
+                        !p.closed
+                    }
+                    _ => false,
+                })
+                .unwrap_or(false);
+
+            if is_unclosed_path {
+                self.checkpoint();
+                if let Some(local) = self.comp_to_layer_local(&sel_id, point) {
+                    let comp = self
+                        .active_composition_mut()
+                        .ok_or_else(|| "No active composition".to_string())?;
+                    let layer = comp
+                        .get_layer_mut(&sel_id)
+                        .ok_or_else(|| format!("Layer {sel_id} not found"))?;
+                    if let LayerSource::Shape {
+                        shape_type: ShapeType::Path { path_data, .. },
+                    } = &mut layer.source
+                    {
+                        let mut path = Path::from_svg(path_data);
+                        if path.points.len() >= 3 {
+                            let first_p = path.points[0].pos;
+                            if (local - first_p).length() <= 20.0 {
+                                path.close();
+                                *path_data = path.to_svg();
+                                return Ok(sel_id);
+                            }
+                        }
+                        path.line_to(local);
+                        *path_data = path.to_svg();
+                        return Ok(sel_id);
+                    }
+                }
+                return Ok(sel_id);
+            }
+        }
+
+        // 3. Ignore background solid as a hit-test target for mask creation
+        let is_bg = picked.as_deref().map(|id| {
+            id == "layer_bg" || self.active_composition().and_then(|c| c.get_layer(id)).map(|l| l.name.to_lowercase().contains("background")).unwrap_or(false)
+        }).unwrap_or(false);
+        let picked = if is_bg { None } else { picked };
+
+        // 4. Route by picked layer under the cursor
         if let Some(pid) = picked {
             let (is_path_shape, is_text) = self
                 .active_composition()
@@ -6001,6 +6054,14 @@ impl EditorState {
                     } = &mut layer.source
                     {
                         let mut path = Path::from_svg(path_data);
+                        if path.points.len() >= 3 {
+                            let first_p = path.points[0].pos;
+                            if (local - first_p).length() <= 20.0 {
+                                path.close();
+                                *path_data = path.to_svg();
+                                return Ok(pid);
+                            }
+                        }
                         path.line_to(local);
                         *path_data = path.to_svg();
                         return Ok(pid);
@@ -6055,7 +6116,7 @@ impl EditorState {
             }
         }
 
-        // 3. No layer picked under cursor (empty space): fresh path layer
+        // 5. No layer picked under cursor (empty space or background): fresh path layer
         self.add_pen_point(point)
     }
 
@@ -6162,7 +6223,7 @@ impl EditorState {
         let fill = self.tool_shape_fill;
         let layer = Layer::shape(
             &layer_id,
-            "Pen Path",
+            "Path",
             ShapeType::Path {
                 path_data: format!("M {:.1} {:.1}", point.x, point.y),
                 fill,

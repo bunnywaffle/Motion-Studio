@@ -4614,6 +4614,7 @@ mod tests {
             1920.0,
             1080.0,
             project::Color::BLACK,
+            None,
             0.0,
             0,
             false,
@@ -5995,5 +5996,127 @@ mod tests {
                 _ => false,
             }
         }));
+    }
+
+    #[gpui_kit::test]
+    fn test_path_tool_point_by_point_drawing_and_blend_mode_backdrop(_cx: &mut gpui::TestAppContext) {
+        use crate::state::{EditorState, EditorTool};
+        let mut state = EditorState::new();
+        state.set_tool(EditorTool::Pen);
+
+        // 1. Click 1: starts Path layer
+        let p1 = project::Vec2::new(100.0, 100.0);
+        let path_layer_id = state.pen_press_at(p1, None).expect("click 1 creates path layer");
+        assert_eq!(state.selected_layer_id.as_deref(), Some(path_layer_id.as_str()));
+
+        // 2. Click 2: appends point 2
+        let p2 = project::Vec2::new(200.0, 100.0);
+        state.pen_press_at(p2, Some("layer_bg".to_string())).expect("click 2 appends point");
+
+        // 3. Click 3: appends point 3
+        let p3 = project::Vec2::new(200.0, 200.0);
+        state.pen_press_at(p3, Some("layer_bg".to_string())).expect("click 3 appends point");
+
+        // 4. Click 4: appends point 4
+        let p4 = project::Vec2::new(100.0, 200.0);
+        state.pen_press_at(p4, Some("layer_bg".to_string())).expect("click 4 appends point");
+
+        {
+            let comp = state.active_composition().unwrap();
+            let layer = comp.get_layer(&path_layer_id).unwrap();
+            if let project::LayerSource::Shape { shape_type: project::ShapeType::Path { path_data, .. } } = &layer.source {
+                let path = project::Path::from_svg(path_data.as_str());
+                assert_eq!(path.points.len(), 4);
+                assert!(!path.closed);
+            } else {
+                panic!("Expected Path shape");
+            }
+        }
+
+        // 5. Click 5 (near vertex 1): closes the path!
+        let p_close = project::Vec2::new(102.0, 99.0);
+        state.pen_press_at(p_close, Some("layer_bg".to_string())).expect("click 5 closes path");
+
+        {
+            let comp = state.active_composition().unwrap();
+            let layer = comp.get_layer(&path_layer_id).unwrap();
+            if let project::LayerSource::Shape { shape_type: project::ShapeType::Path { path_data, .. } } = &layer.source {
+                let path = project::Path::from_svg(path_data.as_str());
+                assert!(path.closed, "Path should be closed after clicking near vertex 0");
+            } else {
+                panic!("Expected Path shape");
+            }
+        }
+
+        // 6. Verify rasterization fills the path with purple (#A855F7)
+        let eval = state.evaluate_current_frame().expect("evaluate");
+        let eval_path = eval.get_layer(&path_layer_id).expect("layer evaluated");
+        let (path_buf, _, _) = crate::raster::rasterize_layer(
+            eval_path,
+            120.0,
+            120.0,
+            120,
+            120,
+            1920.0,
+            1080.0,
+            project::Color::BLACK,
+            None,
+            0.0,
+            0,
+            false,
+            5.0,
+            &std::collections::HashMap::new(),
+        );
+        let filled_pixels = path_buf.px.iter().filter(|p| p.a > 0.8).count();
+        assert!(filled_pixels > 100, "Closed path must have filled interior");
+
+        // 7. Verify per-pixel backdrop blending with Multiply blend mode:
+        // A solid layer with BlendMode::Multiply blends against backdrop_buf
+        let blue = project::Color::from_rgba_u8(0, 0, 255, 255);
+        let mut blue_solid = project::Layer::solid(
+            "blue_solid",
+            "Blue Solid",
+            blue,
+            100,
+            100,
+            project::TimeCode::zero(30.0),
+            project::TimeCode::from_frames(150, 30.0),
+        );
+        blue_solid.blend_mode = project::BlendMode::Multiply;
+        let comp = state.active_composition_mut().unwrap();
+        comp.insert_layer(0, blue_solid).unwrap();
+
+        let eval = state.evaluate_current_frame().expect("evaluate");
+        let eval_blue = eval.get_layer("blue_solid").expect("blue solid evaluated");
+
+        // Create a backdrop buffer containing purple pixels (#A855F7)
+        let purple_px = crate::raster::Px::from_color(project::Color::from_rgba_u8(168, 85, 247, 255));
+        let mut backdrop = crate::raster::FloatBuf::clear(100, 100);
+        for p in backdrop.px.iter_mut() {
+            *p = purple_px;
+        }
+
+        let (blended_buf, _, _) = crate::raster::rasterize_layer(
+            eval_blue,
+            100.0,
+            100.0,
+            100,
+            100,
+            1920.0,
+            1080.0,
+            project::Color::BLACK,
+            Some(&backdrop),
+            0.0,
+            0,
+            false,
+            5.0,
+            &std::collections::HashMap::new(),
+        );
+
+        // Under Multiply, purple (0.658, 0.333, 0.968) * blue (0.0, 0.0, 1.0) = (0.0, 0.0, 0.968)
+        let sample = blended_buf.get(50, 50);
+        assert!(sample.r < 0.05, "Red channel must be near 0 under Multiply with pure blue: {}", sample.r);
+        assert!(sample.g < 0.05, "Green channel must be near 0 under Multiply with pure blue: {}", sample.g);
+        assert!(sample.b > 0.8, "Blue channel must remain high under Multiply: {}", sample.b);
     }
 }
