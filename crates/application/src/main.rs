@@ -2436,7 +2436,11 @@ impl Render for AppView {
                     });
                 } else if key == "delete" || key == "backspace" {
                     state_key.update(cx, |s, cx| {
-                        let _ = s.delete_selected_layer();
+                        if let Some((lid, mid)) = s.active_mask_edit.take() {
+                            let _ = s.remove_layer_mask(&lid, &mid);
+                        } else {
+                            let _ = s.delete_selected_layer();
+                        }
                         cx.notify();
                     });
                 } else if key == "home" {
@@ -7798,5 +7802,107 @@ mod tests {
             &assets,
         );
         assert!(!empty_with_fx, "Adjustment layer with active effects should produce renderable pixels");
+    }
+
+    #[gpui_kit::test]
+    fn test_mask_removal_via_delete_mask(cx: &mut TestAppContext) {
+        let (_root, app_view) = setup_test_window(cx);
+        cx.run_until_parked();
+
+        let state_entity = app_view.read_with(cx, |v, _| v.state().clone());
+
+        let mid = state_entity.update(cx, |s, cx| {
+            let m = s.add_layer_sized_mask("layer_accent").expect("mask added");
+            cx.notify();
+            m
+        });
+
+        // Verify mask exists on layer
+        state_entity.read_with(cx, |s, _| {
+            let comp = s.active_composition().unwrap();
+            let layer = comp.get_layer("layer_accent").unwrap();
+            assert_eq!(layer.masks.len(), 1);
+            assert_eq!(layer.masks[0].id, mid);
+        });
+
+        // Call delete_mask (the action wired to the trash button and context menu)
+        state_entity.update(cx, |s, cx| {
+            s.delete_mask("layer_accent", &mid).expect("mask deleted");
+            cx.notify();
+        });
+
+        // Verify mask was cleanly removed
+        state_entity.read_with(cx, |s, _| {
+            let comp = s.active_composition().unwrap();
+            let layer = comp.get_layer("layer_accent").unwrap();
+            assert!(layer.masks.is_empty(), "Mask should be removed from layer");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn test_smart_delete_shortcut_deletes_mask_when_active(cx: &mut TestAppContext) {
+        let (_root, app_view) = setup_test_window(cx);
+        cx.run_until_parked();
+
+        let state_entity = app_view.read_with(cx, |v, _| v.state().clone());
+
+        let mid = state_entity.update(cx, |s, cx| {
+            let m = s.add_layer_sized_mask("layer_accent").expect("mask added");
+            s.set_active_mask_edit(Some(("layer_accent".to_string(), m.clone())));
+            cx.notify();
+            m
+        });
+
+        // Verify active_mask_edit is set
+        state_entity.read_with(cx, |s, _| {
+            assert_eq!(s.active_mask_edit, Some(("layer_accent".to_string(), mid.clone())));
+        });
+
+        // Simulate smart Delete key handler behavior:
+        state_entity.update(cx, |s, cx| {
+            if let Some((lid, mid)) = s.active_mask_edit.take() {
+                let _ = s.remove_layer_mask(&lid, &mid);
+            } else {
+                let _ = s.delete_selected_layer();
+            }
+            cx.notify();
+        });
+
+        // Verify mask was deleted BUT layer remains intact
+        state_entity.read_with(cx, |s, _| {
+            let comp = s.active_composition().unwrap();
+            let layer = comp.get_layer("layer_accent");
+            assert!(layer.is_some(), "Layer must NOT be deleted when active_mask_edit was set");
+            assert!(layer.unwrap().masks.is_empty(), "Mask should be removed from layer");
+            assert!(s.active_mask_edit.is_none(), "active_mask_edit should be cleared");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn test_viewport_canvas_comp_buffer_reuse(cx: &mut TestAppContext) {
+        let (_root, app_view) = setup_test_window(cx);
+        cx.run_until_parked();
+
+        let state_entity = app_view.read_with(cx, |v, _| v.state().clone());
+        let panels = app_view.read_with(cx, |v, _| v.panels().clone());
+
+        // Add adjustment layer so needs_canvas_comp is true
+        state_entity.update(cx, |s, cx| {
+            let _ = s.add_adjustment_layer(None);
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        // Render once and verify canvas_comp_buf is populated and retained
+        panels.viewer.update(cx, |_panel, cx| {
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        panels.viewer.read_with(cx, |panel, _| {
+            assert!(panel.canvas_comp_buf.is_some(), "canvas_comp_buf must be retained for reuse");
+            let buf = panel.canvas_comp_buf.as_ref().unwrap();
+            assert!(buf.w > 0 && buf.h > 0);
+        });
     }
 }

@@ -1543,6 +1543,10 @@ pub struct CompositionViewerPanel {
     /// Evaluated layer boxes, topmost-first, for deterministic viewport
     /// picking (independent of sibling hit-test order).
     pub pick_boxes: Vec<PickBox>,
+    /// Persistent canvas composite buffer reused across renders without re-allocating.
+    pub canvas_comp_buf: Option<crate::raster::FloatBuf>,
+    /// Fingerprint of the canvas composite (dims + bg + underlying layers).
+    pub canvas_comp_fingerprint: Option<u64>,
 }
 
 /// Evaluated world-space AABB of one layer for viewport picking (comp px).
@@ -1627,6 +1631,8 @@ impl CompositionViewerPanel {
             canvas_px: None,
             last_frame_ms: 0.0,
             pick_boxes: Vec::new(),
+            canvas_comp_buf: None,
+            canvas_comp_fingerprint: None,
         }
     }
 
@@ -1731,18 +1737,37 @@ impl Render for CompositionViewerPanel {
                 let mut pick_list: Vec<PickBox> = Vec::new();
 
                 let needs_canvas_comp = stack.render_layers().iter().any(|l| matches!(&l.source, LayerSource::Adjustment) || l.blend_mode != BlendMode::Normal);
+                let cw = canvas_w.ceil().max(1.0) as u32;
+                let ch = canvas_h.ceil().max(1.0) as u32;
+                let bg_p = crate::raster::Px::from_color(full_frame_backdrop);
                 let mut canvas_comp = if needs_canvas_comp {
-                    let cw = canvas_w.ceil().max(1.0) as u32;
-                    let ch = canvas_h.ceil().max(1.0) as u32;
-                    let mut comp = crate::raster::FloatBuf::clear(cw, ch);
-                    let bg_p = crate::raster::Px::from_color(full_frame_backdrop);
-                    for px in comp.px.iter_mut() {
-                        *px = bg_p;
-                    }
+                    let comp = match self.canvas_comp_buf.take() {
+                        Some(mut buf) if buf.w == cw && buf.h == ch => {
+                            for px in buf.px.iter_mut() {
+                                *px = bg_p;
+                            }
+                            buf
+                        }
+                        _ => {
+                            let mut buf = crate::raster::FloatBuf::clear(cw, ch);
+                            for px in buf.px.iter_mut() {
+                                *px = bg_p;
+                            }
+                            buf
+                        }
+                    };
                     Some(comp)
                 } else {
                     None
                 };
+
+                let mut h_underlying = std::collections::hash_map::DefaultHasher::new();
+                use std::hash::{Hash, Hasher};
+                bg_color.r.to_bits().hash(&mut h_underlying);
+                bg_color.g.to_bits().hash(&mut h_underlying);
+                bg_color.b.to_bits().hash(&mut h_underlying);
+                canvas_w.to_bits().hash(&mut h_underlying);
+                canvas_h.to_bits().hash(&mut h_underlying);
 
                 for layer in stack.render_layers() {
                     let is_adjustment = matches!(&layer.source, LayerSource::Adjustment);
@@ -1871,34 +1896,10 @@ impl Render for CompositionViewerPanel {
                             crate::raster::decoded_asset(&mut self.asset_cache, asset_id, &path);
                         }
                     }
-                    let (backdrop_buf, backdrop_hash) = if is_adjustment || layer.blend_mode != BlendMode::Normal {
-                        if let Some(ref comp_buf) = canvas_comp {
-                            let mut b_slice = crate::raster::FloatBuf::clear(rw, rh);
-                            let mut h = std::collections::hash_map::DefaultHasher::new();
-                            for by in 0..rh {
-                                let v = (by as f32 + 0.5) / rh as f32;
-                                let cy = l_y + v * l_h;
-                                for bx in 0..rw {
-                                    let u = (bx as f32 + 0.5) / rw as f32;
-                                    let cx = l_x + u * l_w;
-                                    let p = comp_buf.sample(cx, cy);
-                                    b_slice.put(bx as i32, by as i32, p);
-                                    if (bx + by) % 2 == 0 {
-                                        use std::hash::Hash;
-                                        p.r.to_bits().hash(&mut h);
-                                        p.g.to_bits().hash(&mut h);
-                                        p.b.to_bits().hash(&mut h);
-                                        p.a.to_bits().hash(&mut h);
-                                    }
-                                }
-                            }
-                            use std::hash::Hasher;
-                            (Some(b_slice), h.finish())
-                        } else {
-                            (None, 0u64)
-                        }
+                    let backdrop_hash = if is_adjustment || layer.blend_mode != BlendMode::Normal {
+                        h_underlying.finish()
                     } else {
-                        (None, 0u64)
+                        0u64
                     };
 
                     let cache_key = crate::raster::layer_cache_key(
@@ -1913,6 +1914,27 @@ impl Render for CompositionViewerPanel {
                     let entry = match self.raster_cache.get(&layer.id) {
                         Some(e) if cacheable && e.key == cache_key && e.w == rw && e.h == rh => e.clone(),
                         _ => {
+                            let backdrop_buf = if is_adjustment || layer.blend_mode != BlendMode::Normal {
+                                if let Some(ref comp_buf) = canvas_comp {
+                                    let mut b_slice = crate::raster::FloatBuf::clear(rw, rh);
+                                    for by in 0..rh {
+                                        let v = (by as f32 + 0.5) / rh as f32;
+                                        let cy = l_y + v * l_h;
+                                        for bx in 0..rw {
+                                            let u = (bx as f32 + 0.5) / rw as f32;
+                                            let cx = l_x + u * l_w;
+                                            let p = comp_buf.sample(cx, cy);
+                                            b_slice.put(bx as i32, by as i32, p);
+                                        }
+                                    }
+                                    Some(b_slice)
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+
                             let (buf, avg, empty) = crate::raster::rasterize_layer(
                                 layer,
                                 base_w,
@@ -1951,8 +1973,6 @@ impl Render for CompositionViewerPanel {
                     };
 
                     // Blit layer pixels into canvas_comp for subsequent overlying layers.
-                    // Pull-sample every covered canvas pixel with bilinear interpolation
-                    // so half-res playback (qdiv = 2) leaves zero holes or stale background stripes.
                     if let Some(ref mut comp_buf) = canvas_comp {
                         if !entry.empty && rw > 0 && rh > 0 {
                             let cw = comp_buf.w as i32;
@@ -1965,63 +1985,92 @@ impl Render for CompositionViewerPanel {
                             let bgra = &entry.bgra;
                             let bgra_len = bgra.len();
 
-                            for cy in min_cy..max_cy {
-                                let v = ((cy as f32 + 0.5 - l_y) / l_h).clamp(0.0, 1.0) * (rh as f32) - 0.5;
-                                let vy = v.clamp(0.0, (rh - 1) as f32);
-                                let y0 = vy.floor() as i32;
-                                let y1 = (y0 + 1).min(rh as i32 - 1);
-                                let fy = (vy - y0 as f32).clamp(0.0, 1.0);
+                            if playing_now {
+                                // Fast nearest-neighbor blit during interactive dragging / playback
+                                for cy in min_cy..max_cy {
+                                    let vy = (((cy as f32 + 0.5 - l_y) / l_h) * rh as f32).clamp(0.0, (rh - 1) as f32) as u32;
+                                    let row_off = (vy * rw) as usize;
+                                    for cx in min_cx..max_cx {
+                                        let vx = (((cx as f32 + 0.5 - l_x) / l_w) * rw as f32).clamp(0.0, (rw - 1) as f32) as u32;
+                                        let idx = (row_off + vx as usize) * 4;
+                                        if idx + 3 < bgra_len {
+                                            let a = bgra[idx + 3] as f32 / 255.0;
+                                            if a > 0.003 {
+                                                let r = bgra[idx + 2] as f32 / 255.0;
+                                                let g = bgra[idx + 1] as f32 / 255.0;
+                                                let b = bgra[idx] as f32 / 255.0;
+                                                let s = crate::raster::Px { r: r * a, g: g * a, b: b * a, a };
+                                                if is_adjustment || layer.blend_mode == BlendMode::Normal {
+                                                    let mut d = comp_buf.get(cx, cy);
+                                                    d.over(s);
+                                                    comp_buf.put(cx, cy, d);
+                                                } else {
+                                                    comp_buf.put(cx, cy, s);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                // High-quality 4-tap bilinear blit when idle
+                                for cy in min_cy..max_cy {
+                                    let v = ((cy as f32 + 0.5 - l_y) / l_h).clamp(0.0, 1.0) * (rh as f32) - 0.5;
+                                    let vy = v.clamp(0.0, (rh - 1) as f32);
+                                    let y0 = vy.floor() as i32;
+                                    let y1 = (y0 + 1).min(rh as i32 - 1);
+                                    let fy = (vy - y0 as f32).clamp(0.0, 1.0);
 
-                                for cx in min_cx..max_cx {
-                                    let u = ((cx as f32 + 0.5 - l_x) / l_w).clamp(0.0, 1.0) * (rw as f32) - 0.5;
-                                    let ux = u.clamp(0.0, (rw - 1) as f32);
-                                    let x0 = ux.floor() as i32;
-                                    let x1 = (x0 + 1).min(rw as i32 - 1);
-                                    let fx = (ux - x0 as f32).clamp(0.0, 1.0);
+                                    for cx in min_cx..max_cx {
+                                        let u = ((cx as f32 + 0.5 - l_x) / l_w).clamp(0.0, 1.0) * (rw as f32) - 0.5;
+                                        let ux = u.clamp(0.0, (rw - 1) as f32);
+                                        let x0 = ux.floor() as i32;
+                                        let x1 = (x0 + 1).min(rw as i32 - 1);
+                                        let fx = (ux - x0 as f32).clamp(0.0, 1.0);
 
-                                    let idx00 = ((y0 as u32 * rw + x0 as u32) * 4) as usize;
-                                    let idx10 = ((y0 as u32 * rw + x1 as u32) * 4) as usize;
-                                    let idx01 = ((y1 as u32 * rw + x0 as u32) * 4) as usize;
-                                    let idx11 = ((y1 as u32 * rw + x1 as u32) * 4) as usize;
+                                        let idx00 = ((y0 as u32 * rw + x0 as u32) * 4) as usize;
+                                        let idx10 = ((y0 as u32 * rw + x1 as u32) * 4) as usize;
+                                        let idx01 = ((y1 as u32 * rw + x0 as u32) * 4) as usize;
+                                        let idx11 = ((y1 as u32 * rw + x1 as u32) * 4) as usize;
 
-                                    if idx11 + 3 < bgra_len {
-                                        let a00 = bgra[idx00 + 3] as f32 / 255.0;
-                                        let a10 = bgra[idx10 + 3] as f32 / 255.0;
-                                        let a01 = bgra[idx01 + 3] as f32 / 255.0;
-                                        let a11 = bgra[idx11 + 3] as f32 / 255.0;
+                                        if idx11 + 3 < bgra_len {
+                                            let a00 = bgra[idx00 + 3] as f32 / 255.0;
+                                            let a10 = bgra[idx10 + 3] as f32 / 255.0;
+                                            let a01 = bgra[idx01 + 3] as f32 / 255.0;
+                                            let a11 = bgra[idx11 + 3] as f32 / 255.0;
 
-                                        let mix = |p: f32, q: f32, r: f32, s: f32| {
-                                            p * (1.0 - fx) * (1.0 - fy) + q * fx * (1.0 - fy) + r * (1.0 - fx) * fy + s * fx * fy
-                                        };
+                                            let mix = |p: f32, q: f32, r: f32, s: f32| {
+                                                p * (1.0 - fx) * (1.0 - fy) + q * fx * (1.0 - fy) + r * (1.0 - fx) * fy + s * fx * fy
+                                            };
 
-                                        let a = mix(a00, a10, a01, a11);
-                                        if a > 0.003 {
-                                            let r = mix(
-                                                bgra[idx00 + 2] as f32 / 255.0,
-                                                bgra[idx10 + 2] as f32 / 255.0,
-                                                bgra[idx01 + 2] as f32 / 255.0,
-                                                bgra[idx11 + 2] as f32 / 255.0,
-                                            );
-                                            let g = mix(
-                                                bgra[idx00 + 1] as f32 / 255.0,
-                                                bgra[idx10 + 1] as f32 / 255.0,
-                                                bgra[idx01 + 1] as f32 / 255.0,
-                                                bgra[idx11 + 1] as f32 / 255.0,
-                                            );
-                                            let b = mix(
-                                                bgra[idx00] as f32 / 255.0,
-                                                bgra[idx10] as f32 / 255.0,
-                                                bgra[idx01] as f32 / 255.0,
-                                                bgra[idx11] as f32 / 255.0,
-                                            );
+                                            let a = mix(a00, a10, a01, a11);
+                                            if a > 0.003 {
+                                                let r = mix(
+                                                    bgra[idx00 + 2] as f32 / 255.0,
+                                                    bgra[idx10 + 2] as f32 / 255.0,
+                                                    bgra[idx01 + 2] as f32 / 255.0,
+                                                    bgra[idx11 + 2] as f32 / 255.0,
+                                                );
+                                                let g = mix(
+                                                    bgra[idx00 + 1] as f32 / 255.0,
+                                                    bgra[idx10 + 1] as f32 / 255.0,
+                                                    bgra[idx01 + 1] as f32 / 255.0,
+                                                    bgra[idx11 + 1] as f32 / 255.0,
+                                                );
+                                                let b = mix(
+                                                    bgra[idx00] as f32 / 255.0,
+                                                    bgra[idx10] as f32 / 255.0,
+                                                    bgra[idx01] as f32 / 255.0,
+                                                    bgra[idx11] as f32 / 255.0,
+                                                );
 
-                                            let s = crate::raster::Px { r: r * a, g: g * a, b: b * a, a };
-                                            if is_adjustment || layer.blend_mode == BlendMode::Normal {
-                                                let mut d = comp_buf.get(cx, cy);
-                                                d.over(s);
-                                                comp_buf.put(cx, cy, d);
-                                            } else {
-                                                comp_buf.put(cx, cy, s);
+                                                let s = crate::raster::Px { r: r * a, g: g * a, b: b * a, a };
+                                                if is_adjustment || layer.blend_mode == BlendMode::Normal {
+                                                    let mut d = comp_buf.get(cx, cy);
+                                                    d.over(s);
+                                                    comp_buf.put(cx, cy, d);
+                                                } else {
+                                                    comp_buf.put(cx, cy, s);
+                                                }
                                             }
                                         }
                                     }
@@ -2029,6 +2078,13 @@ impl Render for CompositionViewerPanel {
                             }
                         }
                     }
+
+                    // Feed layer transform and cache key into underlying hash for overlying layers
+                    cache_key.hash(&mut h_underlying);
+                    l_x.to_bits().hash(&mut h_underlying);
+                    l_y.to_bits().hash(&mut h_underlying);
+                    l_w.to_bits().hash(&mut h_underlying);
+                    l_h.to_bits().hash(&mut h_underlying);
                     let recorded_color = if entry.empty {
                         sampled_backdrop
                     } else {
@@ -2732,6 +2788,7 @@ impl Render for CompositionViewerPanel {
                 // render_layers() walks bottom-to-top; picking needs
                 // topmost-first.
                 self.pick_boxes = pick_list.into_iter().rev().collect();
+                self.canvas_comp_buf = canvas_comp;
                 (elements, gizmo_els)
             }
             None => {
@@ -11820,6 +11877,7 @@ pub enum ContextMenuTarget {
     Layer(String),
     Effect { layer_id: String, effect_id: String },
     Property { layer_id: String, prop_path: &'static str },
+    Mask { layer_id: String, mask_id: String },
     EmptyTrackArea,
 }
 
@@ -14784,6 +14842,11 @@ impl Render for TimelinePanel {
                                 let m_inv = mask.invert;
                                 let m_locked = mask.locked;
 
+                                let is_active_mask = state.active_mask_edit.as_ref().map(|(l, m)| l == &layer.id && m == &mask.id).unwrap_or(false);
+                                let p_mask_ctx = p_m_item.clone();
+                                let lid_ctx = layer.id.clone();
+                                let mid_ctx = mask.id.clone();
+
                                 let mask_item_left = h_flex()
                                     .w(px(380.))
                                     .h(px(24.))
@@ -14793,9 +14856,17 @@ impl Render for TimelinePanel {
                                     .border_color(cx.theme().border)
                                     .items_center()
                                     .justify_between()
-                                    .bg(cx.theme().secondary.opacity(0.25))
+                                    .bg(if is_active_mask { cx.theme().accent.opacity(0.15) } else { cx.theme().secondary.opacity(0.25) })
                                     .text_xs()
                                     .overflow_hidden()
+                                    .on_mouse_down(MouseButton::Right, move |event, _window, cx| {
+                                        let pos = event.position;
+                                        let (l, m) = (lid_ctx.clone(), mid_ctx.clone());
+                                        p_mask_ctx.update(cx, |this, cx| {
+                                            this.open_context_menu(ContextMenuTarget::Mask { layer_id: l, mask_id: m }, pos);
+                                            cx.notify();
+                                        });
+                                    })
                                     .child(
                                         h_flex()
                                             .gap_1p5()
@@ -14820,10 +14891,24 @@ impl Render for TimelinePanel {
                                             )
                                             .child(
                                                 div()
+                                                    .cursor_pointer()
                                                     .font_medium()
                                                     .max_w(px(90.))
                                                     .truncate()
-                                                    .text_color(cx.theme().foreground)
+                                                    .text_color(if is_active_mask { cx.theme().accent } else { cx.theme().foreground })
+                                                    .on_mouse_down(MouseButton::Left, {
+                                                        let lid = layer.id.clone();
+                                                        let mid = mask.id.clone();
+                                                        let s_sel = s_inv.clone();
+                                                        move |_event, _window, cx| {
+                                                            let (l, m) = (lid.clone(), mid.clone());
+                                                            s_sel.update(cx, |s, cx| {
+                                                                s.select_layer(Some(l.clone()));
+                                                                s.set_active_mask_edit(Some((l, m)));
+                                                                cx.notify();
+                                                            });
+                                                        }
+                                                    })
                                                     .child(mask.name.clone())
                                             )
                                     )
@@ -14899,11 +14984,16 @@ impl Render for TimelinePanel {
                                             )
                                             .child(
                                                 div()
+                                                    .id(SharedString::from(format!("tl_mask_delete_{}_{}", layer.id, mask.id)))
+                                                    .test_support()
                                                     .cursor_pointer()
-                                                    .px_1()
-                                                    .py_0p5()
+                                                    .w(px(16.))
+                                                    .h(px(16.))
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
                                                     .rounded_sm()
-                                                    .hover(|s| s.bg(rgb(0xef4444).opacity(0.3)))
+                                                    .hover(|s| s.bg(rgb(0xef4444).opacity(0.2)).text_color(rgb(0xef4444)))
                                                     .text_color(cx.theme().muted_foreground)
                                                     .text_xs()
                                                     .on_mouse_down(MouseButton::Left, {
@@ -14916,7 +15006,7 @@ impl Render for TimelinePanel {
                                                             });
                                                         }
                                                     })
-                                                    .child("✕")
+                                                    .child(icon_box(IconName::Trash))
                                             )
                                     );
 
@@ -16320,6 +16410,88 @@ impl Render for TimelinePanel {
                                 });
                             })
                             .child("Toggle Stopwatch Animation"),
+                    );
+                }
+                ContextMenuTarget::Mask { layer_id, mask_id } => {
+                    let lid = layer_id.clone();
+                    let mid = mask_id.clone();
+                    let s_del = s_menu.clone();
+                    let p_del = p_close.clone();
+                    let (l_del, m_del) = (lid.clone(), mid.clone());
+                    menu_items = menu_items.child(
+                        div()
+                            .id("timeline_ctx_delete_mask")
+                            .test_support()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .text_color(rgb(0xef4444))
+                            .hover(|s| s.bg(rgb(0xef4444).opacity(0.2)))
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                s_del.update(cx, |s, cx| {
+                                    let _ = s.remove_layer_mask(&l_del, &m_del);
+                                    cx.notify();
+                                });
+                                p_del.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    cx.notify();
+                                });
+                            })
+                            .child("Delete Mask"),
+                    );
+
+                    let s_inv = s_menu.clone();
+                    let p_inv = p_close.clone();
+                    let (l_inv, m_inv) = (lid.clone(), mid.clone());
+                    menu_items = menu_items.child(
+                        div()
+                            .id("timeline_ctx_toggle_mask_invert")
+                            .test_support()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                s_inv.update(cx, |s, cx| {
+                                    let _ = s.toggle_mask_invert(&l_inv, &m_inv);
+                                    cx.notify();
+                                });
+                                p_inv.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    cx.notify();
+                                });
+                            })
+                            .child("Toggle Invert"),
+                    );
+
+                    let s_lock = s_menu.clone();
+                    let p_lock = p_close.clone();
+                    let (l_lock, m_lock) = (lid.clone(), mid.clone());
+                    menu_items = menu_items.child(
+                        div()
+                            .id("timeline_ctx_toggle_mask_lock")
+                            .test_support()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                s_lock.update(cx, |s, cx| {
+                                    let _ = s.toggle_mask_lock(&l_lock, &m_lock);
+                                    cx.notify();
+                                });
+                                p_lock.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    cx.notify();
+                                });
+                            })
+                            .child("Toggle Lock"),
                     );
                 }
                 ContextMenuTarget::EmptyTrackArea => {
