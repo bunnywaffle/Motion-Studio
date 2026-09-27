@@ -616,6 +616,7 @@ pub(crate) fn gradient_editor(
 /// Gradient Ramp effect adapter: endpoint wheels for the outer stops
 /// (middle stops recolor through the quick swatches), selection from the
 /// panel's per-effect map.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn widget_gradient(
     state: &Entity<EditorState>,
     panel: &Entity<PropertiesPanel>,
@@ -652,6 +653,7 @@ pub(crate) fn widget_gradient(
 }
 
 /// Layer fill-slot adapter (text/sharp/solid picker gradient tabs).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn fill_gradient_editor(
     state: &Entity<EditorState>,
     panel: &Entity<PropertiesPanel>,

@@ -372,7 +372,7 @@ impl EffectType {
     }
 
     /// Mirror a legacy endpoint write into the matching sorted end stop.
-    fn sync_ramp_endpoint(stops: &mut Vec<GradientStop>, first: bool, color: Color) {
+    fn sync_ramp_endpoint(stops: &mut [GradientStop], first: bool, color: Color) {
         if stops.len() < 2 {
             return;
         }

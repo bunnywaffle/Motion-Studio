@@ -1870,10 +1870,12 @@ impl Render for CompositionViewerPanel {
                             let mut b_slice = crate::raster::FloatBuf::clear(rw, rh);
                             let mut h = std::collections::hash_map::DefaultHasher::new();
                             for by in 0..rh {
-                                let cy = (l_y + (by as f32 / rh as f32) * l_h).floor() as i32;
+                                let v = (by as f32 + 0.5) / rh as f32;
+                                let cy = l_y + v * l_h;
                                 for bx in 0..rw {
-                                    let cx = (l_x + (bx as f32 / rw as f32) * l_w).floor() as i32;
-                                    let p = comp_buf.get(cx, cy);
+                                    let u = (bx as f32 + 0.5) / rw as f32;
+                                    let cx = l_x + u * l_w;
+                                    let p = comp_buf.sample(cx, cy);
                                     b_slice.put(bx as i32, by as i32, p);
                                     if bx % 4 == 0 && by % 4 == 0 {
                                         use std::hash::Hash;
@@ -1942,28 +1944,71 @@ impl Render for CompositionViewerPanel {
                         }
                     };
 
-                    // Blit layer pixels into canvas_comp for subsequent overlying layers
+                    // Blit layer pixels into canvas_comp for subsequent overlying layers.
+                    // Pull-sample every covered canvas pixel with bilinear interpolation
+                    // so half-res playback (qdiv = 2) leaves zero holes or stale background stripes.
                     if let Some(ref mut comp_buf) = canvas_comp {
-                        if !entry.empty {
-                            let cw = comp_buf.w;
-                            let ch = comp_buf.h;
-                            for by in 0..rh {
-                                let cy = (l_y + (by as f32 / rh as f32) * l_h).floor() as i32;
-                                if cy < 0 || cy >= ch as i32 {
-                                    continue;
-                                }
-                                for bx in 0..rw {
-                                    let idx = ((by * rw + bx) * 4) as usize;
-                                    if idx + 3 < entry.bgra.len() {
-                                        let a = entry.bgra[idx + 3] as f32 / 255.0;
+                        if !entry.empty && rw > 0 && rh > 0 {
+                            let cw = comp_buf.w as i32;
+                            let ch = comp_buf.h as i32;
+                            let min_cx = (l_x.floor() as i32).clamp(0, cw);
+                            let max_cx = ((l_x + l_w).ceil() as i32).clamp(0, cw);
+                            let min_cy = (l_y.floor() as i32).clamp(0, ch);
+                            let max_cy = ((l_y + l_h).ceil() as i32).clamp(0, ch);
+
+                            let bgra = &entry.bgra;
+                            let bgra_len = bgra.len();
+
+                            for cy in min_cy..max_cy {
+                                let v = ((cy as f32 + 0.5 - l_y) / l_h).clamp(0.0, 1.0) * (rh as f32) - 0.5;
+                                let vy = v.clamp(0.0, (rh - 1) as f32);
+                                let y0 = vy.floor() as i32;
+                                let y1 = (y0 + 1).min(rh as i32 - 1);
+                                let fy = (vy - y0 as f32).clamp(0.0, 1.0);
+
+                                for cx in min_cx..max_cx {
+                                    let u = ((cx as f32 + 0.5 - l_x) / l_w).clamp(0.0, 1.0) * (rw as f32) - 0.5;
+                                    let ux = u.clamp(0.0, (rw - 1) as f32);
+                                    let x0 = ux.floor() as i32;
+                                    let x1 = (x0 + 1).min(rw as i32 - 1);
+                                    let fx = (ux - x0 as f32).clamp(0.0, 1.0);
+
+                                    let idx00 = ((y0 as u32 * rw + x0 as u32) * 4) as usize;
+                                    let idx10 = ((y0 as u32 * rw + x1 as u32) * 4) as usize;
+                                    let idx01 = ((y1 as u32 * rw + x0 as u32) * 4) as usize;
+                                    let idx11 = ((y1 as u32 * rw + x1 as u32) * 4) as usize;
+
+                                    if idx11 + 3 < bgra_len {
+                                        let a00 = bgra[idx00 + 3] as f32 / 255.0;
+                                        let a10 = bgra[idx10 + 3] as f32 / 255.0;
+                                        let a01 = bgra[idx01 + 3] as f32 / 255.0;
+                                        let a11 = bgra[idx11 + 3] as f32 / 255.0;
+
+                                        let mix = |p: f32, q: f32, r: f32, s: f32| {
+                                            p * (1.0 - fx) * (1.0 - fy) + q * fx * (1.0 - fy) + r * (1.0 - fx) * fy + s * fx * fy
+                                        };
+
+                                        let a = mix(a00, a10, a01, a11);
                                         if a > 0.003 {
-                                            let cx = (l_x + (bx as f32 / rw as f32) * l_w).floor() as i32;
-                                            if cx < 0 || cx >= cw as i32 {
-                                                continue;
-                                            }
-                                            let r = entry.bgra[idx + 2] as f32 / 255.0;
-                                            let g = entry.bgra[idx + 1] as f32 / 255.0;
-                                            let b = entry.bgra[idx] as f32 / 255.0;
+                                            let r = mix(
+                                                bgra[idx00 + 2] as f32 / 255.0,
+                                                bgra[idx10 + 2] as f32 / 255.0,
+                                                bgra[idx01 + 2] as f32 / 255.0,
+                                                bgra[idx11 + 2] as f32 / 255.0,
+                                            );
+                                            let g = mix(
+                                                bgra[idx00 + 1] as f32 / 255.0,
+                                                bgra[idx10 + 1] as f32 / 255.0,
+                                                bgra[idx01 + 1] as f32 / 255.0,
+                                                bgra[idx11 + 1] as f32 / 255.0,
+                                            );
+                                            let b = mix(
+                                                bgra[idx00] as f32 / 255.0,
+                                                bgra[idx10] as f32 / 255.0,
+                                                bgra[idx01] as f32 / 255.0,
+                                                bgra[idx11] as f32 / 255.0,
+                                            );
+
                                             let s = crate::raster::Px { r: r * a, g: g * a, b: b * a, a };
                                             if is_adjustment || layer.blend_mode == BlendMode::Normal {
                                                 let mut d = comp_buf.get(cx, cy);
@@ -8488,7 +8533,7 @@ impl Render for PropertiesPanel {
                 // Fingerprint: layer add/remove/rename or reparent drops the
                 // state so the ensure below rebuilds it immediately.
                 {
-                    let cands = parent_candidates(&self.state.read(cx), &sel_lid);
+                    let cands = parent_candidates(self.state.read(cx), &sel_lid);
                     let mut sel_idx = 0usize;
                     let mut fp = String::from("None (unparent)");
                     for (i, (cid, cname)) in cands.iter().enumerate() {
@@ -8509,7 +8554,7 @@ impl Render for PropertiesPanel {
                 }
                 if !self.combobox_states.contains_key(&pl_key) {
                     let candidates: Vec<(String, String)> =
-                        parent_candidates(&self.state.read(cx), &sel_lid);
+                        parent_candidates(self.state.read(cx), &sel_lid);
 
                     let mut pl_options = vec!["None (unparent)".to_string()];
                     let mut sel_pl_idx = 0;
@@ -8605,7 +8650,7 @@ impl Render for PropertiesPanel {
                 // so only the cheap option sets re-sync here.
                 {
                     let (parent_label, parent_idx) = {
-                        let cands = parent_candidates(&self.state.read(cx), &sel_lid);
+                        let cands = parent_candidates(self.state.read(cx), &sel_lid);
                         let mut label = "None (unparent)".to_string();
                         let mut idx = 0usize;
                         for (i, (cid, cname)) in cands.iter().enumerate() {
@@ -11376,7 +11421,7 @@ pub(crate) fn apply_parent_option(
     } else {
         candidates
             .iter()
-            .find(|(cid, cname)| &format!("{cname} ({cid})") == option)
+            .find(|(cid, cname)| format!("{cname} ({cid})") == option)
             .map(|(cid, _)| cid.clone())
     };
     state.update(cx, |s, cx| {
@@ -13424,6 +13469,7 @@ impl Render for TimelinePanel {
         // renames and add/remove never show stale picks.
         {
             // Owned snapshots (guard dropped before any `cx.new`).
+            #[allow(clippy::type_complexity)]
             let rows: Vec<(
                 String,
                 BlendMode,
@@ -13438,7 +13484,7 @@ impl Render for TimelinePanel {
                         .layers
                         .iter()
                         .map(|l| {
-                            let cands = parent_candidates(&st, &l.id);
+                            let cands = parent_candidates(st, &l.id);
                             (
                                 l.id.clone(),
                                 l.blend_mode,
@@ -13699,7 +13745,8 @@ impl Render for TimelinePanel {
                     .items_center()
                     .justify_between()
                     .text_xs()
-                    .cursor_pointer();
+                    .cursor_pointer()
+                    .overflow_hidden();
 
                 if is_selected {
                     left_col = left_col
@@ -13762,7 +13809,7 @@ impl Render for TimelinePanel {
                     })
                     .child(
                         h_flex()
-                            .gap_1()
+                            .gap_0p5()
                             .items_center()
                             // Twirl arrow
                             .child(
@@ -13781,8 +13828,6 @@ impl Render for TimelinePanel {
                                     })
                                     .child(if is_layer_exp { "▾" } else { "▸" }),
                             )
-                            // Layer index
-                            .child(div().w(px(14.)).text_color(cx.theme().muted_foreground).child(format!("{}", idx + 1)))
                             // Visibility (Eye)
                             .child(
                                 div()
@@ -13838,7 +13883,7 @@ impl Render for TimelinePanel {
                             // Layer Name (reorder via drag-and-drop onto rows)
                             .child(
                                 div()
-                                    .max_w(px(110.))
+                                    .max_w(px(72.))
                                     .truncate()
                                     .font_semibold()
                                     .child(layer.name.clone()),
@@ -13847,18 +13892,19 @@ impl Render for TimelinePanel {
                     // Right controls: Mode, Matte, Parent, Delete
                     .child(
                         h_flex()
-                            .gap_1()
+                            .gap_0p5()
                             .items_center()
                             // Blend Mode (kit Combobox).
                             .child(
                                 div()
                                     .id(SharedString::from(format!("tl_blend_{}", layer.id)))
                                     .test_support()
-                                    .w(px(96.))
+                                    .w(px(68.))
+                                    .overflow_hidden()
                                     .child({
                                         let key = format!("tl_blend_{}", layer.id);
                                         if let Some(cb) = self.tl_combos.get(&key) {
-                                            Combobox::new(cb).small().into_any_element()
+                                            Combobox::new(cb).xsmall().into_any_element()
                                         } else {
                                             div()
                                                 .text_xs()
@@ -13873,11 +13919,12 @@ impl Render for TimelinePanel {
                                 div()
                                     .id(SharedString::from(format!("tl_matte_{}", layer.id)))
                                     .test_support()
-                                    .w(px(96.))
+                                    .w(px(60.))
+                                    .overflow_hidden()
                                     .child({
                                         let key = format!("tl_matte_{}", layer.id);
                                         if let Some(cb) = self.tl_combos.get(&key) {
-                                            Combobox::new(cb).small().into_any_element()
+                                            Combobox::new(cb).xsmall().into_any_element()
                                         } else {
                                             div()
                                                 .text_xs()
@@ -13895,11 +13942,12 @@ impl Render for TimelinePanel {
                                 div()
                                     .id(SharedString::from(format!("parent_picker_{}", layer.id)))
                                     .test_support()
-                                    .w(px(128.))
+                                    .w(px(84.))
+                                    .overflow_hidden()
                                     .child({
                                         let key = format!("tl_parent_{}", layer.id);
                                         if let Some(cb) = self.tl_combos.get(&key) {
-                                            Combobox::new(cb).small().into_any_element()
+                                            Combobox::new(cb).xsmall().into_any_element()
                                         } else {
                                             div()
                                                 .text_xs()
@@ -14740,6 +14788,7 @@ impl Render for TimelinePanel {
                                     .justify_between()
                                     .bg(cx.theme().secondary.opacity(0.25))
                                     .text_xs()
+                                    .overflow_hidden()
                                     .child(
                                         h_flex()
                                             .gap_1p5()
@@ -14765,6 +14814,8 @@ impl Render for TimelinePanel {
                                             .child(
                                                 div()
                                                     .font_medium()
+                                                    .max_w(px(90.))
+                                                    .truncate()
                                                     .text_color(cx.theme().foreground)
                                                     .child(mask.name.clone())
                                             )
@@ -14777,14 +14828,15 @@ impl Render for TimelinePanel {
                                                 div()
                                                     .id(SharedString::from(format!("tl_mask_mode_{}_{}", layer.id, mask.id)))
                                                     .test_support()
-                                                    .w(px(108.))
+                                                    .w(px(88.))
+                                                    .overflow_hidden()
                                                     .child({
                                                         let key = format!(
                                                             "tl_maskmode_{}_{}",
                                                             layer.id, mask.id
                                                         );
                                                         if let Some(cb) = self.tl_combos.get(&key) {
-                                                            Combobox::new(cb).small().into_any_element()
+                                                            Combobox::new(cb).xsmall().into_any_element()
                                                         } else {
                                                             div()
                                                                 .text_xs()

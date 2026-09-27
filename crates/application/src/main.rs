@@ -7562,4 +7562,121 @@ mod tests {
             assert_eq!(this.open_menu, Some(TopMenu::File));
         });
     }
+
+    #[test]
+    fn test_playback_half_res_blit_back_no_holes() {
+        use crate::raster::{FloatBuf, Px};
+        // Canvas size: 100 x 100
+        let cw = 100;
+        let ch = 100;
+        // Background initialized to blue
+        let mut comp_buf = FloatBuf::clear(cw, ch);
+        for y in 0..ch as i32 {
+            for x in 0..cw as i32 {
+                comp_buf.put(x, y, Px { r: 0.0, g: 0.0, b: 1.0, a: 1.0 });
+            }
+        }
+
+        // Layer positioned at (10, 10), dimensions 40x40
+        let l_x = 10.0f32;
+        let l_y = 10.0f32;
+        let l_w = 40.0f32;
+        let l_h = 40.0f32;
+
+        // Half-res playback buffer: 20x20
+        let rw = 20u32;
+        let rh = 20u32;
+        // Solid green RGBA (in BGRA layout: B=0, G=255, R=0, A=255)
+        let mut bgra = Vec::with_capacity((rw * rh * 4) as usize);
+        for _ in 0..(rw * rh) {
+            bgra.extend_from_slice(&[0, 255, 0, 255]);
+        }
+
+        // Pull-sample every covered canvas pixel (same logic as in panels.rs)
+        let min_cx = (l_x.floor() as i32).clamp(0, cw as i32);
+        let max_cx = ((l_x + l_w).ceil() as i32).clamp(0, cw as i32);
+        let min_cy = (l_y.floor() as i32).clamp(0, ch as i32);
+        let max_cy = ((l_y + l_h).ceil() as i32).clamp(0, ch as i32);
+
+        let bgra_len = bgra.len();
+        for cy in min_cy..max_cy {
+            let v = ((cy as f32 + 0.5 - l_y) / l_h).clamp(0.0, 1.0) * (rh as f32) - 0.5;
+            let vy = v.clamp(0.0, (rh - 1) as f32);
+            let y0 = vy.floor() as i32;
+            let y1 = (y0 + 1).min(rh as i32 - 1);
+            let fy = (vy - y0 as f32).clamp(0.0, 1.0);
+
+            for cx in min_cx..max_cx {
+                let u = ((cx as f32 + 0.5 - l_x) / l_w).clamp(0.0, 1.0) * (rw as f32) - 0.5;
+                let ux = u.clamp(0.0, (rw - 1) as f32);
+                let x0 = ux.floor() as i32;
+                let x1 = (x0 + 1).min(rw as i32 - 1);
+                let fx = (ux - x0 as f32).clamp(0.0, 1.0);
+
+                let idx00 = ((y0 as u32 * rw + x0 as u32) * 4) as usize;
+                let idx10 = ((y0 as u32 * rw + x1 as u32) * 4) as usize;
+                let idx01 = ((y1 as u32 * rw + x0 as u32) * 4) as usize;
+                let idx11 = ((y1 as u32 * rw + x1 as u32) * 4) as usize;
+
+                if idx11 + 3 < bgra_len {
+                    let a00 = bgra[idx00 + 3] as f32 / 255.0;
+                    let a10 = bgra[idx10 + 3] as f32 / 255.0;
+                    let a01 = bgra[idx01 + 3] as f32 / 255.0;
+                    let a11 = bgra[idx11 + 3] as f32 / 255.0;
+
+                    let mix = |p: f32, q: f32, r: f32, s: f32| {
+                        p * (1.0 - fx) * (1.0 - fy) + q * fx * (1.0 - fy) + r * (1.0 - fx) * fy + s * fx * fy
+                    };
+
+                    let a = mix(a00, a10, a01, a11);
+                    if a > 0.003 {
+                        let r = mix(
+                            bgra[idx00 + 2] as f32 / 255.0,
+                            bgra[idx10 + 2] as f32 / 255.0,
+                            bgra[idx01 + 2] as f32 / 255.0,
+                            bgra[idx11 + 2] as f32 / 255.0,
+                        );
+                        let g = mix(
+                            bgra[idx00 + 1] as f32 / 255.0,
+                            bgra[idx10 + 1] as f32 / 255.0,
+                            bgra[idx01 + 1] as f32 / 255.0,
+                            bgra[idx11 + 1] as f32 / 255.0,
+                        );
+                        let b = mix(
+                            bgra[idx00] as f32 / 255.0,
+                            bgra[idx10] as f32 / 255.0,
+                            bgra[idx01] as f32 / 255.0,
+                            bgra[idx11] as f32 / 255.0,
+                        );
+
+                        let s = Px { r: r * a, g: g * a, b: b * a, a };
+                        let mut d = comp_buf.get(cx, cy);
+                        let out_a = s.a + d.a * (1.0 - s.a);
+                        let out_r = s.r + d.r * (1.0 - s.a);
+                        let out_g = s.g + d.g * (1.0 - s.a);
+                        let out_b = s.b + d.b * (1.0 - s.a);
+                        d.r = out_r;
+                        d.g = out_g;
+                        d.b = out_b;
+                        d.a = out_a;
+                        comp_buf.put(cx, cy, d);
+                    }
+                }
+            }
+        }
+
+        // Verify that EVERY pixel in 10..50 was updated to green (no checkerboard/holes of pure blue)
+        for cy in 10..50 {
+            for cx in 10..50 {
+                let p = comp_buf.get(cx, cy);
+                assert!(p.g > 0.95, "pixel at ({cx}, {cy}) must be green, got g={}", p.g);
+                assert!(p.b < 0.05, "pixel at ({cx}, {cy}) must have no stale blue background, got b={}", p.b);
+            }
+        }
+
+        // Pixels outside bounds must remain pure blue
+        let outside_p = comp_buf.get(5, 5);
+        assert_eq!(outside_p.b, 1.0);
+        assert_eq!(outside_p.g, 0.0);
+    }
 }
