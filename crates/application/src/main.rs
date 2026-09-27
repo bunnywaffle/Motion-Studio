@@ -7905,4 +7905,153 @@ mod tests {
             assert!(buf.w > 0 && buf.h > 0);
         });
     }
+
+    #[gpui_kit::test]
+    fn test_context_menu_outside_click_auto_dismissal(cx: &mut TestAppContext) {
+        let (_root, app_view) = setup_test_window(cx);
+        cx.run_until_parked();
+
+        let panels = app_view.read_with(cx, |v, _| v.panels().clone());
+
+        // 1. ProjectPanel Context Menu
+        panels.project.update(cx, |panel, cx| {
+            panel.open_context_menu(crate::panels::ProjectContextMenuTarget::BinBackground, gpui::point(px(50.), px(50.)));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(panels.project.read_with(cx, |p, _| p.context_menu.is_some()));
+
+        // Outside click / backdrop dismiss
+        panels.project.update(cx, |panel, cx| {
+            panel.close_context_menu();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(panels.project.read_with(cx, |p, _| p.context_menu.is_none()));
+
+        // 2. CompositionViewerPanel Context Menu
+        panels.viewer.update(cx, |panel, cx| {
+            panel.open_context_menu(crate::panels::ViewerContextMenuTarget::Canvas, gpui::point(px(100.), px(100.)));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(panels.viewer.read_with(cx, |p, _| p.context_menu.is_some()));
+
+        panels.viewer.update(cx, |panel, cx| {
+            panel.close_context_menu();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(panels.viewer.read_with(cx, |p, _| p.context_menu.is_none()));
+
+        // 3. TimelinePanel Context Menu
+        panels.timeline.update(cx, |panel, cx| {
+            panel.open_context_menu(crate::panels::ContextMenuTarget::EmptyTrackArea, gpui::point(px(150.), px(150.)));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(panels.timeline.read_with(cx, |p, _| p.context_menu.is_some()));
+
+        panels.timeline.update(cx, |panel, cx| {
+            panel.close_context_menu();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(panels.timeline.read_with(cx, |p, _| p.context_menu.is_none()));
+    }
+
+    #[gpui_kit::test]
+    fn test_flexible_new_composition_creation(cx: &mut TestAppContext) {
+        let (_root, app_view) = setup_test_window(cx);
+        cx.run_until_parked();
+
+        let state_entity = app_view.read_with(cx, |v, _| v.state().clone());
+        let panels = app_view.read_with(cx, |v, _| v.panels().clone());
+
+        // Open New Composition dialog with flexible values
+        panels.project.update(cx, |panel, cx| {
+            panel.show_new_comp = true;
+            panel.nc_name = "My Custom 4K".to_string();
+            panel.nc_w = 3840;
+            panel.nc_h = 2160;
+            panel.nc_fps = 59.94;
+            panel.nc_dur = 15.0;
+            panel.nc_bg = 2; // Transparent
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(panels.project.read_with(cx, |p, _| p.show_new_comp));
+
+        // Test swapping dimensions (3840x2160 -> 2160x3840)
+        panels.project.update(cx, |panel, cx| {
+            std::mem::swap(&mut panel.nc_w, &mut panel.nc_h);
+            cx.notify();
+        });
+        panels.project.read_with(cx, |p, _| {
+            assert_eq!(p.nc_w, 2160);
+            assert_eq!(p.nc_h, 3840);
+        });
+
+        // Swap back to 3840x2160
+        panels.project.update(cx, |panel, cx| {
+            std::mem::swap(&mut panel.nc_w, &mut panel.nc_h);
+            cx.notify();
+        });
+
+        // Simulate creation with these custom parameters
+        let (cw, ch, cfps, cdur, cbg, cname) = panels.project.read_with(cx, |p, _| {
+            (p.nc_w, p.nc_h, p.nc_fps, p.nc_dur, p.nc_bg, p.nc_name.clone())
+        });
+        let bg = match cbg {
+            1 => project::Color::WHITE,
+            2 => project::Color::TRANSPARENT,
+            3 => project::Color::from_rgba_u8(38, 38, 38, 255),
+            _ => project::Color::BLACK,
+        };
+        state_entity.update(cx, |s, cx| {
+            let res = s.add_composition(&cname, cw, ch, cfps, cdur, bg);
+            assert!(res.is_ok());
+            cx.notify();
+        });
+        panels.project.update(cx, |p, cx| {
+            p.show_new_comp = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        // Verify composition was created with exact custom parameters
+        state_entity.read_with(cx, |s, _| {
+            let comp = s.active_composition().unwrap();
+            assert_eq!(comp.name, "My Custom 4K");
+            assert_eq!(comp.width, 3840);
+            assert_eq!(comp.height, 2160);
+            assert!((comp.frame_rate - 59.94).abs() < 1e-4);
+            assert_eq!(comp.background_color, project::Color::TRANSPARENT);
+        });
+        assert!(!panels.project.read_with(cx, |p, _| p.show_new_comp));
+    }
+
+    #[gpui_kit::test]
+    fn test_new_comp_dialog_outside_click_dismissal(cx: &mut TestAppContext) {
+        let (_root, app_view) = setup_test_window(cx);
+        cx.run_until_parked();
+
+        let panels = app_view.read_with(cx, |v, _| v.panels().clone());
+
+        panels.project.update(cx, |panel, cx| {
+            panel.show_new_comp = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(panels.project.read_with(cx, |p, _| p.show_new_comp));
+
+        // Outside click backdrop dismisses the dialog
+        panels.project.update(cx, |panel, cx| {
+            panel.show_new_comp = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(!panels.project.read_with(cx, |p, _| p.show_new_comp));
+    }
 }

@@ -251,11 +251,12 @@ pub struct ProjectPanel {
     pub sort_mode: ProjectSortMode,
     /// "New Composition" dialog state (After Effects-style).
     pub show_new_comp: bool,
+    pub nc_name: String,
     pub nc_w: u32,
     pub nc_h: u32,
     pub nc_fps: f64,
     pub nc_dur: f64,
-    /// 0 = Black, 1 = White, 2 = Transparent.
+    /// 0 = Black, 1 = White, 2 = Transparent, 3 = Dark Gray.
     pub nc_bg: u8,
 }
 
@@ -273,6 +274,7 @@ impl ProjectPanel {
             filter: ProjectFilterType::All,
             sort_mode: ProjectSortMode::Name,
             show_new_comp: false,
+            nc_name: "Comp 1".to_string(),
             nc_w: 1920,
             nc_h: 1080,
             nc_fps: 30.0,
@@ -299,14 +301,141 @@ impl ProjectPanel {
     /// After Effects-style "New Composition" dialog: size presets (aspect
     /// ratio), frame rate, duration, and background color. The composition
     /// becomes active on Create.
+    /// After Effects-style "New Composition" dialog: flexible user-editable
+    /// resolution (width & height with nudge steppers & presets), frame rate
+    /// (with nudge steppers & standard broadcast/animation presets), duration
+    /// (with steppers & presets), composition name, and background color.
     fn render_new_comp_dialog(&self, panel: &Entity<ProjectPanel>, cx: &App) -> impl IntoElement {
-        let sizes: &[(u32, u32)] = &[(1920, 1080), (1280, 720), (1080, 1080), (1080, 1920), (3840, 2160)];
-        let fps_opts: &[f64] = &[24.0, 25.0, 30.0, 60.0];
-        let dur_opts: &[f64] = &[5.0, 10.0, 30.0];
-        let bg_opts: &[(u8, &str)] = &[(0, "Black"), (1, "White"), (2, "Transparent")];
+        let sizes: &[(u32, u32, &str)] = &[
+            (1920, 1080, "1080p FHD"),
+            (1280, 720, "720p HD"),
+            (3840, 2160, "4K UHD"),
+            (2560, 1440, "2K QHD"),
+            (1080, 1920, "9:16 Vertical"),
+            (1080, 1080, "1:1 Square"),
+        ];
+        let fps_opts: &[(f64, &str)] = &[
+            (23.976, "23.98"),
+            (24.0, "24"),
+            (25.0, "25"),
+            (29.97, "29.97"),
+            (30.0, "30"),
+            (50.0, "50"),
+            (59.94, "59.94"),
+            (60.0, "60"),
+        ];
+        let dur_opts: &[(f64, &str)] = &[
+            (5.0, "5s"),
+            (10.0, "10s"),
+            (15.0, "15s"),
+            (30.0, "30s"),
+            (60.0, "1m"),
+            (120.0, "2m"),
+        ];
+        let bg_opts: &[(u8, &str)] = &[
+            (0, "Black"),
+            (1, "White"),
+            (2, "Transparent"),
+            (3, "Dark Gray"),
+        ];
+        let name_presets = ["Comp 1", "Main Comp", "Reel / Short", "Social Square", "4K Master"];
 
+        // Name presets row
+        let mut name_row = h_flex().gap_1().items_center().flex_wrap();
+        for &preset in &name_presets {
+            let sel = self.nc_name == preset;
+            let p_name = panel.clone();
+            name_row = name_row.child(
+                div()
+                    .id(SharedString::from(format!("nc_name_preset_{preset}")))
+                    .test_support()
+                    .cursor_pointer()
+                    .px_1p5()
+                    .py_0p5()
+                    .rounded_sm()
+                    .bg(if sel { cx.theme().primary } else { cx.theme().muted })
+                    .text_color(if sel { cx.theme().primary_foreground } else { cx.theme().foreground })
+                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                    .text_xs()
+                    .child(preset)
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        p_name.update(cx, |this, cx| {
+                            this.nc_name = preset.to_string();
+                            cx.notify();
+                        });
+                    }),
+            );
+        }
+
+        // Quick suffix steppers for comp name
+        let p_name_inc = panel.clone();
+        let p_name_dec = panel.clone();
+        let name_controls = h_flex()
+            .gap_1p5()
+            .items_center()
+            .child(
+                div()
+                    .id("nc_name_display")
+                    .test_support()
+                    .font_semibold()
+                    .text_xs()
+                    .text_color(cx.theme().foreground)
+                    .child(format!("Name: \"{}\"", self.nc_name)),
+            )
+            .child(
+                div()
+                    .id("nc_name_prev")
+                    .test_support()
+                    .cursor_pointer()
+                    .px_1p5()
+                    .py_0p5()
+                    .rounded_sm()
+                    .bg(cx.theme().muted)
+                    .hover(|s| s.bg(cx.theme().accent))
+                    .text_xs()
+                    .child("◀ Prev")
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        p_name_dec.update(cx, |this, cx| {
+                            if let Some(idx) = name_presets.iter().position(|&p| p == this.nc_name) {
+                                if idx > 0 {
+                                    this.nc_name = name_presets[idx - 1].to_string();
+                                }
+                            } else {
+                                this.nc_name = "Comp 1".to_string();
+                            }
+                            cx.notify();
+                        });
+                    }),
+            )
+            .child(
+                div()
+                    .id("nc_name_next")
+                    .test_support()
+                    .cursor_pointer()
+                    .px_1p5()
+                    .py_0p5()
+                    .rounded_sm()
+                    .bg(cx.theme().muted)
+                    .hover(|s| s.bg(cx.theme().accent))
+                    .text_xs()
+                    .child("Next ▶")
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        p_name_inc.update(cx, |this, cx| {
+                            if let Some(idx) = name_presets.iter().position(|&p| p == this.nc_name) {
+                                if idx + 1 < name_presets.len() {
+                                    this.nc_name = name_presets[idx + 1].to_string();
+                                }
+                            } else {
+                                this.nc_name = "Main Comp".to_string();
+                            }
+                            cx.notify();
+                        });
+                    }),
+            );
+
+        // Size presets row
         let mut size_row = h_flex().gap_1().items_center().flex_wrap();
-        for (w, h) in sizes {
+        for (w, h, label) in sizes {
             let (w, h) = (*w, *h);
             let sel = self.nc_w == w && self.nc_h == h;
             let p_pick = panel.clone();
@@ -322,7 +451,7 @@ impl ProjectPanel {
                     .text_color(if sel { cx.theme().primary_foreground } else { cx.theme().foreground })
                     .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
                     .text_xs()
-                    .child(format!("{w}×{h}"))
+                    .child(format!("{label} ({w}×{h})"))
                     .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                         p_pick.update(cx, |this, cx| {
                             this.nc_w = w;
@@ -333,10 +462,226 @@ impl ProjectPanel {
             );
         }
 
+        // Custom resolution controls with step nudge buttons
+        let p_w_sub100 = panel.clone();
+        let p_w_sub10 = panel.clone();
+        let p_w_add10 = panel.clone();
+        let p_w_add100 = panel.clone();
+        let p_h_sub100 = panel.clone();
+        let p_h_sub10 = panel.clone();
+        let p_h_add10 = panel.clone();
+        let p_h_add100 = panel.clone();
+        let p_swap = panel.clone();
+
+        let custom_res_row = h_flex()
+            .gap_2()
+            .items_center()
+            .flex_wrap()
+            .child(
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("W:"))
+                    .child(
+                        div()
+                            .id("nc_w_display")
+                            .test_support()
+                            .text_xs()
+                            .font_semibold()
+                            .child(format!("{}px", self.nc_w)),
+                    )
+                    .child(
+                        div()
+                            .id("nc_w_sub_100")
+                            .test_support()
+                            .cursor_pointer()
+                            .px_1()
+                            .py_0p5()
+                            .rounded_sm()
+                            .bg(cx.theme().muted)
+                            .hover(|s| s.bg(cx.theme().accent))
+                            .text_xs()
+                            .child("-100")
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                p_w_sub100.update(cx, |this, cx| {
+                                    this.nc_w = this.nc_w.saturating_sub(100).max(16);
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("nc_w_sub_10")
+                            .test_support()
+                            .cursor_pointer()
+                            .px_1()
+                            .py_0p5()
+                            .rounded_sm()
+                            .bg(cx.theme().muted)
+                            .hover(|s| s.bg(cx.theme().accent))
+                            .text_xs()
+                            .child("-10")
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                p_w_sub10.update(cx, |this, cx| {
+                                    this.nc_w = this.nc_w.saturating_sub(10).max(16);
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("nc_w_add_10")
+                            .test_support()
+                            .cursor_pointer()
+                            .px_1()
+                            .py_0p5()
+                            .rounded_sm()
+                            .bg(cx.theme().muted)
+                            .hover(|s| s.bg(cx.theme().accent))
+                            .text_xs()
+                            .child("+10")
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                p_w_add10.update(cx, |this, cx| {
+                                    this.nc_w = (this.nc_w + 10).min(16384);
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("nc_w_add_100")
+                            .test_support()
+                            .cursor_pointer()
+                            .px_1()
+                            .py_0p5()
+                            .rounded_sm()
+                            .bg(cx.theme().muted)
+                            .hover(|s| s.bg(cx.theme().accent))
+                            .text_xs()
+                            .child("+100")
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                p_w_add100.update(cx, |this, cx| {
+                                    this.nc_w = (this.nc_w + 100).min(16384);
+                                    cx.notify();
+                                });
+                            }),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("H:"))
+                    .child(
+                        div()
+                            .id("nc_h_display")
+                            .test_support()
+                            .text_xs()
+                            .font_semibold()
+                            .child(format!("{}px", self.nc_h)),
+                    )
+                    .child(
+                        div()
+                            .id("nc_h_sub_100")
+                            .test_support()
+                            .cursor_pointer()
+                            .px_1()
+                            .py_0p5()
+                            .rounded_sm()
+                            .bg(cx.theme().muted)
+                            .hover(|s| s.bg(cx.theme().accent))
+                            .text_xs()
+                            .child("-100")
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                p_h_sub100.update(cx, |this, cx| {
+                                    this.nc_h = this.nc_h.saturating_sub(100).max(16);
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("nc_h_sub_10")
+                            .test_support()
+                            .cursor_pointer()
+                            .px_1()
+                            .py_0p5()
+                            .rounded_sm()
+                            .bg(cx.theme().muted)
+                            .hover(|s| s.bg(cx.theme().accent))
+                            .text_xs()
+                            .child("-10")
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                p_h_sub10.update(cx, |this, cx| {
+                                    this.nc_h = this.nc_h.saturating_sub(10).max(16);
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("nc_h_add_10")
+                            .test_support()
+                            .cursor_pointer()
+                            .px_1()
+                            .py_0p5()
+                            .rounded_sm()
+                            .bg(cx.theme().muted)
+                            .hover(|s| s.bg(cx.theme().accent))
+                            .text_xs()
+                            .child("+10")
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                p_h_add10.update(cx, |this, cx| {
+                                    this.nc_h = (this.nc_h + 10).min(16384);
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("nc_h_add_100")
+                            .test_support()
+                            .cursor_pointer()
+                            .px_1()
+                            .py_0p5()
+                            .rounded_sm()
+                            .bg(cx.theme().muted)
+                            .hover(|s| s.bg(cx.theme().accent))
+                            .text_xs()
+                            .child("+100")
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                p_h_add100.update(cx, |this, cx| {
+                                    this.nc_h = (this.nc_h + 100).min(16384);
+                                    cx.notify();
+                                });
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .id("nc_swap_wh")
+                    .test_support()
+                    .cursor_pointer()
+                    .px_1p5()
+                    .py_0p5()
+                    .rounded_sm()
+                    .bg(cx.theme().muted)
+                    .hover(|s| s.bg(cx.theme().primary).text_color(cx.theme().primary_foreground))
+                    .text_xs()
+                    .child("⇄ Swap W/H")
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        p_swap.update(cx, |this, cx| {
+                            std::mem::swap(&mut this.nc_w, &mut this.nc_h);
+                            cx.notify();
+                        });
+                    }),
+            );
+
+        // Frame rate presets row
         let mut fps_row = h_flex().gap_1().items_center().flex_wrap();
-        for f in fps_opts {
+        for (f, label) in fps_opts {
             let f = *f;
-            let sel = (self.nc_fps - f).abs() < 1e-6;
+            let sel = (self.nc_fps - f).abs() < 0.005;
             let p_pick = panel.clone();
             fps_row = fps_row.child(
                 div()
@@ -350,7 +695,7 @@ impl ProjectPanel {
                     .text_color(if sel { cx.theme().primary_foreground } else { cx.theme().foreground })
                     .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
                     .text_xs()
-                    .child(format!("{f:.0} fps"))
+                    .child(*label)
                     .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                         p_pick.update(cx, |this, cx| {
                             this.nc_fps = f;
@@ -360,10 +705,105 @@ impl ProjectPanel {
             );
         }
 
+        // Custom FPS controls with step nudge buttons
+        let p_fps_sub1 = panel.clone();
+        let p_fps_sub01 = panel.clone();
+        let p_fps_add01 = panel.clone();
+        let p_fps_add1 = panel.clone();
+        let custom_fps_row = h_flex()
+            .gap_1()
+            .items_center()
+            .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Custom:"))
+            .child(
+                div()
+                    .id("nc_fps_display")
+                    .test_support()
+                    .text_xs()
+                    .font_semibold()
+                    .child(format!("{:.2} fps", self.nc_fps)),
+            )
+            .child(
+                div()
+                    .id("nc_fps_sub_1")
+                    .test_support()
+                    .cursor_pointer()
+                    .px_1()
+                    .py_0p5()
+                    .rounded_sm()
+                    .bg(cx.theme().muted)
+                    .hover(|s| s.bg(cx.theme().accent))
+                    .text_xs()
+                    .child("-1")
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        p_fps_sub1.update(cx, |this, cx| {
+                            this.nc_fps = (this.nc_fps - 1.0).max(1.0);
+                            cx.notify();
+                        });
+                    }),
+            )
+            .child(
+                div()
+                    .id("nc_fps_sub_01")
+                    .test_support()
+                    .cursor_pointer()
+                    .px_1()
+                    .py_0p5()
+                    .rounded_sm()
+                    .bg(cx.theme().muted)
+                    .hover(|s| s.bg(cx.theme().accent))
+                    .text_xs()
+                    .child("-0.1")
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        p_fps_sub01.update(cx, |this, cx| {
+                            this.nc_fps = (this.nc_fps - 0.1).max(1.0);
+                            cx.notify();
+                        });
+                    }),
+            )
+            .child(
+                div()
+                    .id("nc_fps_add_01")
+                    .test_support()
+                    .cursor_pointer()
+                    .px_1()
+                    .py_0p5()
+                    .rounded_sm()
+                    .bg(cx.theme().muted)
+                    .hover(|s| s.bg(cx.theme().accent))
+                    .text_xs()
+                    .child("+0.1")
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        p_fps_add01.update(cx, |this, cx| {
+                            this.nc_fps = (this.nc_fps + 0.1).min(240.0);
+                            cx.notify();
+                        });
+                    }),
+            )
+            .child(
+                div()
+                    .id("nc_fps_add_1")
+                    .test_support()
+                    .cursor_pointer()
+                    .px_1()
+                    .py_0p5()
+                    .rounded_sm()
+                    .bg(cx.theme().muted)
+                    .hover(|s| s.bg(cx.theme().accent))
+                    .text_xs()
+                    .child("+1")
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        p_fps_add1.update(cx, |this, cx| {
+                            this.nc_fps = (this.nc_fps + 1.0).min(240.0);
+                            cx.notify();
+                        });
+                    }),
+            );
+
+        // Duration presets row
         let mut dur_row = h_flex().gap_1().items_center().flex_wrap();
-        for d in dur_opts {
+        for (d, label) in dur_opts {
             let d = *d;
-            let sel = (self.nc_dur - d).abs() < 1e-6;
+            let sel = (self.nc_dur - d).abs() < 1e-4;
             let p_pick = panel.clone();
             dur_row = dur_row.child(
                 div()
@@ -377,7 +817,7 @@ impl ProjectPanel {
                     .text_color(if sel { cx.theme().primary_foreground } else { cx.theme().foreground })
                     .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
                     .text_xs()
-                    .child(format!("{d:.0}s"))
+                    .child(*label)
                     .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                         p_pick.update(cx, |this, cx| {
                             this.nc_dur = d;
@@ -387,6 +827,102 @@ impl ProjectPanel {
             );
         }
 
+        // Custom duration controls with step nudge buttons
+        let p_dur_sub5 = panel.clone();
+        let p_dur_sub1 = panel.clone();
+        let p_dur_add1 = panel.clone();
+        let p_dur_add5 = panel.clone();
+        let frames_total = (self.nc_dur * self.nc_fps).round() as u64;
+        let custom_dur_row = h_flex()
+            .gap_1()
+            .items_center()
+            .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Custom:"))
+            .child(
+                div()
+                    .id("nc_dur_display")
+                    .test_support()
+                    .text_xs()
+                    .font_semibold()
+                    .child(format!("{:.1}s ({}f)", self.nc_dur, frames_total)),
+            )
+            .child(
+                div()
+                    .id("nc_dur_sub_5")
+                    .test_support()
+                    .cursor_pointer()
+                    .px_1()
+                    .py_0p5()
+                    .rounded_sm()
+                    .bg(cx.theme().muted)
+                    .hover(|s| s.bg(cx.theme().accent))
+                    .text_xs()
+                    .child("-5s")
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        p_dur_sub5.update(cx, |this, cx| {
+                            this.nc_dur = (this.nc_dur - 5.0).max(0.1);
+                            cx.notify();
+                        });
+                    }),
+            )
+            .child(
+                div()
+                    .id("nc_dur_sub_1")
+                    .test_support()
+                    .cursor_pointer()
+                    .px_1()
+                    .py_0p5()
+                    .rounded_sm()
+                    .bg(cx.theme().muted)
+                    .hover(|s| s.bg(cx.theme().accent))
+                    .text_xs()
+                    .child("-1s")
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        p_dur_sub1.update(cx, |this, cx| {
+                            this.nc_dur = (this.nc_dur - 1.0).max(0.1);
+                            cx.notify();
+                        });
+                    }),
+            )
+            .child(
+                div()
+                    .id("nc_dur_add_1")
+                    .test_support()
+                    .cursor_pointer()
+                    .px_1()
+                    .py_0p5()
+                    .rounded_sm()
+                    .bg(cx.theme().muted)
+                    .hover(|s| s.bg(cx.theme().accent))
+                    .text_xs()
+                    .child("+1s")
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        p_dur_add1.update(cx, |this, cx| {
+                            this.nc_dur = (this.nc_dur + 1.0).min(3600.0);
+                            cx.notify();
+                        });
+                    }),
+            )
+            .child(
+                div()
+                    .id("nc_dur_add_5")
+                    .test_support()
+                    .cursor_pointer()
+                    .px_1()
+                    .py_0p5()
+                    .rounded_sm()
+                    .bg(cx.theme().muted)
+                    .hover(|s| s.bg(cx.theme().accent))
+                    .text_xs()
+                    .child("+5s")
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        p_dur_add5.update(cx, |this, cx| {
+                            this.nc_dur = (this.nc_dur + 5.0).min(3600.0);
+                            cx.notify();
+                        });
+                    }),
+            );
+
+        // Background presets row
         let mut bg_row = h_flex().gap_1().items_center().flex_wrap();
         for (b, label) in bg_opts {
             let (b, label) = (*b, *label);
@@ -417,113 +953,185 @@ impl ProjectPanel {
         let bg_name = match self.nc_bg {
             1 => "White",
             2 => "Transparent",
+            3 => "Dark Gray",
             _ => "Black",
         };
         let summary = format!(
-            "{}×{} • {:.2} fps • {:.0}s • {bg_name}",
-            self.nc_w, self.nc_h, self.nc_fps, self.nc_dur
+            "\"{}\" • {}×{} • {:.2} fps • {:.1}s ({} frames) • {bg_name}",
+            self.nc_name, self.nc_w, self.nc_h, self.nc_fps, self.nc_dur, frames_total
         );
 
         let p_create = panel.clone();
         let s_create = self.state.clone();
         let (cw, ch, cfps, cdur, cbg) = (self.nc_w, self.nc_h, self.nc_fps, self.nc_dur, self.nc_bg);
+        let cname = self.nc_name.clone();
         let p_cancel = panel.clone();
+        let p_dismiss_bg = panel.clone();
+        let p_dismiss_r = panel.clone();
 
         div()
-            .id("new_comp_dialog")
+            .id("new_comp_modal_overlay")
             .test_support()
             .absolute()
-            .top(px(48.))
-            .left(px(16.))
-            .right(px(16.))
-            .bg(cx.theme().background)
-            .border_1()
-            .border_color(cx.theme().border)
-            .rounded_md()
-            .shadow_lg()
-            .p_3()
+            .inset_0()
             .child(
-                v_flex()
-                    .gap_2()
-                    .child(div().font_semibold().text_sm().child("New Composition"))
+                // Transparent backdrop to dismiss on outside click
+                div()
+                    .id("nc_backdrop")
+                    .test_support()
+                    .absolute()
+                    .inset_0()
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        p_dismiss_bg.update(cx, |this, cx| {
+                            this.show_new_comp = false;
+                            cx.notify();
+                        });
+                    })
+                    .on_mouse_down(MouseButton::Right, move |_event, _window, cx| {
+                        p_dismiss_r.update(cx, |this, cx| {
+                            this.show_new_comp = false;
+                            cx.notify();
+                        });
+                    }),
+            )
+            .child(
+                div()
+                    .id("new_comp_dialog")
+                    .test_support()
+                    .occlude()
+                    .absolute()
+                    .top(px(40.))
+                    .left(px(12.))
+                    .right(px(12.))
+                    .bg(cx.theme().background)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded_md()
+                    .shadow_lg()
+                    .p_3()
                     .child(
                         v_flex()
-                            .gap_1()
-                            .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Frame Size (aspect ratio)"))
-                            .child(size_row),
-                    )
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Frame Rate"))
-                            .child(fps_row),
-                    )
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Duration"))
-                            .child(dur_row),
-                    )
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().text_color(cx.theme().muted_foreground).text_xs().child("Background"))
-                            .child(bg_row),
-                    )
-                    .child(div().text_xs().text_color(cx.theme().primary).child(summary))
-                    .child(
-                        h_flex()
                             .gap_2()
-                            .justify_end()
                             .child(
-                                div()
-                                    .id("nc_create")
-                                    .test_support()
-                                    .cursor_pointer()
-                                    .px_3()
-                                    .py_1()
-                                    .rounded_sm()
-                                    .bg(cx.theme().primary)
-                                    .text_color(cx.theme().primary_foreground)
-                                    .text_xs()
-                                    .font_semibold()
-                                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                        let bg = match cbg {
-                                            1 => Color::WHITE,
-                                            2 => Color::TRANSPARENT,
-                                            _ => Color::BLACK,
-                                        };
-                                        s_create.update(cx, |s, cx| {
-                                            let _ = s.add_composition("", cw, ch, cfps, cdur, bg);
-                                            cx.notify();
-                                        });
-                                        p_create.update(cx, |this, cx| {
-                                            this.show_new_comp = false;
-                                            cx.notify();
-                                        });
-                                    })
-                                    .child("Create"),
+                                h_flex()
+                                    .justify_between()
+                                    .items_center()
+                                    .child(div().font_semibold().text_sm().child("New Composition"))
+                                    .child(
+                                        div()
+                                            .id("nc_close_x")
+                                            .test_support()
+                                            .cursor_pointer()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .hover(|s| s.text_color(cx.theme().foreground))
+                                            .child("✕")
+                                            .on_mouse_down(MouseButton::Left, {
+                                                let p = panel.clone();
+                                                move |_event, _window, cx| {
+                                                    p.update(cx, |this, cx| {
+                                                        this.show_new_comp = false;
+                                                        cx.notify();
+                                                    });
+                                                }
+                                            }),
+                                    ),
                             )
                             .child(
-                                div()
-                                    .id("nc_cancel")
-                                    .test_support()
-                                    .cursor_pointer()
-                                    .px_3()
-                                    .py_1()
-                                    .rounded_sm()
-                                    .bg(cx.theme().muted)
-                                    .text_color(cx.theme().muted_foreground)
-                                    .text_xs()
-                                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                        p_cancel.update(cx, |this, cx| {
-                                            this.show_new_comp = false;
-                                            cx.notify();
-                                        });
-                                    })
-                                    .child("Cancel"),
+                                v_flex()
+                                    .gap_1()
+                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Composition Name"))
+                                    .child(name_row)
+                                    .child(name_controls),
+                            )
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Frame Size & Aspect Ratio"))
+                                    .child(size_row)
+                                    .child(custom_res_row),
+                            )
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Frame Rate"))
+                                    .child(fps_row)
+                                    .child(custom_fps_row),
+                            )
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Duration"))
+                                    .child(dur_row)
+                                    .child(custom_dur_row),
+                            )
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .child(div().text_color(cx.theme().muted_foreground).text_xs().child("Background"))
+                                    .child(bg_row),
+                            )
+                            .child(div().text_xs().text_color(cx.theme().primary).font_semibold().child(summary))
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .justify_end()
+                                    .child(
+                                        div()
+                                            .id("nc_create")
+                                            .test_support()
+                                            .cursor_pointer()
+                                            .px_3()
+                                            .py_1()
+                                            .rounded_sm()
+                                            .bg(cx.theme().primary)
+                                            .text_color(cx.theme().primary_foreground)
+                                            .text_xs()
+                                            .font_semibold()
+                                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                let bg = match cbg {
+                                                    1 => Color::WHITE,
+                                                    2 => Color::TRANSPARENT,
+                                                    3 => Color::from_rgba_u8(38, 38, 38, 255),
+                                                    _ => Color::BLACK,
+                                                };
+                                                let final_name = if cname.trim().is_empty() {
+                                                    "Comp 1".to_string()
+                                                } else {
+                                                    cname.trim().to_string()
+                                                };
+                                                s_create.update(cx, |s, cx| {
+                                                    let _ = s.add_composition(&final_name, cw, ch, cfps, cdur, bg);
+                                                    cx.notify();
+                                                });
+                                                p_create.update(cx, |this, cx| {
+                                                    this.show_new_comp = false;
+                                                    cx.notify();
+                                                });
+                                            })
+                                            .child("Create"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("nc_cancel")
+                                            .test_support()
+                                            .cursor_pointer()
+                                            .px_3()
+                                            .py_1()
+                                            .rounded_sm()
+                                            .bg(cx.theme().muted)
+                                            .text_color(cx.theme().muted_foreground)
+                                            .text_xs()
+                                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                p_cancel.update(cx, |this, cx| {
+                                                    this.show_new_comp = false;
+                                                    cx.notify();
+                                                });
+                                            })
+                                            .child("Cancel"),
+                                    ),
                             ),
                     ),
             )
@@ -998,6 +1606,35 @@ impl Render for ProjectPanel {
                                 .gap_1()
                                 .child(
                                     div()
+                                        .id("new_comp_button")
+                                        .test_support()
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_sm()
+                                        .bg(cx.theme().muted)
+                                        .hover(|s| s.bg(cx.theme().accent))
+                                        .text_color(cx.theme().foreground)
+                                        .text_xs()
+                                        .cursor_pointer()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .on_mouse_down(MouseButton::Left, {
+                                            let p = cx.entity().clone();
+                                            move |_event, _window, cx| {
+                                                p.update(cx, |this, cx| {
+                                                    this.show_new_comp = true;
+                                                    let num = this.state.read(cx).project.compositions.len() + 1;
+                                                    this.nc_name = format!("Comp {num}");
+                                                    cx.notify();
+                                                });
+                                            }
+                                        })
+                                        .child(icon_box(IconName::Film))
+                                        .child("+ Comp"),
+                                )
+                                .child(
+                                    div()
                                         .id("import_media_button")
                                         .test_support()
                                         .px_2()
@@ -1432,9 +2069,37 @@ impl Render for ProjectPanel {
                         .child("Cancel"),
                 );
 
+                // Full transparent backdrop to auto-dismiss on outside click
+                let p_dismiss_bg = cx.entity().clone();
+                let p_dismiss_r = cx.entity().clone();
+                let backdrop = deferred(
+                    Positioner::corner(Anchor::TopLeft, point(px(0.), px(0.)))
+                        .margin(px(0.))
+                        .child(
+                            div()
+                                .id("project_context_menu_backdrop")
+                                .test_support()
+                                .size_full()
+                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                    p_dismiss_bg.update(cx, |this, cx| {
+                                        this.close_context_menu();
+                                        cx.notify();
+                                    });
+                                })
+                                .on_mouse_down(MouseButton::Right, move |_event, _window, cx| {
+                                    p_dismiss_r.update(cx, |this, cx| {
+                                        this.close_context_menu();
+                                        cx.notify();
+                                    });
+                                }),
+                        ),
+                );
+                root = root.child(backdrop);
+
                 // Cursor-anchored: opens exactly under the mouse (viewport
                 // clamped), not at a fixed corner.
                 let menu_pos = self.menu_pos.unwrap_or(point(px(20.), px(40.)));
+                let p_menu_out = cx.entity().clone();
                 let menu_box = div()
                     .id("project_context_menu")
                     .test_support()
@@ -1444,6 +2109,12 @@ impl Render for ProjectPanel {
                     .border_color(cx.theme().border)
                     .rounded_md()
                     .shadow_lg()
+                    .on_mouse_down_out(move |_event, _window, cx| {
+                        p_menu_out.update(cx, |this, cx| {
+                            this.close_context_menu();
+                            cx.notify();
+                        });
+                    })
                     .child(menu_items);
                 let overlay = deferred(
                     Positioner::corner(Anchor::TopLeft, menu_pos)
@@ -3613,9 +4284,36 @@ impl Render for CompositionViewerPanel {
                                         }
                                     }
 
+                                    // Full transparent backdrop to auto-dismiss on outside click
+                                    let p_dismiss_bg = cx.entity().clone();
+                                    let p_dismiss_r = cx.entity().clone();
+                                    canvas_frame = canvas_frame.child(deferred(
+                                        Positioner::corner(Anchor::TopLeft, point(px(0.), px(0.)))
+                                            .margin(px(0.))
+                                            .child(
+                                                div()
+                                                    .id("viewer_context_menu_backdrop")
+                                                    .test_support()
+                                                    .size_full()
+                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                        p_dismiss_bg.update(cx, |this, cx| {
+                                                            this.close_context_menu();
+                                                            cx.notify();
+                                                        });
+                                                    })
+                                                    .on_mouse_down(MouseButton::Right, move |_event, _window, cx| {
+                                                        p_dismiss_r.update(cx, |this, cx| {
+                                                            this.close_context_menu();
+                                                            cx.notify();
+                                                        });
+                                                    }),
+                                            ),
+                                    ));
+
                                     // Cursor-anchored via deferred Positioner (viewport
                                     // clamped), not a fixed corner.
                                     let viewer_menu_pos = self.menu_pos.unwrap_or(point(px(10.), px(10.)));
+                                    let p_viewer_out = cx.entity().clone();
                                     let viewer_menu_box = div()
                                         .id("viewer_context_menu")
                                         .test_support()
@@ -3627,6 +4325,12 @@ impl Render for CompositionViewerPanel {
                                         .border_color(cx.theme().border)
                                         .rounded_md()
                                         .shadow_lg()
+                                        .on_mouse_down_out(move |_event, _window, cx| {
+                                            p_viewer_out.update(cx, |this, cx| {
+                                                this.close_context_menu();
+                                                cx.notify();
+                                            });
+                                        })
                                         .child(menu_items);
                                     canvas_frame = canvas_frame.child(deferred(
                                         Positioner::corner(Anchor::TopLeft, viewer_menu_pos)
@@ -16591,9 +17295,37 @@ impl Render for TimelinePanel {
                     .child("Cancel"),
             );
 
+            // Full transparent backdrop to auto-dismiss on outside click
+            let p_tl_dismiss_bg = cx.entity().clone();
+            let p_tl_dismiss_r = cx.entity().clone();
+            let tl_backdrop = deferred(
+                Positioner::corner(Anchor::TopLeft, point(px(0.), px(0.)))
+                    .margin(px(0.))
+                    .child(
+                        div()
+                            .id("timeline_context_menu_backdrop")
+                            .test_support()
+                            .size_full()
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                p_tl_dismiss_bg.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    cx.notify();
+                                });
+                            })
+                            .on_mouse_down(MouseButton::Right, move |_event, _window, cx| {
+                                p_tl_dismiss_r.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    cx.notify();
+                                });
+                            }),
+                    ),
+            );
+            root = root.child(tl_backdrop);
+
             // Cursor-anchored: opens exactly under the mouse (viewport
             // clamped), not at a fixed corner.
             let tl_menu_pos = ctx_menu.pos;
+            let p_tl_out = cx.entity().clone();
             let context_menu_overlay = deferred(
                 Positioner::corner(Anchor::TopLeft, tl_menu_pos)
                     .margin(px(8.))
@@ -16608,6 +17340,12 @@ impl Render for TimelinePanel {
                             .border_color(cx.theme().border)
                             .rounded_md()
                             .shadow_lg()
+                            .on_mouse_down_out(move |_event, _window, cx| {
+                                p_tl_out.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    cx.notify();
+                                });
+                            })
                             .child(menu_items),
                     ),
             );
