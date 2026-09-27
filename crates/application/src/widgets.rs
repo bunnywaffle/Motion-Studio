@@ -18,7 +18,7 @@ use gpui_kit::base::{h_flex, v_flex, ElementExt as _, TestSupportExt};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::searchable_list::SearchableVec;
-use gpui_kit::component::select::{Select, SelectState};
+use gpui_kit::component::combobox::{Combobox, ComboboxState};
 use gpui_kit::*;
 use project::{Color, FillGradient, GradientStop, PropDecl};
 use std::collections::HashMap;
@@ -163,14 +163,14 @@ where
         .into_any_element()
 }
 
-/// Enum dropdown: kit Select (keyboard nav, search, dismissal and a11y
-/// included). The retained state entity is provisioned by the Properties
-/// panel; Confirm commits through the shader setter.
+/// Enum dropdown: kit Combobox (searchable, keyboard nav, dismissal and
+/// a11y included). The retained state entity is provisioned by the
+/// Properties panel; Confirm commits through the shader setter.
 pub(crate) fn widget_dropdown(
     eff_id: &str,
     field: &str,
     label: &str,
-    select: Option<&Entity<SelectState<SearchableVec<String>>>>,
+    combo: Option<&Entity<ComboboxState<SearchableVec<String>>>>,
     cx: &App,
 ) -> AnyElement {
     h_flex()
@@ -178,13 +178,12 @@ pub(crate) fn widget_dropdown(
         .justify_between()
         .text_xs()
         .child(div().text_color(cx.theme().muted_foreground).child(label.to_string()))
-        .child(match select {
+        .child(match combo {
             Some(st) => div()
                 .id(SharedString::from(format!("shader_enum_{eff_id}_{field}")))
                 .test_support()
                 .child(
-                    Select::new(st)
-                        .accessibility_label(format!("{label} values"))
+                    Combobox::new(st)
                         .placeholder(label.to_string()),
                 )
                 .into_any_element(),

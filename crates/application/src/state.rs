@@ -2119,6 +2119,30 @@ impl EditorState {
         Ok(())
     }
 
+    /// Set a mask's combining mode directly (Combobox commit path).
+    pub fn set_mask_mode(
+        &mut self,
+        layer_id: &str,
+        mask_id: &str,
+        mode: project::MaskMode,
+    ) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let mask = layer
+            .get_mask_mut(mask_id)
+            .ok_or_else(|| format!("Mask {mask_id} not found on layer"))?;
+        if mask.locked {
+            return Err(format!("Mask {mask_id} is locked"));
+        }
+        mask.mode = mode;
+        Ok(())
+    }
+
     /// Toggle a mask's invert flag.
     pub fn toggle_mask_invert(&mut self, layer_id: &str, mask_id: &str) -> Result<(), String> {
         self.checkpoint();

@@ -6,10 +6,10 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::collapsible::Collapsible;
 use gpui_kit::component::combobox::{Combobox, ComboboxEvent, ComboboxState};
 use gpui_kit::component::Selectable;
+use gpui_kit::component::Sizable;
 use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::searchable_list::SearchableVec;
-use gpui_kit::component::select::{SelectEvent, SelectState};
 use gpui_kit::base::{h_flex, v_flex, ElementExt as _, Positioner, StyledExt, TestSupportExt};
 use gpui_kit::component::dock::{BasePanel, Panel, PanelEvent};
 use gpui_kit::component::ActiveTheme;
@@ -71,6 +71,7 @@ pub mod ae {
         rgb(0x2b6cb0)
     }
     /// Parent badge / success green.
+    #[allow(dead_code)]
     pub fn green() -> Rgba {
         rgb(0x2f9e44)
     }
@@ -3647,12 +3648,12 @@ pub struct PropertiesPanel {
     pub trace_error: Option<String>,
     /// Armed shape-clipboard source layer for cross-layer Shape→Mask.
     pub shape_clipboard: Option<String>,
-    /// Retained Select states per ShaderLab enum param
+    /// Retained Combobox states per ShaderLab enum param
     /// (`effect_id`, `param`, selected index).
     #[allow(clippy::type_complexity)]
-    pub select_states: HashMap<(String, String, usize), Entity<SelectState<SearchableVec<String>>>>,
-    /// Confirm subscriptions for the retained Select states.
-    pub select_subs: HashMap<(String, String, usize), Subscription>,
+    pub combo_states: HashMap<(String, String, usize), Entity<ComboboxState<SearchableVec<String>>>>,
+    /// Confirm subscriptions for the retained Combobox states.
+    pub combo_subs: HashMap<(String, String, usize), Subscription>,
     /// Linked vector widgets (`effect_id:param` present = linked).
     pub vec_link: HashSet<String>,
     /// Selected gradient-editor stop per effect id.
@@ -3675,6 +3676,8 @@ pub struct PropertiesPanel {
     pub combobox_states: HashMap<String, Entity<ComboboxState<SearchableVec<String>>>>,
     /// Subscriptions for retained Combobox states.
     pub combobox_subs: HashMap<String, Subscription>,
+    /// Parent Combobox option fingerprints per key (recreate on change).
+    pub combobox_fp: HashMap<String, String>,
 }
 
 /// Live rename editor for one mask (Enter commits, blur/Esc cancels).
@@ -3805,8 +3808,8 @@ impl PropertiesPanel {
             trace_opts: project::AutoTraceOptions::default(),
             trace_error: None,
             shape_clipboard: None,
-            select_states: HashMap::new(),
-            select_subs: HashMap::new(),
+            combo_states: HashMap::new(),
+            combo_subs: HashMap::new(),
             vec_link: HashSet::new(),
             gradient_stop: HashMap::new(),
             gradient_drag: None,
@@ -3818,6 +3821,7 @@ impl PropertiesPanel {
             color_picker_gradient_colors: HashMap::new(),
             combobox_states: HashMap::new(),
             combobox_subs: HashMap::new(),
+            combobox_fp: HashMap::new(),
         }
     }
 
@@ -5797,6 +5801,7 @@ fn render_masks_section(
     state: &Entity<EditorState>,
     layer: &project::Layer,
     panel_entity: &Entity<PropertiesPanel>,
+    combos: &HashMap<String, Entity<ComboboxState<SearchableVec<String>>>>,
     shape_view: Option<MaskShapeView>,
     rename_view: Option<MaskRenameView>,
     trace_open: bool,
@@ -6333,7 +6338,6 @@ fn render_masks_section(
         let is_editing = state.read(cx).active_mask_edit
             == Some((lid.clone(), mid.clone()));
         let s_toggle = state.clone();
-        let s_mode = state.clone();
         let s_inv = state.clone();
         let s_del = state.clone();
         let s_edit = state.clone();
@@ -6344,8 +6348,6 @@ fn render_masks_section(
         let s_lock = state.clone();
         let lid_t = lid.clone();
         let mid_t = mid.clone();
-        let lid_m = lid.clone();
-        let mid_m = mid.clone();
         let lid_i = lid.clone();
         let mid_i = mid.clone();
         let lid_d = lid.clone();
@@ -6458,19 +6460,19 @@ fn render_masks_section(
                             div()
                                 .id(SharedString::from(format!("mask_mode_{mid}")))
                                 .test_support()
-                                .cursor_pointer()
-                                .px_1p5()
-                                .py_0p5()
-                                .rounded_sm()
-                                .bg(cx.theme().muted)
-                                .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                    s_mode.update(cx, |s, cx| {
-                                        let _ = s.cycle_mask_mode(&lid_m, &mid_m);
-                                        cx.notify();
-                                    });
-                                })
-                                .child(mask.mode.label()),
+                                .w(px(108.))
+                                .child({
+                                    let key = format!("mask_mode_{mid}");
+                                    if let Some(cb) = combos.get(&key) {
+                                        Combobox::new(cb).small().into_any_element()
+                                    } else {
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(mask.mode.label())
+                                            .into_any_element()
+                                    }
+                                }),
                         )
                         .child(
                             div()
@@ -6844,7 +6846,7 @@ fn render_applied_effects(
     shader_editor: Option<Entity<TextareaState>>,
     wheels: &HashMap<(String, String), Entity<InspectorColorPicker>>,
     ui: &PropUi,
-    selects: &HashMap<(String, String), Entity<SelectState<SearchableVec<String>>>>,
+    selects: &HashMap<(String, String), Entity<ComboboxState<SearchableVec<String>>>>,
     collapsed: &HashSet<String>,
     group_collapsed: &HashSet<String>,
     cx: &App,
@@ -8292,30 +8294,33 @@ impl Render for PropertiesPanel {
         };
         let mut fx_selects: HashMap<
             (String, String),
-            Entity<SelectState<SearchableVec<String>>>,
+            Entity<ComboboxState<SearchableVec<String>>>,
         > = HashMap::new();
         {
             let live: HashSet<(String, String, usize)> = fx_enum_targets
                 .iter()
                 .map(|(e, p, _, i)| (e.clone(), p.clone(), *i))
                 .collect();
-            self.select_states.retain(|k, _| live.contains(k));
-            self.select_subs.retain(|k, _| live.contains(k));
+            self.combo_states.retain(|k, _| live.contains(k));
+            self.combo_subs.retain(|k, _| live.contains(k));
             for (eid, pname, options, idx) in &fx_enum_targets {
                 let key = (eid.clone(), pname.clone(), *idx);
-                if !self.select_states.contains_key(&key) {
+                if !self.combo_states.contains_key(&key) {
                     let delegate = SearchableVec::new(options.clone());
                     let st = cx.new(|cx| {
-                        SelectState::new(delegate, Some(IndexPath::new(*idx)), window, cx)
+                        ComboboxState::new(delegate, vec![IndexPath::new(*idx)], window, cx)
                     });
                     let editor = self.state.clone();
                     let (eid_s, pname_s, opts_s) =
                         (eid.clone(), pname.clone(), options.clone());
                     let sub = cx.subscribe(
                         &st,
-                        move |_, _, event: &SelectEvent<SearchableVec<String>>, cx| {
-                            let SelectEvent::Confirm(value) = event;
-                            let Some(v) = value else {
+                        move |_, _, event: &ComboboxEvent<SearchableVec<String>>, cx| {
+                            let vals = match event {
+                                ComboboxEvent::Confirm(v) => v,
+                                ComboboxEvent::Change(v) => v,
+                            };
+                            let Some(v) = vals.first() else {
                                 return;
                             };
                             let i = opts_s.iter().position(|o| o == v).unwrap_or(0) as f32;
@@ -8325,10 +8330,10 @@ impl Render for PropertiesPanel {
                             });
                         },
                     );
-                    self.select_states.insert(key.clone(), st);
-                    self.select_subs.insert(key, sub);
+                    self.combo_states.insert(key.clone(), st);
+                    self.combo_subs.insert(key, sub);
                 }
-                if let Some(st) = self.select_states.get(&(eid.clone(), pname.clone(), *idx)) {
+                if let Some(st) = self.combo_states.get(&(eid.clone(), pname.clone(), *idx)) {
                     fx_selects.insert((eid.clone(), pname.clone()), st.clone());
                 }
             }
@@ -8390,13 +8395,7 @@ impl Render for PropertiesPanel {
                             "Bold".to_string(),
                             "Black".to_string(),
                         ];
-                        let sel_style_idx = match cur_w {
-                            w if w < 450 => 0,
-                            w if w < 550 => 1,
-                            w if w < 650 => 2,
-                            w if w < 800 => 3,
-                            _ => 4,
-                        };
+                        let sel_style_idx = font_style_index(cur_w);
                         let delegate = SearchableVec::new(style_options);
                         let cb = cx.new(|cx| {
                             ComboboxState::new(delegate, vec![IndexPath::new(sel_style_idx)], window, cx)
@@ -8409,14 +8408,7 @@ impl Render for PropertiesPanel {
                                 ComboboxEvent::Change(v) => v,
                             };
                             if let Some(style_name) = vals.first() {
-                                let w = match style_name.as_str() {
-                                    "Regular" => 400,
-                                    "Medium" => 500,
-                                    "SemiBold" => 600,
-                                    "Bold" => 700,
-                                    "Black" => 900,
-                                    _ => 400,
-                                };
+                                let w = font_weight_from_label(style_name);
                                 s_w.update(cx, |s, cx| {
                                     let _ = s.set_layer_font_weight(&lid_c, w);
                                     cx.notify();
@@ -8446,12 +8438,7 @@ impl Render for PropertiesPanel {
                             ComboboxEvent::Change(v) => v,
                         };
                         if let Some(name) = vals.first() {
-                            if let Some(&bm) = project::BlendMode::ALL.iter().find(|b| b.as_str() == name) {
-                                s_b.update(cx, |s, cx| {
-                                    s.set_layer_blend_mode(&lid_c, bm);
-                                    cx.notify();
-                                });
-                            }
+                            apply_blend_mode_option(&s_b, &lid_c, name, cx);
                         }
                     });
                     self.combobox_states.insert(bm_key.clone(), cb.clone());
@@ -8488,17 +8475,7 @@ impl Render for PropertiesPanel {
                             ComboboxEvent::Change(v) => v,
                         };
                         if let Some(name) = vals.first() {
-                            let mode = match name.as_str() {
-                                "Alpha Matte" => project::TrackMatteMode::Alpha,
-                                "Alpha Invert" => project::TrackMatteMode::AlphaInverted,
-                                "Luma Matte" => project::TrackMatteMode::Luma,
-                                "Luma Invert" => project::TrackMatteMode::LumaInverted,
-                                _ => project::TrackMatteMode::None,
-                            };
-                            s_m.update(cx, |s, cx| {
-                                s.set_layer_track_matte(&lid_c, mode, None);
-                                cx.notify();
-                            });
+                            apply_track_matte_option(&s_m, &lid_c, name, cx);
                         }
                     });
                     self.combobox_states.insert(tm_key.clone(), cb.clone());
@@ -8508,21 +8485,31 @@ impl Render for PropertiesPanel {
 
                 // Parent Layer Combobox
                 let pl_key = format!("props_parent_layer_{sel_lid}");
+                // Fingerprint: layer add/remove/rename or reparent drops the
+                // state so the ensure below rebuilds it immediately.
+                {
+                    let cands = parent_candidates(&self.state.read(cx), &sel_lid);
+                    let mut sel_idx = 0usize;
+                    let mut fp = String::from("None (unparent)");
+                    for (i, (cid, cname)) in cands.iter().enumerate() {
+                        if cur_parent.as_deref() == Some(cid.as_str()) {
+                            sel_idx = i + 1;
+                        }
+                        fp.push('|');
+                        fp.push_str(cname);
+                        fp.push('|');
+                        fp.push_str(cid);
+                    }
+                    fp = format!("{sel_idx}|{fp}");
+                    if self.combobox_fp.get(&pl_key) != Some(&fp) {
+                        self.combobox_states.remove(&pl_key);
+                        self.combobox_subs.remove(&pl_key);
+                        self.combobox_fp.insert(pl_key.clone(), fp);
+                    }
+                }
                 if !self.combobox_states.contains_key(&pl_key) {
-                    let candidates: Vec<(String, String)> = self.state.read(cx).active_composition().map(|comp| {
-                        comp.layers.iter().filter(|l| {
-                            if l.id == sel_lid { return false; }
-                            let mut cursor = l.parent_id.as_deref();
-                            let mut d = 0;
-                            while let Some(cid) = cursor {
-                                if cid == sel_lid { return false; }
-                                d += 1;
-                                if d > 1024 { return false; }
-                                cursor = comp.get_layer(cid).and_then(|p| p.parent_id.as_deref());
-                            }
-                            true
-                        }).map(|l| (l.id.clone(), l.name.clone())).collect()
-                    }).unwrap_or_default();
+                    let candidates: Vec<(String, String)> =
+                        parent_candidates(&self.state.read(cx), &sel_lid);
 
                     let mut pl_options = vec!["None (unparent)".to_string()];
                     let mut sel_pl_idx = 0;
@@ -8546,24 +8533,120 @@ impl Render for PropertiesPanel {
                             ComboboxEvent::Change(v) => v,
                         };
                         if let Some(opt_name) = vals.first() {
-                            let parent_id = if opt_name == "None (unparent)" {
-                                None
-                            } else {
-                                cands_c.iter().find(|(cid, cname)| &format!("{cname} ({cid})") == opt_name).map(|(cid, _)| cid.clone())
-                            };
-                            s_p.update(cx, |s, cx| {
-                                s.set_layer_parent(&lid_c, parent_id);
-                                cx.notify();
-                            });
+                            apply_parent_option(&s_p, &lid_c, opt_name, &cands_c, cx);
                         }
                     });
                     self.combobox_states.insert(pl_key.clone(), cb.clone());
-                    self.combobox_subs.insert(pl_key, sub);
+                    self.combobox_subs.insert(pl_key.clone(), sub);
                     self.combobox_states.insert("props_parent_layer".to_string(), cb);
+                }
+                // Mask Mode Comboboxes for this layer's masks.
+                let mask_descs: Vec<(String, String, usize)> = self
+                    .state
+                    .read(cx)
+                    .selected_layer()
+                    .map(|l| {
+                        l.masks
+                            .iter()
+                            .map(|m| {
+                                let idx = project::MaskMode::ALL
+                                    .iter()
+                                    .position(|x| x == &m.mode)
+                                    .unwrap_or(0);
+                                (m.id.clone(), m.mode.label().to_string(), idx)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut mask_live: HashSet<String> = HashSet::new();
+                for (mid, _label, idx) in &mask_descs {
+                    let key = format!("mask_mode_{mid}");
+                    mask_live.insert(key.clone());
+                    if !self.combobox_states.contains_key(&key) {
+                        let delegate = SearchableVec::new(
+                            project::MaskMode::ALL
+                                .iter()
+                                .map(|m| m.label().to_string())
+                                .collect::<Vec<_>>(),
+                        );
+                        let cb = cx.new(|cx| {
+                            ComboboxState::new(delegate, vec![IndexPath::new(*idx)], window, cx)
+                        });
+                        let s_m = self.state.clone();
+                        let lid_c = sel_lid.clone();
+                        let mid_c = mid.clone();
+                        let sub = cx.subscribe(
+                            &cb,
+                            move |_, _, event: &ComboboxEvent<SearchableVec<String>>, cx| {
+                                let vals = match event {
+                                    ComboboxEvent::Confirm(v) => v,
+                                    ComboboxEvent::Change(v) => v,
+                                };
+                                if let Some(name) = vals.first() {
+                                    if let Some(mode) = project::MaskMode::from_label(name) {
+                                        s_m.update(cx, |s, cx| {
+                                            let _ = s.set_mask_mode(&lid_c, &mid_c, mode);
+                                            cx.notify();
+                                        });
+                                    }
+                                }
+                            },
+                        );
+                        self.combobox_states.insert(key.clone(), cb);
+                        self.combobox_subs.insert(key, sub);
+                    }
+                }
+                self.combobox_states
+                    .retain(|k, _| !k.starts_with("mask_mode_") || mask_live.contains(k));
+                self.combobox_subs
+                    .retain(|k, _| !k.starts_with("mask_mode_") || mask_live.contains(k));
+                // Re-sync displayed picks that drifted (undo, timeline edits,
+                // renames). Font family/style lists are expensive to rebuild,
+                // so only the cheap option sets re-sync here.
+                {
+                    let (parent_label, parent_idx) = {
+                        let cands = parent_candidates(&self.state.read(cx), &sel_lid);
+                        let mut label = "None (unparent)".to_string();
+                        let mut idx = 0usize;
+                        for (i, (cid, cname)) in cands.iter().enumerate() {
+                            if cur_parent.as_deref() == Some(cid.as_str()) {
+                                label = format!("{cname} ({cid})");
+                                idx = i + 1;
+                            }
+                        }
+                        (label, idx)
+                    };
+                    let bm_idx = project::BlendMode::ALL
+                        .iter()
+                        .position(|b| b == &cur_bm)
+                        .unwrap_or(0);
+                    let wants: Vec<(String, usize, String)> = mask_descs
+                        .iter()
+                        .map(|(mid, label, idx)| (format!("mask_mode_{mid}"), *idx, label.clone()))
+                        .chain([
+                            (
+                                format!("props_blend_mode_{sel_lid}"),
+                                bm_idx,
+                                cur_bm.as_str().to_string(),
+                            ),
+                            (
+                                format!("props_track_matte_{sel_lid}"),
+                                track_matte_index(cur_matte),
+                                track_matte_label(cur_matte).to_string(),
+                            ),
+                            (pl_key.clone(), parent_idx, parent_label),
+                        ])
+                        .collect();
+                    for (key, idx, label) in wants {
+                        if let Some(cb) = self.combobox_states.get(&key) {
+                            sync_combo_selection(cb, idx, &label, window, cx);
+                        }
+                    }
                 }
             } else {
                 self.combobox_states.clear();
                 self.combobox_subs.clear();
+                self.combobox_fp.clear();
             }
         }
 
@@ -10774,6 +10857,7 @@ impl Render for PropertiesPanel {
                                 &self.state,
                                 layer,
                                 &panel_entity,
+                                &self.combobox_states,
                                 shape_view,
                                 rename_view,
                                 self.trace_open,
@@ -11206,24 +11290,162 @@ impl Panel for EffectsPanel {
 
 // --- 5. Timeline Panel ---
 
-pub const BLEND_MODE_GROUPS: &[(&str, &[BlendMode])] = &[
-    ("Normal", &[BlendMode::Normal, BlendMode::Dissolve]),
-    ("Darken", &[BlendMode::Darken, BlendMode::Multiply, BlendMode::ColorBurn, BlendMode::LinearBurn]),
-    ("Lighten", &[BlendMode::Lighten, BlendMode::Screen, BlendMode::ColorDodge, BlendMode::LinearDodge, BlendMode::Add]),
-    ("Contrast", &[BlendMode::Overlay, BlendMode::SoftLight, BlendMode::HardLight, BlendMode::VividLight, BlendMode::LinearLight, BlendMode::PinLight, BlendMode::HardMix]),
-    ("Inversion", &[BlendMode::Difference, BlendMode::Exclusion, BlendMode::Subtract, BlendMode::Divide]),
-    ("Component", &[BlendMode::Hue, BlendMode::Saturation, BlendMode::Color, BlendMode::Luminosity]),
+/// Track-matte option labels in Combobox order.
+pub(crate) const TRACK_MATTE_OPTIONS: [&str; 5] = [
+    "No Matte",
+    "Alpha Matte",
+    "Alpha Invert",
+    "Luma Matte",
+    "Luma Invert",
 ];
 
+/// Parse a [`TRACK_MATTE_OPTIONS`] label back into a mode.
+pub(crate) fn track_matte_from_label(name: &str) -> TrackMatteMode {
+    match name {
+        "Alpha Matte" => TrackMatteMode::Alpha,
+        "Alpha Invert" => TrackMatteMode::AlphaInverted,
+        "Luma Matte" => TrackMatteMode::Luma,
+        "Luma Invert" => TrackMatteMode::LumaInverted,
+        _ => TrackMatteMode::None,
+    }
+}
 
-
-fn next_matte_mode(mode: TrackMatteMode) -> TrackMatteMode {
+/// Label for a track-matte mode (matches [`TRACK_MATTE_OPTIONS`]).
+pub(crate) fn track_matte_label(mode: TrackMatteMode) -> &'static str {
     match mode {
-        TrackMatteMode::None => TrackMatteMode::Alpha,
-        TrackMatteMode::Alpha => TrackMatteMode::AlphaInverted,
-        TrackMatteMode::AlphaInverted => TrackMatteMode::Luma,
-        TrackMatteMode::Luma => TrackMatteMode::LumaInverted,
-        TrackMatteMode::LumaInverted => TrackMatteMode::None,
+        TrackMatteMode::None => "No Matte",
+        TrackMatteMode::Alpha => "Alpha Matte",
+        TrackMatteMode::AlphaInverted => "Alpha Invert",
+        TrackMatteMode::Luma => "Luma Matte",
+        TrackMatteMode::LumaInverted => "Luma Invert",
+    }
+}
+
+/// Index of a track-matte mode in [`TRACK_MATTE_OPTIONS`].
+pub(crate) fn track_matte_index(mode: TrackMatteMode) -> usize {
+    match mode {
+        TrackMatteMode::None => 0,
+        TrackMatteMode::Alpha => 1,
+        TrackMatteMode::AlphaInverted => 2,
+        TrackMatteMode::Luma => 3,
+        TrackMatteMode::LumaInverted => 4,
+    }
+}
+
+/// Shared Combobox commit paths (Properties panel + timeline rows): each is
+/// one undo step plus a notify.
+pub(crate) fn apply_blend_mode_option(
+    state: &Entity<EditorState>,
+    lid: &str,
+    name: &str,
+    cx: &mut App,
+) {
+    if let Some(&bm) = project::BlendMode::ALL.iter().find(|b| b.as_str() == name) {
+        state.update(cx, |s, cx| {
+            s.set_layer_blend_mode(lid, bm);
+            cx.notify();
+        });
+    }
+}
+
+/// Shared Combobox commit path for track-matte options.
+pub(crate) fn apply_track_matte_option(
+    state: &Entity<EditorState>,
+    lid: &str,
+    name: &str,
+    cx: &mut App,
+) {
+    let mode = track_matte_from_label(name);
+    state.update(cx, |s, cx| {
+        s.set_layer_track_matte(lid, mode, None);
+        cx.notify();
+    });
+}
+
+/// Shared Combobox commit path for parent options. `option` is either
+/// `"None (unparent)"` or `"{name} ({id})"`; candidates resolve ids.
+pub(crate) fn apply_parent_option(
+    state: &Entity<EditorState>,
+    lid: &str,
+    option: &str,
+    candidates: &[(String, String)],
+    cx: &mut App,
+) {
+    let parent_id = if option == "None (unparent)" {
+        None
+    } else {
+        candidates
+            .iter()
+            .find(|(cid, cname)| &format!("{cname} ({cid})") == option)
+            .map(|(cid, _)| cid.clone())
+    };
+    state.update(cx, |s, cx| {
+        s.set_layer_parent(lid, parent_id);
+        cx.notify();
+    });
+}
+
+/// Candidate parents for a layer (every layer except itself and its
+/// descendants, which would cycle), as `(id, name)` in layer order.
+pub(crate) fn parent_candidates(
+    state: &EditorState,
+    lid: &str,
+) -> Vec<(String, String)> {
+    let Some(comp) = state.active_composition() else {
+        return Vec::new();
+    };
+    let mut forbidden = vec![lid.to_string()];
+    let mut stack = vec![lid.to_string()];
+    while let Some(id) = stack.pop() {
+        for child in comp.get_children(&id) {
+            forbidden.push(child.id.clone());
+            stack.push(child.id.clone());
+        }
+    }
+    comp.layers
+        .iter()
+        .filter(|l| !forbidden.contains(&l.id))
+        .map(|l| (l.id.clone(), l.name.clone()))
+        .collect()
+}
+
+/// Re-sync a retained Combobox to the model index (undo / other-panel
+/// edits). Converges in one pass with no event loop: no-op when the
+/// displayed value already matches, so open menus are never yanked.
+pub(crate) fn sync_combo_selection(
+    cb: &Entity<ComboboxState<SearchableVec<String>>>,
+    want_idx: usize,
+    want_label: &str,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let cur = cb.read(cx).selected_value().map(|v| v.to_string());
+    if cur.as_deref() != Some(want_label) {
+        cb.update(cx, |s, cx| {
+            s.set_selected_indices(vec![IndexPath::new(want_idx)], window, cx);
+        });
+    }
+}
+
+/// Font weight for a style option label (style Combobox commit path).
+pub(crate) fn font_weight_from_label(name: &str) -> u16 {
+    match name {
+        "Medium" => 500,
+        "SemiBold" => 600,
+        "Bold" => 700,
+        "Black" => 900,
+        _ => 400,
+    }
+}
+
+/// Index of a weight in the font style Combobox options.
+pub(crate) fn font_style_index(weight: u16) -> usize {
+    match weight {
+        w if w < 450 => 0,
+        w if w < 550 => 1,
+        w if w < 650 => 2,
+        w if w < 800 => 3,
+        _ => 4,
     }
 }
 
@@ -11562,9 +11784,13 @@ pub struct TimelinePanel {
     _subscription: Subscription,
     expanded_layers: HashSet<String>,
     expanded_groups: HashSet<String>,
-    pub active_blend_dropdown: Option<String>,
-    /// Layer id whose parent picker is open (timeline Parent pill).
-    pub active_parent_dropdown: Option<String>,
+    /// Retained timeline-row Combobox states (key embeds the selected
+    /// index — and parent candidates — so undo/renames/add-remove
+    /// recreate state instead of showing stale picks; stale pruned).
+    pub tl_combos: HashMap<String, Entity<ComboboxState<SearchableVec<String>>>>,
+    pub tl_combo_subs: HashMap<String, Subscription>,
+    /// Parent Combobox option fingerprints per layer (recreate on change).
+    pub tl_parent_fp: HashMap<String, String>,
     pub context_menu: Option<ContextMenuState>,
     pub is_scrubbing_ruler: bool,
     pub ruler_origin_x: f32,
@@ -13008,8 +13234,9 @@ impl TimelinePanel {
             _subscription,
             expanded_layers,
             expanded_groups,
-            active_blend_dropdown: None,
-            active_parent_dropdown: None,
+            tl_combos: HashMap::new(),
+            tl_combo_subs: HashMap::new(),
+            tl_parent_fp: HashMap::new(),
             context_menu: None,
             is_scrubbing_ruler: false,
             ruler_origin_x: 380.0,
@@ -13036,24 +13263,6 @@ impl TimelinePanel {
             reorder_start_y: 0.0,
             keyframe_drag: None,
         }
-    }
-
-    pub fn open_blend_dropdown(&mut self, layer_id: String) {
-        self.active_blend_dropdown = Some(layer_id);
-        self.active_parent_dropdown = None;
-    }
-
-    pub fn close_blend_dropdown(&mut self) {
-        self.active_blend_dropdown = None;
-    }
-
-    pub fn open_parent_dropdown(&mut self, layer_id: String) {
-        self.active_parent_dropdown = Some(layer_id);
-        self.active_blend_dropdown = None;
-    }
-
-    pub fn close_parent_dropdown(&mut self) {
-        self.active_parent_dropdown = None;
     }
 
     pub fn open_context_menu(&mut self, target: ContextMenuTarget, pos: Point<Pixels>) {
@@ -13207,7 +13416,230 @@ impl Focusable for TimelinePanel {
 }
 
 impl Render for TimelinePanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Retain + provision row Comboboxes (blend / matte / parent) before
+        // the state read-guard below: entity creation needs `&mut cx`.
+        // Stable per-layer keys; the selected index is re-synced every
+        // render and parent option lists are fingerprinted, so undo,
+        // renames and add/remove never show stale picks.
+        {
+            // Owned snapshots (guard dropped before any `cx.new`).
+            let rows: Vec<(
+                String,
+                BlendMode,
+                TrackMatteMode,
+                Option<String>,
+                Vec<(String, String)>,
+                Vec<(String, project::MaskMode)>,
+            )> = {
+                let st = self.state.read(cx);
+                match st.active_composition() {
+                    Some(comp) => comp
+                        .layers
+                        .iter()
+                        .map(|l| {
+                            let cands = parent_candidates(&st, &l.id);
+                            (
+                                l.id.clone(),
+                                l.blend_mode,
+                                l.matte_mode,
+                                l.parent_id.clone(),
+                                cands,
+                                l.masks.iter().map(|m| (m.id.clone(), m.mode)).collect(),
+                            )
+                        })
+                        .collect(),
+                    None => Vec::new(),
+                }
+            };
+            let mut live: HashSet<String> = HashSet::new();
+            for (lid, bm, matte, parent, cands, masks) in &rows {
+                live.insert(format!("tl_blend_{lid}"));
+                live.insert(format!("tl_matte_{lid}"));
+                live.insert(format!("tl_parent_{lid}"));
+                for (mid, _) in masks.iter() {
+                    live.insert(format!("tl_maskmode_{lid}_{mid}"));
+                }
+                // Blend Mode.
+                let bm_idx = project::BlendMode::ALL
+                    .iter()
+                    .position(|b| b == bm)
+                    .unwrap_or(0);
+                let bm_key = format!("tl_blend_{lid}");
+                if !self.tl_combos.contains_key(&bm_key) {
+                    let delegate = SearchableVec::new(
+                        project::BlendMode::ALL
+                            .iter()
+                            .map(|b| b.as_str().to_string())
+                            .collect::<Vec<_>>(),
+                    );
+                    let cb = cx.new(|cx| {
+                        ComboboxState::new(delegate, vec![IndexPath::new(bm_idx)], window, cx)
+                    });
+                    let s_b = self.state.clone();
+                    let lid_c = lid.clone();
+                    let sub = cx.subscribe(
+                        &cb,
+                        move |_, _, event: &ComboboxEvent<SearchableVec<String>>, cx| {
+                            let vals = match event {
+                                ComboboxEvent::Confirm(v) => v,
+                                ComboboxEvent::Change(v) => v,
+                            };
+                            if let Some(name) = vals.first() {
+                                apply_blend_mode_option(&s_b, &lid_c, name, cx);
+                            }
+                        },
+                    );
+                    self.tl_combos.insert(bm_key.clone(), cb);
+                    self.tl_combo_subs.insert(bm_key, sub);
+                }
+                // Track Matte.
+                let m_idx = track_matte_index(*matte);
+                let m_key = format!("tl_matte_{lid}");
+                if !self.tl_combos.contains_key(&m_key) {
+                    let delegate = SearchableVec::new(
+                        TRACK_MATTE_OPTIONS.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                    );
+                    let cb = cx.new(|cx| {
+                        ComboboxState::new(delegate, vec![IndexPath::new(m_idx)], window, cx)
+                    });
+                    let s_m = self.state.clone();
+                    let lid_c = lid.clone();
+                    let sub = cx.subscribe(
+                        &cb,
+                        move |_, _, event: &ComboboxEvent<SearchableVec<String>>, cx| {
+                            let vals = match event {
+                                ComboboxEvent::Confirm(v) => v,
+                                ComboboxEvent::Change(v) => v,
+                            };
+                            if let Some(name) = vals.first() {
+                                apply_track_matte_option(&s_m, &lid_c, name, cx);
+                            }
+                        },
+                    );
+                    self.tl_combos.insert(m_key.clone(), cb);
+                    self.tl_combo_subs.insert(m_key, sub);
+                }
+                // Parent Layer (dynamic candidates → fingerprint).
+                let mut opts = vec!["None (unparent)".to_string()];
+                let mut sel_idx = 0usize;
+                for (i, (cid, cname)) in cands.iter().enumerate() {
+                    if parent.as_deref() == Some(cid.as_str()) {
+                        sel_idx = i + 1;
+                    }
+                    opts.push(format!("{cname} ({cid})"));
+                }
+                let fp = format!("{sel_idx}|{}", opts.join("|"));
+                let p_key = format!("tl_parent_{lid}");
+                if self.tl_parent_fp.get(lid) != Some(&fp) {
+                    self.tl_combos.remove(&p_key);
+                    self.tl_combo_subs.remove(&p_key);
+                    self.tl_parent_fp.insert(lid.clone(), fp);
+                }
+                if !self.tl_combos.contains_key(&p_key) {
+                    let delegate = SearchableVec::new(opts);
+                    let cb = cx.new(|cx| {
+                        ComboboxState::new(delegate, vec![IndexPath::new(sel_idx)], window, cx)
+                    });
+                    let s_p = self.state.clone();
+                    let lid_c = lid.clone();
+                    let cands_c = cands.clone();
+                    let sub = cx.subscribe(
+                        &cb,
+                        move |_, _, event: &ComboboxEvent<SearchableVec<String>>, cx| {
+                            let vals = match event {
+                                ComboboxEvent::Confirm(v) => v,
+                                ComboboxEvent::Change(v) => v,
+                            };
+                            if let Some(name) = vals.first() {
+                                apply_parent_option(&s_p, &lid_c, name, &cands_c, cx);
+                            }
+                        },
+                    );
+                    self.tl_combos.insert(p_key.clone(), cb);
+                    self.tl_combo_subs.insert(p_key, sub);
+                }
+                // Mask Mode Comboboxes.
+                for (mid, mode) in masks.iter() {
+                    let key = format!("tl_maskmode_{lid}_{mid}");
+                    if !self.tl_combos.contains_key(&key) {
+                        let idx = project::MaskMode::ALL
+                            .iter()
+                            .position(|m| m == mode)
+                            .unwrap_or(0);
+                        let delegate = SearchableVec::new(
+                            project::MaskMode::ALL
+                                .iter()
+                                .map(|m| m.label().to_string())
+                                .collect::<Vec<_>>(),
+                        );
+                        let cb = cx.new(|cx| {
+                            ComboboxState::new(delegate, vec![IndexPath::new(idx)], window, cx)
+                        });
+                        let s_m = self.state.clone();
+                        let lid_c = lid.clone();
+                        let mid_c = mid.clone();
+                        let sub = cx.subscribe(
+                            &cb,
+                            move |_, _, event: &ComboboxEvent<SearchableVec<String>>, cx| {
+                                let vals = match event {
+                                    ComboboxEvent::Confirm(v) => v,
+                                    ComboboxEvent::Change(v) => v,
+                                };
+                                if let Some(name) = vals.first() {
+                                    if let Some(mode) = project::MaskMode::from_label(name) {
+                                        s_m.update(cx, |s, cx| {
+                                            let _ = s.set_mask_mode(&lid_c, &mid_c, mode);
+                                            cx.notify();
+                                        });
+                                    }
+                                }
+                            },
+                        );
+                        self.tl_combos.insert(key.clone(), cb);
+                        self.tl_combo_subs.insert(key, sub);
+                    }
+                }
+            }
+            self.tl_combos.retain(|k, _| live.contains(k));
+            self.tl_combo_subs.retain(|k, _| live.contains(k));
+            self.tl_parent_fp.retain(|k, _| {
+                rows.iter().any(|(lid, _, _, _, _, _)| lid == k)
+            });
+            // Re-sync selections that drifted (undo, other-panel edits).
+            for (lid, bm, matte, _, _, masks) in &rows {
+                let mut wants = vec![
+                    (
+                        format!("tl_blend_{lid}"),
+                        project::BlendMode::ALL
+                            .iter()
+                            .position(|b| b == bm)
+                            .unwrap_or(0),
+                        bm.as_str().to_string(),
+                    ),
+                    (
+                        format!("tl_matte_{lid}"),
+                        track_matte_index(*matte),
+                        track_matte_label(*matte).to_string(),
+                    ),
+                ];
+                for (mid, mode) in masks.iter() {
+                    wants.push((
+                        format!("tl_maskmode_{lid}_{mid}"),
+                        project::MaskMode::ALL
+                            .iter()
+                            .position(|m| m == mode)
+                            .unwrap_or(0),
+                        mode.label().to_string(),
+                    ));
+                }
+                for (key, want_idx, want_label) in wants {
+                    if let Some(cb) = self.tl_combos.get(&key) {
+                        sync_combo_selection(cb, want_idx, &want_label, window, cx);
+                    }
+                }
+            }
+        }
         let state = self.state.read(cx);
         let comp_opt = state.active_composition();
         let current_tc = state.clock.timecode();
@@ -13243,15 +13675,11 @@ impl Render for TimelinePanel {
                 let vis_state = self.state.clone();
                 let solo_state = self.state.clone();
                 let lock_state = self.state.clone();
-                let matte_state = self.state.clone();
 
                 let lid = layer.id.clone();
                 let lid_vis = layer.id.clone();
                 let lid_solo = layer.id.clone();
                 let lid_lock = layer.id.clone();
-                let lid_matte = layer.id.clone();
-                let lid_parent = layer.id.clone();
-                let current_matte = layer.matte_mode;
 
                 let p_twirl = panel_entity.clone();
                 let lid_twirl = layer.id.clone();
@@ -13421,93 +13849,71 @@ impl Render for TimelinePanel {
                         h_flex()
                             .gap_1()
                             .items_center()
-                            // Blend Mode
-                            .child({
-                                let p_blend = panel_entity.clone();
-                                let lid_bm = layer.id.clone();
-                                div()
-                                    .cursor_pointer()
-                                    .px_1p5()
-                                    .py_0p5()
-                                    .rounded_sm()
-                                    .bg(cx.theme().secondary)
-                                    .text_color(cx.theme().muted_foreground)
-                                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-                                    .text_xs()
-                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                        p_blend.update(cx, |this, cx| {
-                                            if this.active_blend_dropdown.as_deref() == Some(&lid_bm) {
-                                                this.close_blend_dropdown();
-                                            } else {
-                                                this.open_blend_dropdown(lid_bm.clone());
-                                            }
-                                            cx.notify();
-                                        });
-                                    })
-                                    .child(layer.blend_mode.as_str())
-                            })
-                            // Track Matte
+                            // Blend Mode (kit Combobox).
                             .child(
                                 div()
-                                    .cursor_pointer()
-                                    .px_1p5()
-                                    .py_0p5()
-                                    .rounded_sm()
-                                    .bg(cx.theme().secondary)
-                                    .text_color(cx.theme().muted_foreground)
-                                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-                                    .text_xs()
-                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                        let next = next_matte_mode(current_matte);
-                                        matte_state.update(cx, |s, cx| {
-                                            s.set_layer_track_matte(&lid_matte, next, None);
-                                            cx.notify();
-                                        });
-                                    })
-                                    .child(match layer.matte_mode {
-                                        TrackMatteMode::None => "None",
-                                        TrackMatteMode::Alpha => "Alpha",
-                                        TrackMatteMode::AlphaInverted => "Inv Alpha",
-                                        TrackMatteMode::Luma => "Luma",
-                                        TrackMatteMode::LumaInverted => "Inv Luma",
+                                    .id(SharedString::from(format!("tl_blend_{}", layer.id)))
+                                    .test_support()
+                                    .w(px(96.))
+                                    .child({
+                                        let key = format!("tl_blend_{}", layer.id);
+                                        if let Some(cb) = self.tl_combos.get(&key) {
+                                            Combobox::new(cb).small().into_any_element()
+                                        } else {
+                                            div()
+                                                .text_xs()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(layer.blend_mode.as_str())
+                                                .into_any_element()
+                                        }
+                                    }),
+                            )
+                            // Track Matte (kit Combobox).
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("tl_matte_{}", layer.id)))
+                                    .test_support()
+                                    .w(px(96.))
+                                    .child({
+                                        let key = format!("tl_matte_{}", layer.id);
+                                        if let Some(cb) = self.tl_combos.get(&key) {
+                                            Combobox::new(cb).small().into_any_element()
+                                        } else {
+                                            div()
+                                                .text_xs()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(track_matte_label(layer.matte_mode))
+                                                .into_any_element()
+                                        }
                                     }),
                             )
                             // Parent picker: any layer can parent any other
                             // (except itself and its own descendants, which
                             // would cycle). (Un)parenting preserves the
                             // child's world transform.
-                            .child({
-                                let p_pick = panel_entity.clone();
-                                let has_parent = layer.parent_id.is_some();
+                            .child(
                                 div()
                                     .id(SharedString::from(format!("parent_picker_{}", layer.id)))
                                     .test_support()
-                                    .cursor_pointer()
-                                    .px_1p5()
-                                    .py_0p5()
-                                    .rounded_sm()
-                                    .bg(if has_parent { ae::green() } else { ae::control() })
-                                    .text_color(if has_parent { rgb(0xffffff) } else { ae::dim() })
-                                    .hover(|s| s.bg(ae::hover()))
-                                    .text_xs()
-                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                        let lid = lid_parent.clone();
-                                        p_pick.update(cx, |this, cx| {
-                                            if this.active_parent_dropdown.as_deref() == Some(&lid) {
-                                                this.close_parent_dropdown();
-                                            } else {
-                                                this.open_parent_dropdown(lid);
-                                            }
-                                            cx.notify();
-                                        });
-                                    })
-                                    .child(
-                                        layer
-                                            .parent_id
-                                            .clone()
-                                            .unwrap_or_else(|| "None".to_string()),
-                                    )
-                            }),
+                                    .w(px(128.))
+                                    .child({
+                                        let key = format!("tl_parent_{}", layer.id);
+                                        if let Some(cb) = self.tl_combos.get(&key) {
+                                            Combobox::new(cb).small().into_any_element()
+                                        } else {
+                                            div()
+                                                .text_xs()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(
+                                                    layer
+                                                        .parent_id
+                                                        .clone()
+                                                        .unwrap_or_else(|| "None".to_string()),
+                                                )
+                                                .into_any_element()
+                                        }
+                                    }),
+                            ),
                     );
 
                 let span_state = self.state.clone();
@@ -14313,12 +14719,9 @@ impl Render for TimelinePanel {
                                     || (is_selected && (state.timeline_masks_reveal_all || state.timeline_masks_reveal_path));
                                 let p_m_item = panel_entity.clone();
                                 let m_item_click = mask_item_key.clone();
-                                let s_mode = self.state.clone();
                                 let s_inv = self.state.clone();
                                 let s_del = self.state.clone();
                                 let s_lock = self.state.clone();
-                                let lid_m = layer.id.clone();
-                                let mid_m = mask.id.clone();
                                 let mid_inv = mask.id.clone();
                                 let mid_del = mask.id.clone();
                                 let mid_lock = mask.id.clone();
@@ -14374,21 +14777,22 @@ impl Render for TimelinePanel {
                                                 div()
                                                     .id(SharedString::from(format!("tl_mask_mode_{}_{}", layer.id, mask.id)))
                                                     .test_support()
-                                                    .cursor_pointer()
-                                                    .px_1p5()
-                                                    .py_0p5()
-                                                    .rounded_sm()
-                                                    .bg(cx.theme().muted)
-                                                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-                                                    .text_xs()
-                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                        let (l, m) = (lid_m.clone(), mid_m.clone());
-                                                        s_mode.update(cx, |s, cx| {
-                                                            let _ = s.cycle_mask_mode(&l, &m);
-                                                            cx.notify();
-                                                        });
-                                                    })
-                                                    .child(m_mode.label())
+                                                    .w(px(108.))
+                                                    .child({
+                                                        let key = format!(
+                                                            "tl_maskmode_{}_{}",
+                                                            layer.id, mask.id
+                                                        );
+                                                        if let Some(cb) = self.tl_combos.get(&key) {
+                                                            Combobox::new(cb).small().into_any_element()
+                                                        } else {
+                                                            div()
+                                                                .text_xs()
+                                                                .text_color(cx.theme().muted_foreground)
+                                                                .child(m_mode.label())
+                                                                .into_any_element()
+                                                        }
+                                                    }),
                                             )
                                             .child(
                                                 div()
@@ -15353,254 +15757,7 @@ impl Render for TimelinePanel {
                 }
             });
 
-        // Blend Mode Dropdown Overlay
-        if let Some(ref target_lid) = self.active_blend_dropdown {
-            let s_bm = self.state.clone();
-            let p_close = panel_entity.clone();
-            let target_lid_str = target_lid.clone();
 
-            let mut cat_columns = h_flex().gap_2().p_2();
-
-            for (cat_name, modes) in BLEND_MODE_GROUPS {
-                let mut col = v_flex().gap_0p5().w(px(95.));
-                col = col.child(
-                    div()
-                        .font_semibold()
-                        .text_xs()
-                        .text_color(cx.theme().primary)
-                        .px_1()
-                        .py_0p5()
-                        .border_b_1()
-                        .border_color(cx.theme().border)
-                        .child(*cat_name),
-                );
-
-                for &bm in *modes {
-                    let s_item = s_bm.clone();
-                    let p_close_item = p_close.clone();
-                    let target_lid_item = target_lid_str.clone();
-
-                    col = col.child(
-                        div()
-                            .cursor_pointer()
-                            .px_1p5()
-                            .py_0p5()
-                            .rounded_sm()
-                            .text_xs()
-                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                s_item.update(cx, |s, cx| {
-                                    s.set_layer_blend_mode(&target_lid_item, bm);
-                                    cx.notify();
-                                });
-                                p_close_item.update(cx, |this, cx| {
-                                    this.close_blend_dropdown();
-                                    cx.notify();
-                                });
-                            })
-                            .child(bm.as_str()),
-                    );
-                }
-                cat_columns = cat_columns.child(col);
-            }
-
-            let p_close_bg = p_close.clone();
-            let blend_dropdown_overlay = div()
-                .id("blend_mode_dropdown")
-                .test_support()
-                .absolute()
-                .top(px(40.))
-                .left(px(180.))
-                .bg(cx.theme().background)
-                .border_1()
-                .border_color(cx.theme().border)
-                .rounded_md()
-                .shadow_lg()
-                .child(
-                    v_flex()
-                        .child(
-                            h_flex()
-                                .justify_between()
-                                .items_center()
-                                .px_2()
-                                .py_1()
-                                .border_b_1()
-                                .border_color(cx.theme().border)
-                                .bg(cx.theme().secondary)
-                                .child(div().font_bold().text_xs().child("Blend Modes"))
-                                .child(
-                                    div()
-                                        .cursor_pointer()
-                                        .text_xs()
-                                        .hover(|s| s.text_color(rgb(0xef4444)))
-                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                            p_close_bg.update(cx, |this, cx| {
-                                                this.close_blend_dropdown();
-                                                cx.notify();
-                                            });
-                                        })
-                                        .child("✕"),
-                                ),
-                        )
-                        .child(cat_columns),
-                );
-            root = root.child(blend_dropdown_overlay);
-        }
-
-        // Parent Picker Dropdown Overlay: every layer except the target
-        // itself and its descendants (which would create a cycle), plus
-        // None to unparent. (Un)parenting preserves world transform.
-        if let Some(ref target_lid) = self.active_parent_dropdown {
-            let s_pick = self.state.clone();
-            let p_close = panel_entity.clone();
-            let target_lid_str = target_lid.clone();
-
-            // Candidate parent ids + display names in layer order.
-            let (candidates, current_parent) = {
-                let s = self.state.read(cx);
-                match s.active_composition() {
-                    Some(comp) => {
-                        let mut forbidden = vec![target_lid_str.clone()];
-                        let mut stack = vec![target_lid_str.clone()];
-                        while let Some(id) = stack.pop() {
-                            for child in comp.get_children(&id) {
-                                forbidden.push(child.id.clone());
-                                stack.push(child.id.clone());
-                            }
-                        }
-                        let cands: Vec<(String, String)> = comp
-                            .layers
-                            .iter()
-                            .filter(|l| !forbidden.contains(&l.id))
-                            .map(|l| (l.id.clone(), l.name.clone()))
-                            .collect();
-                        let cur = comp
-                            .get_layer(&target_lid_str)
-                            .and_then(|l| l.parent_id.clone());
-                        (cands, cur)
-                    }
-                    None => (Vec::new(), None),
-                }
-            };
-
-            let mut list = v_flex()
-                .id("parent_pick_list")
-                .test_support()
-                .gap_0p5()
-                .p_1()
-                .overflow_y_scroll();
-            {
-                let s_item = s_pick.clone();
-                let p_close_item = p_close.clone();
-                let target_lid_item = target_lid_str.clone();
-                let is_cur = current_parent.is_none();
-                list = list.child(
-                    div()
-                        .id("parent_pick_none")
-                        .test_support()
-                        .cursor_pointer()
-                        .px_2()
-                        .py_1()
-                        .rounded_sm()
-                        .text_xs()
-                        .bg(if is_cur {
-                            cx.theme().accent
-                        } else {
-                            cx.theme().secondary
-                        })
-                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                            s_item.update(cx, |s, cx| {
-                                s.set_layer_parent(&target_lid_item, None);
-                                cx.notify();
-                            });
-                            p_close_item.update(cx, |this, cx| {
-                                this.close_parent_dropdown();
-                                cx.notify();
-                            });
-                        })
-                        .child("None (unparent)"),
-                );
-            }
-            for (cid, cname) in candidates {
-                let s_item = s_pick.clone();
-                let p_close_item = p_close.clone();
-                let target_lid_item = target_lid_str.clone();
-                let is_cur = current_parent.as_deref() == Some(&cid);
-                let label = format!("{cname} ({cid})");
-                list = list.child(
-                    div()
-                        .id(SharedString::from(format!("parent_pick_{cid}")))
-                        .test_support()
-                        .cursor_pointer()
-                        .px_2()
-                        .py_1()
-                        .rounded_sm()
-                        .text_xs()
-                        .bg(if is_cur {
-                            cx.theme().accent
-                        } else {
-                            cx.theme().secondary
-                        })
-                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                            s_item.update(cx, |s, cx| {
-                                s.set_layer_parent(&target_lid_item, Some(cid.clone()));
-                                cx.notify();
-                            });
-                            p_close_item.update(cx, |this, cx| {
-                                this.close_parent_dropdown();
-                                cx.notify();
-                            });
-                        })
-                        .child(label),
-                );
-            }
-
-            let p_close_bg = p_close.clone();
-            let parent_dropdown_overlay = div()
-                .id("parent_picker_dropdown")
-                .test_support()
-                .absolute()
-                .top(px(40.))
-                .left(px(180.))
-                .w(px(260.))
-                .h(px(300.))
-                .bg(cx.theme().background)
-                .border_1()
-                .border_color(cx.theme().border)
-                .rounded_md()
-                .shadow_lg()
-                .child(
-                    v_flex()
-                        .child(
-                            h_flex()
-                                .justify_between()
-                                .items_center()
-                                .px_2()
-                                .py_1()
-                                .border_b_1()
-                                .border_color(cx.theme().border)
-                                .bg(cx.theme().secondary)
-                                .child(div().font_bold().text_xs().child("Parent Layer"))
-                                .child(
-                                    div()
-                                        .cursor_pointer()
-                                        .text_xs()
-                                        .hover(|s| s.text_color(rgb(0xef4444)))
-                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                            p_close_bg.update(cx, |this, cx| {
-                                                this.close_parent_dropdown();
-                                                cx.notify();
-                                            });
-                                        })
-                                        .child("✕"),
-                                ),
-                        )
-                        .child(list),
-                );
-            root = root.child(parent_dropdown_overlay);
-        }
 
         // Context Menu Overlay
         if let Some(ref ctx_menu) = self.context_menu {

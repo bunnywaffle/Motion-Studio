@@ -5240,6 +5240,14 @@ mod tests {
             state.active_composition().unwrap().get_layer(layer_id).unwrap().get_mask(&mid).unwrap().mode,
             MaskMode::Subtract
         );
+        // Direct set (Combobox commit path) + label round-trip.
+        state.set_mask_mode(layer_id, &mid, MaskMode::Intersect).expect("mode set");
+        assert_eq!(
+            state.active_composition().unwrap().get_layer(layer_id).unwrap().get_mask(&mid).unwrap().mode,
+            MaskMode::Intersect
+        );
+        assert_eq!(MaskMode::from_label("Difference"), Some(MaskMode::Difference));
+        assert_eq!(MaskMode::from_label("Bogus"), None);
         state.toggle_mask_invert(layer_id, &mid).expect("invert toggled");
         assert!(state.active_composition().unwrap().get_layer(layer_id).unwrap().get_mask(&mid).unwrap().invert);
         assert!(state.nudge_mask_param(layer_id, &mid, "feather", 6.0).is_ok());
@@ -5643,41 +5651,18 @@ mod tests {
 
     #[gpui_kit::test]
     fn test_blend_mode_dropdown_and_context_menus(cx: &mut TestAppContext) {
-        use crate::panels::{BLEND_MODE_GROUPS, ContextMenuTarget, TimelinePanel};
+        use crate::panels::{ContextMenuTarget, TimelinePanel};
         use project::BlendMode;
 
         cx.update(gpui_kit::init);
         let state_entity = cx.new(|_| crate::state::EditorState::new());
         let timeline_panel = cx.new(|cx| TimelinePanel::new(state_entity, cx));
 
-        // Verify BLEND_MODE_GROUPS covers all 19 modes in BlendMode::ALL
-        let mut all_grouped_modes = Vec::new();
-        for (_cat, modes) in BLEND_MODE_GROUPS {
-            for &m in *modes {
-                all_grouped_modes.push(m);
-            }
-        }
-        assert_eq!(all_grouped_modes.len(), BlendMode::ALL.len());
-        for mode in BlendMode::ALL {
-            assert!(all_grouped_modes.contains(&mode), "Missing mode: {:?}", mode);
-        }
-
-        // Blend mode dropdown open/close
-        timeline_panel.read_with(cx, |p, _| {
-            assert!(p.active_blend_dropdown.is_none());
-        });
-        timeline_panel.update(cx, |p, _| {
-            p.open_blend_dropdown("layer_accent".to_string());
-        });
-        timeline_panel.read_with(cx, |p, _| {
-            assert_eq!(p.active_blend_dropdown.as_deref(), Some("layer_accent"));
-        });
-        timeline_panel.update(cx, |p, _| {
-            p.close_blend_dropdown();
-        });
-        timeline_panel.read_with(cx, |p, _| {
-            assert!(p.active_blend_dropdown.is_none());
-        });
+        // BlendMode::ALL carries distinct labels for the Combobox options.
+        let mut labels: Vec<&str> = BlendMode::ALL.iter().map(|m| m.as_str()).collect();
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(labels.len(), BlendMode::ALL.len());
 
         // Context menu open/close
         timeline_panel.read_with(cx, |p, _| {
@@ -5695,6 +5680,111 @@ mod tests {
         timeline_panel.read_with(cx, |p, _| {
             assert!(p.context_menu.is_none());
         });
+    }
+
+    #[gpui_kit::test]
+    fn test_timeline_row_comboboxes_drive_blend_matte_parent(cx: &mut TestAppContext) {
+        // Timeline row Comboboxes: open, arrow down, confirm commits.
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("tl_blend_layer_accent").visible());
+            assert!(window.find("tl_matte_layer_accent").visible());
+            assert!(window.find("parent_picker_layer_accent").visible());
+            // Blend: Normal -> Dissolve (second option).
+            window.click("tl_blend_layer_accent", cx);
+            window.press("down", cx);
+            window.press("enter", cx);
+        })
+        .expect("update_window failed");
+        assert!(app_view.read_with(cx, |view, cx| {
+            view.state().read(cx).active_composition().unwrap().get_layer("layer_accent").unwrap().blend_mode == project::BlendMode::Dissolve
+        }));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            // Matte: None -> Alpha (second option).
+            window.click("tl_matte_layer_accent", cx);
+            window.press("down", cx);
+            window.press("enter", cx);
+        })
+        .expect("update_window failed");
+        assert!(app_view.read_with(cx, |view, cx| {
+            view.state().read(cx).active_composition().unwrap().get_layer("layer_accent").unwrap().matte_mode == project::TrackMatteMode::Alpha
+        }));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            // Parent: None -> first candidate layer.
+            window.click("parent_picker_layer_accent", cx);
+            window.press("down", cx);
+            window.press("enter", cx);
+        })
+        .expect("update_window failed");
+        assert!(app_view.read_with(cx, |view, cx| {
+            view.state().read(cx).active_composition().unwrap().get_layer("layer_accent").unwrap().parent_id.is_some()
+        }));
+    }
+
+    #[gpui_kit::test]
+    fn test_mask_mode_combobox_sets_mode_and_resyncs(cx: &mut TestAppContext) {
+        // Mask mode Comboboxes (properties card + timeline row): picking
+        // Subtract commits to the model and both pickers agree afterwards.
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1440.), px(1200.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        let mid = app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, _| {
+                s.select_layer(Some("layer_accent".to_string()));
+                s.add_mask_to_layer("layer_accent").unwrap()
+            })
+        });
+        // Reveal the timeline layer twirl-down + masks group.
+        app_view.update(cx, |view, cx| {
+            view.panels().timeline.update(cx, |this, cx| {
+                this.set_layer_expanded("layer_accent", true);
+                this.set_group_expanded("layer_accent:masks", true);
+                cx.notify();
+            });
+        });
+        let mask_trigger = SharedString::from(format!("mask_mode_{mid}"));
+        let tl_trigger = SharedString::from(format!("tl_mask_mode_layer_accent_{mid}"));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find(mask_trigger.clone()).visible());
+            assert!(window.find(tl_trigger.clone()).visible());
+            // Mode: Add -> Subtract (second option).
+            window.click(mask_trigger.clone(), cx);
+            window.press("down", cx);
+            window.press("enter", cx);
+        })
+        .expect("update_window failed");
+        assert!(app_view.read_with(cx, |view, cx| {
+            view.state().read(cx).active_composition().unwrap().get_layer("layer_accent").unwrap().get_mask(&mid).unwrap().mode == project::MaskMode::Subtract
+        }));
+        // The timeline picker re-synced to the same pick.
+        assert_eq!(
+            app_view.read_with(cx, |view, cx| {
+                view.panels().timeline.read(cx).tl_combos.get(&format!("tl_maskmode_layer_accent_{mid}")).and_then(|cb| cb.read(cx).selected_value().map(|v| v.to_string()))
+            }),
+            Some("Subtract".to_string())
+        );
     }
 
     #[test]

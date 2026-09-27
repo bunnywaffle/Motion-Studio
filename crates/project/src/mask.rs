@@ -73,6 +73,20 @@ impl MaskMode {
             Self::None => Self::Add,
         }
     }
+
+    /// All combining modes in cycle order (drives the mode Combobox).
+    pub const ALL: [Self; 5] = [
+        Self::Add,
+        Self::Subtract,
+        Self::Intersect,
+        Self::Difference,
+        Self::None,
+    ];
+
+    /// Parse a [`Self::label`] back into a mode (Combobox commit path).
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.label() == label)
+    }
 }
 
 /// Combine one effective coverage into the accumulation.
