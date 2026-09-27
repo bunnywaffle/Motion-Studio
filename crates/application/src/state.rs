@@ -608,7 +608,7 @@ impl EditorState {
 
     /// Create a new EditorState pre-seeded with a starter composition and animated demo layers.
     pub fn new() -> Self {
-        let mut project = Project::new("proj_default", "Motion Studio Project");
+        let mut project = Project::new("proj_default", "Motion Effect Project");
         let fps = 30.0;
         let duration_secs = 5.0;
         let mut comp = Composition::hd_1080p_30fps("comp_main", "Main Composition", duration_secs);

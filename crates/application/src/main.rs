@@ -979,7 +979,7 @@ fn render_menu_dropdown(
                     {
                         items = items.child(menu_item(
                             "menu_quit".to_string(),
-                            "Quit Motion Studio".to_string(),
+                            "Quit Motion Effect".to_string(),
                             Some("Ctrl+Q".to_string()),
                             true,
                             cx,
@@ -1338,7 +1338,7 @@ fn render_menu_dropdown(
                 }
                 TopMenu::About => {
                     let a = app.clone();
-                    items = items.child(menu_item("menu_about".to_string(), "About Motion Studio".to_string(), None, true, cx, move |cx| {
+                    items = items.child(menu_item("menu_about".to_string(), "About Motion Effect".to_string(), None, true, cx, move |cx| {
                         a.update(cx, |this, cx| {
                             this.open_menu = None;
                             this.show_about = true;
@@ -1612,7 +1612,7 @@ impl Render for AppView {
                                 .child(
                                     v_flex()
                                         .gap_2()
-                                        .child(div().font_bold().text_sm().child("Motion Studio"))
+                                        .child(div().font_bold().text_sm().child("Motion Effect"))
                                         .child(
                                             div()
                                                 .text_xs()
@@ -1621,7 +1621,7 @@ impl Render for AppView {
                                         )
                                         .child(
                                             div().text_xs().child(
-                                                "After Effects-style compositing: CPU raster viewport, transform gizmo, keyframe spline editor, Shader Lab shaders, and 31 GPU-validated effects.",
+                                                "Motion graphics, visual effects, and compositing: CPU raster viewport, transform gizmo, keyframe spline editor, Shader Lab shaders, and 31 GPU-validated effects.",
                                             ),
                                         )
                                         .child(
@@ -5507,11 +5507,11 @@ mod tests {
         assert_eq!(state.active_tool, EditorTool::ShapeRect);
 
         // Add Text layer
-        let text_id = state.add_text_layer("Motion Studio Title", None).unwrap();
+        let text_id = state.add_text_layer("Motion Effect Title", None).unwrap();
         {
             let comp = state.active_composition().unwrap();
             let text_layer = comp.get_layer(&text_id).unwrap();
-            assert!(matches!(&text_layer.source, LayerSource::Text { text, .. } if text.value == "Motion Studio Title"));
+            assert!(matches!(&text_layer.source, LayerSource::Text { text, .. } if text.value == "Motion Effect Title"));
         }
 
         // Add Rectangle shape layer
@@ -6691,8 +6691,8 @@ mod tests {
 
             // 1. Text Presets (Button)
             assert!(window.find("text_preset_Title Text").visible());
-            assert!(window.find("text_preset_Motion Studio").visible());
-            window.click("text_preset_Motion Studio", cx);
+            assert!(window.find("text_preset_Motion Effect").visible());
+            window.click("text_preset_Motion Effect", cx);
         })
         .expect("update_window failed");
 
@@ -6701,7 +6701,7 @@ mod tests {
             let comp = s.active_composition().unwrap();
             let l = comp.get_layer(&text_id).unwrap();
             match &l.source {
-                project::LayerSource::Text { text, .. } => text.value == "Motion Studio",
+                project::LayerSource::Text { text, .. } => text.value == "Motion Effect",
                 _ => false,
             }
         }));

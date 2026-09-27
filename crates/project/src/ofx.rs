@@ -1,6 +1,6 @@
 //! OpenFX-style effect plug-in registry.
 //!
-//! Motion Studio cannot load native OpenFX (`.ofx` / C ABI) binaries from
+//! Motion Effect cannot load native OpenFX (`.ofx` / C ABI) binaries from
 //! this Rust/GPUI process, so effects ship as an **in-process OFX suite**:
 //! every effect is described by an [`OfxEffectDescriptor`] with a stable
 //! reverse-DNS plug-in id in the `net.sf.openfx.*` family (the stock-effect

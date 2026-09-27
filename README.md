@@ -1,10 +1,10 @@
-# Motion Studio
+# Motion Effect
 
-A native, cross-platform After Effects-style motion graphics and 2D compositing desktop application built in Rust with GPUI Kit and wgpu.
+A native, cross-platform motion graphics, visual effects, and 2D compositing desktop application built in Rust with GPUI Kit and wgpu.
 
 ## Overview
 
-Motion Studio is designed for:
+Motion Effect is designed for:
 - Motion graphics design and vector animation
 - 2D compositing and multi-layer blending
 - Video and audio sequencing
@@ -13,7 +13,7 @@ Motion Studio is designed for:
 
 ## Architecture
 
-Motion Studio employs a clean, decoupled modular workspace architecture:
+Motion Effect employs a clean, decoupled modular workspace architecture:
 
 ```text
 +-------------------------------------------------------------+
@@ -46,6 +46,7 @@ Motion Studio employs a clean, decoupled modular workspace architecture:
 - `crates/application`: Native desktop binary, GPUI Kit application bootstrap, dark theme integration, and 4-region docking layout (`ProjectPanel`, `CompositionViewerPanel`, `PropertiesPanel`, `TimelinePanel`, `EffectsPanel`).
 - `crates/project`: Pure Rust core project model (`Project`, `Composition`, `Layer`, `LayerSource`, `Transform`, `Property<T>`, `Asset`, `BlendMode`, `Color`, `TimeCode`, `Marker`) with full serialization conforming to Section 16 format.
 - `crates/compositor`: Pure Rust scene graph and composition evaluation engine supporting topological evaluation sort (resolving parent-child transform dependencies) and painter's composite rendering order.
+- `crates/renderer`: Hardware-accelerated GPU render pipeline with wgpu and compute shaders.
 
 ## Building and Running
 
@@ -70,7 +71,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ## Status
 - **Phase 0 (Repository & Build System)**: 100% Complete
-- **Phase 1 (Core Engine Architecture)**: In Progress (Task 1.1 Complete)
+- **Phase 1 (Core Engine Architecture)**: 100% Complete (116 passing tests)
+- **Phase 2 (Hardware-Accelerated Rendering Architecture)**: In Progress
 
 ## License
 MIT OR Apache-2.0
+

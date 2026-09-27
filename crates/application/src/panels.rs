@@ -10027,7 +10027,7 @@ impl Render for PropertiesPanel {
                                 let inputs = text_inputs.read(cx);
 
                                 // 1. Source Text Presets
-                                let presets = ["Title Text", "Motion Studio", "Subheading", "After Effects"];
+                                let presets = ["Title Text", "Motion Effect", "Subheading", "Visual Effect"];
                                 let mut text_presets = h_flex().gap_1().items_center().flex_wrap();
                                 for p_str in presets {
                                     let s_p = s_text.clone();
