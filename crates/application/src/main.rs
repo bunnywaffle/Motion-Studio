@@ -5,6 +5,8 @@ pub mod widgets;
 use state::{EditorState, EditorTool};
 
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 pub use gpui_kit::base::{h_flex, v_flex, Positioner, StyledExt, TestSupportExt};
 pub use gpui_kit::component::dock::{
@@ -51,6 +53,11 @@ pub struct AppView {
     show_new_project: bool,
     /// Project settings / manager dialog visibility.
     pub show_project_manager: bool,
+    /// Export dialog visibility + options.
+    pub show_export: bool,
+    pub export_format_idx: usize,
+    pub export_busy: bool,
+    pub export_progress: Option<(usize, usize)>,
     /// Last menu/file action note (saved path, errors).
     menu_note: Option<String>,
 }
@@ -159,6 +166,10 @@ impl AppView {
             show_about: false,
             show_new_project: false,
             show_project_manager: false,
+            show_export: false,
+            export_format_idx: 0,
+            export_busy: false,
+            export_progress: None,
             menu_note: None,
         }
     }
@@ -557,6 +568,173 @@ fn request_quit() {
     std::process::exit(0);
 }
 
+/// Kick off a full-composition render on a background thread.
+///
+/// Nothing here blocks the UI: the native save dialog opens on its own worker
+/// thread, frame rasterization runs on the background executor, and a foreground
+/// poller copies progress out of an atomic pair every 120ms. The render thread
+/// never touches gpui state directly — it only ever sees a cloned `Project` and
+/// writes raw RGBA byte buffers.
+fn request_export_run(app: &Entity<AppView>, state: &Entity<EditorState>, cx: &mut App) {
+    if state.read(cx).active_composition().is_none() {
+        app.update(cx, |a, cx| {
+            a.menu_note = Some("Nothing to export: no composition".to_string());
+            cx.notify();
+        });
+        return;
+    }
+    let s_run = state.clone();
+    let a_run = app.clone();
+    let a_poll = app.clone();
+    let fmt_idx = app.read(cx).export_format_idx;
+    let format = export::ExportFormat::all()
+        .get(fmt_idx)
+        .copied()
+        .unwrap_or(export::ExportFormat::Mp4);
+    let playhead = state.read(cx).clock.current_frame();
+    let comp_name = state
+        .read(cx)
+        .active_composition()
+        .map(|c| c.name.clone())
+        .unwrap_or_else(|| "comp".to_string());
+    let safe: String = comp_name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let default_name = format!("{safe}.{ext}", ext = format.extension());
+    let is_still = format == export::ExportFormat::PngStill;
+    // (done, total) — written by the render thread, read by the UI poller.
+    let prog = Arc::new((AtomicUsize::new(0), AtomicUsize::new(1)));
+    let prog_bg = prog.clone();
+    let prog_ui = prog.clone();
+    app.update(cx, |a, cx| {
+        a.export_busy = true;
+        a.export_progress = Some((0, 1));
+        cx.notify();
+    });
+    // Foreground progress poller — exits as soon as the render clears busy.
+    cx.spawn(move |cx: &mut AsyncApp| {
+        let cx = cx.clone();
+        async move {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(120))
+                    .await;
+                let busy = a_poll.read_with(&cx, |a, _| a.export_busy);
+                if !busy {
+                    break;
+                }
+                let done = prog_ui.0.load(Ordering::Relaxed);
+                let total = prog_ui.1.load(Ordering::Relaxed).max(1);
+                cx.update(|cx| {
+                    a_poll.update(cx, |a, cx| {
+                        a.export_progress = Some((done, total));
+                        cx.notify();
+                    });
+                });
+            }
+        }
+    })
+    .detach();
+    cx.spawn(move |cx: &mut AsyncApp| {
+        let cx = cx.clone();
+        async move {
+            // Native dialog on a worker thread so the UI never blocks.
+            let (tx, rx) = std::sync::mpsc::channel();
+            let _ = std::thread::Builder::new()
+                .name("file-dialog-worker".to_string())
+                .stack_size(8 * 1024 * 1024)
+                .spawn(move || {
+                    let dlg = rfd::FileDialog::new()
+                        .set_title("Export Composition")
+                        .add_filter(format.label(), &[format.extension()]);
+                    let out = match format {
+                        export::ExportFormat::PngSequence => {
+                            dlg.set_file_name(&default_name).pick_folder()
+                        }
+                        _ => dlg.set_file_name(default_name).save_file(),
+                    };
+                    let _ = tx.send(out);
+                });
+            let dest = match rx.recv() {
+                Ok(Some(p)) => p,
+                _ => {
+                    cx.update(|cx| {
+                        a_run.update(cx, |a, cx| {
+                            a.export_busy = false;
+                            a.export_progress = None;
+                            a.menu_note = Some("Export cancelled".to_string());
+                            cx.notify();
+                        });
+                    });
+                    return;
+                }
+            };
+            let project = s_run.read_with(&cx, |s, _| s.project.clone());
+            let comp_id = s_run.read_with(&cx, |s, _| s.active_comp_id.clone());
+            let render = cx
+                .background_executor()
+                .spawn(async move {
+                    // A still exports exactly the playhead frame; everything else
+                    // renders the composition's full duration.
+                    let (start, end) = if is_still {
+                        (Some(playhead), Some(playhead))
+                    } else {
+                        (None, None)
+                    };
+                    let job = export::ExportJob {
+                        comp_id: comp_id.clone(),
+                        format,
+                        output: dest,
+                        start_frame: start,
+                        end_frame: end,
+                        gif_max_side: 640,
+                        gif_fps: 15.0,
+                    };
+                    let cid = job.comp_id.clone();
+                    let report = move |done: usize, total: usize| {
+                        prog_bg.0.store(done, Ordering::Relaxed);
+                        prog_bg.1.store(total.max(1), Ordering::Relaxed);
+                    };
+                    export::render_job(
+                        &project,
+                        &job,
+                        |fr, _tc, w, h| EditorState::render_export_frame(&project, &cid, fr, w, h),
+                        Some(&report),
+                    )
+                    .map_err(|e| e.to_string())
+                })
+                .await;
+            cx.update(|cx| {
+                a_run.update(cx, |a, cx| {
+                    a.export_busy = false;
+                    a.export_progress = None;
+                    match render {
+                        Ok(r) => {
+                            let mut msg = format!(
+                                "Exported {} frame{} to {}",
+                                r.frames,
+                                if r.frames == 1 { "" } else { "s" },
+                                r.primary.display()
+                            );
+                            if let Some(n) = r.note {
+                                msg.push_str(" (");
+                                msg.push_str(&n);
+                                msg.push(')');
+                            }
+                            a.menu_note = Some(msg);
+                            a.show_export = false;
+                        }
+                        Err(e) => a.menu_note = Some(format!("Export failed: {e}")),
+                    }
+                    cx.notify();
+                });
+            });
+        }
+    })
+    .detach();
+}
+
 /// One menu-bar dropdown item (label + optional shortcut hint).
 fn menu_item<F>(id: String, label: String, hint: Option<String>, enabled: bool, cx: &App, on_pick: F) -> AnyElement
 where
@@ -919,6 +1097,24 @@ fn render_menu_dropdown(
                     items = items.child(div().h(px(1.)).my_0p5().bg(cx.theme().border));
 
                     // --- Export Group ---
+                    {
+                        let a = app.clone();
+                        items = items.child(menu_item(
+                            "menu_export_movie".to_string(),
+                            "Export Composition…".to_string(),
+                            Some("Ctrl+M".to_string()),
+                            true,
+                            cx,
+                            move |cx| {
+                                a.update(cx, |this, cx| {
+                                    this.open_menu = None;
+                                    this.show_export = true;
+                                    this.export_progress = None;
+                                    cx.notify();
+                                });
+                            },
+                        ));
+                    }
                     {
                         let (a, s) = (app.clone(), state.clone());
                         items = items.child(menu_item(
@@ -2236,6 +2432,256 @@ impl Render for AppView {
                 .into_any_element(),
             );
         }
+        if self.show_export {
+            let dlg_w = 440.0f32;
+            let dlg_h = 330.0f32;
+            let dlg_pos = point(
+                px((vw_f - dlg_w).max(8.0) / 2.0),
+                px((vh_f - dlg_h).max(8.0) / 2.0),
+            );
+            let a_close = cx.entity().clone();
+            let a_fmt = cx.entity().clone();
+            let a_go = cx.entity().clone();
+            let s_go = self.state.clone();
+            let formats = export::ExportFormat::all();
+            let cur_fmt = self.export_format_idx.min(formats.len().saturating_sub(1));
+            let cur_format = formats[cur_fmt];
+            let comp = self.state.read(cx).active_composition().cloned();
+            let comp_meta = match &comp {
+                Some(c) => format!(
+                    "{} · {}×{} · {:.2} fps · {} frames ({:.2}s)",
+                    c.name,
+                    c.width,
+                    c.height,
+                    c.frame_rate,
+                    c.duration.frames(),
+                    c.duration.seconds()
+                ),
+                None => "No composition open".to_string(),
+            };
+            let ffmpeg_ok = export::find_ffmpeg().is_some();
+            // Format tiles laid out 3 + 2; one test id per format
+            // (`export_format_0` … `export_format_4`).
+            let mut tile_grid = v_flex().gap_1().w_full();
+            for row in 0..2 {
+                let mut line = h_flex().gap_1().w_full();
+                for col in 0..3 {
+                    let i = row * 3 + col;
+                    if i >= formats.len() {
+                        line = line.child(div().flex_1());
+                        continue;
+                    }
+                    let f = formats[i];
+                    let is_cur = i == cur_fmt;
+                    let a_pick = a_fmt.clone();
+                    line = line.child(
+                        div()
+                            .id(SharedString::from(format!("export_format_{i}")))
+                            .test_support()
+                            .flex_1()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1p5()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .bg(if is_cur {
+                                cx.theme().primary
+                            } else {
+                                cx.theme().secondary
+                            })
+                            .text_color(if is_cur {
+                                cx.theme().primary_foreground
+                            } else {
+                                cx.theme().foreground
+                            })
+                            .text_xs()
+                            .child(f.label())
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                a_pick.update(cx, |this, cx| {
+                                    if !this.export_busy {
+                                        this.export_format_idx = i;
+                                        cx.notify();
+                                    }
+                                });
+                            }),
+                    );
+                }
+                tile_grid = tile_grid.child(line);
+            }
+            let progress_line = match self.export_progress {
+                Some((done, total)) => {
+                    let pct = if total > 0 {
+                        (done as f32 / total as f32).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    v_flex()
+                        .gap_1()
+                        .w_full()
+                        .child(
+                            div()
+                                .id("export_progress_label")
+                                .test_support()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(format!("Rendering… {done}/{total} frames")),
+                        )
+                        .child(
+                            div()
+                                .w_full()
+                                .h(px(6.))
+                                .rounded_sm()
+                                .bg(cx.theme().secondary)
+                                .child(
+                                    div()
+                                        .h_full()
+                                        .rounded_sm()
+                                        .bg(cx.theme().primary)
+                                        .w(px((dlg_w - 32.0) * pct)),
+                                ),
+                        )
+                        .into_any_element()
+                }
+                None => div().into_any_element(),
+            };
+            let render_label = if self.export_busy {
+                "Rendering…"
+            } else {
+                "Render"
+            };
+            let render_enabled = comp.is_some() && !self.export_busy;
+            let a_go2 = a_go.clone();
+            let s_go2 = s_go.clone();
+            dialogs.push(
+                deferred(
+                    Positioner::corner(Anchor::TopLeft, dlg_pos)
+                        .margin(px(8.))
+                        .occlude()
+                        .child(
+                            div()
+                                .id("export_dialog")
+                                .test_support()
+                                .w(px(dlg_w))
+                                .bg(cx.theme().background)
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .rounded_md()
+                                .shadow_lg()
+                                .p_4()
+                                .child(
+                                    v_flex()
+                                        .gap_3()
+                                        .child(
+                                            v_flex()
+                                                .gap_1()
+                                                .child(
+                                                    div()
+                                                        .font_bold()
+                                                        .text_sm()
+                                                        .child("Export Composition"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id("export_comp_meta")
+                                                        .test_support()
+                                                        .text_xs()
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .child(comp_meta),
+                                                ),
+                                        )
+                                        .child(tile_grid)
+                                        .child(
+                                            div()
+                                                .id("export_format_hint")
+                                                .test_support()
+                                                .text_xs()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(cur_format.hint()),
+                                        )
+                                        .child(if cur_format.is_movie() && !ffmpeg_ok {
+                                            div()
+                                                .id("export_ffmpeg_warning")
+                                                .test_support()
+                                                .text_xs()
+                                                .text_color(cx.theme().warning)
+                                                .child(
+                                                    "ffmpeg was not found, so frames will be written as a PNG sequence instead.",
+                                                )
+                                                .into_any_element()
+                                        } else {
+                                            div().into_any_element()
+                                        })
+                                        .child(progress_line)
+                                        .child(
+                                            h_flex()
+                                                .gap_2()
+                                                .justify_end()
+                                                .w_full()
+                                                .child(
+                                                    div()
+                                                        .id("export_cancel_btn")
+                                                        .test_support()
+                                                        .cursor_pointer()
+                                                        .px_3()
+                                                        .py_1()
+                                                        .rounded_sm()
+                                                        .border_1()
+                                                        .border_color(cx.theme().border)
+                                                        .text_xs()
+                                                        .text_color(cx.theme().foreground)
+                                                        .hover(|s| s.bg(cx.theme().secondary))
+                                                        .on_mouse_down(
+                                                            MouseButton::Left,
+                                                            move |_event, _window, cx| {
+                                                                a_close.update(cx, |this, cx| {
+                                                                    this.show_export = false;
+                                                                    cx.notify();
+                                                                });
+                                                            },
+                                                        )
+                                                        .child("Cancel"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id("export_render_btn")
+                                                        .test_support()
+                                                        .cursor_pointer()
+                                                        .px_3()
+                                                        .py_1()
+                                                        .rounded_sm()
+                                                        .bg(if render_enabled {
+                                                            cx.theme().primary
+                                                        } else {
+                                                            cx.theme().muted
+                                                        })
+                                                        .text_color(if render_enabled {
+                                                            cx.theme().primary_foreground
+                                                        } else {
+                                                            cx.theme().muted_foreground
+                                                        })
+                                                        .text_xs()
+                                                        .font_semibold()
+                                                        .child(render_label)
+                                                        .on_mouse_down(
+                                                            MouseButton::Left,
+                                                            move |_event, _window, cx| {
+                                                                if a_go2.read(cx).export_busy {
+                                                                    return;
+                                                                }
+                                                                let (a, s) =
+                                                                    (a_go2.clone(), s_go2.clone());
+                                                                request_export_run(&a, &s, cx);
+                                                            },
+                                                        ),
+                                                ),
+                                        )
+                                ),
+                        ),
+                )
+                .into_any_element(),
+            );
+        }
         let main_workspace = if is_full {
             v_flex()
                 .flex_1()
@@ -2388,6 +2834,14 @@ impl Render for AppView {
                         cx.notify();
                     });
                     return;
+                } else if ctrl && key == "m" {
+                    app_key.update(cx, |this, cx| {
+                        this.open_menu = None;
+                        this.show_export = true;
+                        this.export_progress = None;
+                        cx.notify();
+                    });
+                    return;
                 } else if ctrl && key == "s" && mods.shift {
                     let (a, s) = (app_key.clone(), state_key.clone());
                     request_save_project_as(&a, &s, cx);
@@ -2420,6 +2874,7 @@ impl Render for AppView {
                         this.show_about = false;
                         this.show_new_project = false;
                         this.show_project_manager = false;
+                        this.show_export = false;
                         cx.notify();
                     });
                     state_key.update(cx, |s, cx| {
@@ -8212,4 +8667,211 @@ mod tests {
             assert_eq!(new_pos.y, initial_pos.y + 30.0);
         });
     }
+    /// Image ▸ Export Composition must open, list every supported format with
+    /// its own test id, remember the picked format, and close from Cancel.
+    #[gpui_kit::test]
+    fn test_export_dialog_formats_and_cancel(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+
+        app_view.update(cx, |view, cx| {
+            view.show_export = true;
+            cx.notify();
+        });
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("export_dialog").visible());
+            assert!(window.find("export_comp_meta").visible());
+            assert!(window.find("export_format_hint").visible());
+            assert!(window.find("export_render_btn").visible());
+            assert!(window.find("export_cancel_btn").visible());
+            for i in 0..export::ExportFormat::all().len() {
+                let id = SharedString::from(format!("export_format_{i}"));
+                assert!(window.find(id).visible(), "missing format tile {i}");
+            }
+            window.click("export_format_3", cx);
+        })
+        .expect("update_window failed");
+
+        assert_eq!(
+            app_view.read_with(cx, |view, _| view.export_format_idx),
+            3,
+            "clicking a format tile records the choice on AppView"
+        );
+        assert_eq!(
+            export::ExportFormat::all()[3],
+            export::ExportFormat::PngSequence
+        );
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("export_cancel_btn", cx);
+        })
+        .expect("update_window failed");
+        assert!(
+            !app_view.read_with(cx, |view, _| view.show_export),
+            "Cancel closes the export dialog"
+        );
+    }
+
+    /// Ctrl+M is the desktop shortcut for the export dialog, Escape closes it.
+    #[gpui_kit::test]
+    fn test_export_shortcut_and_escape(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            let focus_handle = app_view.read(cx).focus_handle().clone();
+            window.focus(&focus_handle, cx);
+            window.render_frame(cx);
+            window.dispatch_keystroke(gpui_kit::Keystroke::parse("ctrl-m").unwrap(), cx);
+        })
+        .expect("update_window failed");
+
+        assert!(
+            app_view.read_with(cx, |view, _| view.show_export),
+            "Ctrl+M opens the export dialog"
+        );
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("export_dialog").visible());
+            window.dispatch_keystroke(gpui_kit::Keystroke::parse("escape").unwrap(), cx);
+        })
+        .expect("update_window failed");
+
+        assert!(
+            !app_view.read_with(cx, |view, _| view.show_export),
+            "Escape dismisses the export dialog"
+        );
+    }
+
+    /// The whole render pipeline end-to-end on the real project: evaluate the
+    /// composition, rasterize each frame, and write a PNG sequence to disk.
+    #[test]
+    fn test_render_project_to_png_sequence_end_to_end() {
+        let state = EditorState::new();
+        let comp_id = state.active_comp_id.clone();
+        let comp = state
+            .active_composition()
+            .cloned()
+            .expect("default project has an active composition");
+        assert!(!comp.layers.is_empty(), "default comp has layers to draw");
+        let (cw, ch) = (comp.width, comp.height);
+
+        let dir = std::env::temp_dir().join("motion_studio_render_job_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+
+        let project = state.project.clone();
+        let job = export::ExportJob {
+            comp_id: comp_id.clone(),
+            format: export::ExportFormat::PngSequence,
+            output: dir.join("clip"),
+            start_frame: Some(0),
+            end_frame: Some(2),
+            gif_max_side: 640,
+            gif_fps: 15.0,
+        };
+        let cid = comp_id.clone();
+        let res = export::render_job(
+            &project,
+            &job,
+            |fr, _tc, w, h| EditorState::render_export_frame(&project, &cid, fr, w, h),
+            None,
+        )
+        .expect("render the real project to a PNG sequence");
+
+        assert_eq!(res.frames, 3);
+        let pngs: Vec<std::path::PathBuf> = std::fs::read_dir(&res.primary)
+            .expect("sequence folder")
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "png"))
+            .collect();
+        assert_eq!(pngs.len(), 3, "one PNG per requested frame");
+
+        // Every frame is a decodable PNG at full composition resolution, and not
+        // blank: the default composition draws solids over the background.
+        for path in &pngs {
+            let img = image::open(path).expect("decode exported frame");
+            assert_eq!(
+                (img.width(), img.height()),
+                (cw, ch),
+                "export must render at composition resolution"
+            );
+            let rgba = img.to_rgba8();
+            let stride = ((cw * ch / 2048).max(1)) as usize;
+            let distinct: std::collections::HashSet<[u8; 4]> = rgba
+                .pixels()
+                .step_by(stride)
+                .map(|p| p.0)
+                .collect();
+            assert!(
+                distinct.len() > 1,
+                "frame {} is a flat blank image",
+                path.display()
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A single-frame still export writes exactly one PNG at the composition size.
+    #[test]
+    fn test_render_project_to_png_still_end_to_end() {
+        let state = EditorState::new();
+        let comp_id = state.active_comp_id.clone();
+        let comp = state.active_composition().cloned().expect("active comp");
+        let (cw, ch) = (comp.width, comp.height);
+
+        let dir = std::env::temp_dir().join("motion_studio_render_still_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let out = dir.join("frame.png");
+
+        let project = state.project.clone();
+        let job = export::ExportJob {
+            comp_id: comp_id.clone(),
+            format: export::ExportFormat::PngStill,
+            output: out.clone(),
+            start_frame: Some(3),
+            end_frame: Some(3),
+            gif_max_side: 640,
+            gif_fps: 15.0,
+        };
+        let cid = comp_id.clone();
+        let res = export::render_job(
+            &project,
+            &job,
+            |fr, _tc, w, h| EditorState::render_export_frame(&project, &cid, fr, w, h),
+            None,
+        )
+        .expect("render a single frame");
+
+        assert_eq!(res.frames, 1);
+        assert_eq!(res.primary, out);
+        let img = image::open(&out).expect("decode still");
+        assert_eq!((img.width(), img.height()), (cw, ch));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 }

@@ -1,0 +1,10 @@
+[package]
+name = "export"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+project.workspace = true
+image.workspace = true
+thiserror.workspace = true

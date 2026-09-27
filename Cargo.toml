@@ -5,6 +5,7 @@ members = [
     "crates/project",
     "crates/compositor",
     "crates/renderer",
+    "crates/export",
 ]
 exclude = [
     "flux-files-gpui",
@@ -22,10 +23,11 @@ gpui-kit = "0.6.1"
 project = { path = "crates/project" }
 compositor = { path = "crates/compositor" }
 renderer = { path = "crates/renderer" }
+export = { path = "crates/export" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 rfd = "0.15"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
 wgpu = "24.0"
 naga = "24.0"
 pollster = "0.4"

@@ -9,6 +9,7 @@ gpui-kit.workspace = true
 project.workspace = true
 compositor.workspace = true
 renderer.workspace = true
+export.workspace = true
 rfd.workspace = true
 image.workspace = true
 fontdb.workspace = true

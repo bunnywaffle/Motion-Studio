@@ -1669,6 +1669,44 @@ impl EditorState {
         self.import_multiple_media_files(&paths)
     }
 
+    /// Rasterize one frame of `cid` out of a `Project` into raw RGBA8 bytes at
+    /// the requested output size.
+    ///
+    /// This is the per-frame render callback the export crate drives. It is a
+    /// free-standing function taking only a `Project`, so it runs on a worker
+    /// thread with no `EditorState`, runtime, or window involved.
+    pub fn render_export_frame(
+        proj: &Project,
+        cid: &str,
+        fr: i64,
+        w: u32,
+        h: u32,
+    ) -> Result<Vec<u8>, String> {
+        let comp = proj.get_composition(cid).ok_or_else(|| "missing".to_string())?;
+        let fps = if comp.frame_rate > 0.0 { comp.frame_rate } else { 30.0 };
+        let time = TimeCode::from_frames(fr, fps);
+        let graph = SceneGraph::from_project(proj, cid).map_err(|e| format!("{e:?}"))?;
+        let evaluator = LayerStackEvaluator::new();
+        let stack = evaluator
+            .evaluate_with_project(&graph, proj, &time)
+            .map_err(|e| format!("{e:?}"))?;
+        let mut assets = std::collections::HashMap::new();
+        let buffer = crate::raster::comp::rasterize_comp(
+            &stack,
+            comp.width as f32,
+            comp.height as f32,
+            comp.background_color,
+            w,
+            h,
+            fr as f32 / (fps as f32).max(1.0),
+            fr,
+            false,
+            comp.duration.seconds() as f32,
+            &mut assets,
+        );
+        Ok(buffer.to_rgba8())
+    }
+
     /// Export the current frame of the active composition as a PNG image to the given path.
     pub fn export_frame_as_png(&self, path: &StdPath) -> Result<(), String> {
         let comp = self
@@ -8133,4 +8171,3 @@ fn evaluate_math_expression(input: &str) -> Option<f32> {
         None
     }
 }
-
