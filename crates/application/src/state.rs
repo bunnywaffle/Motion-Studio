@@ -1089,33 +1089,33 @@ impl EditorState {
     }
 
     /// Apply typed text from the value editor to the open scrub key.
-    /// Accepts plain numbers with an optional unit suffix ("px", "%", "deg").
+    /// Accepts plain numbers, arithmetic expressions ("1920/2", "100+50"),
+    /// relative modifiers ("+=10", "-=5", "*2", "/2"), and unit suffixes ("px", "%", "deg").
     /// Returns true when a value was applied.
     pub fn commit_typed_value(&mut self, text: &str) -> bool {
         let Some(prop) = self.value_edit_key.clone() else {
             return false;
         };
-        let numeric: String = text
-            .trim()
-            .chars()
-            .take_while(|c| {
-                c.is_ascii_digit() || *c == '.' || *c == '-' || *c == '+' || *c == 'e' || *c == 'E'
-            })
-            .collect();
-        match numeric.parse::<f32>() {
-            Ok(v) => {
-                // Timeline rows use `tl:<layer_id>:<key>` edit keys (layer ids
-                // never contain ':', so the first segment is the layer).
-                if let Some(rest) = prop.strip_prefix("tl:") {
-                    if let Some((lid, key)) = rest.split_once(':') {
-                        return self.set_timeline_value(lid, key, v);
-                    }
-                    return false;
-                }
-                self.set_scrub_value(&prop, v)
+        let current = if let Some(rest) = prop.strip_prefix("tl:") {
+            if let Some((lid, key)) = rest.split_once(':') {
+                self.timeline_current_value(lid, key)
+            } else {
+                None
             }
-            Err(_) => false,
+        } else {
+            self.scrub_current_value(&prop)
+        };
+        let Some(v) = parse_numeric_expression(text, current) else {
+            return false;
+        };
+        self.checkpoint();
+        if let Some(rest) = prop.strip_prefix("tl:") {
+            if let Some((lid, key)) = rest.split_once(':') {
+                return self.set_timeline_value(lid, key, v);
+            }
+            return false;
         }
+        self.set_scrub_value(&prop, v)
     }
 
     /// Close keyboard entry, dropping the editor. Returns true when open.
@@ -7855,3 +7855,266 @@ impl Default for EditorState {
         Self::new()
     }
 }
+
+/// Parse a numeric string or arithmetic expression into a final float value.
+/// Supports:
+/// - Plain numbers (e.g. "120", "-45.5")
+/// - Unit suffixes (e.g. "75%", "100px", "45deg", "45°", "2s", "10f")
+/// - Thousand commas (e.g. "1,920")
+/// - Arithmetic expressions (e.g. "1920/2", "100 + 50", "50 * 2.5", "(100 + 20) * 3")
+/// - Relative modifiers against `current` value (e.g. "+=50", "-=20", "*=2", "/=2", "*2", "/2")
+pub fn parse_numeric_expression(text: &str, current: Option<f32>) -> Option<f32> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Check for relative modifiers first
+    if let Some(rest) = trimmed.strip_prefix("+=") {
+        let delta = parse_numeric_expression(rest, None)?;
+        return Some(current.unwrap_or(0.0) + delta);
+    }
+    if let Some(rest) = trimmed.strip_prefix("-=") {
+        let delta = parse_numeric_expression(rest, None)?;
+        return Some(current.unwrap_or(0.0) - delta);
+    }
+    if let Some(rest) = trimmed.strip_prefix("*=") {
+        let factor = parse_numeric_expression(rest, None)?;
+        return Some(current.unwrap_or(1.0) * factor);
+    }
+    if let Some(rest) = trimmed.strip_prefix("/=") {
+        let divisor = parse_numeric_expression(rest, None)?;
+        if divisor.abs() < 1e-9 {
+            return None;
+        }
+        return Some(current.unwrap_or(0.0) / divisor);
+    }
+    if let Some(rest) = trimmed.strip_prefix('*') {
+        let factor = parse_numeric_expression(rest, None)?;
+        return Some(current.unwrap_or(1.0) * factor);
+    }
+    if let Some(rest) = trimmed.strip_prefix('/') {
+        let divisor = parse_numeric_expression(rest, None)?;
+        if divisor.abs() < 1e-9 {
+            return None;
+        }
+        return Some(current.unwrap_or(0.0) / divisor);
+    }
+
+    // Clean common units and punctuation
+    let mut s = trimmed.to_lowercase().replace(',', "");
+    let suffixes = ["px", "pt", "deg", "°", "rad", "fps", "frames", "frame", "sec", "s", "f", "%"];
+    for suffix in suffixes {
+        if let Some(stripped) = s.strip_suffix(suffix) {
+            s = stripped.trim_end().to_string();
+            break;
+        }
+    }
+
+    // Try evaluating as arithmetic expression
+    if let Some(v) = evaluate_math_expression(&s) {
+        return Some(v);
+    }
+
+    // Fallback: take leading numeric characters only if text does not contain operator symbols
+    // (to prevent invalid expressions like "100 / 0" from being truncated to 100)
+    if !s.contains('/') && !s.contains('*') && !s.contains('(') && !s.contains(')') {
+        let numeric: String = s
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-' || *c == '+' || *c == 'e' || *c == 'E')
+            .collect();
+        return numeric.parse::<f32>().ok();
+    }
+
+    None
+}
+
+#[derive(Debug, PartialEq, Clone)]
+enum MathToken {
+    Num(f32),
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    LParen,
+    RParen,
+}
+
+fn tokenize_math(input: &str) -> Option<Vec<MathToken>> {
+    let mut tokens = Vec::new();
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_whitespace() {
+            i += 1;
+            continue;
+        }
+        match c {
+            '+' => {
+                tokens.push(MathToken::Plus);
+                i += 1;
+            }
+            '-' => {
+                tokens.push(MathToken::Minus);
+                i += 1;
+            }
+            '*' => {
+                tokens.push(MathToken::Star);
+                i += 1;
+            }
+            '/' => {
+                tokens.push(MathToken::Slash);
+                i += 1;
+            }
+            '(' => {
+                tokens.push(MathToken::LParen);
+                i += 1;
+            }
+            ')' => {
+                tokens.push(MathToken::RParen);
+                i += 1;
+            }
+            '0'..='9' | '.' => {
+                let start = i;
+                let mut dot_seen = c == '.';
+                i += 1;
+                while i < chars.len() {
+                    let next_c = chars[i];
+                    if next_c.is_ascii_digit() {
+                        i += 1;
+                    } else if next_c == '.' && !dot_seen {
+                        dot_seen = true;
+                        i += 1;
+                    } else if (next_c == 'e' || next_c == 'E') && i + 1 < chars.len() {
+                        i += 1;
+                        if chars[i] == '+' || chars[i] == '-' {
+                            i += 1;
+                        }
+                        while i < chars.len() && chars[i].is_ascii_digit() {
+                            i += 1;
+                        }
+                        break;
+                    } else {
+                        break;
+                    }
+                }
+                let num_str: String = chars[start..i].iter().collect();
+                let num = num_str.parse::<f32>().ok()?;
+                tokens.push(MathToken::Num(num));
+            }
+            _ => return None,
+        }
+    }
+    Some(tokens)
+}
+
+struct ExprParser<'a> {
+    tokens: &'a [MathToken],
+    pos: usize,
+}
+
+impl<'a> ExprParser<'a> {
+    fn new(tokens: &'a [MathToken]) -> Self {
+        Self { tokens, pos: 0 }
+    }
+
+    fn peek(&self) -> Option<&MathToken> {
+        self.tokens.get(self.pos)
+    }
+
+    fn next(&mut self) -> Option<&MathToken> {
+        let t = self.tokens.get(self.pos);
+        if t.is_some() {
+            self.pos += 1;
+        }
+        t
+    }
+
+    fn parse_expression(&mut self) -> Option<f32> {
+        let mut left = self.parse_term()?;
+        while let Some(op) = self.peek() {
+            match op {
+                MathToken::Plus => {
+                    self.next();
+                    let right = self.parse_term()?;
+                    left += right;
+                }
+                MathToken::Minus => {
+                    self.next();
+                    let right = self.parse_term()?;
+                    left -= right;
+                }
+                _ => break,
+            }
+        }
+        Some(left)
+    }
+
+    fn parse_term(&mut self) -> Option<f32> {
+        let mut left = self.parse_factor()?;
+        while let Some(op) = self.peek() {
+            match op {
+                MathToken::Star => {
+                    self.next();
+                    let right = self.parse_factor()?;
+                    left *= right;
+                }
+                MathToken::Slash => {
+                    self.next();
+                    let right = self.parse_factor()?;
+                    if right.abs() < 1e-9 {
+                        return None;
+                    }
+                    left /= right;
+                }
+                _ => break,
+            }
+        }
+        Some(left)
+    }
+
+    fn parse_factor(&mut self) -> Option<f32> {
+        match self.peek() {
+            Some(MathToken::Minus) => {
+                self.next();
+                let val = self.parse_factor()?;
+                Some(-val)
+            }
+            Some(MathToken::Plus) => {
+                self.next();
+                self.parse_factor()
+            }
+            _ => self.parse_primary(),
+        }
+    }
+
+    fn parse_primary(&mut self) -> Option<f32> {
+        match self.next()? {
+            MathToken::Num(n) => Some(*n),
+            MathToken::LParen => {
+                let val = self.parse_expression()?;
+                if self.next() != Some(&MathToken::RParen) {
+                    return None;
+                }
+                Some(val)
+            }
+            _ => None,
+        }
+    }
+}
+
+fn evaluate_math_expression(input: &str) -> Option<f32> {
+    let tokens = tokenize_math(input)?;
+    if tokens.is_empty() {
+        return None;
+    }
+    let mut parser = ExprParser::new(&tokens);
+    let result = parser.parse_expression()?;
+    if parser.pos == tokens.len() {
+        Some(result)
+    } else {
+        None
+    }
+}
+

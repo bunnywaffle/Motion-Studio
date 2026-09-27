@@ -8,7 +8,7 @@ use gpui_kit::component::combobox::{Combobox, ComboboxEvent, ComboboxState};
 use gpui_kit::component::Selectable;
 use gpui_kit::component::Sizable;
 use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
-use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::searchable_list::SearchableVec;
 use gpui_kit::base::{h_flex, v_flex, ElementExt as _, Positioner, StyledExt, TestSupportExt};
 use gpui_kit::component::dock::{BasePanel, Panel, PanelEvent};
@@ -4791,11 +4791,6 @@ impl PropertiesPanel {
     /// lives on `EditorState` (freely readable during render).
     pub fn begin_value_edit(&mut self, prop: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.end_value_edit(cx);
-        // Typed entry is one undo step: checkpoint before editing.
-        self.state.update(cx, |s, cx| {
-            s.checkpoint();
-            cx.notify();
-        });
         let initial = self
             .state
             .read(cx)
@@ -4808,27 +4803,23 @@ impl PropertiesPanel {
                 }
             })
             .unwrap_or_default();
-        // Prefill inside the entity constructor, where the context type is
-        // already `Context<InputState>` as `set_value` requires.
+        // Prefill inside the entity constructor and select all text so typing
+        // immediately replaces the existing number instead of appending to it.
         let editor = cx.new(|cx| {
             let mut st = InputState::new(window, cx);
             st.set_value(initial, window, cx);
+            st.select_all(window, cx);
             st
         });
         let st = self.state.clone();
         let sub = cx.subscribe(&editor, move |_: &mut Self, input: Entity<InputState>, event: &InputEvent, cx| {
             match event {
-                InputEvent::Change => {
+                InputEvent::PressEnter { .. } | InputEvent::Blur => {
                     let text = input.read(cx).value().trim().to_string();
                     st.update(cx, |s, cx| {
-                        if s.commit_typed_value(&text) {
-                            cx.notify();
-                        }
-                    });
-                }
-                InputEvent::PressEnter { .. } | InputEvent::Blur => {
-                    st.update(cx, |s, cx| {
-                        if s.end_value_edit_state() {
+                        if s.value_edit_key.is_some() {
+                            s.commit_typed_value(&text);
+                            s.end_value_edit_state();
                             cx.notify();
                         }
                     });
@@ -5013,9 +5004,23 @@ where
     let editor_opt = edit_state.value_editor.clone();
     let is_editing = edit_state.value_edit_key.as_deref() == Some(prop_key.as_str());
     let value_child: AnyElement = match (is_editing, editor_opt) {
-        (true, Some(editor)) => Input::new(&editor)
-            .id(edit_id.clone())
+        (true, Some(editor)) => div()
             .w_full()
+            .on_action({
+                let st = state.clone();
+                move |_: &Escape, _window: &mut Window, cx: &mut App| {
+                    st.update(cx, |s, cx| {
+                        if s.end_value_edit_state() {
+                            cx.notify();
+                        }
+                    });
+                }
+            })
+            .child(
+                Input::new(&editor)
+                    .id(edit_id.clone())
+                    .w_full(),
+            )
             .into_any_element(),
         _ => div()
             .id(edit_id)
@@ -5136,9 +5141,23 @@ where
     let is_editing = edit_state.value_edit_key.as_deref() == Some(prop_key.as_str());
 
     let value_child: AnyElement = match (is_editing, editor_opt) {
-        (true, Some(editor)) => Input::new(&editor)
-            .id(edit_id.clone())
+        (true, Some(editor)) => div()
             .w(px(70.))
+            .on_action({
+                let st = state.clone();
+                move |_: &Escape, _window: &mut Window, cx: &mut App| {
+                    st.update(cx, |s, cx| {
+                        if s.end_value_edit_state() {
+                            cx.notify();
+                        }
+                    });
+                }
+            })
+            .child(
+                Input::new(&editor)
+                    .id(edit_id.clone())
+                    .w(px(70.)),
+            )
             .into_any_element(),
         _ => div()
             .id(edit_id)
@@ -12497,9 +12516,23 @@ fn timeline_scrub(
     let is_editing = edit_state.value_edit_key.as_deref() == Some(edit_key.as_str());
     let edit_id = id.into();
     let value_child: AnyElement = match (is_editing, editor_opt) {
-        (true, Some(editor)) => Input::new(&editor)
-            .id(edit_id.clone())
+        (true, Some(editor)) => div()
             .w_full()
+            .on_action({
+                let st = state.clone();
+                move |_: &Escape, _window: &mut Window, cx: &mut App| {
+                    st.update(cx, |s, cx| {
+                        if s.end_value_edit_state() {
+                            cx.notify();
+                        }
+                    });
+                }
+            })
+            .child(
+                Input::new(&editor)
+                    .id(edit_id.clone())
+                    .w_full(),
+            )
             .into_any_element(),
         _ => {
             let panel_down = panel_entity.clone();
@@ -14096,11 +14129,6 @@ impl TimelinePanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Typed entry is one undo step: checkpoint before editing.
-        self.state.update(cx, |s, cx| {
-            s.checkpoint();
-            cx.notify();
-        });
         let prop = format!("tl:{layer_id}:{key}");
         let initial = self
             .state
@@ -14117,6 +14145,7 @@ impl TimelinePanel {
         let editor = cx.new(|cx| {
             let mut st = InputState::new(window, cx);
             st.set_value(initial, window, cx);
+            st.select_all(window, cx);
             st
         });
         let st = self.state.clone();
@@ -14124,17 +14153,12 @@ impl TimelinePanel {
             &editor,
             move |_: &mut Self, input: Entity<InputState>, event: &InputEvent, cx| {
                 match event {
-                    InputEvent::Change => {
+                    InputEvent::PressEnter { .. } | InputEvent::Blur => {
                         let text = input.read(cx).value().trim().to_string();
                         st.update(cx, |s, cx| {
-                            if s.commit_typed_value(&text) {
-                                cx.notify();
-                            }
-                        });
-                    }
-                    InputEvent::PressEnter { .. } | InputEvent::Blur => {
-                        st.update(cx, |s, cx| {
-                            if s.end_value_edit_state() {
+                            if s.value_edit_key.is_some() {
+                                s.commit_typed_value(&text);
+                                s.end_value_edit_state();
                                 cx.notify();
                             }
                         });

@@ -6365,6 +6365,83 @@ mod tests {
     }
 
     #[test]
+    fn test_numeric_expression_parsing_and_typed_commit() {
+        use crate::state::{parse_numeric_expression, EditorState};
+
+        // 1. Basic numbers
+        assert_eq!(parse_numeric_expression("120", None), Some(120.0));
+        assert_eq!(parse_numeric_expression("-45.5", None), Some(-45.5));
+        assert_eq!(parse_numeric_expression(".5", None), Some(0.5));
+        assert_eq!(parse_numeric_expression("+25", None), Some(25.0));
+
+        // 2. Unit suffixes
+        assert_eq!(parse_numeric_expression("100px", None), Some(100.0));
+        assert_eq!(parse_numeric_expression("75 %", None), Some(75.0));
+        assert_eq!(parse_numeric_expression("50%", None), Some(50.0));
+        assert_eq!(parse_numeric_expression("45deg", None), Some(45.0));
+        assert_eq!(parse_numeric_expression("90°", None), Some(90.0));
+        assert_eq!(parse_numeric_expression("2.5s", None), Some(2.5));
+        assert_eq!(parse_numeric_expression("10f", None), Some(10.0));
+        assert_eq!(parse_numeric_expression("60fps", None), Some(60.0));
+
+        // 3. Thousand commas
+        assert_eq!(parse_numeric_expression("1,920", None), Some(1920.0));
+        assert_eq!(parse_numeric_expression("1,920 / 2", None), Some(960.0));
+
+        // 4. Arithmetic expressions
+        assert_eq!(parse_numeric_expression("1920 / 2", None), Some(960.0));
+        assert_eq!(parse_numeric_expression("1920/2", None), Some(960.0));
+        assert_eq!(parse_numeric_expression("100 + 50", None), Some(150.0));
+        assert_eq!(parse_numeric_expression("100 - 25", None), Some(75.0));
+        assert_eq!(parse_numeric_expression("50 * 2.5", None), Some(125.0));
+        assert_eq!(parse_numeric_expression("(100 + 20) * 3", None), Some(360.0));
+        assert_eq!(parse_numeric_expression("100 + 20 * 3", None), Some(160.0));
+        assert_eq!(parse_numeric_expression("-100 + 40", None), Some(-60.0));
+
+        // 5. Relative adjustments against current value
+        assert_eq!(parse_numeric_expression("+=50", Some(100.0)), Some(150.0));
+        assert_eq!(parse_numeric_expression("-=25", Some(100.0)), Some(75.0));
+        assert_eq!(parse_numeric_expression("*=2", Some(100.0)), Some(200.0));
+        assert_eq!(parse_numeric_expression("/=2", Some(100.0)), Some(50.0));
+        assert_eq!(parse_numeric_expression("* 3", Some(50.0)), Some(150.0));
+        assert_eq!(parse_numeric_expression("/ 2", Some(50.0)), Some(25.0));
+
+        // 6. Divide by zero and invalid inputs
+        assert_eq!(parse_numeric_expression("100 / 0", None), None);
+        assert_eq!(parse_numeric_expression("/= 0", Some(50.0)), None);
+        assert_eq!(parse_numeric_expression("", None), None);
+        assert_eq!(parse_numeric_expression("   ", None), None);
+        assert_eq!(parse_numeric_expression("abc", None), None);
+
+        // 7. Typed commit end-to-end with Undo support
+        let mut state = EditorState::new();
+        let initial_x = state.scrub_current_value("pos_x").unwrap();
+
+        // Math expression commit: "1920 / 2" -> 960.0
+        state.value_edit_key = Some("pos_x".to_string());
+        assert!(state.commit_typed_value("1920 / 2"));
+        assert!((state.scrub_current_value("pos_x").unwrap() - 960.0).abs() < 1e-4);
+
+        // Relative commit: "+=40" -> 1000.0
+        state.value_edit_key = Some("pos_x".to_string());
+        assert!(state.commit_typed_value("+=40"));
+        assert!((state.scrub_current_value("pos_x").unwrap() - 1000.0).abs() < 1e-4);
+
+        // Negative value commit: "-150" -> -150.0
+        state.value_edit_key = Some("pos_x".to_string());
+        assert!(state.commit_typed_value("-150"));
+        assert!((state.scrub_current_value("pos_x").unwrap() - (-150.0)).abs() < 1e-4);
+
+        // Undo reverts through each committed step
+        assert!(state.undo());
+        assert!((state.scrub_current_value("pos_x").unwrap() - 1000.0).abs() < 1e-4);
+        assert!(state.undo());
+        assert!((state.scrub_current_value("pos_x").unwrap() - 960.0).abs() < 1e-4);
+        assert!(state.undo());
+        assert!((state.scrub_current_value("pos_x").unwrap() - initial_x).abs() < 1e-4);
+    }
+
+    #[test]
     fn test_new_composition_creation() {
         use crate::state::EditorState;
         use project::Color;
