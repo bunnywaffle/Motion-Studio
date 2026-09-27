@@ -39,7 +39,7 @@ pub use keyframe::{
     evaluate_cubic_bezier, evaluate_keyframe_track, interpolate_keyframes, Extrapolation,
     Interpolate, Keyframe, KeyframeInterpolation, KeyframeTangent,
 };
-pub use layer::{Layer, LayerSource, ShapeType, TextAlign};
+pub use layer::{FillGradient, GradientStop, Layer, LayerSource, ShapeType, TextAlign};
 pub use marker::Marker;
 pub use mask::{Mask, MaskMode, MaskShapeKind};
 pub use matte::TrackMatteMode;
@@ -128,6 +128,7 @@ mod tests {
                 height: Property::new("Height", 100.0),
                 corner_radius: Property::new("Corner Radius", 8.0),
                 fill: Color::WHITE,
+                fill_gradient: None,
             },
             TimeCode::from_frames(0, 30.0),
             TimeCode::from_frames(150, 30.0),
@@ -531,6 +532,7 @@ mod tests {
                 radius_x: Property::new("Radius X", 50.0),
                 radius_y: Property::new("Radius Y", 50.0),
                 fill: Color::WHITE,
+                fill_gradient: None,
             },
             tc0,
             tc100,
@@ -832,7 +834,7 @@ mod tests {
         let shape = Layer::shape(
             "shp",
             "Shape",
-            ShapeType::Path { path_data: "M 0 0 L 10 10".to_string(), fill: Color::WHITE },
+            ShapeType::Path { path_data: "M 0 0 L 10 10".to_string(), fill: Color::WHITE, fill_gradient: None },
             tc0,
             tc100,
         );
@@ -979,6 +981,7 @@ mod tests {
                 height: Property::new("Height", 200.0),
                 corner_radius: Property::new("Corner Radius", 16.0),
                 fill: Color::WHITE,
+                fill_gradient: None,
             },
             tc0,
             tc300,
@@ -992,6 +995,7 @@ mod tests {
                 radius_x: Property::new("Radius X", 100.0),
                 radius_y: Property::new("Radius Y", 150.0),
                 fill: Color::WHITE,
+                fill_gradient: None,
             },
             tc0,
             tc300,
@@ -1004,6 +1008,7 @@ mod tests {
             ShapeType::Path {
                 path_data: "M 0 0 C 10 20, 30 40, 50 50 Z".to_string(),
                 fill: Color::WHITE,
+                fill_gradient: None,
             },
             tc0,
             tc300,

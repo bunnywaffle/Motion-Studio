@@ -249,7 +249,7 @@ mod tests {
             fx(EffectType::LumaKey { threshold: p(50.0), feather: p(5.0) }),
             fx(EffectType::NoiseGenerator { amount: p(50.0), monochrome: false }),
             fx(EffectType::Checkerboard { size: p(32.0), color_a: Color::BLACK, color_b: Color::WHITE }),
-            fx(EffectType::GradientRamp { color_a: Color::BLACK, color_b: Color::WHITE, angle: p(90.0) }),
+            fx(EffectType::GradientRamp { color_a: Color::BLACK, color_b: Color::WHITE, angle: p(90.0), stops: Vec::new() }),
             fx(EffectType::Perspective { skew_x: p(0.0), skew_y: p(0.0) }),
             fx(EffectType::TextOutline { width: p(3.0), color: Color::BLACK }),
             fx(EffectType::TextBevel { strength: p(50.0), softness: p(10.0) }),

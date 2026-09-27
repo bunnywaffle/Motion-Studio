@@ -915,7 +915,7 @@ impl Render for ProjectPanel {
                 } else {
                     for solid in solids {
                         let (w, h, col) = match &solid.source {
-                            LayerSource::Solid { width, height, color } => (*width, *height, *color),
+                            LayerSource::Solid { width, height, color, .. } => (*width, *height, *color),
                             _ => (1920, 1080, Color::WHITE),
                         };
 
@@ -3359,9 +3359,9 @@ impl Render for CompositionViewerPanel {
                                                         cx.notify();
                                                     });
                                                 }
-                                                _ => {}
-                                            }
-                                        }
+                _ => {}
+            }
+        }
                                     })
                                     .children(rendered_layers)
                                     .children(gizmo_els);
@@ -3657,6 +3657,10 @@ pub struct PropertiesPanel {
     pub vec_link: HashSet<String>,
     /// Selected gradient-editor stop per effect id.
     pub gradient_stop: HashMap<String, usize>,
+    /// In-progress gradient stop drag (None = idle).
+    pub gradient_drag: Option<GradientDrag>,
+    /// Gradient bar geometry (origin_x, width, window px) per editor prefix.
+    pub gradient_bar_bounds: HashMap<String, (f32, f32)>,
     /// Active 3-mode color picker key: e.g. "text_fill", "text_stroke", "solid_color" (None = closed).
     pub active_color_picker: Option<String>,
     /// Color mode per key: "none" | "color" | "gradient"
@@ -3726,6 +3730,38 @@ pub struct PropUi {
     pub gradient_stop: HashMap<String, usize>,
 }
 
+/// Target of the shared N-stop gradient editor (see
+/// `widgets::gradient_editor`): either a Gradient Ramp effect ramp or a
+/// layer fill slot (`text_fill`, `text_stroke`, `shape_fill`,
+/// `solid_color`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum GradientTarget {
+    Effect { layer_id: String, eff_id: String },
+    Fill { layer_id: String, key: String },
+}
+
+impl GradientTarget {
+    /// Stable test-id / bar-bounds prefix. Effect targets reuse the raw
+    /// effect id so historic ids (`gradient_stop0_{eff}`,
+    /// `gradient_reverse_{eff}`) keep working.
+    pub fn id_prefix(&self) -> String {
+        match self {
+            Self::Effect { eff_id, .. } => eff_id.clone(),
+            Self::Fill { key, .. } => key.clone(),
+        }
+    }
+}
+
+/// In-progress gradient stop drag, serviced by the panel-root mouse
+/// handlers (same pattern as scalar scrub: diamonds start it, moves commit
+/// offsets, up/out ends it).
+#[derive(Clone, Debug)]
+pub struct GradientDrag {
+    pub target: GradientTarget,
+    pub index: usize,
+    pub moved: bool,
+}
+
 struct TextInspectorInputs {
     text: Entity<InputState>,
     font_family: Entity<InputState>,
@@ -3773,6 +3809,8 @@ impl PropertiesPanel {
             select_subs: HashMap::new(),
             vec_link: HashSet::new(),
             gradient_stop: HashMap::new(),
+            gradient_drag: None,
+            gradient_bar_bounds: HashMap::new(),
             active_color_picker: None,
             color_picker_mode: HashMap::new(),
             color_picker_gradient_angle: HashMap::new(),
@@ -4364,7 +4402,7 @@ pub(crate) fn render_color_swatch<F>(
     id: impl Into<ElementId>,
     color: Color,
     mode: &str,
-    grad_colors: (Color, Color),
+    gradient: Option<project::FillGradient>,
     is_active: bool,
     cx: &App,
     on_click: F,
@@ -4406,7 +4444,7 @@ where
             slash.into_any_element()
         }
         "gradient" => {
-            let (ca, cb) = grad_colors;
+            let probe = gradient.clone().unwrap_or_default();
             let mut bar = h_flex()
                 .w(px(32.))
                 .h(px(20.))
@@ -4415,14 +4453,9 @@ where
                 .border_1()
                 .border_color(border_col);
             for i in 0..16 {
-                let t = i as f32 / 15.0;
+                let c = probe.sample(i as f32 / 15.0);
                 bar = bar.child(
-                    div().flex_1().h_full().bg(Rgba {
-                        r: ca.r + (cb.r - ca.r) * t,
-                        g: ca.g + (cb.g - ca.g) * t,
-                        b: ca.b + (cb.b - ca.b) * t,
-                        a: 1.0,
-                    }),
+                    div().flex_1().h_full().bg(Rgba { r: c.r, g: c.g, b: c.b, a: 1.0 }),
                 );
             }
             bar.into_any_element()
@@ -4463,16 +4496,24 @@ pub(crate) fn render_three_mode_color_picker(
     inspector_color: &Entity<InspectorColorPicker>,
     cx: &App,
 ) -> Div {
+    // Explicit mode wins; otherwise infer from the committed model
+    // (a stored gradient means gradient mode even after undo/switch).
     let mode = panel_self.color_picker_mode.get(key).map(|s| s.as_str()).unwrap_or_else(|| {
-        if current_color.a <= 0.0 {
+        let has_gradient = state
+            .read(cx)
+            .selected_layer_id
+            .clone()
+            .and_then(|lid| state.read(cx).layer_fill_gradient(&lid, key))
+            .is_some();
+        if has_gradient {
+            "gradient"
+        } else if current_color.a <= 0.0 {
             "none"
         } else {
             "color"
         }
     });
-    let grad_colors = panel_self.color_picker_gradient_colors.get(key).copied().unwrap_or((Color::WHITE, Color::BLACK));
     let grad_stop = panel_self.color_picker_gradient_stop.get(key).copied().unwrap_or(0);
-    let grad_angle = panel_self.color_picker_gradient_angle.get(key).copied().unwrap_or(0.0);
 
     let k_none = key.to_string();
     let k_col = key.to_string();
@@ -4519,6 +4560,8 @@ pub(crate) fn render_three_mode_color_picker(
                                                 "shape_fill" => { let _ = s.set_layer_shape_fill(&lid, Color::TRANSPARENT); }
                                                 _ => {}
                                             }
+                                            // None mode clears any gradient back to solid.
+                                            let _ = s.set_layer_fill_gradient(&lid, &k, None);
                                             cx.notify();
                                         }
                                     });
@@ -4551,6 +4594,8 @@ pub(crate) fn render_three_mode_color_picker(
                                                 "shape_fill" => { let _ = s.set_layer_shape_fill(&lid, Color::WHITE); }
                                                 _ => {}
                                             }
+                                            // Solid mode clears any gradient back to flat color.
+                                            let _ = s.set_layer_fill_gradient(&lid, &k, None);
                                             cx.notify();
                                         }
                                     });
@@ -4573,11 +4618,27 @@ pub(crate) fn render_three_mode_color_picker(
                                     });
                                     s_grad.update(cx, |s, cx| {
                                         if let Some(lid) = s.selected_layer_id.clone() {
+                                            // Entering gradient mode commits a real
+                                            // gradient (seeded from the current solid
+                                            // color so the switch is continuous).
+                                            let seed = match k.as_str() {
+                                                "text_fill" | "text_stroke" | "solid_color" | "shape_fill" => current_color,
+                                                _ => Color::WHITE,
+                                            };
+                                            let seed = if seed.a <= 0.0 { Color::WHITE } else { seed };
+                                            let grad = project::FillGradient::two_color(seed, Color::BLACK, 90.0);
                                             match k.as_str() {
-                                                "text_fill" => { let _ = s.set_layer_text_color(&lid, Color::from_hex("#3B82F6").unwrap()); }
+                                                "text_fill" => {
+                                                    let _ = s.set_layer_text_color(&lid, seed);
+                                                    let _ = s.set_layer_fill_gradient(&lid, &k, Some(grad));
+                                                }
                                                 "text_stroke" => {
                                                     let _ = s.set_layer_text_scalar(&lid, "stroke_width", 2.0);
-                                                    let _ = s.set_layer_stroke_color(&lid, Color::from_hex("#3B82F6").unwrap());
+                                                    let _ = s.set_layer_stroke_color(&lid, seed);
+                                                    let _ = s.set_layer_fill_gradient(&lid, &k, Some(grad));
+                                                }
+                                                "solid_color" | "shape_fill" => {
+                                                    let _ = s.set_layer_fill_gradient(&lid, &k, Some(grad));
                                                 }
                                                 _ => {}
                                             }
@@ -4621,107 +4682,109 @@ pub(crate) fn render_three_mode_color_picker(
                 .into_any_element()
         }
         "gradient" => {
-            let (ca, cb) = grad_colors;
-            let mut bar = h_flex().flex_1().h(px(18.)).rounded_sm().overflow_hidden();
-            for i in 0..24 {
-                let t = i as f32 / 23.0;
-                bar = bar.child(
-                    div().flex_1().h_full().bg(Rgba {
-                        r: ca.r + (cb.r - ca.r) * t,
-                        g: ca.g + (cb.g - ca.g) * t,
-                        b: ca.b + (cb.b - ca.b) * t,
-                        a: 1.0,
-                    }),
-                );
-            }
-
-            let p_s0 = panel_entity.clone();
-            let p_s1 = panel_entity.clone();
-            let k_s0 = key.to_string();
-            let k_s1 = key.to_string();
-
-            let mut presets_row = h_flex().gap_1().items_center().flex_wrap();
-            for (p_name, c1, c2) in [
-                ("Sunset", Color::from_hex("#F59E0B").unwrap(), Color::from_hex("#EC4899").unwrap()),
-                ("Ocean", Color::from_hex("#3B82F6").unwrap(), Color::from_hex("#10B981").unwrap()),
-                ("Neon", Color::from_hex("#8B5CF6").unwrap(), Color::from_hex("#EC4899").unwrap()),
-                ("Mono", Color::WHITE, Color::BLACK),
-            ] {
-                let p_pr = panel_entity.clone();
-                let s_pr = state.clone();
-                let k_pr = key.to_string();
-                presets_row = presets_row.child(
-                    Button::new(SharedString::from(format!("{key}_grad_{p_name}")))
-                        .compact()
-                        .child(p_name)
-                        .on_click(move |_, _, cx| {
-                            let k = k_pr.clone();
-                            p_pr.update(cx, |this, _| {
-                                this.color_picker_gradient_colors.insert(k.clone(), (c1, c2));
-                            });
-                            s_pr.update(cx, |s, cx| {
-                                if let Some(lid) = s.selected_layer_id.clone() {
-                                    if k == "text_fill" {
-                                        let _ = s.set_layer_text_color(&lid, c1);
-                                    } else if k == "text_stroke" {
-                                        let _ = s.set_layer_stroke_color(&lid, c1);
-                                    }
-                                    cx.notify();
-                                }
-                            });
-                        }),
-                );
-            }
-
-            v_flex()
-                .gap_2()
-                .p_1()
-                .child(
-                    h_flex()
+            // Model-backed N-stop editor: the layer's committed gradient is
+            // the truth (panel maps only seed it on tab entry).
+            let lid_opt = state.read(cx).selected_layer_id.clone();
+            match lid_opt {
+                Some(lid) => {
+                    let gradient = state
+                        .read(cx)
+                        .layer_fill_gradient(&lid, key)
+                        .unwrap_or_default();
+                    let sel = grad_stop.min(gradient.stops.len().saturating_sub(1));
+                    let angle = gradient.angle;
+                    // Fill axis readout + ±15° steppers (fills aren't
+                    // keyframed, so a plain commit is enough).
+                    let s_ang_m = state.clone();
+                    let s_ang_p = state.clone();
+                    let lid_ang_m = lid.clone();
+                    let lid_ang_p = lid.clone();
+                    let key_ang_m = key.to_string();
+                    let key_ang_p = key.to_string();
+                    let angle_row = h_flex()
                         .gap_2()
                         .items_center()
-                        .child(bar)
-                        .child(div().text_xs().text_color(cx.theme().muted_foreground).child(format!("{grad_angle:.0}°"))),
-                )
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
+                        .text_xs()
+                        .child(div().text_color(cx.theme().muted_foreground).child("Angle"))
                         .child(
                             div()
+                                .id(SharedString::from(format!("{key}_grad_angle_minus")))
+                                .test_support()
                                 .cursor_pointer()
                                 .px_2()
                                 .py_0p5()
                                 .rounded_sm()
-                                .border_1()
-                                .border_color(if grad_stop == 0 { cx.theme().primary } else { cx.theme().border })
-                                .child("Stop 1")
+                                .bg(cx.theme().muted)
+                                .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                .child("−15°")
                                 .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                    p_s0.update(cx, |this, cx| {
-                                        this.color_picker_gradient_stop.insert(k_s0.clone(), 0);
+                                    let cur = s_ang_m.read(cx).layer_fill_gradient(&lid_ang_m, &key_ang_m).map(|g| g.angle).unwrap_or(90.0);
+                                    s_ang_m.update(cx, |s, cx| {
+                                        let _ = s.set_fill_gradient_angle(&lid_ang_m, &key_ang_m, cur - 15.0);
                                         cx.notify();
                                     });
                                 }),
                         )
                         .child(
                             div()
+                                .id(SharedString::from(format!("{key}_grad_angle_value")))
+                                .test_support()
+                                .text_color(cx.theme().foreground)
+                                .child(format!("{angle:.0}°")),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("{key}_grad_angle_plus")))
+                                .test_support()
                                 .cursor_pointer()
                                 .px_2()
                                 .py_0p5()
                                 .rounded_sm()
-                                .border_1()
-                                .border_color(if grad_stop == 1 { cx.theme().primary } else { cx.theme().border })
-                                .child("Stop 2")
+                                .bg(cx.theme().muted)
+                                .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                .child("+15°")
                                 .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                    p_s1.update(cx, |this, cx| {
-                                        this.color_picker_gradient_stop.insert(k_s1.clone(), 1);
+                                    let cur = s_ang_p.read(cx).layer_fill_gradient(&lid_ang_p, &key_ang_p).map(|g| g.angle).unwrap_or(90.0);
+                                    s_ang_p.update(cx, |s, cx| {
+                                        let _ = s.set_fill_gradient_angle(&lid_ang_p, &key_ang_p, cur + 15.0);
                                         cx.notify();
                                     });
                                 }),
-                        ),
-                )
-                .child(presets_row)
-                .into_any_element()
+                        );
+                    // Selected-stop wheel (shared inspector picker; its
+                    // subscription routes to the stop in gradient mode).
+                    let wheel = div()
+                        .id(SharedString::from(format!("{key}_grad_wheel")))
+                        .test_support()
+                        .child(ColorPicker::new(&inspector_color.read(cx).state).label("Stop"));
+                    v_flex()
+                        .gap_2()
+                        .p_1()
+                        .child(angle_row)
+                        .child(crate::widgets::fill_gradient_editor(
+                            state,
+                            panel_entity,
+                            &lid,
+                            key,
+                            &gradient,
+                            sel,
+                            wheel.into_any_element(),
+                            cx,
+                        ))
+                        .into_any_element()
+                }
+                None => v_flex()
+                    .gap_2()
+                    .p_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Select a layer to edit its gradient"),
+                    )
+                    .into_any_element(),
+            }
         }
         _ => {
             // Solid Color mode: GPUI Kit ColorPicker + Swatch Palette + Hex Code
@@ -7696,27 +7759,27 @@ fn render_applied_effects(
                     }
                 }
                 EffectType::GradientRamp { .. } => {
-                    // Two-stop gradient editor over the Start/End colors
-                    // (stop bar, wheel, reverse, presets) + angle dial row.
+                    // N-stop gradient editor over the ramp stops (bar,
+                    // draggable diamonds, wheel, reverse, presets) + angle row.
                     let decls = effect.declarations();
                     let find = |f: &str| decls.iter().find(|d| d.field == f).cloned();
-                    if let (Some(da), Some(db)) = (find("color_a"), find("color_b")) {
-                        let (ca, cb) = match (&da.value, &db.value) {
-                            (project::PropValue::Color(a), project::PropValue::Color(b)) => (*a, *b),
-                            _ => (Color::BLACK, Color::WHITE),
-                        };
-                        effect_box = effect_box.child(crate::widgets::widget_gradient(
-                            state,
-                            panel_entity,
-                            &layer.id,
-                            &eff_id,
-                            ("color_a", da.label.as_str(), ca),
-                            ("color_b", db.label.as_str(), cb),
-                            ui.gradient_stop.get(&eff_id).copied().unwrap_or(0),
-                            wheels,
-                            cx,
-                        ));
-                    }
+                    let stops = effect
+                        .effect_type
+                        .gradient_ramp_stops()
+                        .unwrap_or_else(|| vec![
+                            project::GradientStop::new(0.0, Color::BLACK),
+                            project::GradientStop::new(1.0, Color::WHITE),
+                        ]);
+                    effect_box = effect_box.child(crate::widgets::widget_gradient(
+                        state,
+                        panel_entity,
+                        &layer.id,
+                        &eff_id,
+                        stops,
+                        ui.gradient_stop.get(&eff_id).copied().unwrap_or(0),
+                        wheels,
+                        cx,
+                    ));
                     if let Some(angle) = find("angle") {
                         effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &angle, wheels, cx));
                     }
@@ -7810,15 +7873,32 @@ impl Render for PropertiesPanel {
             TextInspectorInputs { text, font_family, font_size, _subscriptions: subscriptions }
         });
         let editor_for_color = self.state.clone();
+        let panel_for_color = cx.entity().clone();
         let inspector_color = window.use_keyed_state("properties_color_picker", cx, move |window, cx| {
             let picker = cx.new(|cx| ColorPickerState::new(window, cx));
             let editor = editor_for_color.clone();
+            let panel_ent = panel_for_color.clone();
             let subscription = cx.subscribe(&picker, move |_, _, event: &ColorPickerEvent, cx| {
                 let ColorPickerEvent::Change(Some(hsla)) = event else { return; };
                 let rgba: Rgba = (*hsla).into();
                 let color = Color::rgba(rgba.r, rgba.g, rgba.b, rgba.a);
+                // Gradient mode: the wheel drives the selected stop of the
+                // open fill picker.
+                let grad_target: Option<(String, usize)> = (|| {
+                    let p = panel_ent.read(cx);
+                    let key = p.active_color_picker.clone()?;
+                    if p.color_picker_mode.get(&key).map(|s| s.as_str()) != Some("gradient") {
+                        None
+                    } else {
+                        Some((key.clone(), p.color_picker_gradient_stop.get(&key).copied().unwrap_or(0)))
+                    }
+                })();
                 editor.update(cx, |state, _cx| {
                     let Some(layer_id) = state.selected_layer_id.clone() else { return; };
+                    if let Some((gkey, gsel)) = grad_target {
+                        let _ = state.set_fill_gradient_stop_color(&layer_id, &gkey, gsel, color);
+                        return;
+                    }
                     let _ = match state.selected_layer().map(|layer| &layer.source) {
                         Some(LayerSource::Text { .. }) => state.set_layer_text_color(&layer_id, color),
                         Some(LayerSource::Solid { .. }) => state.set_layer_solid_color(&layer_id, color),
@@ -8025,6 +8105,41 @@ impl Render for PropertiesPanel {
                         });
                     }
                 _ => {}
+            }
+        }
+
+        // Gradient mode: the shared wheel follows the selected stop of the
+        // open fill picker.
+        if !is_open {
+            if let Some(active_key) = self.active_color_picker.clone() {
+                let in_gradient = self
+                    .color_picker_mode
+                    .get(&active_key)
+                    .map(|s| s.as_str())
+                    == Some("gradient");
+                if in_gradient {
+                    let sel = self
+                        .color_picker_gradient_stop
+                        .get(&active_key)
+                        .copied()
+                        .unwrap_or(0);
+                    let stop_col = self
+                        .state
+                        .read(cx)
+                        .selected_layer_id
+                        .clone()
+                        .and_then(|lid| {
+                            self.state.read(cx).layer_fill_gradient(&lid, &active_key)
+                        })
+                        .and_then(|g| g.stops.get(sel).map(|s| s.color));
+                    if let Some(c) = stop_col {
+                        let hsla: Hsla = Rgba { r: c.r, g: c.g, b: c.b, a: c.a }.into();
+                        let picker_ent = inspector_color.read(cx).state.clone();
+                        picker_ent.update(cx, |p, cx| {
+                            p.set_value(hsla, window, cx);
+                        });
+                    }
+                }
             }
         }
 
@@ -8568,6 +8683,43 @@ impl Render for PropertiesPanel {
                         this.scrub_moved = true;
                     }
                 }
+                // Gradient stop drag: absolute offset along the bar.
+                if let Some(drag) = this.gradient_drag.clone() {
+                    let prefix = drag.target.id_prefix();
+                    if let Some((ox, w)) =
+                        this.gradient_bar_bounds.get(&format!("gradient_bar_{prefix}")).copied()
+                    {
+                        let mx = event.position.x / px(1.0);
+                        let t = ((mx - ox) / w.max(1.0)).clamp(0.0, 1.0);
+                        let target = drag.target.clone();
+                        let idx = drag.index;
+                        let at = this.state.update(cx, |s, _| match &target {
+                            GradientTarget::Effect { layer_id, eff_id } => {
+                                s.move_effect_gradient_stop(layer_id, eff_id, idx, t)
+                            }
+                            GradientTarget::Fill { layer_id, key } => {
+                                s.move_fill_gradient_stop(layer_id, key, idx, t)
+                            }
+                        });
+                        if let Ok(at) = at {
+                            match &target {
+                                GradientTarget::Effect { eff_id, .. } => {
+                                    this.gradient_stop.insert(eff_id.clone(), at);
+                                }
+                                GradientTarget::Fill { key, .. } => {
+                                    this.color_picker_gradient_stop.insert(key.clone(), at);
+                                }
+                            }
+                            if let Some(d) = this.gradient_drag.as_mut() {
+                                d.index = at;
+                                d.moved = true;
+                            }
+                            let s = this.state.clone();
+                            s.update(cx, |_, cx| cx.notify());
+                            cx.notify();
+                        }
+                    }
+                }
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _event, window, cx| {
                 // Click (no drag movement) on a value field opens keyboard
@@ -8577,6 +8729,15 @@ impl Render for PropertiesPanel {
                     let was_drag = std::mem::replace(&mut this.scrub_moved, false);
                     if !was_drag {
                         this.begin_value_edit(&prop, window, cx);
+                    }
+                }
+                // A gradient diamond press without movement is a click, not
+                // a drag: undo the mousedown checkpoint so clicks leave the
+                // undo stack untouched.
+                if let Some(drag) = this.gradient_drag.take() {
+                    if !drag.moved {
+                        let s = this.state.clone();
+                        s.update(cx, |s, _| s.undo());
                     }
                 }
                 let s = this.state.clone();
@@ -8589,6 +8750,7 @@ impl Render for PropertiesPanel {
                 this.scrub_prop = None;
                 this.scrub_last_x = None;
                 this.scrub_moved = false;
+                this.gradient_drag = None;
                 let s = this.state.clone();
                 s.update(cx, |s, cx| {
                     s.preview_fast = false;
@@ -8687,7 +8849,7 @@ impl Render for PropertiesPanel {
 
                         // --- Source-Specific Properties Section ---
                         match &layer.source {
-                            LayerSource::Solid { color, width, height } => {
+                            LayerSource::Solid { color, width, height, .. } => {
                                 let c = *color;
                                 let w = *width;
                                 let h = *height;
@@ -8731,8 +8893,8 @@ impl Render for PropertiesPanel {
                                     );
                                 }
 
-                                let solid_mode = self.color_picker_mode.get("solid_color").map(|s| s.as_str()).unwrap_or(if c.a <= 0.0 { "none" } else { "color" });
-                                let solid_grad = self.color_picker_gradient_colors.get("solid_color").copied().unwrap_or((Color::WHITE, Color::BLACK));
+                                let solid_model_grad = self.state.read(cx).layer_fill_gradient(&lid_c, "solid_color");
+                                let solid_mode = self.color_picker_mode.get("solid_color").map(|s| s.as_str()).unwrap_or(if solid_model_grad.is_some() { "gradient" } else if c.a <= 0.0 { "none" } else { "color" });
                                 let is_solid_active = self.active_color_picker.as_deref() == Some("solid_color");
                                 let p_solid_picker = panel_entity.clone();
                                 let p_src = panel_entity.clone();
@@ -8762,7 +8924,7 @@ impl Render for PropertiesPanel {
                                                             "solid_color_swatch",
                                                             c,
                                                             solid_mode,
-                                                            solid_grad,
+                                                            solid_model_grad.clone(),
                                                             is_solid_active,
                                                             cx,
                                                             move |_event, _window, cx| {
@@ -9251,12 +9413,12 @@ impl Render for PropertiesPanel {
                                 );
 
                                 // 3. Fill & Stroke Group Collapsible
-                                let fill_mode = self.color_picker_mode.get("text_fill").map(|s| s.as_str()).unwrap_or(if cur_col.a <= 0.0 { "none" } else { "color" });
-                                let fill_grad = self.color_picker_gradient_colors.get("text_fill").copied().unwrap_or((Color::WHITE, Color::BLACK));
+                                let fill_model_grad = self.state.read(cx).layer_fill_gradient(&lid_t, "text_fill");
+                                let fill_mode = self.color_picker_mode.get("text_fill").map(|s| s.as_str()).unwrap_or(if fill_model_grad.is_some() { "gradient" } else if cur_col.a <= 0.0 { "none" } else { "color" });
                                 let is_fill_active = self.active_color_picker.as_deref() == Some("text_fill");
 
-                                let stroke_mode = self.color_picker_mode.get("text_stroke").map(|s| s.as_str()).unwrap_or(if cur_stroke_w <= 0.0 || cur_stroke.a <= 0.0 { "none" } else { "color" });
-                                let stroke_grad = self.color_picker_gradient_colors.get("text_stroke").copied().unwrap_or((Color::WHITE, Color::BLACK));
+                                let stroke_model_grad = self.state.read(cx).layer_fill_gradient(&lid_t, "text_stroke");
+                                let stroke_mode = self.color_picker_mode.get("text_stroke").map(|s| s.as_str()).unwrap_or(if stroke_model_grad.is_some() { "gradient" } else if cur_stroke_w <= 0.0 || cur_stroke.a <= 0.0 { "none" } else { "color" });
                                 let is_stroke_active = self.active_color_picker.as_deref() == Some("text_stroke");
 
                                 let p_swatch_fill = panel_entity.clone();
@@ -9270,7 +9432,7 @@ impl Render for PropertiesPanel {
                                             "text_fill_swatch",
                                             cur_col,
                                             fill_mode,
-                                            fill_grad,
+                                            fill_model_grad.clone(),
                                             is_fill_active,
                                             cx,
                                             move |_event, _window, cx| {
@@ -9290,7 +9452,7 @@ impl Render for PropertiesPanel {
                                             "text_stroke_swatch",
                                             cur_stroke,
                                             stroke_mode,
-                                            stroke_grad,
+                                            stroke_model_grad.clone(),
                                             is_stroke_active,
                                             cx,
                                             move |_event, _window, cx| {
@@ -9702,7 +9864,7 @@ impl Render for PropertiesPanel {
                             }
                             LayerSource::Shape { shape_type } => {
                                 match shape_type {
-                                    ShapeType::Rectangle { width, height, corner_radius, fill } => {
+                                    ShapeType::Rectangle { width, height, corner_radius, fill, .. } => {
                                         let w = width.value;
                                         let h = height.value;
                                         let cr = corner_radius.value;
@@ -9742,8 +9904,9 @@ impl Render for PropertiesPanel {
                                                     }),
                                             );
                                         }
-                                        let shape_mode = self.color_picker_mode.get("shape_fill").map(|s| s.as_str()).unwrap_or(if fill_col.a <= 0.0 { "none" } else { "color" });
-                                        let shape_grad = self.color_picker_gradient_colors.get("shape_fill").copied().unwrap_or((Color::WHITE, Color::BLACK));
+                                        let shape_model_grad = self.state.read(cx).layer_fill_gradient(&lid_fill, "shape_fill");
+                                        let shape_mode = self.color_picker_mode.get("shape_fill").map(|s| s.as_str()).unwrap_or(if shape_model_grad.is_some() { "gradient" } else if fill_col.a <= 0.0 { "none" } else { "color" });
+                                        
                                         let is_shape_active = self.active_color_picker.as_deref() == Some("shape_fill");
                                         let p_shape_picker = panel_entity.clone();
 
@@ -9772,7 +9935,7 @@ impl Render for PropertiesPanel {
                                                                     "shape_fill_swatch",
                                                                     fill_col,
                                                                     shape_mode,
-                                                                    shape_grad,
+                                                                    shape_model_grad.clone(),
                                                                     is_shape_active,
                                                                     cx,
                                                                     move |_event, _window, cx| {
@@ -9866,7 +10029,7 @@ impl Render for PropertiesPanel {
                                         );
                                         props_items.push(rect_section);
                                     }
-                                    ShapeType::Ellipse { radius_x, radius_y, fill } => {
+                                    ShapeType::Ellipse { radius_x, radius_y, fill, .. } => {
                                         let rx = radius_x.value;
                                         let ry = radius_y.value;
                                         let fill_col = *fill;
@@ -9905,8 +10068,9 @@ impl Render for PropertiesPanel {
                                                     }),
                                             );
                                         }
-                                        let shape_mode = self.color_picker_mode.get("shape_fill").map(|s| s.as_str()).unwrap_or(if fill_col.a <= 0.0 { "none" } else { "color" });
-                                        let shape_grad = self.color_picker_gradient_colors.get("shape_fill").copied().unwrap_or((Color::WHITE, Color::BLACK));
+                                        let shape_model_grad = self.state.read(cx).layer_fill_gradient(&lid_fill, "shape_fill");
+                                        let shape_mode = self.color_picker_mode.get("shape_fill").map(|s| s.as_str()).unwrap_or(if shape_model_grad.is_some() { "gradient" } else if fill_col.a <= 0.0 { "none" } else { "color" });
+                                        
                                         let is_shape_active = self.active_color_picker.as_deref() == Some("shape_fill");
                                         let p_shape_picker = panel_entity.clone();
 
@@ -9935,7 +10099,7 @@ impl Render for PropertiesPanel {
                                                                     "ellipse_fill_swatch",
                                                                     fill_col,
                                                                     shape_mode,
-                                                                    shape_grad,
+                                                                    shape_model_grad.clone(),
                                                                     is_shape_active,
                                                                     cx,
                                                                     move |_event, _window, cx| {

@@ -1,5 +1,6 @@
 use super::buffer::FloatBuf;
-use super::pixel::Px;
+use super::pixel::{gradient_axis, sample_fill_gradient, Px};
+use project::FillGradient;
 
 // Shape SDF fills (local px, straight alpha)
 // ---------------------------------------------------------------------------
@@ -37,6 +38,46 @@ pub(crate) fn fill_rect(buf: &mut FloatBuf, w: f32, h: f32, cr: f32, col: Px) {
     }
 }
 
+pub(crate) fn fill_rect_gradient(
+    buf: &mut FloatBuf,
+    w: f32,
+    h: f32,
+    cr: f32,
+    gradient: &FillGradient,
+) {
+    let axis = gradient_axis(w, h, gradient.angle);
+    let cr = cr.clamp(0.0, w.min(h) / 2.0);
+    for y in 0..buf.h {
+        for x in 0..buf.w {
+            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+            if fx > w || fy > h {
+                continue;
+            }
+            let inside = if cr <= 0.0 {
+                true
+            } else {
+                let cx = fx.clamp(cr, w - cr);
+                let cy = fy.clamp(cr, h - cr);
+                let dx = fx - cx;
+                let dy = fy - cy;
+                dx * dx + dy * dy <= cr * cr + 0.5
+            };
+            if inside {
+                let mut p = Px::from_color(sample_fill_gradient(gradient, fx, fy, axis));
+                // Cheap 1px AA on the outer edge.
+                let edge = (w - fx).min(fx).min(h - fy).min(fy);
+                if edge < 1.0 && edge > 0.0 {
+                    p.scale(edge.clamp(0.0, 1.0));
+                }
+                let dst = buf.get(x as i32, y as i32);
+                let mut out = dst;
+                out.over(p);
+                buf.put(x as i32, y as i32, out);
+            }
+        }
+    }
+}
+
 pub(crate) fn fill_ellipse(buf: &mut FloatBuf, rx: f32, ry: f32, col: Px) {
     let (cx, cy) = (buf.w as f32 / 2.0, buf.h as f32 / 2.0);
     for y in 0..buf.h {
@@ -46,6 +87,40 @@ pub(crate) fn fill_ellipse(buf: &mut FloatBuf, rx: f32, ry: f32, col: Px) {
             let d = fx * fx + fy * fy;
             if d <= 1.0 {
                 let mut p = col;
+                // Smooth rim AA.
+                let rim = ((1.0 - d).max(0.0) * rx.min(ry) * 0.5).min(1.0);
+                if rim < 1.0 {
+                    p.scale(rim.clamp(0.15, 1.0));
+                }
+                let dst = buf.get(x as i32, y as i32);
+                let mut out = dst;
+                out.over(p);
+                buf.put(x as i32, y as i32, out);
+            }
+        }
+    }
+}
+
+pub(crate) fn fill_ellipse_gradient(
+    buf: &mut FloatBuf,
+    rx: f32,
+    ry: f32,
+    gradient: &FillGradient,
+) {
+    let (cx, cy) = (buf.w as f32 / 2.0, buf.h as f32 / 2.0);
+    let axis = gradient_axis(buf.w as f32, buf.h as f32, gradient.angle);
+    for y in 0..buf.h {
+        for x in 0..buf.w {
+            let fx = (x as f32 + 0.5 - cx) / rx.max(0.5);
+            let fy = (y as f32 + 0.5 - cy) / ry.max(0.5);
+            let d = fx * fx + fy * fy;
+            if d <= 1.0 {
+                let mut p = Px::from_color(sample_fill_gradient(
+                    gradient,
+                    x as f32 + 0.5,
+                    y as f32 + 0.5,
+                    axis,
+                ));
                 // Smooth rim AA.
                 let rim = ((1.0 - d).max(0.0) * rx.min(ry) * 0.5).min(1.0);
                 if rim < 1.0 {
@@ -84,6 +159,41 @@ pub(crate) fn fill_path(
             if a > 0.0 {
                 let mut p = col;
                 p.scale(a);
+                let dst = buf.get(x as i32, y as i32);
+                let mut out = dst;
+                out.over(p);
+                buf.put(x as i32, y as i32, out);
+            }
+        }
+    }
+}
+
+/// Gradient variant of [`fill_path`]: coverage from the path, color from
+/// the linear gradient over the content frame (`frame_size`).
+pub(crate) fn fill_path_gradient(
+    buf: &mut FloatBuf,
+    path_data: &str,
+    gradient: &FillGradient,
+    origin: project::Vec2,
+    frame_size: (f32, f32),
+) {
+    let path = project::Path::from_svg(path_data);
+    let mut pts = path.flatten(0.5);
+    if pts.len() < 3 {
+        return;
+    }
+    for p in pts.iter_mut() {
+        *p -= origin;
+    }
+    let axis = gradient_axis(frame_size.0, frame_size.1, gradient.angle);
+    let mut cov = vec![0.0f32; (buf.w * buf.h) as usize];
+    super::mask::fill_even_odd(&mut cov, buf.w, buf.h, &pts);
+    for y in 0..buf.h {
+        for x in 0..buf.w {
+            let a = cov[(y * buf.w + x) as usize];
+            if a > 0.0 {
+                let c = sample_fill_gradient(gradient, x as f32 + 0.5, y as f32 + 0.5, axis);
+                let p = Px::from_color_scaled(c, a);
                 let dst = buf.get(x as i32, y as i32);
                 let mut out = dst;
                 out.over(p);
@@ -150,6 +260,85 @@ fn stroke_segment(buf: &mut FloatBuf, a: (f32, f32), b: (f32, f32), nib: f32, co
     for i in 0..=steps {
         let t = i as f32 / steps as f32;
         dot(buf, a.0 + dx * t, a.1 + dy * t, nib, col);
+    }
+}
+
+/// Gradient variant of [`stroke_path`]: each nib stamp samples the linear
+/// gradient over the content frame (`frame_size`).
+pub(crate) fn stroke_path_gradient(
+    buf: &mut FloatBuf,
+    path_data: &str,
+    nib: f32,
+    gradient: &FillGradient,
+    origin: project::Vec2,
+    frame_size: (f32, f32),
+) {
+    let path = project::Path::from_svg(path_data);
+    let mut pts = path.flatten(0.5);
+    if pts.is_empty() {
+        return;
+    }
+    for p in pts.iter_mut() {
+        *p -= origin;
+    }
+    if path.closed {
+        pts.push(pts[0]);
+    }
+    let axis = gradient_axis(frame_size.0, frame_size.1, gradient.angle);
+    if pts.len() < 2 {
+        dot_gradient(buf, pts[0].x, pts[0].y, nib, gradient, axis);
+        return;
+    }
+    for w in pts.windows(2) {
+        stroke_segment_gradient(buf, (w[0].x, w[0].y), (w[1].x, w[1].y), nib, gradient, axis);
+    }
+}
+
+fn dot_gradient(
+    buf: &mut FloatBuf,
+    x: f32,
+    y: f32,
+    r: f32,
+    gradient: &FillGradient,
+    axis: (f32, f32, f32, f32),
+) {
+    let r2 = r * r;
+    for oy in (-r.ceil() as i32)..=(r.ceil() as i32) {
+        for ox in (-r.ceil() as i32)..=(r.ceil() as i32) {
+            let dx = ox as f32 + 0.5;
+            let dy = oy as f32 + 0.5;
+            if dx * dx + dy * dy <= r2 {
+                let (bx, by) = (x as i32 + ox, y as i32 + oy);
+                let col = Px::from_color(sample_fill_gradient(
+                    gradient,
+                    bx as f32 + 0.5,
+                    by as f32 + 0.5,
+                    axis,
+                ));
+                let dst = buf.get(bx, by);
+                let mut out = dst;
+                out.over(col);
+                buf.put(bx, by, out);
+            }
+        }
+    }
+}
+
+fn stroke_segment_gradient(
+    buf: &mut FloatBuf,
+    a: (f32, f32),
+    b: (f32, f32),
+    nib: f32,
+    gradient: &FillGradient,
+    axis: (f32, f32, f32, f32),
+) {
+    let dx = b.0 - a.0;
+    let dy = b.1 - a.1;
+    let len = (dx * dx + dy * dy).sqrt();
+    let steps = (len.max(1.0)).ceil() as i32;
+    for i in 0..=steps {
+        let t = i as f32 / steps as f32;
+        dot_gradient(buf, a.0 + dx * t, a.1 + dy * t, nib, gradient, axis);
     }
 }
 

@@ -1,4 +1,5 @@
 use crate::color::Color;
+use crate::layer::{FillGradient, GradientStop};
 use crate::property::Property;
 use crate::shader::{parse_shader_params, ShaderParam, ShaderParamValue};
 use crate::stock::{stock_default_color, StockPlugin};
@@ -83,6 +84,11 @@ pub enum EffectType {
         color_a: Color,
         color_b: Color,
         angle: Property<f32>,
+        /// Extra stops beyond the endpoints (empty = pure two-color ramp).
+        /// When non-empty these win for rendering; `color_a`/`color_b`
+        /// mirror the sorted endpoints for export/compat.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        stops: Vec<GradientStop>,
     },
     /// Fake-3D skew filter in degrees (spatial).
     Perspective {
@@ -316,6 +322,83 @@ impl EffectType {
             color_a,
             color_b,
             angle: Property::new("Angle", angle),
+            stops: Vec::new(),
+        }
+    }
+
+    /// Effective gradient stops for a ramp: explicit `stops` when two or
+    /// more are stored, otherwise the classic endpoint pair.
+    pub fn gradient_ramp_stops(&self) -> Option<Vec<GradientStop>> {
+        match self {
+            Self::GradientRamp { color_a, color_b, stops, .. } => {
+                if stops.len() >= 2 {
+                    let mut sorted = stops.clone();
+                    sorted.sort_by(|a, b| {
+                        a.offset
+                            .partial_cmp(&b.offset)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    Some(sorted)
+                } else {
+                    Some(vec![
+                        GradientStop::new(0.0, *color_a),
+                        GradientStop::new(1.0, *color_b),
+                    ])
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Replace a ramp's explicit stops (fewer than two clears back to the
+    /// endpoint pair) and mirror the sorted endpoints into
+    /// `color_a`/`color_b` for export/compat readers.
+    pub fn set_gradient_ramp_stops(&mut self, stops: Vec<GradientStop>) -> bool {
+        match self {
+            Self::GradientRamp { color_a, color_b, stops: slot, .. } => {
+                if stops.len() >= 2 {
+                    let grad = FillGradient { stops, angle: 0.0 };
+                    let sorted = grad.sorted_stops();
+                    *color_a = sorted[0].color;
+                    *color_b = sorted[sorted.len() - 1].color;
+                    *slot = sorted.into_iter().cloned().collect();
+                } else {
+                    slot.clear();
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Mirror a legacy endpoint write into the matching sorted end stop.
+    fn sync_ramp_endpoint(stops: &mut Vec<GradientStop>, first: bool, color: Color) {
+        if stops.len() < 2 {
+            return;
+        }
+        let at = if first {
+            stops
+                .iter()
+                .enumerate()
+                .min_by(|(_, a), (_, b)| {
+                    a.offset
+                        .partial_cmp(&b.offset)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|(i, _)| i)
+        } else {
+            stops
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| {
+                    a.offset
+                        .partial_cmp(&b.offset)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|(i, _)| i)
+        };
+        if let Some(i) = at {
+            stops[i].color = color;
         }
     }
 
@@ -835,12 +918,14 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     false
                 }
             }
-            EffectType::GradientRamp { color_a, color_b, .. } => {
+            EffectType::GradientRamp { color_a, color_b, stops, .. } => {
                 if field.eq_ignore_ascii_case("color_a") || field.eq_ignore_ascii_case("a") {
                     *color_a = next;
+                    EffectType::sync_ramp_endpoint(stops, true, next);
                     true
                 } else if field.eq_ignore_ascii_case("color_b") || field.eq_ignore_ascii_case("b") {
                     *color_b = next;
+                    EffectType::sync_ramp_endpoint(stops, false, next);
                     true
                 } else {
                     false
@@ -1810,7 +1895,7 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 PropDecl::color("color_b", "Color B", *color_b),
                 scalar("size", "Size", WidgetKind::Slider, ParamMeta::slider(2.0, 512.0, 4.0, 0, "px", 100.0), size),
             ],
-            EffectType::GradientRamp { color_a, color_b, angle } => vec![
+            EffectType::GradientRamp { color_a, color_b, angle, .. } => vec![
                 PropDecl::color("color_a", "Start", *color_a),
                 PropDecl::color("color_b", "End", *color_b),
                 scalar("angle", "Angle", WidgetKind::Angle, ParamMeta::slider(0.0, 360.0, 5.0, 0, "°", 100.0), angle),

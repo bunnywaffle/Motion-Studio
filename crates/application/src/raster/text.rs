@@ -2,8 +2,8 @@ use project::TextAlign;
 use super::affine::{Aff, aff_mul};
 use super::buffer::FloatBuf;
 use super::layer::blit_affine;
-use super::pixel::Px;
-use project::{BlendMode, Path};
+use super::pixel::{gradient_axis, sample_fill_gradient, Px};
+use project::{BlendMode, FillGradient, Path};
 use std::sync::{Mutex, OnceLock};
 
 // Text raster (cosmic-text)
@@ -31,6 +31,9 @@ pub struct TextSpec<'a> {
     pub family: &'a str,
     pub size: f32,
     pub fill: Px,
+    /// Linear fill gradient (None = solid `fill`); spans the laid-out
+    /// text block.
+    pub fill_gradient: Option<FillGradient>,
     pub weight: u16,
     pub italic: bool,
     pub tracking: f32,
@@ -39,6 +42,8 @@ pub struct TextSpec<'a> {
     pub all_caps: bool,
     pub stroke_w: f32,
     pub stroke_col: Px,
+    /// Linear stroke gradient (None = solid `stroke_col`).
+    pub stroke_gradient: Option<FillGradient>,
     pub baseline_shift: f32,
     pub box_w: f32,
     pub bevel: Option<(f32, f32)>,
@@ -137,6 +142,15 @@ pub fn raster_text(spec: &TextSpec) -> (FloatBuf, (f32, f32, f32, f32)) {
     }
     // Outline ring (8-neighborhood dilate) under the fill.
     let sw_px = spec.stroke_w.round() as i32;
+    // Gradient axes span the laid-out block (scratch buffer dims).
+    let fill_axis = spec
+        .fill_gradient
+        .as_ref()
+        .map(|g| gradient_axis(buf.w as f32, buf.h as f32, g.angle));
+    let stroke_axis = spec
+        .stroke_gradient
+        .as_ref()
+        .map(|g| gradient_axis(buf.w as f32, buf.h as f32, g.angle));
     if sw_px >= 1 {
         let ring: [(i32, i32); 8] = [
             (-sw_px, 0),
@@ -150,15 +164,24 @@ pub fn raster_text(spec: &TextSpec) -> (FloatBuf, (f32, f32, f32, f32)) {
         ];
         for g in &glyphs {
             for (ox, oy) in ring {
-                draw_mask(&mut buf, g, ox, oy, spec.stroke_col);
+                match (&spec.stroke_gradient, stroke_axis) {
+                    (Some(grad), Some(axis)) => draw_mask_gradient(&mut buf, g, ox, oy, grad, axis),
+                    _ => draw_mask(&mut buf, g, ox, oy, spec.stroke_col),
+                }
             }
         }
     }
     // Fill + faux-bold second pass.
     for g in &glyphs {
-        draw_mask(&mut buf, g, 0, 0, spec.fill);
+        match (&spec.fill_gradient, fill_axis) {
+            (Some(grad), Some(axis)) => draw_mask_gradient(&mut buf, g, 0, 0, grad, axis),
+            _ => draw_mask(&mut buf, g, 0, 0, spec.fill),
+        }
         if spec.weight >= 700 {
-            draw_mask(&mut buf, g, 1, 0, spec.fill);
+            match (&spec.fill_gradient, fill_axis) {
+                (Some(grad), Some(axis)) => draw_mask_gradient(&mut buf, g, 1, 0, grad, axis),
+                _ => draw_mask(&mut buf, g, 1, 0, spec.fill),
+            }
         }
     }
 
@@ -205,6 +228,33 @@ fn draw_mask(buf: &mut FloatBuf, g: &GlyphMask, ox: i32, oy: i32, col: Px) {
             let mut out = dst;
             out.over(p);
             buf.put(g.x + ox + column, g.y + oy + row, out);
+        }
+    }
+}
+
+/// Coverage mask filled from a linear gradient: each pixel samples the
+/// gradient at its buffer position, scaled by glyph coverage.
+fn draw_mask_gradient(
+    buf: &mut FloatBuf,
+    g: &GlyphMask,
+    ox: i32,
+    oy: i32,
+    gradient: &FillGradient,
+    axis: (f32, f32, f32, f32),
+) {
+    for row in 0..g.h as i32 {
+        for column in 0..g.w as i32 {
+            let cov = g.data[(row as u32 * g.w + column as u32) as usize] as f32 / 255.0;
+            if cov <= 0.0 {
+                continue;
+            }
+            let (bx, by) = (g.x + ox + column, g.y + oy + row);
+            let c = sample_fill_gradient(gradient, bx as f32 + 0.5, by as f32 + 0.5, axis);
+            let p = Px::from_color_scaled(c, cov);
+            let dst = buf.get(bx, by);
+            let mut out = dst;
+            out.over(p);
+            buf.put(bx, by, out);
         }
     }
 }
@@ -339,6 +389,15 @@ pub fn raster_text_on_path(
     y1 = y1.max(0.0);
     let (bw, bh) = ((x1 - ox).max(8.0), (y1 - oy).max(8.0));
     let mut buf = FloatBuf::clear(bw.ceil() as u32, bh.ceil() as u32);
+    // On-path gradients sample per glyph at its anchor (output space).
+    let path_fill_axis = spec
+        .fill_gradient
+        .as_ref()
+        .map(|g| gradient_axis(bw, bh, g.angle));
+    let path_stroke_axis = spec
+        .stroke_gradient
+        .as_ref()
+        .map(|g| gradient_axis(bw, bh, g.angle));
     let path_len = path.length(0.5).max(1.0);
     let sw_px = spec.stroke_w.round() as i32;
     for p in &placed {
@@ -350,6 +409,17 @@ pub fn raster_text_on_path(
         };
         let angle = path.tangent_at_ratio(ratio, 0.5).unwrap_or(0.0);
         // Compose the glyph (bevel + outline + fill) into a temp buffer.
+        // Gradient fills sample once per glyph at its path anchor so the
+        // ramp flows along the whole path in output space.
+        let (ax, ay) = (anchor.x - ox, anchor.y - oy);
+        let glyph_fill = match (&spec.fill_gradient, path_fill_axis) {
+            (Some(grad), Some(axis)) => Px::from_color(sample_fill_gradient(grad, ax, ay, axis)),
+            _ => spec.fill,
+        };
+        let glyph_stroke = match (&spec.stroke_gradient, path_stroke_axis) {
+            (Some(grad), Some(axis)) => Px::from_color(sample_fill_gradient(grad, ax, ay, axis)),
+            _ => spec.stroke_col,
+        };
         let (gw, gh) = ((p.mask.w + 8) as i32, (p.mask.h + 8) as i32);
         let mut tmp = FloatBuf::clear(gw as u32, gh as u32);
         let gx = 4i32;
@@ -365,12 +435,12 @@ pub fn raster_text_on_path(
         if sw_px >= 1 {
             let ring: [(i32, i32); 8] = [(-sw_px, 0), (sw_px, 0), (0, -sw_px), (0, sw_px), (-sw_px, -sw_px), (sw_px, -sw_px), (-sw_px, sw_px), (sw_px, sw_px)];
             for (ox2, oy2) in ring {
-                draw_mask(&mut tmp, &shifted, ox2, oy2, spec.stroke_col);
+                draw_mask(&mut tmp, &shifted, ox2, oy2, glyph_stroke);
             }
         }
-        draw_mask(&mut tmp, &shifted, 0, 0, spec.fill);
+        draw_mask(&mut tmp, &shifted, 0, 0, glyph_fill);
         if spec.weight >= 700 {
-            draw_mask(&mut tmp, &shifted, 1, 0, spec.fill);
+            draw_mask(&mut tmp, &shifted, 1, 0, glyph_fill);
         }
         // Rotate about the glyph center onto the path point.
         let (cx, cy) = (gw as f32 * 0.5, gh as f32 * 0.5);

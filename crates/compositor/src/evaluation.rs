@@ -4,8 +4,8 @@ use crate::graph::SceneGraph;
 use crate::node::SceneNode;
 use crate::transform::{AffineTransform2D, BoundingBox2D, EvaluatedTransform, TransformResolver};
 use project::{
-    BlendMode, Color, Composition, EffectType, LayerSource, LoopMode, MaskMode, Path, Project,
-    StockPlugin, TimeCode, TrackMatteMode, Vec2,
+    BlendMode, Color, Composition, EffectType, FillGradient, GradientStop, LayerSource, LoopMode,
+    MaskMode, Path, Project, StockPlugin, TimeCode, TrackMatteMode, Vec2,
 };
 use project::shader_interp::{self, PreviewEnv};
 use serde::{Deserialize, Serialize};
@@ -297,9 +297,7 @@ pub enum EvaluatedEffectType {
         color_b: Color,
     },
     GradientRamp {
-        color_a: Color,
-        color_b: Color,
-        angle: f32,
+        gradient: FillGradient,
     },
     Perspective {
         skew_x: f32,
@@ -1549,11 +1547,24 @@ impl LayerStackEvaluator {
                                 color_b: *color_b,
                             }
                         }
-                        EffectType::GradientRamp { color_a, color_b, angle } => {
+                        EffectType::GradientRamp { color_a, color_b, angle, stops } => {
+                            let angle = angle.evaluate_at(time);
+                            let stops = if stops.len() >= 2 {
+                                let mut sorted = stops.clone();
+                                sorted.sort_by(|a, b| {
+                                    a.offset
+                                        .partial_cmp(&b.offset)
+                                        .unwrap_or(std::cmp::Ordering::Equal)
+                                });
+                                sorted
+                            } else {
+                                vec![
+                                    GradientStop::new(0.0, *color_a),
+                                    GradientStop::new(1.0, *color_b),
+                                ]
+                            };
                             EvaluatedEffectType::GradientRamp {
-                                color_a: *color_a,
-                                color_b: *color_b,
-                                angle: angle.evaluate_at(time),
+                                gradient: FillGradient { stops, angle },
                             }
                         }
                         EffectType::Perspective { skew_x, skew_y } => {

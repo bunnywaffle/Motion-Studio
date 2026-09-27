@@ -14,13 +14,13 @@
 
 use crate::panels::{self, InspectorColorPicker, PropertiesPanel};
 use crate::state::EditorState;
-use gpui_kit::base::{h_flex, v_flex, TestSupportExt};
+use gpui_kit::base::{h_flex, v_flex, ElementExt as _, TestSupportExt};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::searchable_list::SearchableVec;
 use gpui_kit::component::select::{Select, SelectState};
 use gpui_kit::*;
-use project::{Color, PropDecl};
+use project::{Color, FillGradient, GradientStop, PropDecl};
 use std::collections::HashMap;
 
 /// Which commit path a scalar row uses.
@@ -283,110 +283,194 @@ pub(crate) fn widget_vec(
     col.into_any_element()
 }
 
-/// Two-stop gradient editor (Tint maps, GradientRamp start/end): stop bar
-/// with selectable stops, wheel + hex for the selected stop, reverse and
-/// presets. Commits through the same color setters as the swatch rows.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn widget_gradient(
+/// Shared N-stop gradient editor (Gradient Ramp ramps, text/shape/solid
+/// fill slots): preview bar, stop diamonds, selected-stop color, reverse +
+/// presets, quick swatches.
+///
+/// Interaction (After Effects-style):
+/// - click an empty bar stretch: add a stop there (sampled color) and
+///   select it;
+/// - left-press a diamond: select it and start a drag (panel-root mouse
+///   handlers commit offsets; release ends the gesture — one undo step);
+/// - right-click a diamond: delete it (minimum two stops);
+/// - the bar ignores the bubbled press of a diamond grab (the diamond arms
+///   `gradient_drag` first).
+///
+/// Commits route through the target's state methods; `stop_color_editor` is
+/// caller-built (effect endpoint wheel, fill wheel/palette, …).
+pub(crate) fn gradient_editor(
     state: &Entity<EditorState>,
     panel: &Entity<PropertiesPanel>,
-    layer_id: &str,
-    eff_id: &str,
-    stop_a: (&str, &str, Color),
-    stop_b: (&str, &str, Color),
-    sel: usize,
-    wheels: &HashMap<(String, String), Entity<InspectorColorPicker>>,
+    target: panels::GradientTarget,
+    stops: Vec<GradientStop>,
+    selected: usize,
+    stop_color_editor: AnyElement,
     cx: &App,
 ) -> AnyElement {
     fn to_rgba(c: Color) -> Rgba {
         Rgba { r: c.r, g: c.g, b: c.b, a: 1.0 }
     }
-    let (fa, la, ca) = (stop_a.0.to_string(), stop_a.1.to_string(), stop_a.2);
-    let (fb, lb, cb) = (stop_b.0.to_string(), stop_b.1.to_string(), stop_b.2);
-    let (sel_field, sel_label, sel_color) = if sel == 0 {
-        (fa.clone(), la.clone(), ca)
-    } else {
-        (fb.clone(), lb.clone(), cb)
-    };
-    // 24-segment preview bar (GPUI has no gradient fills).
-    let mut bar = h_flex().flex_1().h(px(22.)).rounded_sm().overflow_hidden();
+    let prefix = target.id_prefix();
+    let sel = selected.min(stops.len().saturating_sub(1));
+    let sel_color = stops.get(sel).map(|s| s.color).unwrap_or(Color::WHITE);
+
+    // N-stop preview bar (GPUI has no gradient fills): sample the stops.
+    let probe = FillGradient { stops: stops.clone(), angle: 0.0 };
+    let mut bar = h_flex()
+        .flex_1()
+        .h(px(22.))
+        .rounded_sm()
+        .overflow_hidden()
+        .cursor_pointer();
     for i in 0..24 {
-        let t = i as f32 / 23.0;
-        bar = bar.child(
-            div().flex_1().h_full().bg(Rgba {
-                r: ca.r + (cb.r - ca.r) * t,
-                g: ca.g + (cb.g - ca.g) * t,
-                b: ca.b + (cb.b - ca.b) * t,
-                a: 1.0,
-            }),
-        );
+        let c = probe.sample(i as f32 / 23.0);
+        bar = bar.child(div().flex_1().h_full().bg(to_rgba(c)));
     }
-    let mut col = v_flex().gap_1();
-    // Stop bar with selectable diamonds.
     {
-        let p_sa = panel.clone();
-        let p_sb = panel.clone();
-        let eid_a = eff_id.to_string();
-        let eid_b = eff_id.to_string();
-        col = col.child(
-            div()
-                .relative()
-                .child(bar)
-                .child(
-                    div()
-                        .id(SharedString::from(format!("gradient_stop0_{eff_id}")))
-                        .test_support()
-                        .absolute()
-                        .left(px(2.))
-                        .top(px(-3.))
-                        .cursor_pointer()
-                        .w(px(12.))
-                        .h(px(12.))
-                        .rounded_sm()
-                        .bg(to_rgba(ca))
-                        .border_1()
-                        .border_color(if sel == 0 { rgb(0xffffff) } else { rgb(0x000000) })
-                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                            p_sa.update(cx, |this, cx| {
-                                this.gradient_stop.insert(eid_a.clone(), 0);
-                                cx.notify();
-                            });
-                        }),
-                )
-                .child(
-                    div()
-                        .id(SharedString::from(format!("gradient_stop1_{eff_id}")))
-                        .test_support()
-                        .absolute()
-                        .right(px(2.))
-                        .top(px(-3.))
-                        .cursor_pointer()
-                        .w(px(12.))
-                        .h(px(12.))
-                        .rounded_sm()
-                        .bg(to_rgba(cb))
-                        .border_1()
-                        .border_color(if sel == 1 { rgb(0xffffff) } else { rgb(0x000000) })
-                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                            p_sb.update(cx, |this, cx| {
-                                this.gradient_stop.insert(eid_b.clone(), 1);
-                                cx.notify();
-                            });
-                        }),
-                ),
-        );
+        let p_prep = panel.clone();
+        let p_down = panel.clone();
+        let s_add = state.clone();
+        let prefix_prep = prefix.clone();
+        let prefix_down = prefix.clone();
+        let target_add = target.clone();
+        let stops_add = stops.clone();
+        bar = bar
+            .on_prepaint(move |bounds, _window, cx| {
+                let ox = bounds.origin.x / px(1.0);
+                let w = bounds.size.width / px(1.0);
+                p_prep.update(cx, |this, cx| {
+                    let key = format!("gradient_bar_{prefix_prep}");
+                    if this.gradient_bar_bounds.get(&key) != Some(&(ox, w)) {
+                        this.gradient_bar_bounds.insert(key, (ox, w));
+                        cx.notify();
+                    }
+                });
+            })
+            .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+                // Diamond grabs bubble here; the diamond arms gradient_drag
+                // first, so an armed drag means "not a bar click".
+                let armed = p_down.read(cx).gradient_drag.clone().map(|d| d.target)
+                    == Some(target_add.clone());
+                if armed {
+                    return;
+                }
+                let mx = event.position.x / px(1.0);
+                let (ox, w) = p_down
+                    .read(cx)
+                    .gradient_bar_bounds
+                    .get(&format!("gradient_bar_{prefix_down}"))
+                    .copied()
+                    .unwrap_or((mx, 100.0));
+                let t = ((mx - ox) / w.max(1.0)).clamp(0.0, 1.0);
+                let probe = FillGradient { stops: stops_add.clone(), angle: 0.0 };
+                let color = probe.sample(t);
+                let target_do = target_add.clone();
+                let at = s_add.update(cx, |s, _| match &target_do {
+                    panels::GradientTarget::Effect { layer_id, eff_id } => {
+                        s.add_effect_gradient_stop(layer_id, eff_id, t, color)
+                    }
+                    panels::GradientTarget::Fill { layer_id, key } => {
+                        s.add_fill_gradient_stop(layer_id, key, t, color)
+                    }
+                });
+                if let Ok(at) = at {
+                    p_down.update(cx, |this, cx| {
+                        match &target_add {
+                            panels::GradientTarget::Effect { eff_id, .. } => {
+                                this.gradient_stop.insert(eff_id.clone(), at);
+                            }
+                            panels::GradientTarget::Fill { key, .. } => {
+                                this.color_picker_gradient_stop.insert(key.clone(), at);
+                            }
+                        }
+                        cx.notify();
+                    });
+                    s_add.update(cx, |_, cx| cx.notify());
+                }
+            });
     }
-    // Selected stop: wheel (same ids as the swatch rows) + hex.
-    {
-        let wheel_el: AnyElement = match wheels.get(&(eff_id.to_string(), sel_field.clone())) {
-            Some(picker) => panels::fx_wheel_el(&sel_field, eff_id, picker, cx),
-            None => div().into_any_element(),
+    let bar = div()
+        .id(SharedString::from(format!("gradient_bar_{prefix}")))
+        .test_support()
+        .relative()
+        .child(bar);
+    let mut wrap = div().relative().child(bar);
+    // Movable stop diamonds, centered on their offsets.
+    for (i, stop) in stops.iter().enumerate() {
+        let p_sel = panel.clone();
+        let s_down = state.clone();
+        let s_del = state.clone();
+        let p_del = panel.clone();
+        let target_sel = target.clone();
+        let target_del = target.clone();
+        let stop_id = match &target {
+            panels::GradientTarget::Effect { eff_id, .. } if i < 2 => {
+                format!("gradient_stop{i}_{eff_id}")
+            }
+            _ => format!("gradient_stop_{prefix}_{i}"),
         };
+        wrap = wrap.child(
+            div()
+                .id(SharedString::from(stop_id))
+                .test_support()
+                .absolute()
+                .left(relative(stop.offset.clamp(0.0, 1.0)))
+                .top(px(-4.))
+                .ml(px(-6.))
+                .cursor_grab()
+                .w(px(12.))
+                .h(px(12.))
+                .rounded_sm()
+                .bg(to_rgba(stop.color))
+                .border_1()
+                .border_color(if i == sel { rgb(0xffffff) } else { rgb(0x000000) })
+                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    s_down.update(cx, |s, cx| {
+                        s.checkpoint();
+                        cx.notify();
+                    });
+                    p_sel.update(cx, |this, cx| {
+                        match &target_sel {
+                            panels::GradientTarget::Effect { eff_id, .. } => {
+                                this.gradient_stop.insert(eff_id.clone(), i);
+                            }
+                            panels::GradientTarget::Fill { key, .. } => {
+                                this.color_picker_gradient_stop.insert(key.clone(), i);
+                            }
+                        }
+                        this.gradient_drag = Some(panels::GradientDrag {
+                            target: target_sel.clone(),
+                            index: i,
+                            moved: false,
+                        });
+                        cx.notify();
+                    });
+                })
+                .on_mouse_down(MouseButton::Right, move |_event, _window, cx| {
+                    let target_do = target_del.clone();
+                    let res = s_del.update(cx, |s, _| match &target_do {
+                        panels::GradientTarget::Effect { layer_id, eff_id } => {
+                            s.remove_effect_gradient_stop(layer_id, eff_id, i)
+                        }
+                        panels::GradientTarget::Fill { layer_id, key } => {
+                            s.remove_fill_gradient_stop(layer_id, key, i)
+                        }
+                    });
+                    if res.is_ok() {
+                        p_del.update(cx, |_, cx| cx.notify());
+                        s_del.update(cx, |_, cx| cx.notify());
+                    }
+                }),
+        );
+    }
+    let mut col = v_flex().gap_1().child(wrap);
+    // Selected stop: chip + hex + caller-built color editor.
+    {
         let hex = format!(
             "#{:02X}{:02X}{:02X}",
-            (sel_color.r * 255.0) as u8,
-            (sel_color.g * 255.0) as u8,
-            (sel_color.b * 255.0) as u8
+            (sel_color.r * 255.0).round() as u8,
+            (sel_color.g * 255.0).round() as u8,
+            (sel_color.b * 255.0).round() as u8
         );
         col = col.child(
             h_flex()
@@ -398,12 +482,16 @@ pub(crate) fn widget_gradient(
                         .gap_1p5()
                         .items_center()
                         .child(div().w(px(20.)).h(px(14.)).rounded_sm().bg(to_rgba(sel_color)))
-                        .child(div().text_color(cx.theme().muted_foreground).child(format!("{sel_label} · {hex}"))),
+                        .child(
+                            div()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(format!("Stop {} · {hex}", sel + 1)),
+                        ),
                 )
-                .child(wheel_el),
+                .child(stop_color_editor),
         );
     }
-    // Reverse + presets (single-undo pair commits).
+    // Reverse + presets (single-undo whole-gradient commits).
     {
         let presets: [(&str, Color, Color); 4] = [
             ("B/W", Color::BLACK, Color::WHITE),
@@ -414,12 +502,11 @@ pub(crate) fn widget_gradient(
         let mut row = h_flex().gap_1().items_center().text_xs();
         {
             let s_rev = state.clone();
-            let lid = layer_id.to_string();
-            let eid = eff_id.to_string();
-            let (fa_r, fb_r) = (fa.clone(), fb.clone());
+            let target_rev = target.clone();
+            let prefix_rev = prefix.clone();
             row = row.child(
                 div()
-                    .id(SharedString::from(format!("gradient_reverse_{eff_id}")))
+                    .id(SharedString::from(format!("gradient_reverse_{prefix_rev}")))
                     .test_support()
                     .cursor_pointer()
                     .px_2()
@@ -428,21 +515,31 @@ pub(crate) fn widget_gradient(
                     .bg(cx.theme().muted)
                     .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
                     .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                        s_rev.update(cx, |s, cx| {
-                            let _ = s.set_effect_color_pair(&lid, &eid, &[(&fa_r, cb), (&fb_r, ca)]);
-                            cx.notify();
+                        let target_do = target_rev.clone();
+                        let res = s_rev.update(cx, |s, _| match &target_do {
+                            panels::GradientTarget::Effect { layer_id, eff_id } => {
+                                s.reverse_effect_gradient(layer_id, eff_id)
+                            }
+                            panels::GradientTarget::Fill { layer_id, key } => {
+                                s.reverse_fill_gradient(layer_id, key)
+                            }
                         });
+                        if res.is_ok() {
+                            s_rev.update(cx, |_, cx| cx.notify());
+                        }
                     })
                     .child("Reverse"),
             );
         }
         for (name, pa, pb) in presets {
             let s_pre = state.clone();
-            let lid = layer_id.to_string();
-            let eid = eff_id.to_string();
-            let (fa_p, fb_p) = (fa.clone(), fb.clone());
+            let target_pre = target.clone();
+            let prefix_pre = prefix.clone();
+            let name_owned = name.to_string();
             row = row.child(
                 div()
+                    .id(SharedString::from(format!("gradient_preset_{prefix_pre}_{name_owned}")))
+                    .test_support()
                     .cursor_pointer()
                     .px_2()
                     .py_0p5()
@@ -450,31 +547,43 @@ pub(crate) fn widget_gradient(
                     .bg(cx.theme().muted)
                     .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
                     .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                        s_pre.update(cx, |s, cx| {
-                            let _ = s.set_effect_color_pair(&lid, &eid, &[(&fa_p, pa), (&fb_p, pb)]);
-                            cx.notify();
+                        let target_do = target_pre.clone();
+                        let grad = FillGradient::two_color(pa, pb, 0.0);
+                        let res = s_pre.update(cx, |s, _| match &target_do {
+                            panels::GradientTarget::Effect { layer_id, eff_id } => {
+                                s.set_effect_gradient_stops(layer_id, eff_id, grad.stops.clone())
+                            }
+                            panels::GradientTarget::Fill { layer_id, key } => {
+                                let mut grad = grad.clone();
+                                // Keep the fill's current axis; presets swap colors.
+                                if let Some(cur) = s.layer_fill_gradient(layer_id, key) {
+                                    grad.angle = cur.angle;
+                                }
+                                s.set_layer_fill_gradient(layer_id, key, Some(grad))
+                            }
                         });
+                        if res.is_ok() {
+                            s_pre.update(cx, |_, cx| cx.notify());
+                        }
                     })
-                    .child(name.to_string()),
+                    .child(name_owned),
             );
         }
         col = col.child(row);
     }
-    // Stop color swatches (compact presets for the selected stop).
+    // Quick swatches recolor the selected stop.
     {
         let mut sprow = h_flex().gap_1().items_center();
-        for (hex_str, col_val) in [
-            ("#FFFFFF", Color::WHITE),
-            ("#000000", Color::BLACK),
-            ("#EF4444", Color::from_hex("#EF4444").unwrap()),
-            ("#F59E0B", Color::from_hex("#F59E0B").unwrap()),
-            ("#10B981", Color::from_hex("#10B981").unwrap()),
-            ("#3B82F6", Color::from_hex("#3B82F6").unwrap()),
+        for col_val in [
+            Color::WHITE,
+            Color::BLACK,
+            Color::from_hex("#EF4444").unwrap(),
+            Color::from_hex("#F59E0B").unwrap(),
+            Color::from_hex("#10B981").unwrap(),
+            Color::from_hex("#3B82F6").unwrap(),
         ] {
             let s_p = state.clone();
-            let lid_p = layer_id.to_string();
-            let eid_p = eff_id.to_string();
-            let fld = sel_field.clone();
+            let target_sw = target.clone();
             sprow = sprow.child(
                 div()
                     .cursor_pointer()
@@ -485,17 +594,87 @@ pub(crate) fn widget_gradient(
                     .border_1()
                     .border_color(cx.theme().border)
                     .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                        s_p.update(cx, |s, cx| {
-                            let _ = s.set_effect_color(&lid_p, &eid_p, &fld, col_val);
-                            cx.notify();
+                        let target_do = target_sw.clone();
+                        let res = s_p.update(cx, |s, _| match &target_do {
+                            panels::GradientTarget::Effect { layer_id, eff_id } => {
+                                s.set_effect_gradient_stop_color(layer_id, eff_id, sel, col_val)
+                            }
+                            panels::GradientTarget::Fill { layer_id, key } => {
+                                s.set_fill_gradient_stop_color(layer_id, key, sel, col_val)
+                            }
                         });
+                        if res.is_ok() {
+                            s_p.update(cx, |_, cx| cx.notify());
+                        }
                     }),
             );
-            let _ = hex_str;
         }
         col = col.child(sprow);
     }
     col.into_any_element()
+}
+
+/// Gradient Ramp effect adapter: endpoint wheels for the outer stops
+/// (middle stops recolor through the quick swatches), selection from the
+/// panel's per-effect map.
+pub(crate) fn widget_gradient(
+    state: &Entity<EditorState>,
+    panel: &Entity<PropertiesPanel>,
+    layer_id: &str,
+    eff_id: &str,
+    stops: Vec<GradientStop>,
+    sel: usize,
+    wheels: &HashMap<(String, String), Entity<InspectorColorPicker>>,
+    cx: &App,
+) -> AnyElement {
+    let field = if sel == 0 {
+        Some("color_a")
+    } else if sel + 1 >= stops.len().max(1) {
+        Some("color_b")
+    } else {
+        None
+    };
+    let wheel_el: AnyElement = match field.and_then(|f| wheels.get(&(eff_id.to_string(), f.to_string()))) {
+        Some(picker) => panels::fx_wheel_el(field.unwrap_or("color_a"), eff_id, picker, cx),
+        None => div().into_any_element(),
+    };
+    gradient_editor(
+        state,
+        panel,
+        panels::GradientTarget::Effect {
+            layer_id: layer_id.to_string(),
+            eff_id: eff_id.to_string(),
+        },
+        stops,
+        sel,
+        wheel_el,
+        cx,
+    )
+}
+
+/// Layer fill-slot adapter (text/sharp/solid picker gradient tabs).
+pub(crate) fn fill_gradient_editor(
+    state: &Entity<EditorState>,
+    panel: &Entity<PropertiesPanel>,
+    layer_id: &str,
+    key: &str,
+    gradient: &FillGradient,
+    sel: usize,
+    stop_color_editor: AnyElement,
+    cx: &App,
+) -> AnyElement {
+    gradient_editor(
+        state,
+        panel,
+        panels::GradientTarget::Fill {
+            layer_id: layer_id.to_string(),
+            key: key.to_string(),
+        },
+        gradient.stops.clone(),
+        sel,
+        stop_color_editor,
+        cx,
+    )
 }
 
 /// Dispatch one declaration to its widget (the automatic UI).

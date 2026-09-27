@@ -48,7 +48,7 @@ mod tests {
     use project::{BlendMode, Color, TextAlign};
     use crate::raster::{
         pixel::blend_color,
-        shapes::{fill_ellipse, fill_rect},
+        shapes::{fill_ellipse, fill_rect, fill_rect_gradient},
     };
 
     #[test]
@@ -114,6 +114,7 @@ mod tests {
             family: "Arial",
             size: 64.0,
             fill: Px { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+            fill_gradient: None,
             weight: 400,
             italic: false,
             tracking: 0.0,
@@ -122,6 +123,7 @@ mod tests {
             all_caps: false,
             stroke_w: 0.0,
             stroke_col: Px::clear(),
+            stroke_gradient: None,
             baseline_shift: 0.0,
             box_w: 0.0,
             bevel: None,
@@ -159,13 +161,47 @@ mod tests {
             *p = Px { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
         }
         let fx = EvaluatedEffectType::GradientRamp {
-            color_a: Color::BLACK,
-            color_b: Color::WHITE,
-            angle: 0.0,
+            gradient: project::FillGradient::two_color(Color::BLACK, Color::WHITE, 0.0),
         };
         apply_effect_pixels(&mut buf, 32.0, 1.0, &fx, &ctx);
         assert!(buf.px[0].r < 0.1);
         assert!(buf.px[31].r > 0.9);
+    }
+
+    #[test]
+    fn gradient_ramp_three_stops_hit_middle_color() {
+        let mut buf = FloatBuf::clear(32, 1);
+        for p in buf.px.iter_mut() {
+            *p = Px { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+        }
+        let fx = EvaluatedEffectType::GradientRamp {
+            gradient: project::FillGradient {
+                stops: vec![
+                    project::GradientStop::new(0.0, Color::BLACK),
+                    project::GradientStop::new(0.5, Color::RED),
+                    project::GradientStop::new(1.0, Color::WHITE),
+                ],
+                angle: 0.0,
+            },
+        };
+        let ctx = RasterFx { time_s: 0.0, frame: 0, res_w: 32.0, res_h: 1.0, duration_s: 0.0, playing: false };
+        apply_effect_pixels(&mut buf, 32.0, 1.0, &fx, &ctx);
+        assert!(buf.px[0].r < 0.1);
+        let mid = buf.px[16];
+        assert!(mid.r > 0.7 && mid.g < 0.3, "{mid:?}");
+        assert!(buf.px[31].r > 0.9);
+    }
+
+    #[test]
+    fn rect_gradient_fill_varies_along_axis() {
+        let mut buf = FloatBuf::clear(32, 32);
+        let grad = project::FillGradient::two_color(Color::BLACK, Color::WHITE, 0.0);
+        fill_rect_gradient(&mut buf, 32.0, 32.0, 0.0, &grad);
+        // Middle row, inset from the 1px edge AA: black -> mid -> white.
+        let (l, m, r) = (buf.px[16 * 32 + 2], buf.px[16 * 32 + 16], buf.px[16 * 32 + 29]);
+        assert!(l.r < 0.1 && (l.a - 1.0).abs() < 1e-5, "{l:?}");
+        assert!((m.r - 0.5).abs() < 0.1, "{m:?}");
+        assert!(r.r > 0.9, "{r:?}");
     }
 
     #[test]
@@ -176,6 +212,7 @@ mod tests {
             family: "Arial",
             size: 48.0,
             fill: Px { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+            fill_gradient: None,
             weight: 400,
             italic: false,
             tracking: 0.0,
@@ -184,6 +221,7 @@ mod tests {
             all_caps: false,
             stroke_w: 0.0,
             stroke_col: Px::clear(),
+            stroke_gradient: None,
             baseline_shift: 0.0,
             box_w: 0.0,
             bevel: None,

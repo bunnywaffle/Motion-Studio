@@ -1,7 +1,7 @@
 use compositor::EvaluatedEffectType;
 use project::Color;
 use super::buffer::FloatBuf;
-use super::pixel::Px;
+use super::pixel::{gradient_axis, gradient_t, Px};
 use super::stock::apply_stock;
 
 // Effect application on pixmaps
@@ -50,19 +50,8 @@ pub fn apply_effect_pixels(
                 }
             }
         }
-        EvaluatedEffectType::GradientRamp { color_a, color_b, angle } => {
-            let rad = angle.to_radians();
-            let (dx, dy) = (rad.cos(), rad.sin());
-            // Project corners to normalize t over the box.
-            let corners = [(0.0f32, 0.0f32), (base_w, 0.0), (0.0, base_h), (base_w, base_h)];
-            let mut mn = f32::INFINITY;
-            let mut mx = f32::NEG_INFINITY;
-            for (cx, cy) in corners {
-                let t = cx * dx + cy * dy;
-                mn = mn.min(t);
-                mx = mx.max(t);
-            }
-            let span = (mx - mn).max(1e-3);
+        EvaluatedEffectType::GradientRamp { gradient } => {
+            let axis = gradient_axis(base_w, base_h, gradient.angle);
             for y in 0..buf.h {
                 for x in 0..buf.w {
                     let dst = buf.get(x as i32, y as i32);
@@ -71,14 +60,14 @@ pub fn apply_effect_pixels(
                     }
                     let lx = x as f32 / w * base_w;
                     let ly = y as f32 / h * base_h;
-                    let t = ((lx * dx + ly * dy) - mn) / span;
+                    let c = gradient.sample(gradient_t(lx, ly, axis));
                     buf.put(
                         x as i32,
                         y as i32,
                         Px {
-                            r: (color_a.r + (color_b.r - color_a.r) * t) * dst.a,
-                            g: (color_a.g + (color_b.g - color_a.g) * t) * dst.a,
-                            b: (color_a.b + (color_b.b - color_a.b) * t) * dst.a,
+                            r: c.r * dst.a,
+                            g: c.g * dst.a,
+                            b: c.b * dst.a,
                             a: dst.a,
                         },
                     );

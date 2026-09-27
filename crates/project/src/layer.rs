@@ -22,6 +22,141 @@ fn default_shape_fill() -> Color {
     Color::WHITE
 }
 
+fn default_no_gradient() -> Option<FillGradient> {
+    None
+}
+
+/// One color stop on a fill gradient: normalized `offset` (0..1) along the
+/// gradient axis plus the color at that position.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GradientStop {
+    pub offset: f32,
+    pub color: Color,
+}
+
+impl GradientStop {
+    pub fn new(offset: f32, color: Color) -> Self {
+        Self {
+            offset: offset.clamp(0.0, 1.0),
+            color,
+        }
+    }
+}
+
+/// Multi-stop linear fill gradient (After Effects-style fill): two or more
+/// color stops interpolated along an axis rotated `angle` degrees
+/// (0 = left-to-right, 90 = top-to-bottom).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FillGradient {
+    #[serde(default)]
+    pub stops: Vec<GradientStop>,
+    #[serde(default)]
+    pub angle: f32,
+}
+
+impl Default for FillGradient {
+    fn default() -> Self {
+        Self::two_color(Color::WHITE, Color::BLACK, 90.0)
+    }
+}
+
+impl FillGradient {
+    /// Two-stop gradient with stops pinned at 0 and 1.
+    pub fn two_color(a: Color, b: Color, angle: f32) -> Self {
+        Self {
+            stops: vec![GradientStop::new(0.0, a), GradientStop::new(1.0, b)],
+            angle,
+        }
+    }
+
+    /// Stops sorted by offset (ascending). The stored order is the UI order;
+    /// sampling always uses the sorted view so crossed stops blend correctly.
+    pub fn sorted_stops(&self) -> Vec<&GradientStop> {
+        let mut stops: Vec<&GradientStop> = self.stops.iter().collect();
+        stops.sort_by(|a, b| {
+            a.offset
+                .partial_cmp(&b.offset)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        stops
+    }
+
+    /// Sample the gradient at normalized position `t` (clamped to 0..1).
+    /// Fewer than two stops falls back to the single stop (or black).
+    pub fn sample(&self, t: f32) -> Color {
+        let t = t.clamp(0.0, 1.0);
+        let stops = self.sorted_stops();
+        match stops.as_slice() {
+            [] => Color::BLACK,
+            [only] => only.color,
+            _ => {
+                if t <= stops[0].offset {
+                    return stops[0].color;
+                }
+                for pair in stops.windows(2) {
+                    let (a, b) = (pair[0], pair[1]);
+                    if t <= b.offset {
+                        let span = (b.offset - a.offset).max(1e-6);
+                        let f = ((t - a.offset) / span).clamp(0.0, 1.0);
+                        return Color::rgba(
+                            a.color.r + (b.color.r - a.color.r) * f,
+                            a.color.g + (b.color.g - a.color.g) * f,
+                            a.color.b + (b.color.b - a.color.b) * f,
+                            a.color.a + (b.color.a - a.color.a) * f,
+                        );
+                    }
+                }
+                stops[stops.len() - 1].color
+            }
+        }
+    }
+
+    /// Insert a stop keeping offsets ascending. Returns the new stop index.
+    pub fn add_stop(&mut self, offset: f32, color: Color) -> usize {
+        let offset = offset.clamp(0.0, 1.0);
+        let at = self
+            .stops
+            .iter()
+            .position(|s| s.offset > offset)
+            .unwrap_or(self.stops.len());
+        self.stops.insert(at, GradientStop::new(offset, color));
+        at
+    }
+
+    /// Move a stop to a new offset, re-sorting ascending. Returns the stop's
+    /// new index (`None` for an out-of-range index).
+    pub fn set_stop_offset(&mut self, index: usize, offset: f32) -> Option<usize> {
+        if index >= self.stops.len() {
+            return None;
+        }
+        let color = self.stops[index].color;
+        self.stops.remove(index);
+        Some(self.add_stop(offset, color))
+    }
+
+    /// Remove a stop (keeps at least… nothing enforced here; the UI enforces
+    /// a 2-stop minimum). Returns the removed stop.
+    pub fn remove_stop(&mut self, index: usize) -> Option<GradientStop> {
+        if index < self.stops.len() {
+            Some(self.stops.remove(index))
+        } else {
+            None
+        }
+    }
+
+    /// Swap the stop order end-for-end (offsets mirrored).
+    pub fn reversed(&self) -> Self {
+        Self {
+            stops: self
+                .stops
+                .iter()
+                .map(|s| GradientStop::new(1.0 - s.offset, s.color))
+                .collect(),
+            angle: self.angle,
+        }
+    }
+}
+
 fn default_font_weight() -> u16 {
     400
 }
@@ -66,17 +201,26 @@ pub enum ShapeType {
         corner_radius: Property<f32>,
         #[serde(default = "default_shape_fill")]
         fill: Color,
+        /// Linear fill gradient (None = solid `fill`).
+        #[serde(default = "default_no_gradient", skip_serializing_if = "Option::is_none")]
+        fill_gradient: Option<FillGradient>,
     },
     Ellipse {
         radius_x: Property<f32>,
         radius_y: Property<f32>,
         #[serde(default = "default_shape_fill")]
         fill: Color,
+        /// Linear fill gradient (None = solid `fill`).
+        #[serde(default = "default_no_gradient", skip_serializing_if = "Option::is_none")]
+        fill_gradient: Option<FillGradient>,
     },
     Path {
         path_data: String,
         #[serde(default = "default_shape_fill")]
         fill: Color,
+        /// Linear fill gradient (None = solid `fill`).
+        #[serde(default = "default_no_gradient", skip_serializing_if = "Option::is_none")]
+        fill_gradient: Option<FillGradient>,
     },
 }
 
@@ -89,6 +233,9 @@ pub enum LayerSource {
         color: Color,
         width: u32,
         height: u32,
+        /// Linear fill gradient (None = solid `color`).
+        #[serde(default = "default_no_gradient", skip_serializing_if = "Option::is_none")]
+        fill_gradient: Option<FillGradient>,
     },
     Image {
         asset_id: String,
@@ -102,6 +249,9 @@ pub enum LayerSource {
         font_family: String,
         font_size: Property<f32>,
         fill_color: Property<Color>,
+        /// Linear fill gradient (None = solid `fill_color`).
+        #[serde(default = "default_no_gradient", skip_serializing_if = "Option::is_none")]
+        fill_gradient: Option<FillGradient>,
         /// Font weight 100..900 (400 normal, 700 bold).
         #[serde(default = "default_font_weight")]
         weight: u16,
@@ -124,6 +274,9 @@ pub enum LayerSource {
         stroke_width: Property<f32>,
         #[serde(default = "default_stroke_color")]
         stroke_color: Color,
+        /// Linear stroke gradient (None = solid `stroke_color`).
+        #[serde(default = "default_no_gradient", skip_serializing_if = "Option::is_none")]
+        stroke_gradient: Option<FillGradient>,
         /// Vertical glyph offset in px.
         #[serde(default)]
         baseline_shift: Property<f32>,
@@ -275,6 +428,7 @@ impl Layer {
                 color,
                 width,
                 height,
+                fill_gradient: None,
             },
             in_point,
             out_point,
@@ -359,6 +513,7 @@ impl Layer {
                 font_family: font_family.into(),
                 font_size: Property::new("Font Size", font_size),
                 fill_color: Property::new("Fill Color", fill_color),
+                fill_gradient: None,
                 weight: default_font_weight(),
                 italic: false,
                 tracking: Property::new("Tracking", 0.0),
@@ -367,6 +522,7 @@ impl Layer {
                 all_caps: false,
                 stroke_width: Property::new("Stroke Width", 0.0),
                 stroke_color: default_stroke_color(),
+                stroke_gradient: None,
                 baseline_shift: Property::new("Baseline Shift", 0.0),
                 box_width: Property::new("Box Width", 0.0),
                 box_height: Property::new("Box Height", 0.0),
@@ -732,5 +888,78 @@ impl Layer {
             });
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn close(a: Color, b: Color) -> bool {
+        (a.r - b.r).abs() < 1e-5
+            && (a.g - b.g).abs() < 1e-5
+            && (a.b - b.b).abs() < 1e-5
+            && (a.a - b.a).abs() < 1e-5
+    }
+
+    #[test]
+    fn fill_gradient_samples_endpoints_and_midpoints() {
+        let g = FillGradient::two_color(Color::BLACK, Color::WHITE, 0.0);
+        assert!(close(g.sample(0.0), Color::BLACK));
+        assert!(close(g.sample(1.0), Color::WHITE));
+        let mid = g.sample(0.5);
+        assert!((mid.r - 0.5).abs() < 1e-5, "{mid:?}");
+        // Clamped outside 0..1.
+        assert!(close(g.sample(-2.0), Color::BLACK));
+        assert!(close(g.sample(2.0), Color::WHITE));
+    }
+
+    #[test]
+    fn fill_gradient_three_stops_interpolate_per_segment() {
+        let g = FillGradient {
+            stops: vec![
+                GradientStop::new(0.0, Color::BLACK),
+                GradientStop::new(0.5, Color::RED),
+                GradientStop::new(1.0, Color::WHITE),
+            ],
+            angle: 90.0,
+        };
+        assert!(close(g.sample(0.5), Color::RED));
+        let q = g.sample(0.25);
+        assert!((q.r - 0.5).abs() < 1e-5 && q.g < 1e-5, "{q:?}");
+        // Unsorted storage still samples in offset order.
+        let mut shuffled = g.clone();
+        shuffled.stops.swap(0, 2);
+        assert!(close(shuffled.sample(0.5), Color::RED));
+    }
+
+    #[test]
+    fn fill_gradient_edits_keep_sorted_order() {
+        let mut g = FillGradient::two_color(Color::BLACK, Color::WHITE, 0.0);
+        let at = g.add_stop(0.25, Color::RED);
+        assert_eq!(at, 1);
+        assert_eq!(g.stops.len(), 3);
+        // Drag the last stop before the middle one: re-sorted, index follows.
+        let at = g.set_stop_offset(2, 0.1).unwrap();
+        assert_eq!(at, 1);
+        assert!(close(g.stops[1].color, Color::WHITE));
+        assert!(g.stops.windows(2).all(|w| w[0].offset <= w[1].offset));
+        // Reversal mirrors offsets end-for-end.
+        let rev = g.reversed();
+        assert!(close(rev.sample(0.9), Color::WHITE), "{rev:?}");
+        assert_eq!(g.remove_stop(5), None);
+        assert!(g.remove_stop(0).is_some());
+        assert_eq!(g.stops.len(), 2);
+    }
+
+    #[test]
+    fn fill_gradient_empty_and_single_fall_back() {
+        let g = FillGradient { stops: vec![], angle: 0.0 };
+        assert!(close(g.sample(0.3), Color::BLACK));
+        let g = FillGradient {
+            stops: vec![GradientStop::new(0.7, Color::RED)],
+            angle: 0.0,
+        };
+        assert!(close(g.sample(0.0), Color::RED));
     }
 }

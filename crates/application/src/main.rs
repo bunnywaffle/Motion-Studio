@@ -4650,6 +4650,277 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn test_fill_gradient_tab_commits_model_and_edits_stops(cx: &mut TestAppContext) {
+        // Three-mode picker Gradient tab: commits a real fill gradient,
+        // then bar-click adds a stop, right-click deletes, angle steps.
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1440.), px(1200.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        let text_id = app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, _| {
+                let tid = s.add_text_layer("Gradient Text", None).unwrap();
+                s.select_layer(Some(tid.clone()));
+                tid
+            })
+        });
+        // Keep the fill group on-screen (off-viewport clicks can't land).
+        app_view.update(cx, |view, cx| {
+            view.panels().properties.update(cx, |this, cx| {
+                for key in ["font", "character", "paragraph"] {
+                    this.text_collapsed.insert(key);
+                }
+                cx.notify();
+            });
+        });
+        // No gradient before entering the tab.
+        assert!(app_view.read_with(cx, |view, cx| {
+            view.state().read(cx).layer_fill_gradient(&text_id, "text_fill").is_none()
+        }));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("text_fill_swatch", cx);
+        })
+        .expect("update_window failed");
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("text_fill_tab_gradient").visible());
+            window.click("text_fill_btn_gradient", cx);
+        })
+        .expect("update_window failed");
+        // Model now holds a seeded two-stop gradient; editor mounted.
+        let g = app_view.read_with(cx, |view, cx| {
+            view.state().read(cx).layer_fill_gradient(&text_id, "text_fill")
+        });
+        assert_eq!(g.as_ref().map(|g| g.stops.len()), Some(2));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("gradient_bar_text_fill").visible());
+            assert!(window.find("gradient_stop_text_fill_0").visible());
+            assert!(window.find("gradient_stop_text_fill_1").visible());
+            assert!(window.find("text_fill_grad_angle_value").visible());
+        })
+        .expect("update_window failed");
+        // Angle stepper commits to the model.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("text_fill_grad_angle_plus", cx);
+        })
+        .expect("update_window failed");
+        assert_eq!(
+            app_view
+                .read_with(cx, |view, cx| {
+                    view.state().read(cx).layer_fill_gradient(&text_id, "text_fill")
+                })
+                .map(|g| g.angle),
+            Some(105.0)
+        );
+        // Bar click at 50% adds a stop there and selects it.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let b = window.find("gradient_bar_text_fill").bounds();
+            let w = b.size.width / px(1.0);
+            window.click_at(
+                "gradient_bar_text_fill",
+                gpui::point(px(w * 0.5), px(11.0)),
+                cx,
+            );
+        })
+        .expect("update_window failed");
+        let g = app_view
+            .read_with(cx, |view, cx| {
+                view.state().read(cx).layer_fill_gradient(&text_id, "text_fill")
+            })
+            .expect("gradient present");
+        assert_eq!(g.stops.len(), 3);
+        assert!((g.stops[1].offset - 0.5).abs() < 0.03, "{g:?}");
+        assert!(app_view.read_with(cx, |view, cx| {
+            view.panels().properties.read(cx).color_picker_gradient_stop.get("text_fill").copied() == Some(1)
+        }));
+        // Right-click the middle diamond deletes it (back to two).
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.right_click("gradient_stop_text_fill_1", cx);
+        })
+        .expect("update_window failed");
+        assert_eq!(
+            app_view
+                .read_with(cx, |view, cx| {
+                    view.state().read(cx).layer_fill_gradient(&text_id, "text_fill")
+                })
+                .map(|g| g.stops.len()),
+            Some(2)
+        );
+        // Two-stop minimum: deleting again is refused.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.right_click("gradient_stop_text_fill_0", cx);
+        })
+        .expect("update_window failed");
+        assert_eq!(
+            app_view
+                .read_with(cx, |view, cx| {
+                    view.state().read(cx).layer_fill_gradient(&text_id, "text_fill")
+                })
+                .map(|g| g.stops.len()),
+            Some(2)
+        );
+        // Reverse mirrors the stored stops end-for-end.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("gradient_reverse_text_fill", cx);
+        })
+        .expect("update_window failed");
+        assert_eq!(
+            app_view
+                .read_with(cx, |view, cx| {
+                    view.state().read(cx).layer_fill_gradient(&text_id, "text_fill")
+                })
+                .map(|g| g.stops[0].offset),
+            Some(1.0)
+        );
+        // Back to Color clears the model gradient.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("text_fill_btn_color", cx);
+        })
+        .expect("update_window failed");
+        assert!(app_view.read_with(cx, |view, cx| {
+            view.state().read(cx).layer_fill_gradient(&text_id, "text_fill").is_none()
+        }));
+    }
+
+    #[gpui_kit::test]
+    fn test_gradient_stop_drag_moves_and_bar_adds(cx: &mut TestAppContext) {
+        // Effect ramp editor: diamond drag moves the stop (one undo step),
+        // bar click adds a stop at the click position.
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        let (lid, ramp) = app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, _| {
+                s.select_layer(Some("layer_accent".to_string()));
+                let ramp = s
+                    .add_effect_to_selected_layer(project::EffectType::gradient_ramp(
+                        project::Color::BLACK,
+                        project::Color::WHITE,
+                        90.0,
+                    ))
+                    .unwrap();
+                ("layer_accent".to_string(), ramp)
+            })
+        });
+        app_view.update(cx, |view, cx| {
+            view.panels().properties.update(cx, |this, cx| {
+                this.source_expanded = false;
+                this.transform_expanded = false;
+                this.switches_expanded = false;
+                this.tools_expanded = false;
+                cx.notify();
+            });
+        });
+        let stops_of = |app_view: &Entity<AppView>, cx: &TestAppContext| {
+            app_view.read_with(cx, |view, cx| {
+                view.state()
+                    .read(cx)
+                    .active_composition()
+                    .unwrap()
+                    .get_layer(&lid)
+                    .unwrap()
+                    .get_effect(&ramp)
+                    .unwrap()
+                    .effect_type
+                    .gradient_ramp_stops()
+                    .unwrap()
+            })
+        };
+        assert_eq!(stops_of(&app_view, cx).len(), 2);
+        // Drag stop 0 onto the bar center: offset lands near 0.5.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.drag_to(
+                SharedString::from(format!("gradient_stop0_{ramp}")),
+                SharedString::from(format!("gradient_bar_{ramp}")),
+                cx,
+            );
+        })
+        .expect("update_window failed");
+        let stops = stops_of(&app_view, cx);
+        assert!((stops[0].offset - 0.5).abs() < 0.06, "{stops:?}");
+        // Bar click at 75% adds a third stop there.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let bar = SharedString::from(format!("gradient_bar_{ramp}"));
+            let b = window.find(bar.clone()).bounds();
+            let w = b.size.width / px(1.0);
+            window.click_at(bar, gpui::point(px(w * 0.75), px(11.0)), cx);
+        })
+        .expect("update_window failed");
+        let stops = stops_of(&app_view, cx);
+        assert_eq!(stops.len(), 3);
+        assert!((stops[1].offset - 0.75).abs() < 0.05, "{stops:?}");
+    }
+
+    #[gpui_kit::test]
+    fn test_solid_gradient_tab_commits_model(cx: &mut TestAppContext) {
+        // Solid fill picker Gradient tab commits a model gradient too.
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1440.), px(1200.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.select_layer(Some("layer_bg".to_string()));
+                cx.notify();
+            });
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("solid_color_swatch", cx);
+        })
+        .expect("update_window failed");
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("solid_color_tab_gradient").visible());
+            window.click("solid_color_btn_gradient", cx);
+        })
+        .expect("update_window failed");
+        assert_eq!(
+            app_view.read_with(cx, |view, cx| {
+                view.state().read(cx).layer_fill_gradient("layer_bg", "solid_color").map(|g| g.stops.len())
+            }),
+            Some(2)
+        );
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("gradient_bar_solid_color").visible());
+        })
+        .expect("update_window failed");
+    }
+
+    #[gpui_kit::test]
     fn test_ae_chrome_visible(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let mut app_view_entity = None;
@@ -5453,7 +5724,7 @@ mod tests {
         // 1. Solid layer source mutation
         let _ = state.nudge_layer_solid_color("layer_bg", 0.1, 0.0, -0.1);
         let layer_bg = state.active_composition().unwrap().get_layer("layer_bg").unwrap().clone();
-        if let LayerSource::Solid { color, width, height } = layer_bg.source {
+        if let LayerSource::Solid { color, width, height, .. } = layer_bg.source {
             assert!(color.r > 0.05);
             assert_eq!(width, 1920);
             assert_eq!(height, 1080);

@@ -1,4 +1,4 @@
-use project::{BlendMode, Color};
+use project::{BlendMode, Color, FillGradient};
 
 // Pixels
 // ---------------------------------------------------------------------------
@@ -267,6 +267,36 @@ fn blend_color_nsep(mode: BlendMode, dst: [f32; 3], src: [f32; 3]) -> [f32; 3] {
         _ => src,
     };
     [r[0].clamp(0.0, 1.0), r[1].clamp(0.0, 1.0), r[2].clamp(0.0, 1.0)]
+}
+
+/// Linear-gradient axis over a `(base_w, base_h)` box at `angle_deg`
+/// degrees (0 = left-to-right, 90 = top-to-bottom, matching the Gradient
+/// Ramp effect): unit direction plus the corner-projection range, so
+/// `t = ((x * dx + y * dy) - mn) / span` sweeps 0..1 corner to corner.
+pub fn gradient_axis(base_w: f32, base_h: f32, angle_deg: f32) -> (f32, f32, f32, f32) {
+    let rad = angle_deg.to_radians();
+    let (dx, dy) = (rad.cos(), rad.sin());
+    let corners = [(0.0f32, 0.0f32), (base_w, 0.0), (0.0, base_h), (base_w, base_h)];
+    let mut mn = f32::INFINITY;
+    let mut mx = f32::NEG_INFINITY;
+    for (cx, cy) in corners {
+        let t = cx * dx + cy * dy;
+        mn = mn.min(t);
+        mx = mx.max(t);
+    }
+    (dx, dy, mn, (mx - mn).max(1e-3))
+}
+
+/// Normalized gradient position of box-local `(x, y)` on an axis from
+/// [`gradient_axis`].
+pub fn gradient_t(x: f32, y: f32, axis: (f32, f32, f32, f32)) -> f32 {
+    let (dx, dy, mn, span) = axis;
+    ((x * dx + y * dy) - mn) / span
+}
+
+/// Sample a fill gradient at box-local `(x, y)` as a straight color.
+pub fn sample_fill_gradient(gradient: &FillGradient, x: f32, y: f32, axis: (f32, f32, f32, f32)) -> Color {
+    gradient.sample(gradient_t(x, y, axis))
 }
 
 #[cfg(test)]

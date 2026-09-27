@@ -12,8 +12,11 @@ use super::buffer::{FloatBuf, blur_buffer};
 use super::effects::{RasterFx, apply_effect_pixels, apply_sharpen, apply_vignette};
 use super::mask::apply_masks;
 use super::stock::apply_stock;
-use super::pixel::Px;
-use super::shapes::{fill_ellipse, fill_path, fill_rect, stroke_path};
+use super::pixel::{gradient_axis, sample_fill_gradient, Px};
+use super::shapes::{
+    fill_ellipse, fill_ellipse_gradient, fill_path, fill_path_gradient, fill_rect,
+    fill_rect_gradient, stroke_path, stroke_path_gradient,
+};
 use super::text::{TextSpec, raster_text};
 
 // Layer + composition raster
@@ -67,11 +70,25 @@ pub fn raster_content(
     base_h: f32,
 ) -> Option<FloatBuf> {
     match &layer.source {
-        LayerSource::Solid { color, .. } => {
+        LayerSource::Solid { color, fill_gradient, .. } => {
             let mut buf = FloatBuf::clear(base_w.ceil().max(1.0) as u32, base_h.ceil().max(1.0) as u32);
-            let p = Px::from_color(*color);
-            for px in buf.px.iter_mut() {
-                *px = p;
+            match fill_gradient {
+                Some(gradient) => {
+                    let axis = gradient_axis(base_w, base_h, gradient.angle);
+                    for y in 0..buf.h {
+                        for x in 0..buf.w {
+                            buf.px[(y * buf.w + x) as usize] = Px::from_color(
+                                sample_fill_gradient(gradient, x as f32 + 0.5, y as f32 + 0.5, axis),
+                            );
+                        }
+                    }
+                }
+                None => {
+                    let p = Px::from_color(*color);
+                    for px in buf.px.iter_mut() {
+                        *px = p;
+                    }
+                }
             }
             Some(buf)
         }
@@ -79,28 +96,42 @@ pub fn raster_content(
             let (w, h) = (base_w.max(2.0), base_h.max(2.0));
             let mut buf = FloatBuf::clear(w.ceil() as u32, h.ceil() as u32);
             match shape_type {
-                ShapeType::Rectangle { corner_radius, fill, .. } => {
+                ShapeType::Rectangle { corner_radius, fill, fill_gradient, .. } => {
                     // Corner radius is stored unscaled; content is unscaled.
-                    fill_rect(&mut buf, w, h, corner_radius.value, Px::from_color(*fill));
+                    match fill_gradient {
+                        Some(gradient) => fill_rect_gradient(&mut buf, w, h, corner_radius.value, gradient),
+                        None => fill_rect(&mut buf, w, h, corner_radius.value, Px::from_color(*fill)),
+                    }
                 }
-                ShapeType::Ellipse { fill, .. } => {
-                    fill_ellipse(&mut buf, w / 2.0, h / 2.0, Px::from_color(*fill));
+                ShapeType::Ellipse { fill, fill_gradient, .. } => {
+                    match fill_gradient {
+                        Some(gradient) => fill_ellipse_gradient(&mut buf, w / 2.0, h / 2.0, gradient),
+                        None => fill_ellipse(&mut buf, w / 2.0, h / 2.0, Px::from_color(*fill)),
+                    }
                 }
-                ShapeType::Path { path_data, fill } => {
-                    let (origin, _, _) = path_frame(path_data);
-                    fill_path(
-                        &mut buf,
-                        path_data,
-                        Px::from_color(*fill),
-                        origin,
-                    );
-                    stroke_path(
-                        &mut buf,
-                        path_data,
-                        2.0,
-                        Px::from_color(*fill),
-                        origin,
-                    );
+                ShapeType::Path { path_data, fill, fill_gradient, .. } => {
+                    let (origin, fw, fh) = path_frame(path_data);
+                    match fill_gradient {
+                        Some(gradient) => {
+                            fill_path_gradient(&mut buf, path_data, gradient, origin, (fw, fh));
+                            stroke_path_gradient(&mut buf, path_data, 2.0, gradient, origin, (fw, fh));
+                        }
+                        None => {
+                            fill_path(
+                                &mut buf,
+                                path_data,
+                                Px::from_color(*fill),
+                                origin,
+                            );
+                            stroke_path(
+                                &mut buf,
+                                path_data,
+                                2.0,
+                                Px::from_color(*fill),
+                                origin,
+                            );
+                        }
+                    }
                 }
             }
             Some(buf)
@@ -110,6 +141,7 @@ pub fn raster_content(
             font_family,
             font_size,
             fill_color,
+            fill_gradient,
             weight,
             italic,
             tracking,
@@ -118,6 +150,7 @@ pub fn raster_content(
             all_caps,
             stroke_width,
             stroke_color,
+            stroke_gradient,
             baseline_shift,
             box_width,
             text_path,
@@ -126,6 +159,7 @@ pub fn raster_content(
             // Effective outline: TextOutline effect wins over native stroke.
             let mut sw = stroke_width.value.max(0.0);
             let mut sc = *stroke_color;
+            let mut outline_override = false;
             for eff in &layer.effects {
                 if !eff.enabled {
                     continue;
@@ -133,6 +167,7 @@ pub fn raster_content(
                 if let EvaluatedEffectType::TextOutline { width, color } = &eff.effect_type {
                     sw = (*width).max(0.0);
                     sc = *color;
+                    outline_override = true;
                     break;
                 }
             }
@@ -153,6 +188,7 @@ pub fn raster_content(
                 family: font_family,
                 size: font_size.value,
                 fill: Px::from_color(fill_color.value),
+                fill_gradient: fill_gradient.clone(),
                 weight: *weight,
                 italic: *italic,
                 tracking: tracking.value,
@@ -161,6 +197,9 @@ pub fn raster_content(
                 all_caps: *all_caps,
                 stroke_w: sw,
                 stroke_col: Px::from_color(sc),
+                // An overriding outline effect replaces the native stroke
+                // (and its gradient) with a flat color.
+                stroke_gradient: if outline_override { None } else { stroke_gradient.clone() },
                 baseline_shift: baseline_shift.value,
                 box_w: box_width.value,
                 bevel,
@@ -260,11 +299,12 @@ pub fn layer_cache_key(
     layer.is_visible.hash(&mut h);
     // Source content.
     match &layer.source {
-        LayerSource::Solid { color, width, height } => {
+        LayerSource::Solid { color, width, height, fill_gradient, .. } => {
             0u8.hash(&mut h);
             color_hash(color, &mut h);
             width.hash(&mut h);
             height.hash(&mut h);
+            gradient_hash(fill_gradient, &mut h);
         }
         LayerSource::Image { asset_id } => {
             1u8.hash(&mut h);
@@ -279,6 +319,7 @@ pub fn layer_cache_key(
             font_family,
             font_size,
             fill_color,
+            fill_gradient,
             weight,
             italic,
             tracking,
@@ -287,6 +328,7 @@ pub fn layer_cache_key(
             all_caps,
             stroke_width,
             stroke_color,
+            stroke_gradient,
             baseline_shift,
             box_width,
             text_path,
@@ -297,6 +339,7 @@ pub fn layer_cache_key(
             font_family.hash(&mut h);
             font_size.value.to_bits().hash(&mut h);
             color_hash(&fill_color.value, &mut h);
+            gradient_hash(fill_gradient, &mut h);
             weight.hash(&mut h);
             italic.hash(&mut h);
             tracking.value.to_bits().hash(&mut h);
@@ -305,6 +348,7 @@ pub fn layer_cache_key(
             all_caps.hash(&mut h);
             stroke_width.value.to_bits().hash(&mut h);
             color_hash(stroke_color, &mut h);
+            gradient_hash(stroke_gradient, &mut h);
             baseline_shift.value.to_bits().hash(&mut h);
             box_width.value.to_bits().hash(&mut h);
             if let Some(path) = text_path {
@@ -321,23 +365,26 @@ pub fn layer_cache_key(
             }
         }
         LayerSource::Shape { shape_type } => match shape_type {
-            ShapeType::Rectangle { width, height, corner_radius, fill } => {
+            ShapeType::Rectangle { width, height, corner_radius, fill, fill_gradient, .. } => {
                 4u8.hash(&mut h);
                 width.value.to_bits().hash(&mut h);
                 height.value.to_bits().hash(&mut h);
                 corner_radius.value.to_bits().hash(&mut h);
                 color_hash(fill, &mut h);
+                gradient_hash(fill_gradient, &mut h);
             }
-            ShapeType::Ellipse { radius_x, radius_y, fill } => {
+            ShapeType::Ellipse { radius_x, radius_y, fill, fill_gradient, .. } => {
                 5u8.hash(&mut h);
                 radius_x.value.to_bits().hash(&mut h);
                 radius_y.value.to_bits().hash(&mut h);
                 color_hash(fill, &mut h);
+                gradient_hash(fill_gradient, &mut h);
             }
-            ShapeType::Path { path_data, fill } => {
+            ShapeType::Path { path_data, fill, fill_gradient, .. } => {
                 6u8.hash(&mut h);
                 path_data.hash(&mut h);
                 color_hash(fill, &mut h);
+                gradient_hash(fill_gradient, &mut h);
             }
         },
         _ => {
@@ -386,6 +433,20 @@ fn color_hash(c: &Color, h: &mut DefaultHasher) {
     c.g.to_bits().hash(h);
     c.b.to_bits().hash(h);
     c.a.to_bits().hash(h);
+}
+
+fn gradient_hash(g: &Option<project::FillGradient>, h: &mut DefaultHasher) {
+    match g {
+        Some(grad) => {
+            1u8.hash(h);
+            grad.angle.to_bits().hash(h);
+            for stop in &grad.stops {
+                stop.offset.to_bits().hash(h);
+                color_hash(&stop.color, h);
+            }
+        }
+        None => 0u8.hash(h),
+    }
 }
 
 fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
@@ -476,10 +537,12 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
             color_hash(color_a, h);
             color_hash(color_b, h);
         }
-        EvaluatedEffectType::GradientRamp { color_a, color_b, angle } => {
-            color_hash(color_a, h);
-            color_hash(color_b, h);
-            angle.to_bits().hash(h);
+        EvaluatedEffectType::GradientRamp { gradient } => {
+            gradient.angle.to_bits().hash(h);
+            for stop in &gradient.stops {
+                stop.offset.to_bits().hash(h);
+                color_hash(&stop.color, h);
+            }
         }
         EvaluatedEffectType::Perspective { skew_x, skew_y } => {
             skew_x.to_bits().hash(h);
@@ -1281,6 +1344,7 @@ mod tests {
             project::ShapeType::Path {
                 path_data: "M -100.0 -50.0 L 100.0 60.0".to_string(),
                 fill: Color::WHITE,
+                fill_gradient: None,
             },
             tc,
             out,
@@ -1340,7 +1404,7 @@ mod tests {
                 width: project::Property::new("W", 200.0),
                 height: project::Property::new("H", 100.0),
                 corner_radius: project::Property::new("R", 0.0),
-                fill: Color::rgb(1.0, 0.0, 0.0),
+                fill: Color::rgb(1.0, 0.0, 0.0), fill_gradient: None,
             },
             tc,
             out,

@@ -2,10 +2,10 @@ use compositor::{AffineTransform2D, EvaluatedStack, LayerStackEvaluator, SceneGr
 use gpui_kit::component::input::InputState;
 use gpui_kit::{Entity, Subscription};
 use project::{
-    Asset, AutoTraceOptions, BlendMode, Color, Composition, Effect, EffectType, Keyframe,
-    KeyframeInterpolation,     KeyframeTangent, Layer, LayerSource, Mask, MaskShapeKind, Path,
-    PathPointKind, PlaybackClock, Project, Property, ShapeType, TimeCode, TraceRange,
-    TrackMatteMode, Vec2,
+    Asset, AutoTraceOptions, BlendMode, Color, Composition, Effect, EffectType, FillGradient,
+    Keyframe, KeyframeInterpolation, KeyframeTangent, Layer, LayerSource,
+    Mask, MaskShapeKind, Path, PathPointKind, PlaybackClock, Project, Property, ShapeType,
+    TimeCode, TraceRange, TrackMatteMode, Vec2,
 };
 use std::path::{Path as StdPath, PathBuf};
 use std::time::Duration;
@@ -4230,6 +4230,234 @@ impl EditorState {
         }
     }
 
+    /// Mutable access to a layer's fill-gradient slot by picker key:
+    /// `"text_fill"` / `"text_stroke"` (Text), `"shape_fill"` (Shape),
+    /// `"solid_color"` (Solid). Errors when the key doesn't fit the source.
+    fn fill_gradient_slot_mut<'a>(
+        layer: &'a mut Layer,
+        key: &str,
+    ) -> Result<&'a mut Option<FillGradient>, String> {
+        let lid = layer.id.clone();
+        match &mut layer.source {
+            LayerSource::Text {
+                fill_gradient,
+                stroke_gradient,
+                ..
+            } => match key {
+                "text_fill" => Ok(fill_gradient),
+                "text_stroke" => Ok(stroke_gradient),
+                _ => Err(format!("Fill key {key} is not on Text layer {lid}")),
+            },
+            LayerSource::Shape {
+                shape_type:
+                    ShapeType::Rectangle { fill_gradient, .. }
+                    | ShapeType::Ellipse { fill_gradient, .. }
+                    | ShapeType::Path { fill_gradient, .. },
+            } => match key {
+                "shape_fill" => Ok(fill_gradient),
+                _ => Err(format!("Fill key {key} is not on Shape layer {lid}")),
+            },
+            LayerSource::Solid { fill_gradient, .. } => match key {
+                "solid_color" => Ok(fill_gradient),
+                _ => Err(format!("Fill key {key} is not on Solid layer {lid}")),
+            },
+            _ => Err(format!("Layer {lid} has no gradient fill slot for {key}")),
+        }
+    }
+
+    /// Read a layer's committed fill gradient (the panel renders from this;
+    /// its local maps are only defaults before the first commit).
+    pub fn layer_fill_gradient(&self, layer_id: &str, key: &str) -> Option<FillGradient> {
+        let comp = self.active_composition()?;
+        let layer = comp.get_layer(layer_id)?;
+        match (&layer.source, key) {
+            (
+                LayerSource::Text {
+                    fill_gradient, ..
+                },
+                "text_fill",
+            ) => fill_gradient.clone(),
+            (LayerSource::Text { stroke_gradient, .. }, "text_stroke") => {
+                stroke_gradient.clone()
+            }
+            (
+                LayerSource::Shape {
+                    shape_type:
+                        ShapeType::Rectangle { fill_gradient, .. }
+                        | ShapeType::Ellipse { fill_gradient, .. }
+                        | ShapeType::Path { fill_gradient, .. },
+                },
+                "shape_fill",
+            ) => fill_gradient.clone(),
+            (LayerSource::Solid { fill_gradient, .. }, "solid_color") => {
+                fill_gradient.clone()
+            }
+            _ => None,
+        }
+    }
+
+    /// Commit a whole fill gradient (one undo step). `None` clears back to
+    /// the solid color.
+    pub fn set_layer_fill_gradient(
+        &mut self,
+        layer_id: &str,
+        key: &str,
+        gradient: Option<FillGradient>,
+    ) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        *Self::fill_gradient_slot_mut(layer, key)? = gradient;
+        Ok(())
+    }
+
+    /// Append a stop; returns its sorted index (one undo step).
+    pub fn add_fill_gradient_stop(
+        &mut self,
+        layer_id: &str,
+        key: &str,
+        offset: f32,
+        color: Color,
+    ) -> Result<usize, String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let slot = Self::fill_gradient_slot_mut(layer, key)?;
+        let grad = slot.get_or_insert_with(|| FillGradient::two_color(Color::WHITE, Color::BLACK, 90.0));
+        Ok(grad.add_stop(offset, color))
+    }
+
+    /// Drag a stop to a new offset (no checkpoint: the drag gesture
+    /// checkpoints once on press). Returns the stop's new sorted index.
+    pub fn move_fill_gradient_stop(
+        &mut self,
+        layer_id: &str,
+        key: &str,
+        index: usize,
+        offset: f32,
+    ) -> Result<usize, String> {
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let slot = Self::fill_gradient_slot_mut(layer, key)?;
+        match slot {
+            Some(grad) => grad
+                .set_stop_offset(index, offset)
+                .ok_or_else(|| format!("Gradient stop {index} out of range")),
+            None => Err("No gradient on this fill".to_string()),
+        }
+    }
+
+    /// Recolor one stop (one undo step).
+    pub fn set_fill_gradient_stop_color(
+        &mut self,
+        layer_id: &str,
+        key: &str,
+        index: usize,
+        color: Color,
+    ) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let slot = Self::fill_gradient_slot_mut(layer, key)?;
+        match slot {
+            Some(grad) => match grad.stops.get_mut(index) {
+                Some(stop) => {
+                    stop.color = color;
+                    Ok(())
+                }
+                None => Err(format!("Gradient stop {index} out of range")),
+            },
+            None => Err("No gradient on this fill".to_string()),
+        }
+    }
+
+    /// Delete a stop; refuses to drop below two (one undo step).
+    pub fn remove_fill_gradient_stop(
+        &mut self,
+        layer_id: &str,
+        key: &str,
+        index: usize,
+    ) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let slot = Self::fill_gradient_slot_mut(layer, key)?;
+        match slot {
+            Some(grad) => {
+                if grad.stops.len() <= 2 {
+                    return Err("A gradient needs at least two stops".to_string());
+                }
+                grad.remove_stop(index)
+                    .map(|_| ())
+                    .ok_or_else(|| format!("Gradient stop {index} out of range"))
+            }
+            None => Err("No gradient on this fill".to_string()),
+        }
+    }
+
+    /// Set the gradient axis in degrees (one undo step).
+    pub fn set_fill_gradient_angle(
+        &mut self,
+        layer_id: &str,
+        key: &str,
+        angle: f32,
+    ) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let slot = Self::fill_gradient_slot_mut(layer, key)?;
+        match slot {
+            Some(grad) => {
+                grad.angle = angle;
+                Ok(())
+            }
+            None => Err("No gradient on this fill".to_string()),
+        }
+    }
+
+    /// Mirror all stop offsets end-for-end (one undo step).
+    pub fn reverse_fill_gradient(&mut self, layer_id: &str, key: &str) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let slot = Self::fill_gradient_slot_mut(layer, key)?;
+        match slot {
+            Some(grad) => {
+                *grad = grad.reversed();
+                Ok(())
+            }
+            None => Err("No gradient on this fill".to_string()),
+        }
+    }
+
     /// Set a color field on an effect (`color_a` / `color_b` / `color`).
     /// Used by checker, gradient, and outline swatches.
     pub fn set_effect_color(
@@ -4254,6 +4482,145 @@ impl EditorState {
         } else {
             Err(format!("Color field {field} not found on effect {effect_id}"))
         }
+    }
+
+    /// Read a Gradient Ramp's working stops (explicit stops, else the
+    /// endpoint pair) for the shared gradient editor.
+    pub fn effect_gradient_stops(
+        &self,
+        layer_id: &str,
+        effect_id: &str,
+    ) -> Result<Vec<project::GradientStop>, String> {
+        let comp = self
+            .active_composition()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let effect = layer
+            .get_effect(effect_id)
+            .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
+        effect
+            .effect_type
+            .gradient_ramp_stops()
+            .ok_or_else(|| format!("Effect {effect_id} has no gradient"))
+    }
+
+    /// Replace a Gradient Ramp's explicit stops (one undo step; fewer than
+    /// two clears back to the endpoint pair).
+    pub fn set_effect_gradient_stops(
+        &mut self,
+        layer_id: &str,
+        effect_id: &str,
+        stops: Vec<project::GradientStop>,
+    ) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let effect = layer
+            .get_effect_mut(effect_id)
+            .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
+        if effect.effect_type.set_gradient_ramp_stops(stops) {
+            Ok(())
+        } else {
+            Err(format!("Effect {effect_id} has no gradient"))
+        }
+    }
+
+    /// Append a ramp stop; returns its sorted index (one undo step).
+    pub fn add_effect_gradient_stop(
+        &mut self,
+        layer_id: &str,
+        effect_id: &str,
+        offset: f32,
+        color: Color,
+    ) -> Result<usize, String> {
+        let mut stops = self.effect_gradient_stops(layer_id, effect_id)?;
+        let mut grad = FillGradient { stops: std::mem::take(&mut stops), angle: 0.0 };
+        let at = grad.add_stop(offset, color);
+        self.set_effect_gradient_stops(layer_id, effect_id, grad.stops)?;
+        Ok(at)
+    }
+
+    /// Drag a ramp stop (no checkpoint: the gesture checkpoints on press).
+    /// Returns the stop's new sorted index.
+    pub fn move_effect_gradient_stop(
+        &mut self,
+        layer_id: &str,
+        effect_id: &str,
+        index: usize,
+        offset: f32,
+    ) -> Result<usize, String> {
+        let mut stops = self.effect_gradient_stops(layer_id, effect_id)?;
+        let mut grad = FillGradient { stops: std::mem::take(&mut stops), angle: 0.0 };
+        let at = grad
+            .set_stop_offset(index, offset)
+            .ok_or_else(|| format!("Gradient stop {index} out of range"))?;
+        // Drag commits skip the undo checkpoint (one step per gesture, taken
+        // on press), so write the stops back directly.
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let effect = layer
+            .get_effect_mut(effect_id)
+            .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
+        if effect.effect_type.set_gradient_ramp_stops(grad.stops) {
+            Ok(at)
+        } else {
+            Err(format!("Effect {effect_id} has no gradient"))
+        }
+    }
+
+    /// Recolor one ramp stop (one undo step).
+    pub fn set_effect_gradient_stop_color(
+        &mut self,
+        layer_id: &str,
+        effect_id: &str,
+        index: usize,
+        color: Color,
+    ) -> Result<(), String> {
+        let mut stops = self.effect_gradient_stops(layer_id, effect_id)?;
+        if index >= stops.len() {
+            return Err(format!("Gradient stop {index} out of range"));
+        }
+        stops[index].color = color;
+        self.set_effect_gradient_stops(layer_id, effect_id, stops)
+    }
+
+    /// Delete a ramp stop; refuses to drop below two (one undo step).
+    pub fn remove_effect_gradient_stop(
+        &mut self,
+        layer_id: &str,
+        effect_id: &str,
+        index: usize,
+    ) -> Result<(), String> {
+        let mut stops = self.effect_gradient_stops(layer_id, effect_id)?;
+        if stops.len() <= 2 {
+            return Err("A gradient needs at least two stops".to_string());
+        }
+        if index >= stops.len() {
+            return Err(format!("Gradient stop {index} out of range"));
+        }
+        stops.remove(index);
+        self.set_effect_gradient_stops(layer_id, effect_id, stops)
+    }
+
+    /// Mirror all ramp stops end-for-end (one undo step).
+    pub fn reverse_effect_gradient(
+        &mut self,
+        layer_id: &str,
+        effect_id: &str,
+    ) -> Result<(), String> {
+        let stops = self.effect_gradient_stops(layer_id, effect_id)?;
+        let grad = FillGradient { stops, angle: 0.0 };
+        self.set_effect_gradient_stops(layer_id, effect_id, grad.reversed().stops)
     }
 
     /// Nudge rotation on the specified layer.
@@ -6177,6 +6544,7 @@ impl EditorState {
                 height: Property::new("Height", height),
                 corner_radius: Property::new("Corner Radius", 0.0),
                 fill,
+                fill_gradient: None,
             },
             in_pt,
             out_pt,
@@ -6235,6 +6603,7 @@ impl EditorState {
                 radius_x: Property::new("Radius X", radius_x),
                 radius_y: Property::new("Radius Y", radius_y),
                 fill,
+                fill_gradient: None,
             },
             in_pt,
             out_pt,
@@ -6466,6 +6835,7 @@ impl EditorState {
             ShapeType::Path {
                 path_data: format!("M {:.1} {:.1}", point.x, point.y),
                 fill,
+                fill_gradient: None,
             },
             in_pt,
             out_pt,
