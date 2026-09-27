@@ -258,12 +258,34 @@ pub struct ProjectPanel {
     pub nc_dur: f64,
     /// 0 = Black, 1 = White, 2 = Transparent, 3 = Dark Gray.
     pub nc_bg: u8,
+    pub last_project_fp: (usize, usize, String, Option<usize>),
 }
 
 impl ProjectPanel {
     pub fn new(state: Entity<EditorState>, cx: &mut Context<Self>) -> Self {
-        let _subscription = cx.observe(&state, |_this, _state, cx| {
-            cx.notify();
+        let last_project_fp = {
+            let s = state.read(cx);
+            (
+                s.project.compositions.len(),
+                s.project.assets.len(),
+                s.active_comp_id.clone(),
+                s.active_composition().map(|c| c.layers.len()),
+            )
+        };
+        let _subscription = cx.observe(&state, |this, state, cx| {
+            let fp = {
+                let s = state.read(cx);
+                (
+                    s.project.compositions.len(),
+                    s.project.assets.len(),
+                    s.active_comp_id.clone(),
+                    s.active_composition().map(|c| c.layers.len()),
+                )
+            };
+            if this.last_project_fp != fp {
+                this.last_project_fp = fp;
+                cx.notify();
+            }
         });
         Self {
             focus_handle: cx.focus_handle(),
@@ -280,6 +302,7 @@ impl ProjectPanel {
             nc_fps: 30.0,
             nc_dur: 10.0,
             nc_bg: 0,
+            last_project_fp,
         }
     }
 
@@ -2752,8 +2775,10 @@ impl Render for CompositionViewerPanel {
 
                     // Feed layer transform and cache key into underlying hash for overlying layers
                     cache_key.hash(&mut h_underlying);
-                    l_x.to_bits().hash(&mut h_underlying);
-                    l_y.to_bits().hash(&mut h_underlying);
+                    if is_adjustment || layer.blend_mode != BlendMode::Normal {
+                        l_x.to_bits().hash(&mut h_underlying);
+                        l_y.to_bits().hash(&mut h_underlying);
+                    }
                     l_w.to_bits().hash(&mut h_underlying);
                     l_h.to_bits().hash(&mut h_underlying);
                     let recorded_color = if entry.empty {
@@ -3742,6 +3767,7 @@ impl Render for CompositionViewerPanel {
                                 let ang = (cmy - aw.y).atan2(cmx - aw.x);
                                 let delta_deg = (ang - start_angle).to_degrees();
                                 st.update(cx, |s, cx| {
+                                    s.preview_fast = true;
                                     s.set_layer_rotation(&layer_id, start_rot + delta_deg);
                                     cx.notify();
                                 });
@@ -3777,6 +3803,7 @@ impl Render for CompositionViewerPanel {
                                     ny = start_scale.y;
                                 }
                                 st.update(cx, |s, cx| {
+                                    s.preview_fast = true;
                                     s.set_layer_scale(&layer_id, nx, ny);
                                     cx.notify();
                                 });
@@ -3789,6 +3816,7 @@ impl Render for CompositionViewerPanel {
                             if let Some(loc) = local {
                                 let d = Vec2::new(loc.x - start_local.x, loc.y - start_local.y);
                                 st.update(cx, |s, cx| {
+                                    s.preview_fast = true;
                                     s.move_layer_anchor(&layer_id, d);
                                     cx.notify();
                                 });
@@ -3821,6 +3849,7 @@ impl Render for CompositionViewerPanel {
                     if active_tool == EditorTool::Move {
                         let s = this.state.clone();
                         s.update(cx, |s, cx| {
+                            s.preview_fast = true;
                             s.nudge_position(dx / fit_here, dy / fit_here);
                             cx.notify();
                         });
@@ -3828,6 +3857,7 @@ impl Render for CompositionViewerPanel {
                     } else if active_tool == EditorTool::Rotate {
                         let s = this.state.clone();
                         s.update(cx, |s, cx| {
+                            s.preview_fast = true;
                             s.nudge_rotation(dx * 0.5);
                             cx.notify();
                         });
@@ -11771,6 +11801,7 @@ pub struct EffectsPanel {
     /// Collapsed effect categories (all collapsed by default — click a
     /// header to expand, After Effects-style accordion).
     collapsed: HashSet<&'static str>,
+    pub last_selected_id: Option<String>,
 }
 
 impl EffectsPanel {
@@ -11789,18 +11820,25 @@ impl EffectsPanel {
             state: None,
             _subscription: None,
             collapsed: Self::all_collapsed(),
+            last_selected_id: None,
         }
     }
 
     pub fn new_with_state(state: Entity<EditorState>, cx: &mut Context<Self>) -> Self {
-        let _subscription = cx.observe(&state, |_this, _state, cx| {
-            cx.notify();
+        let last_selected_id = state.read(cx).selected_layer_id.clone();
+        let _subscription = cx.observe(&state, |this, state, cx| {
+            let cur_sel = state.read(cx).selected_layer_id.clone();
+            if this.last_selected_id != cur_sel {
+                this.last_selected_id = cur_sel;
+                cx.notify();
+            }
         });
         Self {
             focus_handle: cx.focus_handle(),
             state: Some(state),
             _subscription: Some(_subscription),
             collapsed: Self::all_collapsed(),
+            last_selected_id,
         }
     }
 
@@ -12640,6 +12678,7 @@ pub struct TimelinePanel {
     pub tl_parent_fp: HashMap<String, String>,
     pub context_menu: Option<ContextMenuState>,
     pub is_scrubbing_ruler: bool,
+    pub last_scrub_frame: Option<i64>,
     pub ruler_origin_x: f32,
     pub ruler_width: f32,
     pub graph_plot_origin_x: f32,
@@ -14086,6 +14125,7 @@ impl TimelinePanel {
             tl_parent_fp: HashMap::new(),
             context_menu: None,
             is_scrubbing_ruler: false,
+            last_scrub_frame: None,
             ruler_origin_x: 380.0,
             ruler_width: 1000.0,
             graph_plot_origin_x: 0.0,
@@ -15948,11 +15988,23 @@ impl Render for TimelinePanel {
                     };
                     let frac = ((cur_x - ox) / rw.max(1.0)).clamp(0.0, 1.0) as f64;
                     let target_time = frac * total_duration_secs;
-                    s_root_move.update(cx, |s, cx| {
-                        s.preview_fast = true;
-                        s.seek(target_time);
-                        cx.notify();
+                    let fps = s_root_move.read(cx).active_composition().map(|c| c.frame_rate).unwrap_or(30.0);
+                    let target_frame = (target_time * fps).round() as i64;
+                    let changed = p_root_move.update(cx, |this, _| {
+                        if this.last_scrub_frame != Some(target_frame) {
+                            this.last_scrub_frame = Some(target_frame);
+                            true
+                        } else {
+                            false
+                        }
                     });
+                    if changed {
+                        s_root_move.update(cx, |s, cx| {
+                            s.preview_fast = true;
+                            s.seek(target_time);
+                            cx.notify();
+                        });
+                    }
                     return;
                 }
                 // Tangent-handle drag wins over keyframe drags.
@@ -16207,6 +16259,7 @@ impl Render for TimelinePanel {
                     .unwrap_or(false);
                 p_root_up.update(cx, |this, cx| {
                     this.is_scrubbing_ruler = false;
+                    this.last_scrub_frame = None;
                     this.drag_action = None;
                     this.graph_drag = None;
                     this.graph_tan_drag = None;
@@ -16248,6 +16301,7 @@ impl Render for TimelinePanel {
             .on_mouse_up_out(MouseButton::Left, move |_event, _window, cx| {
                 p_root_up_out.update(cx, |this, cx| {
                     this.is_scrubbing_ruler = false;
+                    this.last_scrub_frame = None;
                     this.drag_action = None;
                     this.graph_drag = None;
                     this.graph_tan_drag = None;
@@ -16557,6 +16611,9 @@ impl Render for TimelinePanel {
                                     this.is_scrubbing_ruler = true;
                                     let frac = ((mx - this.ruler_origin_x) / this.ruler_width.max(1.0)).clamp(0.0, 1.0) as f64;
                                     let target_time = frac * total_duration_secs;
+                                    let fps = s_ruler_down.read(cx).active_composition().map(|c| c.frame_rate).unwrap_or(30.0);
+                                    let target_frame = (target_time * fps).round() as i64;
+                                    this.last_scrub_frame = Some(target_frame);
                                     s_ruler_down.update(cx, |s, cx| {
                                         s.preview_fast = true;
                                         s.seek(target_time);

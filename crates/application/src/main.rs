@@ -8131,4 +8131,85 @@ mod tests {
         cx.run_until_parked();
         assert!(!panels.project.read_with(cx, |p, _| p.show_new_comp));
     }
+
+    #[gpui_kit::test]
+    fn test_scrubbing_frame_quantization_skips_redundant_seeks(cx: &mut TestAppContext) {
+        let (_root, app_view) = setup_test_window(cx);
+        cx.run_until_parked();
+
+        let state_entity = app_view.read_with(cx, |v, _| v.state().clone());
+
+        // At 30 FPS, frame 0 is [0.0, 0.0166s], frame 1 starts at 0.0167s...
+        // Seeking from 0.001s to 0.005s should NOT advance the quantized visual frame
+        state_entity.update(cx, |s, _| {
+            s.seek(0.0);
+            assert_eq!(s.clock.current_frame(), 0);
+
+            // Sub-frame nudge within frame 0: should return false (skip seek notify)
+            let changed1 = s.scrub_frame_quantized(0.005);
+            assert!(!changed1, "Sub-frame scrub within same frame must return false");
+            assert_eq!(s.clock.current_frame(), 0);
+
+            // Advancing to 0.040s (frame 1 at 30 FPS): should return true
+            let changed2 = s.scrub_frame_quantized(0.040);
+            assert!(changed2, "Scrub advancing to next frame must return true");
+            assert_eq!(s.clock.current_frame(), 1);
+
+            // Sub-frame nudge within frame 1: should return false
+            let changed3 = s.scrub_frame_quantized(0.045);
+            assert!(!changed3, "Sub-frame scrub within frame 1 must return false");
+            assert_eq!(s.clock.current_frame(), 1);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn test_preview_divisor_adaptive_proxy_resolution(cx: &mut TestAppContext) {
+        let (_root, app_view) = setup_test_window(cx);
+        cx.run_until_parked();
+
+        let state_entity = app_view.read_with(cx, |v, _| v.state().clone());
+
+        state_entity.update(cx, |s, _| {
+            // Idle divisor matches user quality preference (default Full = 1)
+            assert!(!s.preview_fast);
+            assert!(!s.is_playing);
+            assert_eq!(s.preview_divisor(), 1);
+
+            // During preview_fast gesture (e.g. gizmo drag or ruler scrub)
+            s.preview_fast = true;
+            let d_fast = s.preview_divisor();
+            assert!(d_fast >= 4, "preview_divisor during fast gesture must be at least 4 (got {d_fast})");
+
+            // On mouse up / gesture release
+            s.preview_fast = false;
+            assert_eq!(s.preview_divisor(), 1, "preview_divisor must restore to full quality when gesture ends");
+
+            // During playback
+            s.is_playing = true;
+            let d_play = s.preview_divisor();
+            assert!(d_play >= 4, "preview_divisor during playback must be at least 4 (got {d_play})");
+
+            s.is_playing = false;
+            assert_eq!(s.preview_divisor(), 1);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn test_layer_translation_preserves_raster_cache(cx: &mut TestAppContext) {
+        let (_root, app_view) = setup_test_window(cx);
+        cx.run_until_parked();
+
+        let state_entity = app_view.read_with(cx, |v, _| v.state().clone());
+
+        state_entity.update(cx, |s, _| {
+            s.select_layer(Some("layer_bg".to_string()));
+            let initial_pos = s.selected_layer().unwrap().transform.position.value;
+
+            // Move the layer by nudging position
+            s.nudge_position(50.0, 30.0);
+            let new_pos = s.selected_layer().unwrap().transform.position.value;
+            assert_eq!(new_pos.x, initial_pos.x + 50.0);
+            assert_eq!(new_pos.y, initial_pos.y + 30.0);
+        });
+    }
 }

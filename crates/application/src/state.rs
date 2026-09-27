@@ -1325,14 +1325,30 @@ impl EditorState {
         self.preview_quality = quality;
     }
 
-    /// Effective raster divisor right now: gestures/playback always halve,
-    /// otherwise the sticky preference applies.
+    /// Effective raster divisor right now: gestures/playback use adaptive
+    /// fast proxy resolution (4x or 8x downsampled) for silky smooth 120+ FPS
+    /// interactions, otherwise the user's sticky preview quality preference applies.
     pub fn preview_divisor(&self) -> u32 {
         if self.is_playing || self.preview_fast {
-            2
+            let layer_count = self.active_composition().map(|c| c.layers.len()).unwrap_or(1);
+            if layer_count > 4 {
+                8
+            } else {
+                4
+            }
         } else {
             self.preview_quality.divisor()
         }
+    }
+
+    /// Seek to continuous `target_time` in seconds, returning true only if the quantized
+    /// visual frame changed. Avoids redundant composition re-evaluations during ruler scrubbing.
+    pub fn scrub_frame_quantized(&mut self, target_time: f64) -> bool {
+        let fps = self.active_composition().map(|c| c.frame_rate).unwrap_or(30.0);
+        let target_frame = (target_time * fps).round() as i64;
+        let prev_frame = self.clock.current_frame();
+        self.seek(target_time);
+        target_frame != prev_frame
     }
 
     /// Play transport.
