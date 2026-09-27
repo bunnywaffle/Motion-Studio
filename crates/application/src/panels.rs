@@ -1553,6 +1553,7 @@ pub struct PickBox {
     pub min_y: f32,
     pub max_x: f32,
     pub max_y: f32,
+    pub is_adjustment: bool,
 }
 
 /// What part of a mask node is being dragged in the Path Editor.
@@ -1640,12 +1641,17 @@ impl CompositionViewerPanel {
     }
 
     /// Topmost layer id whose evaluated box contains comp-space `(x, y)`.
-    /// `pick_boxes` is stored topmost-first, so the first hit wins —
-    /// deterministic regardless of sibling hit-test order.
+    /// Prioritizes content layers first so users can directly click and drag
+    /// layers positioned beneath an adjustment layer.
     pub fn pick_top_at(&self, x: f32, y: f32) -> Option<String> {
         self.pick_boxes
             .iter()
-            .find(|b| x >= b.min_x && x <= b.max_x && y >= b.min_y && y <= b.max_y)
+            .find(|b| !b.is_adjustment && x >= b.min_x && x <= b.max_x && y >= b.min_y && y <= b.max_y)
+            .or_else(|| {
+                self.pick_boxes
+                    .iter()
+                    .find(|b| x >= b.min_x && x <= b.max_x && y >= b.min_y && y <= b.max_y)
+            })
             .map(|b| b.id.clone())
     }
 
@@ -1877,7 +1883,7 @@ impl Render for CompositionViewerPanel {
                                     let cx = l_x + u * l_w;
                                     let p = comp_buf.sample(cx, cy);
                                     b_slice.put(bx as i32, by as i32, p);
-                                    if bx % 4 == 0 && by % 4 == 0 {
+                                    if (bx + by) % 2 == 0 {
                                         use std::hash::Hash;
                                         p.r.to_bits().hash(&mut h);
                                         p.g.to_bits().hash(&mut h);
@@ -2036,6 +2042,7 @@ impl Render for CompositionViewerPanel {
                         min_y: bbox.min.y,
                         max_x: bbox.max.x,
                         max_y: bbox.max.y,
+                        is_adjustment,
                     });
 
 

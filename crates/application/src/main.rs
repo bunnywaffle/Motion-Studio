@@ -7679,4 +7679,124 @@ mod tests {
         assert_eq!(outside_p.b, 1.0);
         assert_eq!(outside_p.g, 0.0);
     }
+
+    #[test]
+    fn test_adjustment_layer_cache_key_varies_with_frame_and_backdrop() {
+        use crate::raster::layer_cache_key;
+        use compositor::{LayerStackEvaluator, SceneGraph};
+        use project::{Composition, Project, TimeCode, Layer, Color};
+
+        let mut project = Project::new("p", "P");
+        let mut comp = Composition::hd_1080p_30fps("c", "C", 5.0);
+        let tc0 = TimeCode::from_frames(0, 30.0);
+        let tc_end = TimeCode::from_frames(150, 30.0);
+
+        let solid = Layer::solid("l1", "Solid", Color::RED, 100, 100, tc0, tc_end);
+        comp.add_layer(solid).unwrap();
+
+        let adj = Layer::adjustment("adj", "Adjustment", tc0, tc_end);
+        comp.add_layer(adj).unwrap();
+
+        project.add_composition(comp).unwrap();
+
+        let graph = SceneGraph::from_project(&project, "c").unwrap();
+        let evaluator = LayerStackEvaluator::new();
+        let stack = evaluator.evaluate(&graph, &tc0);
+
+        let adj_layer = stack.get_layer("adj").expect("adj layer");
+        let solid_layer = stack.get_layer("l1").expect("solid layer");
+
+        // Frame sensitivity: adjustment layers must invalidate when frame changes (underlying animation)
+        let key_f0 = layer_cache_key(adj_layer, 0, 100, 100, false, 1111);
+        let key_f1 = layer_cache_key(adj_layer, 1, 100, 100, false, 1111);
+        assert_ne!(key_f0, key_f1, "Adjustment layer cache key MUST differ across frames to reflect underlying animations");
+
+        // Backdrop sensitivity: adjustment layers with Normal blend mode must invalidate when backdrop changes
+        let key_b2 = layer_cache_key(adj_layer, 0, 100, 100, false, 2222);
+        assert_ne!(key_f0, key_b2, "Adjustment layer cache key MUST differ when backdrop changes");
+
+        // Normal solid without keyframes should preserve frame-invariance
+        let solid_f0 = layer_cache_key(solid_layer, 0, 100, 100, false, 1111);
+        let solid_f1 = layer_cache_key(solid_layer, 1, 100, 100, false, 1111);
+        assert_eq!(solid_f0, solid_f1, "Static solid layers should remain cached across frames when not animated");
+    }
+
+    #[test]
+    fn test_adjustment_layer_without_effects_returns_empty() {
+        use crate::raster::rasterize_layer;
+        use compositor::{LayerStackEvaluator, SceneGraph};
+        use project::{Composition, Project, TimeCode, Layer, Color, Effect, EffectType, Property};
+        use std::collections::HashMap;
+
+        let mut project = Project::new("p", "P");
+        let mut comp = Composition::hd_1080p_30fps("c", "C", 5.0);
+        let tc0 = TimeCode::from_frames(0, 30.0);
+        let tc_end = TimeCode::from_frames(150, 30.0);
+
+        let adj = Layer::adjustment("adj", "Adjustment", tc0, tc_end);
+        comp.add_layer(adj).unwrap();
+        project.add_composition(comp).unwrap();
+
+        let graph = SceneGraph::from_project(&project, "c").unwrap();
+        let evaluator = LayerStackEvaluator::new();
+        let stack = evaluator.evaluate(&graph, &tc0);
+        let adj_layer = stack.get_layer("adj").expect("adj layer");
+
+        let assets = HashMap::new();
+        // 1. Zero effects -> empty = true
+        let (_buf, _avg, empty) = rasterize_layer(
+            adj_layer,
+            100.0,
+            100.0,
+            100,
+            100,
+            100.0,
+            100.0,
+            Color::BLACK,
+            None,
+            0.0,
+            0,
+            false,
+            10.0,
+            &assets,
+        );
+        assert!(empty, "Adjustment layer with zero effects should be empty pass-through");
+
+        // 2. Active effect -> empty = false
+        let mut project2 = Project::new("p2", "P2");
+        let mut comp2 = Composition::hd_1080p_30fps("c2", "C2", 5.0);
+        let mut adj2 = Layer::adjustment("adj2", "Adjustment", tc0, tc_end);
+        adj2.effects.push(Effect {
+            id: "blur".to_string(),
+            name: "Gaussian Blur".to_string(),
+            enabled: true,
+            effect_type: EffectType::GaussianBlur {
+                radius: Property::new("Radius", 10.0),
+            },
+        });
+        comp2.add_layer(adj2).unwrap();
+        project2.add_composition(comp2).unwrap();
+
+        let graph2 = SceneGraph::from_project(&project2, "c2").unwrap();
+        let stack2 = evaluator.evaluate(&graph2, &tc0);
+        let adj_layer2 = stack2.get_layer("adj2").expect("adj layer 2");
+
+        let (_buf, _avg, empty_with_fx) = rasterize_layer(
+            adj_layer2,
+            100.0,
+            100.0,
+            100,
+            100,
+            100.0,
+            100.0,
+            Color::BLACK,
+            None,
+            0.0,
+            0,
+            false,
+            10.0,
+            &assets,
+        );
+        assert!(!empty_with_fx, "Adjustment layer with active effects should produce renderable pixels");
+    }
 }

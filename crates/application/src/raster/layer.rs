@@ -264,20 +264,23 @@ pub fn layer_cache_key(
     backdrop_hash: u64,
 ) -> u64 {
     let mut h = DefaultHasher::new();
+    let is_adjustment = matches!(&layer.source, LayerSource::Adjustment);
     layer.id.hash(&mut h);
     out_w.hash(&mut h);
     out_h.hash(&mut h);
     playing.hash(&mut h);
-    if layer.blend_mode != BlendMode::Normal {
+    if is_adjustment || layer.blend_mode != BlendMode::Normal {
         backdrop_hash.hash(&mut h);
     }
-    // Time-varying Shader Lab (`time`/`frame` uniforms) invalidates per
-    // frame; everything else keys off evaluated values below. This avoids
+    // Time-varying Shader Lab (`time`/`frame` uniforms) and Adjustment layers
+    // (which post-process temporal underlying animations) invalidate per frame;
+    // everything else keys off evaluated values below. This avoids
     // the old `format!("{:?}")` whose AST dumps cost milliseconds per
     // layer per tick during drags.
-    let time_varying = layer.effects.iter().any(|e| {
-        e.enabled && matches!(&e.effect_type, EvaluatedEffectType::ShaderLab { .. })
-    });
+    let time_varying = is_adjustment
+        || layer.effects.iter().any(|e| {
+            e.enabled && matches!(&e.effect_type, EvaluatedEffectType::ShaderLab { .. })
+        });
     (if time_varying { frame } else { 0 }).hash(&mut h);
     // Evaluated transform. Only the linear part (a/b/c/d) affects pixels:
     // pure translation merely shifts the AABB, and the raster is relative
@@ -290,7 +293,7 @@ pub fn layer_cache_key(
     for v in [wm.a, wm.b, wm.c, wm.d] {
         v.to_bits().hash(&mut h);
     }
-    if layer.blend_mode != BlendMode::Normal {
+    if is_adjustment || layer.blend_mode != BlendMode::Normal {
         wm.tx.to_bits().hash(&mut h);
         wm.ty.to_bits().hash(&mut h);
     }
@@ -387,8 +390,11 @@ pub fn layer_cache_key(
                 gradient_hash(fill_gradient, &mut h);
             }
         },
-        _ => {
+        LayerSource::Adjustment => {
             7u8.hash(&mut h);
+        }
+        _ => {
+            8u8.hash(&mut h);
         }
     }
     // Effects: identity + on/off + scalar/color params.
@@ -678,6 +684,14 @@ pub fn rasterize_layer(
     let (ow, oh) = (out_w.max(1), out_h.max(1));
     let mut out = FloatBuf::clear(ow, oh);
     if matches!(&layer.source, LayerSource::Adjustment) {
+        // If the adjustment layer has zero enabled effects and normal blend mode,
+        // it applies no transformations to the composite. Return empty = true so
+        // that underlying layers render cleanly and natively without an opaque pass-through bitmap.
+        let has_active_fx = layer.effects.iter().any(|e| e.enabled);
+        if !has_active_fx && layer.blend_mode == BlendMode::Normal {
+            return (out, Color::TRANSPARENT, true);
+        }
+
         let fx = RasterFx {
             time_s,
             frame,
