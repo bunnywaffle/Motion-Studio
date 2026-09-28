@@ -1,12 +1,21 @@
 use std::collections::HashMap;
 
 use gpui_kit::assets::IconName;
-use gpui_kit::base::{h_flex, v_flex, StyledExt};
+use gpui_kit::base::{h_flex, v_flex, StyledExt, TestSupportExt};
 use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
 use gpui_kit::*;
 use project::modifier::{MathOp, ModifierGraph, ModifierNode, NodeKind, WaveType};
 
 use crate::state::EditorState;
+
+/// Total pixel height of the top header area (Row 1: 42px + Row 2: 34px + border: 1px = 77px).
+pub const HEADER_HEIGHT: f32 = 77.0;
+
+/// Map window-space cursor coordinates to canvas-space coordinates.
+#[inline]
+pub fn event_to_canvas_pos(pos: Point<Pixels>) -> (f32, f32) {
+    (pos.x / px(1.0), (pos.y / px(1.0)) - HEADER_HEIGHT)
+}
 
 /// Open a dedicated modifier graph editor window for a property on a layer.
 pub fn open_modifier_graph_window(
@@ -36,23 +45,39 @@ pub fn open_modifier_graph_window(
     );
 }
 
+/// Active wire connection drag state.
+#[derive(Clone, Debug)]
+pub struct WireDragState {
+    /// True if drag started from an Input socket seeking an Output socket;
+    /// false if started from an Output socket seeking an Input socket.
+    pub is_from_input: bool,
+    pub node_id: String,
+    pub socket_name: String,
+    /// Current canvas-space cursor position
+    pub cur_x: f32,
+    pub cur_y: f32,
+    /// Initial canvas-space click position to distinguish stationary click vs drag
+    pub start_x: f32,
+    pub start_y: f32,
+}
+
 /// Standalone interactive visual node graph editor for modifier graphs.
 pub struct ModifierGraphView {
     focus_handle: FocusHandle,
     editor_state: Entity<EditorState>,
     layer_id: String,
     prop_path: String,
-    graph: ModifierGraph,
+    pub graph: ModifierGraph,
     _subscription: Subscription,
-    /// Dragging a node: `(node_id, initial_mouse_x, initial_mouse_y, initial_node_x, initial_node_y)`
+    /// Dragging a node: `(node_id, initial_canvas_x, initial_canvas_y, initial_node_x, initial_node_y)`
     dragging_node: Option<(String, f32, f32, f32, f32)>,
-    /// Connecting a wire: `(from_node_id, from_socket_name, current_mouse_x, current_mouse_y)`
-    connecting_wire: Option<(String, String, f32, f32)>,
+    /// Connecting a wire state
+    connecting_wire: Option<WireDragState>,
     /// Selected node ID
     selected_node: Option<String>,
     /// Canvas pan offset (X, Y)
     pan_offset: (f32, f32),
-    /// Canvas panning: `(initial_mouse_x, initial_mouse_y, initial_pan_x, initial_pan_y)`
+    /// Canvas panning: `(initial_canvas_x, initial_canvas_y, initial_pan_x, initial_pan_y)`
     panning_canvas: Option<(f32, f32, f32, f32)>,
 }
 
@@ -118,6 +143,7 @@ impl ModifierGraphView {
         self.graph = ModifierGraph::default_passthrough();
         self.pan_offset = (0.0, 0.0);
         self.selected_node = None;
+        self.connecting_wire = None;
         self.sync_to_state(cx);
     }
 
@@ -155,6 +181,76 @@ impl ModifierGraphView {
         }
         self.sync_to_state(cx);
     }
+
+    /// Attempt to complete a wire connection to a target position.
+    /// Returns true if a connection was made.
+    fn try_finish_wire_connection(
+        &mut self,
+        target_canvas_x: f32,
+        target_canvas_y: f32,
+        pan_x: f32,
+        pan_y: f32,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let wire = match &self.connecting_wire {
+            Some(w) => w.clone(),
+            None => return false,
+        };
+
+        // Find closest compatible socket within snap radius (32.0 px)
+        let snap_radius_sq = 32.0 * 32.0;
+        let mut best_candidate = None;
+        let mut best_dist_sq = snap_radius_sq;
+
+        for node in &self.graph.nodes {
+            if node.id == wire.node_id {
+                continue; // Cannot connect a node to itself
+            }
+            let (nx, ny) = (node.pos_x + pan_x, node.pos_y + pan_y);
+
+            if !wire.is_from_input {
+                // Dragging from OUTPUT socket -> seeking an INPUT socket
+                for (idx, in_name) in node.kind.input_sockets().iter().enumerate() {
+                    let sx = nx + 14.0;
+                    let sy = ny + 41.0 + (idx as f32 * 26.0);
+                    let dx = target_canvas_x - sx;
+                    let dy = target_canvas_y - sy;
+                    let dsq = dx * dx + dy * dy;
+                    if dsq < best_dist_sq {
+                        best_dist_sq = dsq;
+                        best_candidate = Some((node.id.clone(), (*in_name).to_string(), false));
+                    }
+                }
+            } else {
+                // Dragging from INPUT socket -> seeking an OUTPUT socket
+                for (idx, out_name) in node.kind.output_sockets().iter().enumerate() {
+                    let sx = nx + 186.0;
+                    let sy = ny + 41.0 + (idx as f32 * 26.0);
+                    let dx = target_canvas_x - sx;
+                    let dy = target_canvas_y - sy;
+                    let dsq = dx * dx + dy * dy;
+                    if dsq < best_dist_sq {
+                        best_dist_sq = dsq;
+                        best_candidate = Some((node.id.clone(), (*out_name).to_string(), true));
+                    }
+                }
+            }
+        }
+
+        if let Some((target_node, target_socket, is_target_output)) = best_candidate {
+            if is_target_output {
+                // Wire was from input socket; target is output socket
+                self.connect_sockets(&target_node, &target_socket, &wire.node_id, &wire.socket_name, cx);
+            } else {
+                // Wire was from output socket; target is input socket
+                self.connect_sockets(&wire.node_id, &wire.socket_name, &target_node, &target_socket, cx);
+            }
+            self.connecting_wire = None;
+            return true;
+        }
+
+        false
+    }
 }
 
 impl Focusable for ModifierGraphView {
@@ -183,6 +279,7 @@ impl Render for ModifierGraphView {
 
         v_flex()
             .id("modifier_graph_root")
+            .test_support()
             .size_full()
             .bg(cx.theme().background)
             .track_focus(&self.focus_handle)
@@ -457,6 +554,7 @@ impl ModifierGraphView {
         let ent_drag = entity.clone();
         let ent_up = entity.clone();
         let ent_pan_down = entity.clone();
+        let ent_canvas_down = entity.clone();
 
         // Calculate positions of all sockets for wire rendering
         let mut socket_coords: HashMap<(String, String, bool), (f32, f32)> = HashMap::new();
@@ -464,15 +562,14 @@ impl ModifierGraphView {
             let (nx, ny) = (node.pos_x + pan_x, node.pos_y + pan_y);
             let in_sockets = node.kind.input_sockets();
             for (idx, in_name) in in_sockets.iter().enumerate() {
-                let sx = nx + 8.0;
-                let sy = ny + 38.0 + (idx as f32 * 22.0);
+                let sx = nx + 14.0;
+                let sy = ny + 41.0 + (idx as f32 * 26.0);
                 socket_coords.insert((node.id.clone(), (*in_name).to_string(), true), (sx, sy));
             }
             let out_sockets = node.kind.output_sockets();
-            let card_width = 200.0;
             for (idx, out_name) in out_sockets.iter().enumerate() {
-                let sx = nx + card_width - 8.0;
-                let sy = ny + 38.0 + (idx as f32 * 22.0);
+                let sx = nx + 186.0;
+                let sy = ny + 41.0 + (idx as f32 * 26.0);
                 socket_coords.insert((node.id.clone(), (*out_name).to_string(), false), (sx, sy));
             }
         }
@@ -483,10 +580,26 @@ impl ModifierGraphView {
             .relative()
             .overflow_hidden()
             .bg(rgb(0x101116))
+            // Click empty canvas cancels pending wire or deselects node
+            .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+                let (curr_x, curr_y) = event_to_canvas_pos(event.position);
+                ent_canvas_down.update(cx, |this, cx| {
+                    if this.connecting_wire.is_some() {
+                        let (pan_x, pan_y) = this.pan_offset;
+                        let connected = this.try_finish_wire_connection(curr_x, curr_y, pan_x, pan_y, cx);
+                        if !connected {
+                            this.connecting_wire = None;
+                            cx.notify();
+                        }
+                    } else {
+                        this.selected_node = None;
+                        cx.notify();
+                    }
+                });
+            })
             // Mouse move handler for dragging nodes and wires
             .on_mouse_move(move |event, _window, cx| {
-                let curr_x = event.position.x / px(1.0);
-                let curr_y = event.position.y / px(1.0);
+                let (curr_x, curr_y) = event_to_canvas_pos(event.position);
 
                 ent_drag.update(cx, |this, cx| {
                     let mut changed = false;
@@ -501,9 +614,9 @@ impl ModifierGraphView {
                         }
                     }
                     // Wire drag
-                    if let Some((_from_n, _from_s, cur_x, cur_y)) = &mut this.connecting_wire {
-                        *cur_x = curr_x;
-                        *cur_y = curr_y;
+                    if let Some(wire) = &mut this.connecting_wire {
+                        wire.cur_x = curr_x;
+                        wire.cur_y = curr_y;
                         changed = true;
                     }
                     // Canvas pan
@@ -519,15 +632,24 @@ impl ModifierGraphView {
                 });
             })
             // Mouse up handler to finalize drag or drop wire
-            .on_mouse_up(MouseButton::Left, move |_event, _window, cx| {
+            .on_mouse_up(MouseButton::Left, move |event, _window, cx| {
+                let (curr_x, curr_y) = event_to_canvas_pos(event.position);
                 ent_up.update(cx, |this, cx| {
                     if this.dragging_node.is_some() {
                         this.dragging_node = None;
                         this.sync_to_state(cx);
                     }
-                    if this.connecting_wire.is_some() {
-                        this.connecting_wire = None;
-                        cx.notify();
+                    if let Some(wire) = this.connecting_wire.clone() {
+                        let (pan_x, pan_y) = this.pan_offset;
+                        let connected = this.try_finish_wire_connection(curr_x, curr_y, pan_x, pan_y, cx);
+                        if !connected {
+                            let dist = ((curr_x - wire.start_x).powi(2) + (curr_y - wire.start_y).powi(2)).sqrt();
+                            if dist > 6.0 {
+                                // Drag-dropped on empty canvas -> cancel wire
+                                this.connecting_wire = None;
+                                cx.notify();
+                            }
+                        }
                     }
                     if this.panning_canvas.is_some() {
                         this.panning_canvas = None;
@@ -537,35 +659,56 @@ impl ModifierGraphView {
             })
             // Canvas right-click for panning
             .on_mouse_down(MouseButton::Right, move |event, _window, cx| {
-                let curr_x = event.position.x / px(1.0);
-                let curr_y = event.position.y / px(1.0);
+                let (curr_x, curr_y) = event_to_canvas_pos(event.position);
                 ent_pan_down.update(cx, |this, cx| {
                     this.panning_canvas = Some((curr_x, curr_y, this.pan_offset.0, this.pan_offset.1));
                     cx.notify();
                 });
             });
 
-        // 3. Render Connecting Wires
+        // 3. Render Connecting Wires (beads and midpoint disconnect button)
         for conn in &self.graph.connections {
             if let (Some(&(x1, y1)), Some(&(x2, y2))) = (
                 socket_coords.get(&(conn.from_node.clone(), conn.from_socket.clone(), false)),
                 socket_coords.get(&(conn.to_node.clone(), conn.to_socket.clone(), true)),
             ) {
-                let wire_div = self.render_bezier_wire(
+                let wire_els = self.build_bezier_wire(
                     (x1, y1),
                     (x2, y2),
+                    rgb(0x38bdf8),
                     Some((conn.to_node.clone(), conn.to_socket.clone())),
                     entity,
                 );
-                canvas_div = canvas_div.child(wire_div);
+                canvas_div = canvas_div.children(wire_els);
             }
         }
 
         // 4. Render Active Dragging Wire (from socket to cursor)
-        if let Some((from_n, from_s, cur_x, cur_y)) = &self.connecting_wire {
-            if let Some(&(x1, y1)) = socket_coords.get(&(from_n.clone(), from_s.clone(), false)) {
-                let wire_div = self.render_bezier_wire((x1, y1), (*cur_x, *cur_y), None, entity);
-                canvas_div = canvas_div.child(wire_div);
+        if let Some(wire) = &self.connecting_wire {
+            if !wire.is_from_input {
+                // From output socket to cursor
+                if let Some(&(x1, y1)) = socket_coords.get(&(wire.node_id.clone(), wire.socket_name.clone(), false)) {
+                    let wire_els = self.build_bezier_wire(
+                        (x1, y1),
+                        (wire.cur_x, wire.cur_y),
+                        rgb(0xfbbf24), // Vibrant gold wire while connecting
+                        None,
+                        entity,
+                    );
+                    canvas_div = canvas_div.children(wire_els);
+                }
+            } else {
+                // From cursor to input socket
+                if let Some(&(x2, y2)) = socket_coords.get(&(wire.node_id.clone(), wire.socket_name.clone(), true)) {
+                    let wire_els = self.build_bezier_wire(
+                        (wire.cur_x, wire.cur_y),
+                        (x2, y2),
+                        rgb(0xfbbf24),
+                        None,
+                        entity,
+                    );
+                    canvas_div = canvas_div.children(wire_els);
+                }
             }
         }
 
@@ -578,14 +721,15 @@ impl ModifierGraphView {
         canvas_div
     }
 
-    /// Render a smooth bezier wire between two points using discrete interpolated segments.
-    fn render_bezier_wire(
+    /// Build a smooth bezier wire between two points.
+    fn build_bezier_wire(
         &self,
         from_pt: (f32, f32),
         to_pt: (f32, f32),
+        bead_color: Rgba,
         disconnect_target: Option<(String, String)>,
         entity: &Entity<Self>,
-    ) -> Div {
+    ) -> Vec<AnyElement> {
         let (x1, y1) = from_pt;
         let (x2, y2) = to_pt;
         let dx = (x2 - x1).abs().max(40.0) * 0.5;
@@ -594,10 +738,8 @@ impl ModifierGraphView {
         let p2 = (x2 - dx, y2);
         let p3 = (x2, y2);
 
-        let mut wire_container = div().absolute().inset_0();
-
-        // Sample 20 points along the cubic bezier curve
-        let steps = 20;
+        let mut elements = Vec::with_capacity(25);
+        let steps = 22;
 
         for i in 1..=steps {
             let t = i as f32 / steps as f32;
@@ -607,22 +749,20 @@ impl ModifierGraphView {
 
             let bead = div()
                 .absolute()
-                .left(px(bx - 2.5))
-                .top(px(by - 2.5))
-                .w(px(5.0))
-                .h(px(5.0))
+                .left(px(bx - 3.0))
+                .top(px(by - 3.0))
+                .w(px(6.0))
+                .h(px(6.0))
                 .rounded_full()
-                .bg(rgb(0x38bdf8));
+                .bg(bead_color);
 
-            wire_container = wire_container.child(bead);
+            elements.push(bead.into_any_element());
         }
 
         // Render disconnect badge at the midpoint of the wire
         if let Some((to_node, to_sock)) = disconnect_target {
-            let mid_t = 0.5;
-            let mid_it = 0.5;
-            let mx = mid_it * mid_it * mid_it * p0.0 + 3.0 * mid_it * mid_it * mid_t * p1.0 + 3.0 * mid_it * mid_t * mid_t * p2.0 + mid_t * mid_t * mid_t * p3.0;
-            let my = mid_it * mid_it * mid_it * p0.1 + 3.0 * mid_it * mid_it * mid_t * p1.1 + 3.0 * mid_it * mid_t * mid_t * p2.1 + mid_t * mid_t * mid_t * p3.1;
+            let mx = (x1 + x2) * 0.5;
+            let my = (y1 + y2) * 0.5;
 
             let ent_disc = entity.clone();
             let tn = to_node.clone();
@@ -652,10 +792,10 @@ impl ModifierGraphView {
                 })
                 .child("×");
 
-            wire_container = wire_container.child(disconnect_btn);
+            elements.push(disconnect_btn.into_any_element());
         }
 
-        wire_container
+        elements
     }
 
     /// Render an individual node card with its sockets and inline parameters.
@@ -717,8 +857,7 @@ impl ModifierGraphView {
             .items_center()
             .cursor_move()
             .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
-                let curr_x = event.position.x / px(1.0);
-                let curr_y = event.position.y / px(1.0);
+                let (curr_x, curr_y) = event_to_canvas_pos(event.position);
                 ent_drag.update(cx, |this, cx| {
                     this.selected_node = Some(nid_drag.clone());
                     this.dragging_node = Some((nid_drag.clone(), curr_x, curr_y, npos_x, npos_y));
@@ -782,6 +921,7 @@ impl ModifierGraphView {
                 sockets_col = sockets_col.child(
                     h_flex()
                         .w_full()
+                        .h(px(22.0))
                         .justify_between()
                         .items_center()
                         .child(in_widget)
@@ -805,9 +945,8 @@ impl ModifierGraphView {
         node_id: &str,
         socket_name: &'static str,
         entity: &Entity<Self>,
-        cx: &App,
+        _cx: &mut Context<Self>,
     ) -> Div {
-        let ent = entity.clone();
         let nid = node_id.to_string();
         let sname = socket_name.to_string();
 
@@ -817,32 +956,94 @@ impl ModifierGraphView {
             .iter()
             .any(|c| c.to_node == nid && c.to_socket == sname);
 
+        let is_target_hover = self.connecting_wire.as_ref().is_some_and(|w| {
+            !w.is_from_input && w.node_id != nid
+        });
+
+        let ent_down = entity.clone();
+        let ent_up = entity.clone();
+        let ent_rclick = entity.clone();
+        let nid_down = nid.clone();
+        let nid_rclick = nid.clone();
+        let sname_down = sname.clone();
+        let sname_rclick = sname.clone();
+
         h_flex()
             .gap_1p5()
             .items_center()
             .child(
                 div()
                     .id(SharedString::from(format!("in_{}_{}", node_id, socket_name)))
-                    .w(px(10.0))
-                    .h(px(10.0))
+                    .w(px(12.0))
+                    .h(px(12.0))
                     .rounded_full()
-                    .bg(if is_connected { rgb(0x38bdf8) } else { rgb(0x4b5563) })
+                    .bg(if is_connected {
+                        rgb(0x38bdf8)
+                    } else if is_target_hover {
+                        rgb(0x0284c7)
+                    } else {
+                        rgb(0x4b5563)
+                    })
                     .border_1()
-                    .border_color(rgb(0x9ca3af))
+                    .border_color(if is_target_hover {
+                        rgb(0x38bdf8)
+                    } else {
+                        rgb(0x9ca3af)
+                    })
                     .hover(|s| s.bg(rgb(0x0ea5e9)).border_color(rgb(0xffffff)))
                     .cursor_pointer()
-                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                        ent.update(cx, |this, cx| {
-                            if let Some((from_n, from_s, _, _)) = this.connecting_wire.take() {
-                                this.connect_sockets(&from_n, &from_s, &nid, &sname, cx);
+                    .on_mouse_up(MouseButton::Left, move |event, _window, cx| {
+                        let (curr_x, curr_y) = event_to_canvas_pos(event.position);
+                        ent_up.update(cx, |this, cx| {
+                            let (pan_x, pan_y) = this.pan_offset;
+                            this.try_finish_wire_connection(curr_x, curr_y, pan_x, pan_y, cx);
+                        });
+                    })
+                    .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+                        let (curr_x, curr_y) = event_to_canvas_pos(event.position);
+                        ent_down.update(cx, |this, cx| {
+                            let (pan_x, pan_y) = this.pan_offset;
+                            if this.connecting_wire.is_some() {
+                                this.try_finish_wire_connection(curr_x, curr_y, pan_x, pan_y, cx);
+                            } else {
+                                // If already connected, disconnect and pick up wire to reconnect!
+                                if let Some(existing) = this.graph.connections.iter().find(|c| c.to_node == nid_down && c.to_socket == sname_down).cloned() {
+                                    this.disconnect_socket(&nid_down, &sname_down, cx);
+                                    this.connecting_wire = Some(WireDragState {
+                                        is_from_input: false,
+                                        node_id: existing.from_node,
+                                        socket_name: existing.from_socket,
+                                        cur_x: curr_x,
+                                        cur_y: curr_y,
+                                        start_x: curr_x,
+                                        start_y: curr_y,
+                                    });
+                                } else {
+                                    // Start dragging from input socket to an output
+                                    this.connecting_wire = Some(WireDragState {
+                                        is_from_input: true,
+                                        node_id: nid_down.clone(),
+                                        socket_name: sname_down.clone(),
+                                        cur_x: curr_x,
+                                        cur_y: curr_y,
+                                        start_x: curr_x,
+                                        start_y: curr_y,
+                                    });
+                                }
+                                cx.notify();
                             }
+                        });
+                    })
+                    .on_mouse_down(MouseButton::Right, move |_event, _window, cx| {
+                        ent_rclick.update(cx, |this, cx| {
+                            this.disconnect_socket(&nid_rclick, &sname_rclick, cx);
                         });
                     }),
             )
             .child(
                 div()
                     .text_xs()
-                    .text_color(cx.theme().muted_foreground)
+                    .text_color(rgb(0x9ca3af))
                     .child(socket_name),
             )
     }
@@ -853,9 +1054,8 @@ impl ModifierGraphView {
         node_id: &str,
         socket_name: &'static str,
         entity: &Entity<Self>,
-        cx: &App,
+        _cx: &mut Context<Self>,
     ) -> Div {
-        let ent = entity.clone();
         let nid = node_id.to_string();
         let sname = socket_name.to_string();
 
@@ -865,32 +1065,79 @@ impl ModifierGraphView {
             .iter()
             .any(|c| c.from_node == nid && c.from_socket == sname);
 
+        let is_target_hover = self.connecting_wire.as_ref().is_some_and(|w| {
+            w.is_from_input && w.node_id != nid
+        });
+
+        let ent_down = entity.clone();
+        let ent_up = entity.clone();
+        let ent_rclick = entity.clone();
+        let nid_down = nid.clone();
+        let nid_rclick = nid.clone();
+        let sname_down = sname.clone();
+        let sname_rclick = sname.clone();
+
         h_flex()
             .gap_1p5()
             .items_center()
             .child(
                 div()
                     .text_xs()
-                    .text_color(cx.theme().muted_foreground)
+                    .text_color(rgb(0x9ca3af))
                     .child(socket_name),
             )
             .child(
                 div()
                     .id(SharedString::from(format!("out_{}_{}", node_id, socket_name)))
-                    .w(px(10.0))
-                    .h(px(10.0))
+                    .w(px(12.0))
+                    .h(px(12.0))
                     .rounded_full()
-                    .bg(if is_connected { rgb(0x10b981) } else { rgb(0x4b5563) })
+                    .bg(if is_connected {
+                        rgb(0x10b981)
+                    } else if is_target_hover {
+                        rgb(0x059669)
+                    } else {
+                        rgb(0x4b5563)
+                    })
                     .border_1()
-                    .border_color(rgb(0x9ca3af))
+                    .border_color(if is_target_hover {
+                        rgb(0x34d399)
+                    } else {
+                        rgb(0x9ca3af)
+                    })
                     .hover(|s| s.bg(rgb(0x059669)).border_color(rgb(0xffffff)))
                     .cursor_pointer()
+                    .on_mouse_up(MouseButton::Left, move |event, _window, cx| {
+                        let (curr_x, curr_y) = event_to_canvas_pos(event.position);
+                        ent_up.update(cx, |this, cx| {
+                            let (pan_x, pan_y) = this.pan_offset;
+                            this.try_finish_wire_connection(curr_x, curr_y, pan_x, pan_y, cx);
+                        });
+                    })
                     .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
-                        let curr_x = event.position.x / px(1.0);
-                        let curr_y = event.position.y / px(1.0);
-                        ent.update(cx, |this, cx| {
-                            this.connecting_wire = Some((nid.clone(), sname.clone(), curr_x, curr_y));
-                            cx.notify();
+                        let (curr_x, curr_y) = event_to_canvas_pos(event.position);
+                        ent_down.update(cx, |this, cx| {
+                            let (pan_x, pan_y) = this.pan_offset;
+                            if this.connecting_wire.is_some() {
+                                this.try_finish_wire_connection(curr_x, curr_y, pan_x, pan_y, cx);
+                            } else {
+                                this.connecting_wire = Some(WireDragState {
+                                    is_from_input: false,
+                                    node_id: nid_down.clone(),
+                                    socket_name: sname_down.clone(),
+                                    cur_x: curr_x,
+                                    cur_y: curr_y,
+                                    start_x: curr_x,
+                                    start_y: curr_y,
+                                });
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .on_mouse_down(MouseButton::Right, move |_event, _window, cx| {
+                        ent_rclick.update(cx, |this, cx| {
+                            this.graph.connections.retain(|c| !(c.from_node == nid_rclick && c.from_socket == sname_rclick));
+                            this.sync_to_state(cx);
                         });
                     }),
             )

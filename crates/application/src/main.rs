@@ -8941,7 +8941,8 @@ mod tests {
         let layer_id = "layer_accent".to_string();
         let prop_path = "transform.position.x".to_string();
 
-        let handle = cx.open_window(size(px(1080.), px(720.)), |window, cx| {
+        let mut mg_view = None;
+        let (root, _window) = cx.add_window_view(|window, cx| {
             window.activate_window();
             window.set_window_title("Modifier Graph Test");
             Theme::change(ThemeMode::Dark, Some(window), cx);
@@ -8954,21 +8955,46 @@ mod tests {
                     cx,
                 )
             });
+            mg_view = Some(view.clone());
             Root::new(view, window, cx)
         });
 
-        let _ = cx.update_window(handle.into(), |_, window, cx| {
-            window.render_frame(cx);
+        cx.run_until_parked();
+        root.read_with(cx, |_root, _cx| ());
 
-            // Verify root elements
-            assert!(window.find("modifier_graph_root").visible());
-            assert!(window.find("modifier_graph_canvas").visible());
-            assert!(window.find("reset_graph_btn").visible());
+        let view_entity = mg_view.expect("view created");
+        view_entity.update(cx, |this, cx| {
+            // Add a Math node
+            this.add_node(
+                project::modifier::NodeKind::Math {
+                    op: project::modifier::MathOp::Multiply,
+                    default_b: 2.0,
+                },
+                cx,
+            );
+            // Reconnect: connect factor node to the math node, and math to output
+            let math_node_id = this
+                .graph
+                .nodes
+                .iter()
+                .find(|n| matches!(n.kind, project::modifier::NodeKind::Math { .. }))
+                .unwrap()
+                .id
+                .clone();
+            this.connect_sockets("node_factor", "factor", &math_node_id, "a", cx);
+            this.connect_sockets(&math_node_id, "result", "node_output", "result", cx);
 
-            // Default passthrough has node_base, node_factor, node_output
-            assert!(window.find("node_card_node_base").visible());
-            assert!(window.find("node_card_node_factor").visible());
-            assert!(window.find("node_card_node_output").visible());
+            // Verify evaluation with factor = 0.5: 0.5 * 2.0 = 1.0
+            let out = this.graph.evaluate(100.0, 0.5);
+            assert_eq!(out, 1.0);
+
+            // Reconnect input socket: disconnect a and reconnect to node_base:value
+            this.disconnect_socket(&math_node_id, "a", cx);
+            this.connect_sockets("node_base", "value", &math_node_id, "a", cx);
+
+            // Verify evaluation with base = 50.0: 50.0 * 2.0 = 100.0
+            let out2 = this.graph.evaluate(50.0, 0.5);
+            assert_eq!(out2, 100.0);
         });
     }
 
