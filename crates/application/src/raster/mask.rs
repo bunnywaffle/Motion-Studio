@@ -395,7 +395,7 @@ mod tests {
             // Pixels safely away from the rect edge band must match tightly;
             // resampling only perturbs the ~1px edge band.
             let (x, y) = (i % 200, i / 200);
-            let near_edge = x < 30 || x > 170 || y < 30 || y > 170;
+            let near_edge = !(30..=170).contains(&x) || !(30..=170).contains(&y);
             if !near_edge && d > 0.02 {
                 flat_bad += 1;
             }

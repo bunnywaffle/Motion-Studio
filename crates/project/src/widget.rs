@@ -34,6 +34,8 @@
 //! from the same data through `application::widgets`.
 
 use crate::color::Color;
+#[cfg(test)]
+use crate::effect::{TileCell, TileMode};
 use serde::{Deserialize, Serialize};
 
 /// Internal widget kinds the application can auto-create.
@@ -215,6 +217,19 @@ impl PropDecl {
             value: PropValue::Bool(value),
         }
     }
+
+    /// Dropdown over a fixed option list, carrying the selected index.
+    pub fn enumeration(field: &str, label: &str, options: Vec<String>, selected: usize) -> Self {
+        let mut meta = ParamMeta::slider(0.0, options.len().saturating_sub(1) as f32, 1.0, 0, "", 100.0);
+        meta.options = options;
+        Self {
+            field: field.to_string(),
+            label: label.to_string(),
+            widget: WidgetKind::Dropdown,
+            meta,
+            value: PropValue::EnumSel { index: selected },
+        }
+    }
 }
 
 #[cfg(test)]
@@ -254,7 +269,7 @@ mod tests {
             fx(EffectType::TextOutline { width: p(3.0), color: Color::BLACK }),
             fx(EffectType::TextBevel { strength: p(50.0), softness: p(10.0) }),
             fx(EffectType::Bloom { intensity: p(50.0), radius: p(5.0) }),
-            fx(EffectType::Tiler { tiles_x: p(4.0), tiles_y: p(4.0) }),
+            fx(EffectType::Tiler { tiles_x: p(4.0), tiles_y: p(4.0), mode: TileMode::Grid, mirror: false, offset_x: p(0.0), offset_y: p(0.0), cell: TileCell::Square, seed: p(1.0), amount: p(0.0) }),
             fx(EffectType::Warp { amount: p(50.0), scale: p(1.0) }),
             fx(EffectType::Exposure { exposure: p(1.5) }),
             fx(EffectType::Vibrance { vibrance: p(20.0) }),
@@ -279,7 +294,12 @@ mod tests {
         let noise = &cases[9].declarations();
         assert!(noise.iter().any(|d| d.widget == WidgetKind::Checkbox));
         let tiler = &cases[16].declarations();
-        assert!(tiler.iter().all(|d| d.widget == WidgetKind::Integer));
+        assert!(tiler.iter().any(|d| d.widget == WidgetKind::Dropdown));
+        assert!(tiler.iter().any(|d| d.widget == WidgetKind::Integer));
+        assert!(tiler.iter().any(|d| d.widget == WidgetKind::Checkbox));
+        assert!(tiler.iter().any(|d| d.widget == WidgetKind::Percentage));
+        let modes: Vec<String> = TileMode::ALL.iter().map(|m| m.label().to_string()).collect();
+        assert!(tiler.iter().any(|d| d.field == "mode" && d.meta.options == modes));
         let _ = TimeCode::from_frames(0, 30.0);
     }
 

@@ -10,6 +10,117 @@ const fn default_true() -> bool {
     true
 }
 
+fn default_tile_offset() -> Property<f32> {
+    Property::new("Tile Offset", 0.0)
+}
+
+fn default_tile_seed() -> Property<f32> {
+    Property::new("Random Seed", 1.0)
+}
+
+fn default_tile_amount() -> Property<f32> {
+    Property::new("Randomize", 0.0)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TileMode {
+    /// Classic rows × columns mosaic repeat.
+    #[default]
+    Grid,
+    /// Kaleidoscope ring around the center (segments × rings).
+    Radial,
+    /// Pointy-top hexagonal lattice.
+    Hex,
+    /// Triangular lattice.
+    Triangle,
+}
+
+impl TileMode {
+    /// All modes in Combobox order.
+    pub const ALL: [Self; 4] = [Self::Grid, Self::Radial, Self::Hex, Self::Triangle];
+
+    /// Human label.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Grid => "Grid",
+            Self::Radial => "Radial (Around)",
+            Self::Hex => "Hexagon",
+            Self::Triangle => "Triangle",
+        }
+    }
+
+    /// Parse a [`Self::label`] back into a mode (Combobox commit path).
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.label() == label)
+    }
+
+    /// Compact numeric id for shaders / cache keys.
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Grid => 0,
+            Self::Radial => 1,
+            Self::Hex => 2,
+            Self::Triangle => 3,
+        }
+    }
+}
+
+/// Tiler cell aperture shape (grid + radial lattices; hexagon mode always
+/// uses hex cells). Non-square cells punch transparency outside the shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TileCell {
+    /// Full rectangular cell (classic mosaic, fully opaque).
+    #[default]
+    Square,
+    /// Rotated-square aperture.
+    Diamond,
+    /// Inscribed disc aperture.
+    Circle,
+    /// Inscribed triangle aperture.
+    Triangle,
+    /// Regular hexagon aperture.
+    Hexagon,
+}
+
+impl TileCell {
+    /// All cell shapes in Combobox order.
+    pub const ALL: [Self; 5] = [
+        Self::Square,
+        Self::Diamond,
+        Self::Circle,
+        Self::Triangle,
+        Self::Hexagon,
+    ];
+
+    /// Human label.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Square => "Square",
+            Self::Diamond => "Diamond",
+            Self::Circle => "Circle",
+            Self::Triangle => "Triangle",
+            Self::Hexagon => "Hexagon",
+        }
+    }
+
+    /// Parse a [`Self::label`] back into a cell shape.
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|c| c.label() == label)
+    }
+
+    /// Compact numeric id for shaders / cache keys.
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Square => 0,
+            Self::Diamond => 1,
+            Self::Circle => 2,
+            Self::Triangle => 3,
+            Self::Hexagon => 4,
+        }
+    }
+}
 /// The specific algorithm and animatable parameters for an image processing effect.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -110,11 +221,29 @@ pub enum EffectType {
         intensity: Property<f32>,
         radius: Property<f32>,
     },
-    /// Mosaic tiler (spatial).
+    /// Advanced mosaic tiler (spatial): grid / radial / hexagonal
+    /// lattices, shaped cell apertures, mirroring, phase offset and
+    /// seeded per-tile randomization. New fields all carry serde
+    /// defaults so old project files (tiles only) keep loading.
     Tiler {
         tiles_x: Property<f32>,
         tiles_y: Property<f32>,
+        #[serde(default)]
+        mode: TileMode,
+        #[serde(default)]
+        mirror: bool,
+        #[serde(default = "default_tile_offset")]
+        offset_x: Property<f32>,
+        #[serde(default = "default_tile_offset")]
+        offset_y: Property<f32>,
+        #[serde(default)]
+        cell: TileCell,
+        #[serde(default = "default_tile_seed")]
+        seed: Property<f32>,
+        #[serde(default = "default_tile_amount")]
+        amount: Property<f32>,
     },
+
     /// Turbulent warp distortion (spatial).
     Warp {
         amount: Property<f32>,
@@ -439,6 +568,13 @@ impl EffectType {
         Self::Tiler {
             tiles_x: Property::new("Tiles X", tiles_x.clamp(1.0, 32.0)),
             tiles_y: Property::new("Tiles Y", tiles_y.clamp(1.0, 32.0)),
+            mode: TileMode::Grid,
+            mirror: false,
+            offset_x: default_tile_offset(),
+            offset_y: default_tile_offset(),
+            cell: TileCell::Square,
+            seed: default_tile_seed(),
+            amount: default_tile_amount(),
         }
     }
 
@@ -879,8 +1015,7 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
     /// Set a named color field (`color_a` / `color_b` / `color`) on effects
     /// that carry swatch colors (Checkerboard, Gradient Ramp, Text Outline).
     /// Returns false for unknown fields or effects without colors.
-    pub fn set_color_value(&mut self, field: &str, next: Color) -> bool {
-        match &mut self.effect_type {
+    pub fn set_color_value(&mut self, field: &str, next: Color) -> bool {        match &mut self.effect_type {
             EffectType::Tint { map_black, map_white, .. } => {
                 if field.eq_ignore_ascii_case("map_black") || field.eq_ignore_ascii_case("black") {
                     *map_black = next;
@@ -936,6 +1071,56 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     *color = next;
                     true
                 }
+            _ => false,
+        }
+    }
+
+    /// Set a named enum option by index (`mode`, `cell`, …). Returns false
+    /// for unknown fields or effects without that enum.
+    pub fn set_enum_value(&mut self, field: &str, index: usize) -> bool {
+        match &mut self.effect_type {
+            EffectType::Tiler { mode, cell, .. } => {
+                if field.eq_ignore_ascii_case("mode") {
+                    if let Some(m) = TileMode::ALL.get(index).copied() {
+                        *mode = m;
+                        return true;
+                    }
+                } else if field.eq_ignore_ascii_case("cell") {
+                    if let Some(c) = TileCell::ALL.get(index).copied() {
+                        *cell = c;
+                        return true;
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// Read a named enum option index. Returns None for unknown fields.
+    pub fn get_enum_value(&self, field: &str) -> Option<usize> {
+        match &self.effect_type {
+            EffectType::Tiler { mode, cell, .. } => {
+                if field.eq_ignore_ascii_case("mode") {
+                    Some(mode.index())
+                } else if field.eq_ignore_ascii_case("cell") {
+                    Some(cell.index())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Set a named boolean flag (`mirror`, …). Returns false for unknown
+    /// fields or effects without that flag.
+    pub fn set_bool_value(&mut self, field: &str, next: bool) -> bool {
+        match &mut self.effect_type {
+            EffectType::Tiler { mirror, .. } if field.eq_ignore_ascii_case("mirror") => {
+                *mirror = next;
+                true
+            }
             _ => false,
         }
     }
@@ -1160,12 +1345,24 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     return true;
                 }
             }
-            EffectType::Tiler { tiles_x, tiles_y } => {
+            EffectType::Tiler { tiles_x, tiles_y, offset_x, offset_y, seed, amount, .. } => {
                 if param_name.eq_ignore_ascii_case("tiles_x") || param_name.eq_ignore_ascii_case("x") {
                     tiles_x.set_value((tiles_x.value + delta).clamp(1.0, 32.0));
                     return true;
                 } else if param_name.eq_ignore_ascii_case("tiles_y") || param_name.eq_ignore_ascii_case("y") {
                     tiles_y.set_value((tiles_y.value + delta).clamp(1.0, 32.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("offset_x") {
+                    offset_x.set_value((offset_x.value + delta).clamp(0.0, 1.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("offset_y") {
+                    offset_y.set_value((offset_y.value + delta).clamp(0.0, 1.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("seed") {
+                    seed.set_value((seed.value + delta).clamp(0.0, 100.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("amount") || param_name.eq_ignore_ascii_case("randomize") {
+                    amount.set_value((amount.value + delta).clamp(0.0, 100.0));
                     return true;
                 }
             }
@@ -1411,11 +1608,19 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     None
                 }
             }
-            EffectType::Tiler { tiles_x, tiles_y } => {
+            EffectType::Tiler { tiles_x, tiles_y, offset_x, offset_y, seed, amount, .. } => {
                 if param_name.eq_ignore_ascii_case("tiles_x") || param_name.eq_ignore_ascii_case("x") {
                     Some(tiles_x)
                 } else if param_name.eq_ignore_ascii_case("tiles_y") || param_name.eq_ignore_ascii_case("y") {
                     Some(tiles_y)
+                } else if param_name.eq_ignore_ascii_case("offset_x") {
+                    Some(offset_x)
+                } else if param_name.eq_ignore_ascii_case("offset_y") {
+                    Some(offset_y)
+                } else if param_name.eq_ignore_ascii_case("seed") {
+                    Some(seed)
+                } else if param_name.eq_ignore_ascii_case("amount") || param_name.eq_ignore_ascii_case("randomize") {
+                    Some(amount)
                 } else {
                     None
                 }
@@ -1656,11 +1861,19 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     None
                 }
             }
-            EffectType::Tiler { tiles_x, tiles_y } => {
+            EffectType::Tiler { tiles_x, tiles_y, offset_x, offset_y, seed, amount, .. } => {
                 if param_name.eq_ignore_ascii_case("tiles_x") || param_name.eq_ignore_ascii_case("x") {
                     Some(tiles_x)
                 } else if param_name.eq_ignore_ascii_case("tiles_y") || param_name.eq_ignore_ascii_case("y") {
                     Some(tiles_y)
+                } else if param_name.eq_ignore_ascii_case("offset_x") {
+                    Some(offset_x)
+                } else if param_name.eq_ignore_ascii_case("offset_y") {
+                    Some(offset_y)
+                } else if param_name.eq_ignore_ascii_case("seed") {
+                    Some(seed)
+                } else if param_name.eq_ignore_ascii_case("amount") || param_name.eq_ignore_ascii_case("randomize") {
+                    Some(amount)
                 } else {
                     None
                 }
@@ -1916,10 +2129,29 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 scalar("intensity", "Intensity", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), intensity),
                 scalar("radius", "Radius", WidgetKind::Slider, px1(0.0, 128.0, 2.0, 100.0), radius),
             ],
-            EffectType::Tiler { tiles_x, tiles_y } => vec![
-                scalar("tiles_x", "Tiles X", WidgetKind::Integer, ParamMeta::slider(1.0, 64.0, 1.0, 0, "", 100.0), tiles_x),
-                scalar("tiles_y", "Tiles Y", WidgetKind::Integer, ParamMeta::slider(1.0, 64.0, 1.0, 0, "", 100.0), tiles_y),
-            ],
+            EffectType::Tiler { tiles_x, tiles_y, mode, mirror, offset_x, offset_y, cell, seed, amount } => {
+                vec![
+                    PropDecl::enumeration(
+                        "mode",
+                        "Layout",
+                        TileMode::ALL.iter().map(|m| m.label().to_string()).collect(),
+                        mode.index(),
+                    ),
+                    scalar("tiles_x", "Tiles X", WidgetKind::Integer, ParamMeta::slider(1.0, 64.0, 1.0, 0, "", 100.0), tiles_x),
+                    scalar("tiles_y", "Tiles Y", WidgetKind::Integer, ParamMeta::slider(1.0, 64.0, 1.0, 0, "", 100.0), tiles_y),
+                    PropDecl::enumeration(
+                        "cell",
+                        "Cell Shape",
+                        TileCell::ALL.iter().map(|c| c.label().to_string()).collect(),
+                        cell.index(),
+                    ),
+                    PropDecl::boolean("mirror", "Mirror Tiles", *mirror),
+                    scalar("offset_x", "Offset X", WidgetKind::Slider, ParamMeta::slider(0.0, 1.0, 0.01, 2, "", 100.0), offset_x),
+                    scalar("offset_y", "Offset Y", WidgetKind::Slider, ParamMeta::slider(0.0, 1.0, 0.01, 2, "", 100.0), offset_y),
+                    scalar("seed", "Random Seed", WidgetKind::Slider, ParamMeta::slider(0.0, 100.0, 1.0, 0, "", 100.0), seed),
+                    scalar("amount", "Randomize", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), amount),
+                ]
+            }
             EffectType::Warp { amount, scale } => vec![
                 scalar("amount", "Amount", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), amount),
                 scalar("scale", "Scale", WidgetKind::Slider, ParamMeta::slider(0.1, 32.0, 0.2, 1, "", 100.0), scale),

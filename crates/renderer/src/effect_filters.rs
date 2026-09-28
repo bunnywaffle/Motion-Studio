@@ -367,14 +367,140 @@ pub fn perspective() -> UvFilter {
     )
 }
 
-/// Mirror-tile the uv domain.
+/// Advanced mosaic tiler with grid/radial/hex/triangle modes, cell shapes, mirroring, and randomization.
 pub fn tiler() -> UvFilter {
     uv_filter!(
         "tiler",
-        r#"fn fx_uv_tiler(uv: vec2<f32>, tiles_x: f32, tiles_y: f32) -> vec2<f32> {
-    let tx = clamp(floor(tiles_x), 1.0, 32.0);
-    let ty = clamp(floor(tiles_y), 1.0, 32.0);
-    return fract(uv * vec2<f32>(tx, ty));
+        r#"fn fx_tile_hash22(p: vec2<f32>, s: f32) -> vec2<f32> {
+    let p3 = fract(vec3<f32>(p.xyx) * vec3<f32>(443.897, 441.423, 437.195) + vec3<f32>(s * 19.19, s * 7.31, s * 13.73));
+    let d = dot(p3, p3.yzx + 19.19);
+    return fract((p3.xx + vec2<f32>(p3.y, p3.z)) * d);
+}
+
+fn fx_tiler_inside_shape(q: vec2<f32>, shape: f32) -> bool {
+    let s = floor(shape + 0.5);
+    if (s == 0.0) {
+        return abs(q.x) <= 0.5 && abs(q.y) <= 0.5;
+    } else if (s == 1.0) {
+        return (abs(q.x) + abs(q.y)) <= 0.5;
+    } else if (s == 2.0) {
+        return length(q) <= 0.5;
+    } else if (s == 3.0) {
+        let px = abs(q.x);
+        return q.y >= -0.35 && (px * 1.7320508 + q.y) <= 0.5;
+    } else if (s == 4.0) {
+        let px = abs(q.x);
+        let py = abs(q.y);
+        return px <= 0.45 && (px * 0.5 + py * 0.8660254) <= 0.45;
+    }
+    return true;
+}
+
+fn fx_uv_tiler(
+    uv: vec2<f32>,
+    tiles_x: f32,
+    tiles_y: f32,
+    mode: f32,
+    mirror: f32,
+    offset_x: f32,
+    offset_y: f32,
+    cell_shape: f32,
+    seed: f32,
+    amount: f32
+) -> vec2<f32> {
+    let tx = clamp(floor(tiles_x), 1.0, 64.0);
+    let ty = clamp(floor(tiles_y), 1.0, 64.0);
+    let m = floor(mode + 0.5);
+    let off = vec2<f32>(offset_x, offset_y);
+
+    var cell_id = vec2<f32>(0.0);
+    var local_uv = vec2<f32>(0.0);
+
+    if (m == 1.0) {
+        let center = uv - vec2<f32>(0.5, 0.5);
+        let radius = length(center) * 2.0;
+        let phi = atan2(center.y, center.x);
+        let ang = phi / 6.28318530718 + 0.5;
+        let p = vec2<f32>(ang * tx + off.x, radius * ty + off.y);
+        cell_id = floor(p);
+        local_uv = fract(p);
+    } else if (m == 2.0) {
+        let r3 = 1.7320508;
+        let p = (uv + off) * vec2<f32>(tx, ty * r3);
+        let r = vec2<f32>(1.0, r3);
+        let h = r * 0.5;
+        let a = p - r * floor(p / r);
+        let b = (p - h) - r * floor((p - h) / r);
+        let p_a = a - h;
+        let p_b = b - h;
+        if (dot(p_a, p_a) < dot(p_b, p_b)) {
+            cell_id = floor(p / r);
+            local_uv = p_a / vec2<f32>(1.0, r3) + vec2<f32>(0.5);
+        } else {
+            cell_id = floor((p - h) / r) + vec2<f32>(0.5, 0.5);
+            local_uv = p_b / vec2<f32>(1.0, r3) + vec2<f32>(0.5);
+        }
+    } else if (m == 3.0) {
+        let p = uv * vec2<f32>(tx, ty) + off;
+        let quad_id = floor(p);
+        var f = fract(p);
+        var tid = quad_id * 2.0;
+        if (f.x + f.y > 1.0) {
+            tid.x += 1.0;
+            f = vec2<f32>(1.0 - f.x, 1.0 - f.y);
+        }
+        cell_id = tid;
+        local_uv = f;
+    } else {
+        let p = uv * vec2<f32>(tx, ty) + off;
+        cell_id = floor(p);
+        local_uv = fract(p);
+    }
+
+    if (mirror > 0.5) {
+        let ax = abs(cell_id.x);
+        let ay = abs(cell_id.y);
+        let ix = ax - 2.0 * floor(ax * 0.5);
+        let iy = ay - 2.0 * floor(ay * 0.5);
+        if (ix >= 0.5 && ix < 1.5) {
+            local_uv.x = 1.0 - local_uv.x;
+        }
+        if (iy >= 0.5 && iy < 1.5) {
+            local_uv.y = 1.0 - local_uv.y;
+        }
+    }
+
+    // Cell-relative coordinate for the tile aperture shape mask
+    let cell_uv = local_uv;
+
+    // Seeded Randomization of texture content per tile
+    let amt = clamp(amount / 100.0, 0.0, 1.0);
+    var sample_uv = local_uv;
+    if (amt > 0.0) {
+        let rnd1 = fx_tile_hash22(cell_id, seed);
+        let rnd2 = fx_tile_hash22(cell_id.yx + vec2<f32>(13.37, 73.31), seed + 31.0);
+
+        var q = local_uv - vec2<f32>(0.5, 0.5);
+        let rot = (rnd1.x - 0.5) * 6.28318530718 * amt;
+        let cos_r = cos(rot);
+        let sin_r = sin(rot);
+        q = vec2<f32>(q.x * cos_r - q.y * sin_r, q.x * sin_r + q.y * cos_r);
+
+        if (amt >= 0.5 && rnd1.y > 0.5) {
+            q.x = -q.x;
+        }
+
+        let jitter = (rnd2 - vec2<f32>(0.5)) * amt * 0.5;
+        sample_uv = fract(q + vec2<f32>(0.5, 0.5) + jitter);
+    }
+
+    // Cell Shape Aperture check
+    let q_shape = cell_uv - vec2<f32>(0.5, 0.5);
+    if (!fx_tiler_inside_shape(q_shape, cell_shape)) {
+        return vec2<f32>(-10.0, -10.0);
+    }
+
+    return clamp(sample_uv, vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
 }"#
     )
 }
@@ -1146,7 +1272,7 @@ pub fn validate_all() -> Result<(), String> {
         chain_src.push('\n');
     }
     chain_src.push_str(&compose_chain(
-        &["fx_uv_tiler(uv, 2.0, 2.0)", "fx_uv_warp(uv, 30.0, 1.0)"],
+        &["fx_uv_tiler(uv, 2.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0)", "fx_uv_warp(uv, 30.0, 1.0)"],
         &[
             "fx_tint(uv, color, vec3<f32>(0.0), vec3<f32>(1.0), 80.0)",
             "fx_exposure(uv, color, 1.0)",
@@ -1241,7 +1367,10 @@ mod tests {
 
     #[test]
     fn composer_emits_ordered_chain() {
-        let src = compose_chain(&["fx_uv_tiler(uv, 2.0, 2.0)"], &["fx_exposure(uv, color, 1.0)"]);
+        let src = compose_chain(
+            &["fx_uv_tiler(uv, 2.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0)"],
+            &["fx_exposure(uv, color, 1.0)"],
+        );
         let uv_pos = src.find("fx_uv_tiler").unwrap();
         let col_pos = src.find("fx_exposure").unwrap();
         assert!(uv_pos < col_pos);
@@ -1251,5 +1380,22 @@ mod tests {
             exposure().wgsl
         ))
         .expect("chain parses");
+    }
+
+    #[test]
+    fn advanced_tiler_wgsl_variants_parse() {
+        let modes = [0.0, 1.0, 2.0, 3.0]; // Grid, Radial, Hex, Triangle
+        let shapes = [0.0, 1.0, 2.0, 3.0, 4.0]; // Square, Diamond, Circle, Triangle, Hexagon
+        for mode in modes {
+            for shape in shapes {
+                let call = format!(
+                    "fx_uv_tiler(uv, 4.0, 4.0, {mode:.1}, 1.0, 0.1, 0.2, {shape:.1}, 42.0, 75.0)"
+                );
+                let chain = compose_chain(&[&call], &[]);
+                let full = format!("{}\n{chain}", tiler().wgsl);
+                naga::front::wgsl::parse_str(&full)
+                    .unwrap_or_else(|e| panic!("failed for mode={mode} shape={shape}: {e:?}"));
+            }
+        }
     }
 }

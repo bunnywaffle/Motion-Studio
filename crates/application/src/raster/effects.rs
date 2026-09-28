@@ -74,19 +74,158 @@ pub fn apply_effect_pixels(
                 }
             }
         }
-        EvaluatedEffectType::Tiler { tiles_x, tiles_y } => {
-            let tx = (*tiles_x).clamp(1.0, 32.0).round().max(1.0);
-            let ty = (*tiles_y).clamp(1.0, 32.0).round().max(1.0);
-            if tx <= 1.0 && ty <= 1.0 {
-                return;
-            }
+        EvaluatedEffectType::Tiler {
+            tiles_x,
+            tiles_y,
+            mode,
+            mirror,
+            offset_x,
+            offset_y,
+            cell,
+            seed,
+            amount,
+        } => {
+            let tx = (*tiles_x).clamp(1.0, 64.0).floor().max(1.0);
+            let ty = (*tiles_y).clamp(1.0, 64.0).floor().max(1.0);
+            let off_x = *offset_x;
+            let off_y = *offset_y;
+            let amt = (*amount / 100.0).clamp(0.0, 1.0);
             let src = buf.px.clone();
             let sw = buf.w;
+            let sh = buf.h;
+            let w_f = buf.w.max(1) as f32;
+            let h_f = buf.h.max(1) as f32;
+
             for y in 0..buf.h {
                 for x in 0..buf.w {
-                    let sx = ((x as f32 * tx / buf.w as f32).fract() * buf.w as f32) as i32;
-                    let sy = ((y as f32 * ty / buf.h as f32).fract() * buf.h as f32) as i32;
-                    buf.px[(y * sw + x) as usize] = src[(sy as u32 * sw + sx as u32) as usize];
+                    let u = x as f32 / w_f;
+                    let v = y as f32 / h_f;
+
+                    let (cell_id_x, cell_id_y, mut local_u, mut local_v) = match mode {
+                        project::TileMode::Radial => {
+                            let cx = u - 0.5;
+                            let cy = v - 0.5;
+                            let radius = (cx * cx + cy * cy).sqrt() * 2.0;
+                            let phi = cy.atan2(cx);
+                            let ang = phi / (2.0 * std::f32::consts::PI) + 0.5;
+                            let px = ang * tx + off_x;
+                            let py = radius * ty + off_y;
+                            (px.floor(), py.floor(), px.fract(), py.fract())
+                        }
+                        project::TileMode::Hex => {
+                            let r3 = 1.7320508_f32;
+                            let px = (u + off_x) * tx;
+                            let py = (v + off_y) * ty * r3;
+                            let rx = 1.0_f32;
+                            let ry = r3;
+                            let hx = rx * 0.5;
+                            let hy = ry * 0.5;
+                            let ax = px - rx * (px / rx).floor();
+                            let ay = py - ry * (py / ry).floor();
+                            let bx = (px - hx) - rx * ((px - hx) / rx).floor();
+                            let by = (py - hy) - ry * ((py - hy) / ry).floor();
+                            let pa_x = ax - hx;
+                            let pa_y = ay - hy;
+                            let pb_x = bx - hx;
+                            let pb_y = by - hy;
+                            if pa_x * pa_x + pa_y * pa_y < pb_x * pb_x + pb_y * pb_y {
+                                ((px / rx).floor(), (py / ry).floor(), pa_x / rx + 0.5, pa_y / ry + 0.5)
+                            } else {
+                                (((px - hx) / rx).floor() + 0.5, ((py - hy) / ry).floor() + 0.5, pb_x / rx + 0.5, pb_y / ry + 0.5)
+                            }
+                        }
+                        project::TileMode::Triangle => {
+                            let px = u * tx + off_x;
+                            let py = v * ty + off_y;
+                            let qx = px.floor();
+                            let qy = py.floor();
+                            let mut fx = px.fract();
+                            let mut fy = py.fract();
+                            let mut tid_x = qx * 2.0;
+                            if fx + fy > 1.0 {
+                                tid_x += 1.0;
+                                fx = 1.0 - fx;
+                                fy = 1.0 - fy;
+                            }
+                            (tid_x, qy, fx, fy)
+                        }
+                        project::TileMode::Grid => {
+                            let px = u * tx + off_x;
+                            let py = v * ty + off_y;
+                            (px.floor(), py.floor(), px.fract(), py.fract())
+                        }
+                    };
+
+                    if *mirror {
+                        let ix = (cell_id_x.abs() as i64) % 2;
+                        let iy = (cell_id_y.abs() as i64) % 2;
+                        if ix == 1 {
+                            local_u = 1.0 - local_u;
+                        }
+                        if iy == 1 {
+                            local_v = 1.0 - local_v;
+                        }
+                    }
+
+                    let cell_u = local_u;
+                    let cell_v = local_v;
+                    let mut sample_u = local_u;
+                    let mut sample_v = local_v;
+
+                    if amt > 0.0 {
+                        let hash22 = |px: f32, py: f32, s: f32| -> (f32, f32) {
+                            let f = |val: f32| val - val.floor();
+                            let dot = |ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32| ax * bx + ay * by + az * bz;
+                            let p3_x = f(px * 443.897 + s * 19.19);
+                            let p3_y = f(py * 441.423 + s * 7.31);
+                            let p3_z = f(px * 437.195 + s * 13.73);
+                            let d = dot(p3_x, p3_y, p3_z, p3_y + 19.19, p3_z + 19.19, p3_x + 19.19);
+                            (f((p3_x + p3_y) * d), f((p3_x + p3_z) * d))
+                        };
+
+                        let (rnd1_x, rnd1_y) = hash22(cell_id_x, cell_id_y, *seed);
+                        let (rnd2_x, rnd2_y) = hash22(cell_id_y + 13.37, cell_id_x + 73.31, *seed + 31.0);
+
+                        let mut qx = local_u - 0.5;
+                        let mut qy = local_v - 0.5;
+                        let rot = (rnd1_x - 0.5) * std::f32::consts::TAU * amt;
+                        let cos_r = rot.cos();
+                        let sin_r = rot.sin();
+                        let n_qx = qx * cos_r - qy * sin_r;
+                        let n_qy = qx * sin_r + qy * cos_r;
+                        qx = n_qx;
+                        qy = n_qy;
+
+                        if amt >= 0.5 && rnd1_y > 0.5 {
+                            qx = -qx;
+                        }
+
+                        let jit_x = (rnd2_x - 0.5) * amt * 0.5;
+                        let jit_y = (rnd2_y - 0.5) * amt * 0.5;
+                        sample_u = (qx + 0.5 + jit_x).fract();
+                        sample_v = (qy + 0.5 + jit_y).fract();
+                        if sample_u < 0.0 { sample_u += 1.0; }
+                        if sample_v < 0.0 { sample_v += 1.0; }
+                    }
+
+                    let qx = cell_u - 0.5;
+                    let qy = cell_v - 0.5;
+                    let inside = match cell {
+                        project::TileCell::Square => qx.abs() <= 0.5 && qy.abs() <= 0.5,
+                        project::TileCell::Diamond => (qx.abs() + qy.abs()) <= 0.5,
+                        project::TileCell::Circle => (qx * qx + qy * qy).sqrt() <= 0.5,
+                        project::TileCell::Triangle => qy >= -0.35 && (qx.abs() * 1.7320508 + qy) <= 0.5,
+                        project::TileCell::Hexagon => qx.abs() <= 0.45 && (qx.abs() * 0.5 + qy.abs() * 0.8660254) <= 0.45,
+                    };
+
+                    let idx = (y * sw + x) as usize;
+                    if !inside {
+                        buf.px[idx] = Px::clear();
+                    } else {
+                        let sx = ((sample_u.clamp(0.0, 1.0) * (sw as f32 - 1.0)).round() as u32).min(sw - 1);
+                        let sy = ((sample_v.clamp(0.0, 1.0) * (sh as f32 - 1.0)).round() as u32).min(sh - 1);
+                        buf.px[idx] = src[(sy * sw + sx) as usize];
+                    }
                 }
             }
         }
@@ -345,5 +484,79 @@ pub fn apply_vignette(buf: &mut FloatBuf, amount: f32, softness: f32) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use compositor::evaluation::EvaluatedEffectType;
 
-// ---------------------------------------------------------------------------
+    #[test]
+    fn test_tiler_grid_mirror_and_shapes() {
+        let mut buf = FloatBuf {
+            w: 100,
+            h: 100,
+            px: vec![Px { r: 1.0, g: 0.5, b: 0.25, a: 1.0 }; 100 * 100],
+        };
+        let ctx = RasterFx {
+            time_s: 0.0,
+            frame: 0,
+            res_w: 100.0,
+            res_h: 100.0,
+            duration_s: 10.0,
+            playing: false,
+        };
+
+        // Mode: Grid, Shape: Circle, Mirror: true, Random: 50%
+        let eff = EvaluatedEffectType::Tiler {
+            tiles_x: 2.0,
+            tiles_y: 2.0,
+            mode: project::TileMode::Grid,
+            mirror: true,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            cell: project::TileCell::Circle,
+            seed: 12.0,
+            amount: 50.0,
+        };
+        apply_effect_pixels(&mut buf, 100.0, 100.0, &eff, &ctx);
+
+        // Outside circular aperture should be transparent
+        // Top-left pixel (0,0) is outside the circle of the top-left tile
+        assert_eq!(buf.px[0].a, 0.0);
+        // Center of top-left tile (25, 25) is inside
+        assert!(buf.px[25 * 100 + 25].a > 0.0);
+    }
+
+    #[test]
+    fn test_tiler_radial_and_hex_modes() {
+        for mode in [project::TileMode::Radial, project::TileMode::Hex, project::TileMode::Triangle] {
+            let mut buf = FloatBuf {
+                w: 60,
+                h: 60,
+                px: vec![Px { r: 0.8, g: 0.2, b: 0.4, a: 1.0 }; 60 * 60],
+            };
+            let ctx = RasterFx {
+                time_s: 0.0,
+                frame: 0,
+                res_w: 60.0,
+                res_h: 60.0,
+                duration_s: 10.0,
+                playing: false,
+            };
+            let eff = EvaluatedEffectType::Tiler {
+                tiles_x: 3.0,
+                tiles_y: 3.0,
+                mode,
+                mirror: false,
+                offset_x: 0.1,
+                offset_y: 0.1,
+                cell: project::TileCell::Square,
+                seed: 42.0,
+                amount: 30.0,
+            };
+            apply_effect_pixels(&mut buf, 60.0, 60.0, &eff, &ctx);
+            // Verify buffer has pixels with ink
+            let ink_count = buf.px.iter().filter(|p| p.a > 0.5).count();
+            assert!(ink_count > 0, "mode {mode:?} should render ink");
+        }
+    }
+}

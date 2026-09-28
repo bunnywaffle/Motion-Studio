@@ -6291,7 +6291,7 @@ mod tests {
             view.panels().viewer.read(cx).raster_cache.get(&lid).cloned()
         });
         let entry = entry.expect("raster cache entry for masked layer");
-        let ink = entry.bgra.chunks_exact(4).filter(|c| c[3] > 10).count();
+        let ink = entry.bgra.as_chunks::<4>().0.iter().filter(|c| c[3] > 10).count();
         assert!(ink > 1000, "masked shell must hold visible ink, got {ink}");
         // Average trends toward the solid color, not black.
         assert!(

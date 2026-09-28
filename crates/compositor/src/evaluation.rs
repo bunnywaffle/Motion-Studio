@@ -320,6 +320,13 @@ pub enum EvaluatedEffectType {
     Tiler {
         tiles_x: f32,
         tiles_y: f32,
+        mode: project::TileMode,
+        mirror: bool,
+        offset_x: f32,
+        offset_y: f32,
+        cell: project::TileCell,
+        seed: f32,
+        amount: f32,
     },
     Warp {
         amount: f32,
@@ -1182,15 +1189,6 @@ fn clamp_or_loop_seconds(
     TimeCode::from_seconds(resolved_sec, frame_rate)
 }
 
-/// The layer stack evaluation pipeline executor.
-///
-/// Evaluates composition layers at a given timeline position, applying:
-/// - In/Out boundary conditions (half-open interval `[in_point, out_point)`)
-/// - Solo filtering (when any layer is soloed, only soloed layers and their matte sources are visible)
-/// - Track matte pairing and consumption
-/// - Effective opacity clamping and normalization
-/// - Relative frame and second timing offsets
-/// - Recursive nested composition evaluation with temporal alignment, time stretch, spatial matrix concatenation, and cycle protection
 /// Reusable scratch buffers for frame evaluation: per-level temporaries
 /// (matte/solo sets, matte pairs) that would otherwise allocate every
 /// frame. Retained on the evaluator and cleared per use; nested
@@ -1220,6 +1218,15 @@ impl ScratchGuard<'_> {
     }
 }
 
+/// The layer stack evaluation pipeline executor.
+///
+/// Evaluates composition layers at a given timeline position, applying:
+/// - In/Out boundary conditions (half-open interval `[in_point, out_point)`)
+/// - Solo filtering (when any layer is soloed, only soloed layers and their matte sources are visible)
+/// - Track matte pairing and consumption
+/// - Effective opacity clamping and normalization
+/// - Relative frame and second timing offsets
+/// - Recursive nested composition evaluation with temporal alignment, time stretch, spatial matrix concatenation, and cycle protection
 #[derive(Debug, Clone)]
 pub struct LayerStackEvaluator {
     /// If true, layers consumed as track mattes are excluded from the main composite render list.
@@ -1639,10 +1646,17 @@ impl LayerStackEvaluator {
                                 radius: radius.evaluate_at(time),
                             }
                         }
-                        EffectType::Tiler { tiles_x, tiles_y } => {
+                        EffectType::Tiler { tiles_x, tiles_y, mode, mirror, offset_x, offset_y, cell, seed, amount } => {
                             EvaluatedEffectType::Tiler {
                                 tiles_x: tiles_x.evaluate_at(time),
                                 tiles_y: tiles_y.evaluate_at(time),
+                                mode: *mode,
+                                mirror: *mirror,
+                                offset_x: offset_x.evaluate_at(time),
+                                offset_y: offset_y.evaluate_at(time),
+                                cell: *cell,
+                                seed: seed.evaluate_at(time),
+                                amount: amount.evaluate_at(time),
                             }
                         }
                         EffectType::Warp { amount, scale } => {

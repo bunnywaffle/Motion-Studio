@@ -566,9 +566,26 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
             intensity.to_bits().hash(h);
             radius.to_bits().hash(h);
         }
-        EvaluatedEffectType::Tiler { tiles_x, tiles_y } => {
+        EvaluatedEffectType::Tiler {
+            tiles_x,
+            tiles_y,
+            mode,
+            mirror,
+            offset_x,
+            offset_y,
+            cell,
+            seed,
+            amount,
+        } => {
             tiles_x.to_bits().hash(h);
             tiles_y.to_bits().hash(h);
+            mode.index().hash(h);
+            mirror.hash(h);
+            offset_x.to_bits().hash(h);
+            offset_y.to_bits().hash(h);
+            cell.index().hash(h);
+            seed.to_bits().hash(h);
+            amount.to_bits().hash(h);
         }
         EvaluatedEffectType::Warp { amount, scale } => {
             amount.to_bits().hash(h);
