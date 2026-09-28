@@ -5843,6 +5843,76 @@ impl EditorState {
         self.toggle_layer_keyframe_at_current_time(layer_id, prop_path);
     }
 
+    /// Retrieve the modifier graph attached to a property path on a layer.
+    pub fn get_layer_modifier_graph(&self, layer_id: &str, prop_path: &str) -> Option<project::ModifierGraph> {
+        self.active_composition()?
+            .get_layer(layer_id)?
+            .get_modifier_graph(prop_path)
+            .cloned()
+    }
+
+    /// Set or update the modifier graph for a property path on a layer.
+    pub fn set_layer_modifier_graph(&mut self, layer_id: &str, prop_path: &str, graph: project::ModifierGraph) {
+        if let Some(comp) = self.active_composition_mut() {
+            if let Some(layer) = comp.get_layer_mut(layer_id) {
+                layer.set_modifier_graph(prop_path, graph);
+            }
+        }
+    }
+
+    /// Remove the modifier graph for a property path on a layer.
+    pub fn remove_layer_modifier_graph(&mut self, layer_id: &str, prop_path: &str) {
+        if let Some(comp) = self.active_composition_mut() {
+            if let Some(layer) = comp.get_layer_mut(layer_id) {
+                layer.remove_modifier_graph(prop_path);
+            }
+        }
+    }
+
+    /// Ensure a modifier graph exists for a property (creating default passthrough if missing) and return it.
+    pub fn ensure_layer_modifier_graph(&mut self, layer_id: &str, prop_path: &str) -> project::ModifierGraph {
+        if let Some(existing) = self.get_layer_modifier_graph(layer_id, prop_path) {
+            existing
+        } else {
+            let default_graph = project::ModifierGraph::default_passthrough();
+            self.set_layer_modifier_graph(layer_id, prop_path, default_graph.clone());
+            default_graph
+        }
+    }
+
+    /// Read the current un-modified base value for a property path on a layer.
+    pub fn get_layer_property_base_value(&self, layer_id: &str, prop_path: &str) -> f32 {
+        let tc = self.clock.timecode();
+        let comp = match self.active_composition() {
+            Some(c) => c,
+            None => return 0.0,
+        };
+        let layer = match comp.get_layer(layer_id) {
+            Some(l) => l,
+            None => return 0.0,
+        };
+        match prop_path {
+            "transform.anchor_point.x" | "anchor_x" => layer.transform.anchor_point.evaluate_at(&tc).x,
+            "transform.anchor_point.y" | "anchor_y" => layer.transform.anchor_point.evaluate_at(&tc).y,
+            "transform.position.x" | "pos_x" => layer.transform.position.evaluate_at(&tc).x,
+            "transform.position.y" | "pos_y" => layer.transform.position.evaluate_at(&tc).y,
+            "transform.scale.x" | "scale_x" => layer.transform.scale.evaluate_at(&tc).x,
+            "transform.scale.y" | "scale_y" => layer.transform.scale.evaluate_at(&tc).y,
+            "transform.rotation" | "rotation" => layer.transform.rotation.evaluate_at(&tc),
+            "opacity" => layer.opacity.evaluate_at(&tc),
+            _ => 0.0,
+        }
+    }
+
+    /// Read the layer's current normalized progression factor ($0.0 \to 1.0$) at the current playhead.
+    pub fn get_layer_progression_factor(&self, layer_id: &str) -> f32 {
+        let tc = self.clock.timecode();
+        self.active_composition()
+            .and_then(|c| c.get_layer(layer_id))
+            .map(|l| l.progression_factor(&tc))
+            .unwrap_or(0.0)
+    }
+
     /// Seek to the previous keyframe for the given property path on the layer.
     pub fn seek_previous_keyframe(&mut self, layer_id: &str, prop_path: &str) {
         let current_tc = self.clock.timecode();

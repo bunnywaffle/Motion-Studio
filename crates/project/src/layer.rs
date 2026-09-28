@@ -374,6 +374,10 @@ pub struct Layer {
     pub masks: Vec<crate::mask::Mask>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label_color: Option<Color>,
+    /// Interactive modifier graphs attached to properties on this layer,
+    /// keyed by property path (e.g. "transform.rotation", "transform.position.x").
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub modifier_graphs: std::collections::HashMap<String, crate::modifier::ModifierGraph>,
 }
 
 impl Layer {
@@ -408,7 +412,32 @@ impl Layer {
             effects: Vec::new(),
             masks: Vec::new(),
             label_color: None,
+            modifier_graphs: std::collections::HashMap::new(),
         }
+    }
+
+    /// Calculate the normalized progression factor ($0.0 \to 1.0$) of this layer at a given timecode.
+    pub fn progression_factor(&self, current_time: &TimeCode) -> f32 {
+        let in_s = self.in_point.seconds();
+        let out_s = self.out_point.seconds();
+        let cur_s = current_time.seconds();
+        let span = (out_s - in_s).max(1e-6);
+        ((cur_s - in_s) / span).clamp(0.0, 1.0) as f32
+    }
+
+    /// Retrieve the modifier graph attached to a property path on this layer, if any.
+    pub fn get_modifier_graph(&self, prop_path: &str) -> Option<&crate::modifier::ModifierGraph> {
+        self.modifier_graphs.get(prop_path)
+    }
+
+    /// Set or update the modifier graph for a property path on this layer.
+    pub fn set_modifier_graph(&mut self, prop_path: impl Into<String>, graph: crate::modifier::ModifierGraph) {
+        self.modifier_graphs.insert(prop_path.into(), graph);
+    }
+
+    /// Remove the modifier graph for a property path on this layer.
+    pub fn remove_modifier_graph(&mut self, prop_path: &str) -> Option<crate::modifier::ModifierGraph> {
+        self.modifier_graphs.remove(prop_path)
     }
 
     /// Factory for creating a Solid layer.

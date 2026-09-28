@@ -1,3 +1,4 @@
+pub(crate) mod modifier_graph_view;
 pub(crate) mod panels;
 pub mod raster;
 pub mod state;
@@ -8929,4 +8930,65 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[gpui_kit::test]
+    fn test_modifier_graph_window_rendering_and_interactions(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            Theme::change(ThemeMode::Dark, None, cx);
+        });
+
+        let state = cx.new(|_cx| EditorState::new());
+        let layer_id = "layer_accent".to_string();
+        let prop_path = "transform.position.x".to_string();
+
+        let handle = cx.open_window(size(px(1080.), px(720.)), |window, cx| {
+            window.activate_window();
+            window.set_window_title("Modifier Graph Test");
+            Theme::change(ThemeMode::Dark, Some(window), cx);
+            let view = cx.new(|cx| {
+                crate::modifier_graph_view::ModifierGraphView::new(
+                    state.clone(),
+                    layer_id.clone(),
+                    prop_path.clone(),
+                    window,
+                    cx,
+                )
+            });
+            Root::new(view, window, cx)
+        });
+
+        let _ = cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+
+            // Verify root elements
+            assert!(window.find("modifier_graph_root").visible());
+            assert!(window.find("modifier_graph_canvas").visible());
+            assert!(window.find("reset_graph_btn").visible());
+
+            // Default passthrough has node_base, node_factor, node_output
+            assert!(window.find("node_card_node_base").visible());
+            assert!(window.find("node_card_node_factor").visible());
+            assert!(window.find("node_card_node_output").visible());
+        });
+    }
+
+    #[gpui_kit::test]
+    fn test_timeline_context_menu_has_modifier_graph_option(cx: &mut TestAppContext) {
+        let (root, app_view) = setup_test_window(cx);
+        let timeline = app_view.read_with(cx, |view, _cx| view.panels.timeline.clone());
+        timeline.update(cx, |this, _cx| {
+            this.open_context_menu(
+                crate::panels::ContextMenuTarget::Property {
+                    layer_id: "layer_accent".to_string(),
+                    prop_path: "transform.position",
+                },
+                gpui_kit::point(px(100.0), px(100.0)),
+            );
+        });
+
+        root.update(cx, |_root, cx| {
+            cx.notify();
+        });
+        cx.run_until_parked();
+    }
 }

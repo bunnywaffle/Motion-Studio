@@ -2506,6 +2506,77 @@ mod tests {
         assert_eq!(flat_fx_layer.effects[0].id, "fx_blur_anim");
         assert_eq!(flat_fx_layer.effects[1].id, "fx_inv");
     }
+
+    #[test]
+    fn test_modifier_graph_transforms_and_opacity_evaluation() {
+        use project::{ModifierGraph, ModifierNode, NodeConnection, NodeKind};
+
+        let mut comp = Composition::hd_1080p_30fps("comp_mod", "Modifier Test", 10.0);
+        let tc0 = TimeCode::zero(30.0);
+        let tc300 = TimeCode::from_frames(300, 30.0);
+
+        let mut layer = Layer::solid("l_mod", "Mod Layer", Color::RED, 100, 100, tc0, tc300);
+        layer.transform.position.set_value(Vec2::new(100.0, 200.0));
+        layer.opacity.set_value(50.0);
+
+        // Modifier graph on position.x: Lerp from 100 to 500 driven by layer factor
+        let mg_pos_x = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("f", 0.0, 0.0, NodeKind::GetLayerFactor),
+                ModifierNode::new("lerp", 100.0, 0.0, NodeKind::Lerp { default_a: 100.0, default_b: 500.0 }),
+                ModifierNode::new("out", 200.0, 0.0, NodeKind::Output),
+            ],
+            connections: vec![
+                NodeConnection::new("f", "factor", "lerp", "weight"),
+                NodeConnection::new("lerp", "result", "out", "result"),
+            ],
+        };
+        layer.set_modifier_graph("transform.position.x", mg_pos_x);
+
+        // Modifier graph on opacity: factor * 100 (so goes 0 -> 100%)
+        let mg_opacity = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("f", 0.0, 0.0, NodeKind::GetLayerFactor),
+                ModifierNode::new("c", 0.0, 50.0, NodeKind::Constant { value: 100.0 }),
+                ModifierNode::new("mul", 100.0, 20.0, NodeKind::Math { op: project::MathOp::Multiply, default_b: 1.0 }),
+                ModifierNode::new("out", 200.0, 20.0, NodeKind::Output),
+            ],
+            connections: vec![
+                NodeConnection::new("f", "factor", "mul", "a"),
+                NodeConnection::new("c", "value", "mul", "b"),
+                NodeConnection::new("mul", "result", "out", "result"),
+            ],
+        };
+        layer.set_modifier_graph("opacity", mg_opacity);
+
+        comp.add_layer(layer).unwrap();
+        let graph = SceneGraph::from_composition(&comp).unwrap();
+        let evaluator = LayerStackEvaluator::new();
+
+        // At frame 0 (factor = 0.0):
+        let eval_0 = evaluator.evaluate(&graph, &tc0);
+        let l0 = eval_0.get_layer("l_mod").unwrap();
+        assert_eq!(l0.transform.position.x, 100.0);
+        assert_eq!(l0.transform.position.y, 200.0);
+        assert_eq!(l0.effective_opacity, 0.0);
+
+        // At frame 150 (midway, factor = 0.5):
+        let tc150 = TimeCode::from_frames(150, 30.0);
+        let eval_150 = evaluator.evaluate(&graph, &tc150);
+        let l150 = eval_150.get_layer("l_mod").unwrap();
+        assert_eq!(l150.transform.position.x, 300.0); // lerp(100, 500, 0.5) = 300
+        assert_eq!(l150.transform.position.y, 200.0);
+        assert!((l150.effective_opacity - 0.5).abs() < 1e-4);
+
+        // At frame 300 (end, factor = 1.0):
+        let _eval_300 = evaluator.evaluate(&graph, &tc300);
+        // Note: out_point is half-open, so at frame 300 layer is inactive/not visible in normal playback,
+        // but evaluating at frame 299:
+        let tc299 = TimeCode::from_frames(299, 30.0);
+        let eval_299 = evaluator.evaluate(&graph, &tc299);
+        let l299 = eval_299.get_layer("l_mod").unwrap();
+        assert!((l299.transform.position.x - 500.0).abs() < 3.0);
+    }
 }
 
 

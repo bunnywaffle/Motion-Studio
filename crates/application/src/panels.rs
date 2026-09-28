@@ -5021,8 +5021,10 @@ where
     let panel_down = panel_entity.clone();
     let state_scroll = state.clone();
     let state_fast = state.clone();
+    let state_rclick = state.clone();
     let prop_for_wheel = prop_key.clone();
     let prop_for_edit = prop_key.clone();
+    let prop_for_rclick = prop_key.clone();
 
     // After Effects-style keyboard entry: when this field is the open edit
     // target, render the live single-line editor instead of the value label.
@@ -5079,6 +5081,28 @@ where
                     s.preview_fast = true;
                     cx.notify();
                 });
+            })
+            .on_mouse_down(MouseButton::Right, move |_event, _window, cx| {
+                let sel_lid = state_rclick.read(cx).selected_layer_id.clone();
+                if let Some(lid) = sel_lid {
+                    let path_str = match prop_for_rclick.as_str() {
+                        "anchor_x" => "transform.anchor_point.x",
+                        "anchor_y" => "transform.anchor_point.y",
+                        "pos_x" => "transform.position.x",
+                        "pos_y" => "transform.position.y",
+                        "scale_x" => "transform.scale.x",
+                        "scale_y" => "transform.scale.y",
+                        "rotation" => "transform.rotation",
+                        "opacity" => "opacity",
+                        other => other,
+                    };
+                    crate::modifier_graph_view::open_modifier_graph_window(
+                        state_rclick.clone(),
+                        lid,
+                        path_str.to_string(),
+                        cx,
+                    );
+                }
             })
             .on_scroll_wheel(move |event, _window, cx| {
                 let dy = match event.delta {
@@ -12581,10 +12605,13 @@ fn timeline_scrub(
             .into_any_element(),
         _ => {
             let panel_down = panel_entity.clone();
+            let panel_rclick = panel_entity.clone();
             let state_wheel = state.clone();
             let state_fast = state.clone();
             let lid_down = layer_id.clone();
             let key_down = value_key.clone();
+            let lid_rclick = layer_id.clone();
+            let key_rclick = value_key.clone();
             let lid_wheel = layer_id.clone();
             let key_wheel = value_key.clone();
             div()
@@ -12617,6 +12644,30 @@ fn timeline_scrub(
                     state_fast.update(cx, |s, cx| {
                         s.checkpoint();
                         s.preview_fast = true;
+                        cx.notify();
+                    });
+                })
+                .on_mouse_down(MouseButton::Right, move |event, _window, cx| {
+                    let pos = event.position;
+                    let prop_path_static: &'static str = match key_rclick.as_str() {
+                        "anchor_x" => "transform.anchor_point.x",
+                        "anchor_y" => "transform.anchor_point.y",
+                        "pos_x" => "transform.position.x",
+                        "pos_y" => "transform.position.y",
+                        "scale_x" => "transform.scale.x",
+                        "scale_y" => "transform.scale.y",
+                        "rotation" => "transform.rotation",
+                        "opacity" => "opacity",
+                        _ => "transform.position",
+                    };
+                    panel_rclick.update(cx, |this, cx| {
+                        this.open_context_menu(
+                            ContextMenuTarget::Property {
+                                layer_id: lid_rclick.clone(),
+                                prop_path: prop_path_static,
+                            },
+                            pos,
+                        );
                         cx.notify();
                     });
                 })
@@ -17203,6 +17254,91 @@ impl Render for TimelinePanel {
                             })
                             .child("Toggle Stopwatch Animation"),
                     );
+
+                    let s3 = s_menu.clone();
+                    let p3 = p_close.clone();
+                    let l3 = lid.clone();
+                    menu_items = menu_items.child(
+                        div()
+                            .id("timeline_ctx_modifier_graph")
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                crate::modifier_graph_view::open_modifier_graph_window(
+                                    s3.clone(),
+                                    l3.clone(),
+                                    path.to_string(),
+                                    cx,
+                                );
+                                p3.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    cx.notify();
+                                });
+                            })
+                            .child("Modifier Graph..."),
+                    );
+
+                    if path == "transform.position" || path == "transform.scale" || path == "transform.anchor_point" {
+                        let s_x = s_menu.clone();
+                        let p_x = p_close.clone();
+                        let l_x = lid.clone();
+                        let path_x = format!("{path}.x");
+                        menu_items = menu_items.child(
+                            div()
+                                .id(SharedString::from(format!("timeline_ctx_modifier_graph_x_{path}")))
+                                .cursor_pointer()
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .text_xs()
+                                .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                    crate::modifier_graph_view::open_modifier_graph_window(
+                                        s_x.clone(),
+                                        l_x.clone(),
+                                        path_x.clone(),
+                                        cx,
+                                    );
+                                    p_x.update(cx, |this, cx| {
+                                        this.close_context_menu();
+                                        cx.notify();
+                                    });
+                                })
+                                .child("Modifier Graph (X)..."),
+                        );
+
+                        let s_y = s_menu.clone();
+                        let p_y = p_close.clone();
+                        let l_y = lid.clone();
+                        let path_y = format!("{path}.y");
+                        menu_items = menu_items.child(
+                            div()
+                                .id(SharedString::from(format!("timeline_ctx_modifier_graph_y_{path}")))
+                                .cursor_pointer()
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .text_xs()
+                                .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                    crate::modifier_graph_view::open_modifier_graph_window(
+                                        s_y.clone(),
+                                        l_y.clone(),
+                                        path_y.clone(),
+                                        cx,
+                                    );
+                                    p_y.update(cx, |this, cx| {
+                                        this.close_context_menu();
+                                        cx.notify();
+                                    });
+                                })
+                                .child("Modifier Graph (Y)..."),
+                        );
+                    }
                 }
                 ContextMenuTarget::Mask { layer_id, mask_id } => {
                     let lid = layer_id.clone();

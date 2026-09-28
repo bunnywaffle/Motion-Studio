@@ -632,7 +632,56 @@ impl TransformResolver {
             HashMap::with_capacity(eval_order.len());
 
         for node in eval_order {
-            let (anchor, position, scale, rotation) = node.transform.evaluate_at(time);
+            let (mut anchor, mut position, mut scale, mut rotation) = node.transform.evaluate_at(time);
+
+            if !node.modifier_graphs.is_empty() {
+                let factor = node.progression_factor(time);
+                if let Some(mg) = node
+                    .modifier_graphs
+                    .get("transform.anchor_point.x")
+                    .or_else(|| node.modifier_graphs.get("transform.anchor_point"))
+                {
+                    anchor.x = mg.evaluate(anchor.x, factor);
+                }
+                if let Some(mg) = node
+                    .modifier_graphs
+                    .get("transform.anchor_point.y")
+                    .or_else(|| node.modifier_graphs.get("transform.anchor_point"))
+                {
+                    anchor.y = mg.evaluate(anchor.y, factor);
+                }
+                if let Some(mg) = node
+                    .modifier_graphs
+                    .get("transform.position.x")
+                    .or_else(|| node.modifier_graphs.get("transform.position"))
+                {
+                    position.x = mg.evaluate(position.x, factor);
+                }
+                if let Some(mg) = node
+                    .modifier_graphs
+                    .get("transform.position.y")
+                    .or_else(|| node.modifier_graphs.get("transform.position"))
+                {
+                    position.y = mg.evaluate(position.y, factor);
+                }
+                if let Some(mg) = node
+                    .modifier_graphs
+                    .get("transform.scale.x")
+                    .or_else(|| node.modifier_graphs.get("transform.scale"))
+                {
+                    scale.x = mg.evaluate(scale.x, factor);
+                }
+                if let Some(mg) = node
+                    .modifier_graphs
+                    .get("transform.scale.y")
+                    .or_else(|| node.modifier_graphs.get("transform.scale"))
+                {
+                    scale.y = mg.evaluate(scale.y, factor);
+                }
+                if let Some(mg) = node.modifier_graphs.get("transform.rotation") {
+                    rotation = mg.evaluate(rotation, factor);
+                }
+            }
 
             let local_matrix =
                 AffineTransform2D::from_transform_components(position, scale, rotation, anchor);

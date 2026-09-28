@@ -29,6 +29,7 @@ pub struct SceneNode {
     pub loop_mode: LoopMode,
     pub effects: Vec<Effect>,
     pub masks: Vec<Mask>,
+    pub modifier_graphs: std::collections::HashMap<String, project::ModifierGraph>,
 }
 
 impl SceneNode {
@@ -57,7 +58,17 @@ impl SceneNode {
             loop_mode: layer.loop_mode,
             effects: layer.effects.clone(),
             masks: layer.masks.clone(),
+            modifier_graphs: layer.modifier_graphs.clone(),
         }
+    }
+
+    /// Calculate the normalized progression factor ($0.0 \to 1.0$) of this node at a given timecode.
+    pub fn progression_factor(&self, current_time: &TimeCode) -> f32 {
+        let in_s = self.in_point.seconds();
+        let out_s = self.out_point.seconds();
+        let cur_s = current_time.seconds();
+        let span = (out_s - in_s).max(1e-6);
+        ((cur_s - in_s) / span).clamp(0.0, 1.0) as f32
     }
 
     /// Check if this node is active at the specified timecode (in_point <= time < out_point).

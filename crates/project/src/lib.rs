@@ -11,6 +11,7 @@ pub mod layer;
 pub mod marker;
 pub mod mask;
 pub mod matte;
+pub mod modifier;
 pub mod ofx;
 pub mod path;
 pub mod project;
@@ -43,6 +44,7 @@ pub use layer::{FillGradient, GradientStop, Layer, LayerSource, ShapeType, TextA
 pub use marker::Marker;
 pub use mask::{Mask, MaskMode, MaskShapeKind};
 pub use matte::TrackMatteMode;
+pub use modifier::{MathOp, ModifierGraph, ModifierNode, NodeConnection, NodeKind, WaveType};
 pub use ofx::{ofx_in_category, ofx_lookup, OfxCategory, OfxEffectDescriptor, OfxParamDescriptor, OFX_SUITE};
 pub use path::{Path, PathBooleanOp, PathPoint, PathPointKind};
 pub use trace::{AutoTraceOptions, TraceChannel, TraceRange, TracedContour};

@@ -1406,7 +1406,13 @@ impl LayerStackEvaluator {
 
             let is_visible = is_active && node.visible && solo_eligible;
 
-            let local_opacity = node.opacity.evaluate_at(time).clamp(0.0, 100.0);
+            let base_opacity = node.opacity.evaluate_at(time);
+            let local_opacity = if let Some(mg) = node.modifier_graphs.get("opacity") {
+                let factor = node.progression_factor(time);
+                mg.evaluate(base_opacity, factor).clamp(0.0, 100.0)
+            } else {
+                base_opacity.clamp(0.0, 100.0)
+            };
             let effective_opacity = if is_visible {
                 local_opacity / 100.0
             } else {
