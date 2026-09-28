@@ -122,6 +122,10 @@ static GPU_ENGINE: OnceLock<Mutex<Option<GpuEffectEngine>>> = OnceLock::new();
 fn get_gpu_engine() -> &'static Mutex<Option<GpuEffectEngine>> {
     GPU_ENGINE.get_or_init(|| {
         let engine = GpuContext::new_headless().ok().and_then(|gpu| GpuEffectEngine::new(gpu).ok());
+        // Software-emulated adapters are far slower than the CPU kernel
+        // (submit + readback stall dominates every call): only keep real
+        // hardware for the blur fast path.
+        let engine = engine.filter(|e| e.is_hardware());
         Mutex::new(engine)
     })
 }
@@ -134,21 +138,25 @@ pub fn blur_buffer(buf: &mut FloatBuf, radius_px: f32) {
     if radius_px < 0.5 || buf.w == 0 || buf.h == 0 {
         return;
     }
-    // Attempt GPU compute blur
-    if let Ok(mut lock) = get_gpu_engine().lock() {
-        if let Some(engine) = lock.as_mut() {
-            let bytes = buf.to_rgba8();
-            if let Ok(out_rgba) = engine.blur_rgba(&bytes, buf.w, buf.h, radius_px) {
-                for (i, p) in buf.px.iter_mut().enumerate() {
-                    let a = out_rgba[i * 4 + 3] as f32 / 255.0;
-                    *p = Px {
-                        r: out_rgba[i * 4] as f32 / 255.0 * a,
-                        g: out_rgba[i * 4 + 1] as f32 / 255.0 * a,
-                        b: out_rgba[i * 4 + 2] as f32 / 255.0 * a,
-                        a,
-                    };
+    // Attempt GPU compute blur (its shader apron covers radii up to 8;
+    // wider radii silently clamp there, so they take the CPU kernel which
+    // honors the full radius and matches across machines).
+    if radius_px <= 8.0 {
+        if let Ok(mut lock) = get_gpu_engine().lock() {
+            if let Some(engine) = lock.as_mut() {
+                let bytes = buf.to_rgba8();
+                if let Ok(out_rgba) = engine.blur_rgba(&bytes, buf.w, buf.h, radius_px) {
+                    for (i, p) in buf.px.iter_mut().enumerate() {
+                        let a = out_rgba[i * 4 + 3] as f32 / 255.0;
+                        *p = Px {
+                            r: out_rgba[i * 4] as f32 / 255.0 * a,
+                            g: out_rgba[i * 4 + 1] as f32 / 255.0 * a,
+                            b: out_rgba[i * 4 + 2] as f32 / 255.0 * a,
+                            a,
+                        };
+                    }
+                    return;
                 }
-                return;
             }
         }
     }

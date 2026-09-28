@@ -149,6 +149,7 @@ where
 /// Viewport gizmo handle dot, centered on canvas-space `(x, y)`.
 /// Note: no `.test_support()` wrapper here — it would hide the concrete
 /// `Stateful<Div>` type that callers extend with children and handlers.
+/// Call sites add `.test_support()` to their finished chains instead.
 fn gizmo_dot(id: String, x: f32, y: f32, size: f32, fill: Rgba, border: Rgba, round: bool) -> Stateful<Div> {
     let mut d = div()
         .id(SharedString::from(id))
@@ -2531,20 +2532,12 @@ impl Render for CompositionViewerPanel {
                         _ => (400.0, 300.0),
                     };
 
-                    // World box from the layer's local content box. Pen/path
-                    // shapes use their raster frame (arbitrary local coords),
-                    // everything else spans (0, 0, base).
-                    let bbox = match &layer.source {
-                        LayerSource::Shape {
-                            shape_type: ShapeType::Path { path_data, .. },
-                        } => match project::Path::from_svg(path_data).frame(8.0) {
-                            Some((origin, size)) => layer.local_to_world_bbox(
-                                &compositor::BoundingBox2D::from_origin_size(origin, size),
-                            ),
-                            None => layer.world_bounds(base_w, base_h),
-                        },
-                        _ => layer.world_bounds(base_w, base_h),
-                    };
+                    // World box from the shared origin-aware local content
+                    // box (same helper as the rasterizer and gizmo, so
+                    // pixels, hit areas and handles always agree).
+                    let bbox = layer.local_to_world_bbox(
+                        &crate::raster::layer_local_box(layer, base_w, base_h),
+                    );
                     let l_x = (bbox.min.x + comp_w / 2.0) * scale_x;
                     let l_y = (bbox.min.y + comp_h / 2.0) * scale_y;
                     let l_w = ((bbox.max.x - bbox.min.x) * scale_x).max(2.0);
@@ -2962,10 +2955,14 @@ impl Render for CompositionViewerPanel {
                         };
                         // Window px -> composition px for drag starts.
                         let mid = |a: (f32, f32), b: (f32, f32)| ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0);
-                        let c00 = w2c(Vec2::new(0.0, 0.0));
-                        let c10 = w2c(Vec2::new(base_w, 0.0));
-                        let c11 = w2c(Vec2::new(base_w, base_h));
-                        let c01 = w2c(Vec2::new(0.0, base_h));
+                        // Gizmo corners from the shared origin-aware local
+                        // box (same helper as shell + rasterizer).
+                        let [g00, g10, g11, g01] =
+                            crate::raster::gizmo_local_corners(layer, base_w, base_h);
+                        let c00 = w2c(g00);
+                        let c10 = w2c(g10);
+                        let c11 = w2c(g11);
+                        let c01 = w2c(g01);
                         let anchor_l = layer.transform.anchor_point;
                         let anchor_c = w2c(anchor_l);
                         let accent = rgb(0x3b82f6);

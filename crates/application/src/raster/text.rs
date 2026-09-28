@@ -151,24 +151,47 @@ pub fn raster_text(spec: &TextSpec) -> (FloatBuf, (f32, f32, f32, f32)) {
         .stroke_gradient
         .as_ref()
         .map(|g| gradient_axis(buf.w as f32, buf.h as f32, g.angle));
+    // Outline: dilate the combined glyph alpha by the stroke width and
+    // fill the ring (dilated minus original) under the fill. A true
+    // dilation has exact width with no gaps or detachment, unlike stamped
+    // offset copies.
     if sw_px >= 1 {
-        let ring: [(i32, i32); 8] = [
-            (-sw_px, 0),
-            (sw_px, 0),
-            (0, -sw_px),
-            (0, sw_px),
-            (-sw_px, -sw_px),
-            (sw_px, -sw_px),
-            (-sw_px, sw_px),
-            (sw_px, sw_px),
-        ];
+        let white = Px { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+        let mut alpha = FloatBuf::clear(buf.w, buf.h);
         for g in &glyphs {
-            for (ox, oy) in ring {
-                match (&spec.stroke_gradient, stroke_axis) {
-                    (Some(grad), Some(axis)) => draw_mask_gradient(&mut buf, g, ox, oy, grad, axis),
-                    _ => draw_mask(&mut buf, g, ox, oy, spec.stroke_col),
-                }
+            draw_mask(&mut alpha, g, 0, 0, white);
+            if spec.weight >= 700 {
+                draw_mask(&mut alpha, g, 1, 0, white);
             }
+        }
+        let flat: Vec<f32> = alpha.px.iter().map(|p| p.a).collect();
+        let grown = super::mask::box_extremum(
+            &flat,
+            buf.w,
+            buf.h,
+            spec.stroke_w.clamp(1.0, 128.0),
+            true,
+        );
+        for (i, dst) in buf.px.iter_mut().enumerate() {
+            let ring = (grown[i] - flat[i]).clamp(0.0, 1.0);
+            if ring <= 0.003 {
+                continue;
+            }
+            let (x, y) = ((i as u32 % buf.w) as f32, (i as u32 / buf.w) as f32);
+            let p = match (&spec.stroke_gradient, stroke_axis) {
+                (Some(grad), Some(axis)) => {
+                    let c = sample_fill_gradient(grad, x + 0.5, y + 0.5, axis);
+                    Px::from_color_scaled(c, ring)
+                }
+                _ => {
+                    let mut p = spec.stroke_col;
+                    p.scale(ring);
+                    p
+                }
+            };
+            let mut out = *dst;
+            out.over(p);
+            *dst = out;
         }
     }
     // Fill + faux-bold second pass.
@@ -433,9 +456,32 @@ pub fn raster_text_on_path(
             }
         }
         if sw_px >= 1 {
-            let ring: [(i32, i32); 8] = [(-sw_px, 0), (sw_px, 0), (0, -sw_px), (0, sw_px), (-sw_px, -sw_px), (sw_px, -sw_px), (-sw_px, sw_px), (sw_px, sw_px)];
-            for (ox2, oy2) in ring {
-                draw_mask(&mut tmp, &shifted, ox2, oy2, glyph_stroke);
+            // Dilation outline in the temp buffer (same as straight text:
+            // exact width, no gaps or detachment).
+            let white = Px { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+            let mut alpha = FloatBuf::clear(tmp.w, tmp.h);
+            draw_mask(&mut alpha, &shifted, 0, 0, white);
+            if spec.weight >= 700 {
+                draw_mask(&mut alpha, &shifted, 1, 0, white);
+            }
+            let flat: Vec<f32> = alpha.px.iter().map(|p| p.a).collect();
+            let grown = super::mask::box_extremum(
+                &flat,
+                tmp.w,
+                tmp.h,
+                spec.stroke_w.clamp(1.0, 128.0),
+                true,
+            );
+            for (i, dst) in tmp.px.iter_mut().enumerate() {
+                let ring = (grown[i] - flat[i]).clamp(0.0, 1.0);
+                if ring <= 0.003 {
+                    continue;
+                }
+                let mut p = glyph_stroke;
+                p.scale(ring);
+                let mut out = *dst;
+                out.over(p);
+                *dst = out;
             }
         }
         draw_mask(&mut tmp, &shifted, 0, 0, glyph_fill);

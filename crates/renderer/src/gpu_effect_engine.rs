@@ -44,6 +44,17 @@ impl GpuEffectEngine {
         &self.gpu
     }
 
+    /// True when the engine runs on real hardware. Software-fallback
+    /// adapters emulate compute on the CPU with submit + readback stalls
+    /// that dwarf the native CPU kernel — callers must prefer the CPU
+    /// path when this is false.
+    pub fn is_hardware(&self) -> bool {
+        !matches!(
+            self.gpu.adapter_info().device_type,
+            wgpu::DeviceType::Cpu
+        )
+    }
+
     /// Ensure render targets match the given dimensions.
     fn ensure_targets(&mut self, width: u32, height: u32) -> Result<(), GpuError> {
         let needs_new = match &self.targets {

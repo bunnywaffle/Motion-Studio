@@ -35,7 +35,7 @@ pub use affine::{Aff, aff_apply, aff_invert, aff_mul, fold_transform, skew_about
 pub use buffer::{FloatBuf, blur_buffer};
 pub use comp::rasterize_comp;
 pub use effects::{RasterFx, apply_effect_pixels};
-pub use layer::{RasterEntry, decoded_asset, layer_cache_key, rasterize_layer};
+pub use layer::{RasterEntry, decoded_asset, gizmo_local_corners, layer_cache_key, layer_local_box, rasterize_layer};
 pub use mask::apply_masks;
 pub use pixel::Px;
 pub use stock::apply_stock;
@@ -138,6 +138,121 @@ mod tests {
         assert!(y0 < buf.h as f32 * 0.6, "ink top {y0} of {}", buf.h);
         assert!(x0 < buf.w as f32 * 0.4, "ink left {x0}");
         let _ = (x0, y0, x1, y1);
+    }
+
+    #[test]
+    fn text_outline_touches_fill_without_moat() {
+        // "H" at 48px with a wide red outline over a white fill: every
+        // pixel within 2px of fill ink must be covered (the outline must
+        // touch the fill instead of floating detached with a clear moat).
+        let spec = TextSpec {
+            text: "H",
+            family: "Arial",
+            size: 48.0,
+            fill: Px { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+            fill_gradient: None,
+            weight: 700,
+            italic: false,
+            tracking: 0.0,
+            leading: 0.0,
+            align: TextAlign::Left,
+            all_caps: false,
+            stroke_w: 10.0,
+            stroke_col: Px { r: 1.0, g: 0.0, b: 0.0, a: 1.0 },
+            stroke_gradient: None,
+            baseline_shift: 0.0,
+            box_w: 0.0,
+            bevel: None,
+        };
+        let (buf, _) = raster_text(&spec);
+        let (w, h) = (buf.w as usize, buf.h as usize);
+        let at = |x: isize, y: isize| -> f32 {
+            if x < 0 || y < 0 || x >= w as isize || y >= h as isize {
+                0.0
+            } else {
+                buf.px[y as usize * w + x as usize].a
+            }
+        };
+        let is_fill = |x: isize, y: isize| -> bool {
+            if x < 0 || y < 0 || x >= w as isize || y >= h as isize {
+                return false;
+            }
+            let p = buf.px[y as usize * w + x as usize];
+            p.a > 0.5 && p.g > 0.5
+        };
+        // Dilate the fill mask by 2px (3x3 max, twice).
+        let mut band = vec![false; w * h];
+        for y in 0..h as isize {
+            for x in 0..w as isize {
+                'outer: for r in 1..=2 {
+                    for dy in -(r)..=r {
+                        for dx in -(r)..=r {
+                            if is_fill(x + dx, y + dy) {
+                                band[y as usize * w + x as usize] = true;
+                                break 'outer;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Outline pixels are red-dominant; count them (must exist).
+        let mut outline = 0usize;
+        let mut moat = 0usize;
+        for y in 0..h as isize {
+            for x in 0..w as isize {
+                let p = buf.px[y as usize * w + x as usize];
+                let is_outline = p.a > 0.1 && p.r > 0.5 && p.g < 0.5;
+                if is_outline {
+                    outline += 1;
+                }
+                // Band pixel that is neither fill nor covered = moat hole.
+                if band[y as usize * w + x as usize] && !is_fill(x, y) && at(x, y) < 0.1 {
+                    moat += 1;
+                }
+            }
+        }
+        assert!(outline > 50, "wide outline must leave pixels, got {outline}");
+        assert_eq!(moat, 0, "outline must touch the fill (no transparent moat)");
+    }
+
+    #[test]
+    fn text_outline_thickness_scales_with_width() {
+        // Same glyph at stroke 2 vs 10: the dilated ring area must grow
+        // substantially (a stamped ring keeps near-constant area).
+        fn outline_count(stroke_w: f32) -> usize {
+            let spec = TextSpec {
+                text: "O",
+                family: "Arial",
+                size: 64.0,
+                fill: Px { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+                fill_gradient: None,
+                weight: 400,
+                italic: false,
+                tracking: 0.0,
+                leading: 0.0,
+                align: TextAlign::Left,
+                all_caps: false,
+                stroke_w,
+                stroke_col: Px { r: 1.0, g: 0.0, b: 0.0, a: 1.0 },
+                stroke_gradient: None,
+                baseline_shift: 0.0,
+                box_w: 0.0,
+                bevel: None,
+            };
+            let (buf, _) = raster_text(&spec);
+            buf.px
+                .iter()
+                .filter(|p| p.a > 0.1 && p.r > 0.5 && p.g < 0.5)
+                .count()
+        }
+        let thin = outline_count(2.0);
+        let thick = outline_count(10.0);
+        assert!(thin > 20, "thin outline exists, got {thin}");
+        assert!(
+            thick as f32 > thin as f32 * 2.0,
+            "outline must grow with width: thin={thin} thick={thick}"
+        );
     }
 
     #[test]

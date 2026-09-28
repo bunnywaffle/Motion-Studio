@@ -6246,6 +6246,61 @@ mod tests {
         );
     }
 
+    #[gpui_kit::test]
+    fn test_masked_layer_shell_presents_content(cx: &mut TestAppContext) {
+        // Viewport shell path for a masked layer: the raster cache entry
+        // must exist, hold ink, and average to the layer color (no black
+        // wipe), and the shell must present an image.
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        let lid = app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                let lid = s
+                    .add_solid_layer(
+                        "Masked Solid",
+                        project::Color::from_rgb_u8(200, 100, 50),
+                        400,
+                        400,
+                    )
+                    .unwrap();
+                s.select_layer(Some(lid.clone()));
+                let _ = s.add_mask_path_to_layer(
+                    &lid,
+                    "M",
+                    project::Path::rectangle(50.0, 50.0, 300.0, 300.0),
+                );
+                cx.notify();
+                lid
+            })
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find(SharedString::from(format!("canvas_layer_{lid}"))).visible());
+        })
+        .expect("update_window failed");
+        let entry = app_view.read_with(cx, |view, cx| {
+            view.panels().viewer.read(cx).raster_cache.get(&lid).cloned()
+        });
+        let entry = entry.expect("raster cache entry for masked layer");
+        let ink = entry.bgra.chunks_exact(4).filter(|c| c[3] > 10).count();
+        assert!(ink > 1000, "masked shell must hold visible ink, got {ink}");
+        // Average trends toward the solid color, not black.
+        assert!(
+            entry.avg.r > 0.4 && entry.avg.g > 0.15,
+            "masked average {:?}",
+            entry.avg
+        );
+    }
+
     #[test]
     fn test_timeline_scrubbing_and_seek() {
         use crate::state::EditorState;

@@ -820,7 +820,32 @@ pub fn rasterize_layer(
     // shapes alpha before any effect sees pixels). On framed (path) layers
     // the work buffer is frame-relative, so mask paths shift by `-origin`.
     let mut work = content;
-    if frame_ox != 0.0 || frame_oy != 0.0 {
+    // Fast preview (playback/gestures): evaluate shaped masks at output
+    // res with radii scaled by the output/work ratio, then upscale the
+    // smooth coverage — full-res filtering per frame is what stalls mask
+    // drags and feathered playback. Idle keeps the exact work-space path.
+    let out_scale =
+        ((ow as f32 / work.w.max(1) as f32) + (oh as f32 / work.h.max(1) as f32)) * 0.5;
+    if playing && out_scale < 0.75 && !layer.masks.is_empty() {
+        let wm = layer.world_matrix();
+        // Work px -> output px (pre-effect base map; masks apply before
+        // effects, so perspective/stock folds stay out of it).
+        let base = AffineTransform2D {
+            a: wm.a * kx,
+            b: wm.b * ky,
+            c: wm.c * kx,
+            d: wm.d * ky,
+            tx: ((wm.a * frame_ox + wm.c * frame_oy + wm.tx) - bbox.min.x) * kx,
+            ty: ((wm.b * frame_ox + wm.d * frame_oy + wm.ty) - bbox.min.y) * ky,
+        };
+        let shift = AffineTransform2D::from_translation(Vec2::new(-frame_ox, -frame_oy));
+        let space = base * shift;
+        if let Some(cov) =
+            crate::raster::mask::evaluate_mask_coverage_mapped(ow, oh, &layer.masks, &space, out_scale)
+        {
+            crate::raster::mask::apply_scaled_coverage(&mut work, &cov, ow, oh);
+        }
+    } else if frame_ox != 0.0 || frame_oy != 0.0 {
         let shift = AffineTransform2D::from_translation(Vec2::new(-frame_ox, -frame_oy));
         let shifted_masks: Vec<compositor::EvaluatedMask> = layer
             .masks
@@ -1071,8 +1096,10 @@ pub(crate) fn path_frame(path_data: &str) -> (Vec2, f32, f32) {
 }
 
 /// Local content box for a layer: path shapes use their raster frame,
-/// everything else spans `(0, 0, base_w, base_h)`.
-pub(crate) fn layer_local_box(layer: &EvaluatedLayer, base_w: f32, base_h: f32) -> BoundingBox2D {
+/// everything else spans `(0, 0, base_w, base_h)`. Shared by the rasterizer,
+/// the viewer shells and the transform gizmo so pixels, hit areas and
+/// handles always agree (pen paths live in arbitrary local coords).
+pub fn layer_local_box(layer: &EvaluatedLayer, base_w: f32, base_h: f32) -> BoundingBox2D {
     match &layer.source {
         LayerSource::Shape { shape_type: ShapeType::Path { path_data, .. } } => {
             let (origin, w, h) = path_frame(path_data);
@@ -1080,6 +1107,20 @@ pub(crate) fn layer_local_box(layer: &EvaluatedLayer, base_w: f32, base_h: f32) 
         }
         _ => BoundingBox2D::from_origin_size(Vec2::ZERO, Vec2::new(base_w, base_h)),
     }
+}
+
+/// Gizmo corner handles in layer-local coords: the corners of the
+/// origin-aware content box (pen paths live at the frame origin, not
+/// `(0, 0)`). The viewer maps these through the world matrix, so handles
+/// sit on the shell box for every layer kind.
+pub fn gizmo_local_corners(layer: &EvaluatedLayer, base_w: f32, base_h: f32) -> [Vec2; 4] {
+    let b = layer_local_box(layer, base_w, base_h);
+    [
+        Vec2::new(b.min.x, b.min.y),
+        Vec2::new(b.max.x, b.min.y),
+        Vec2::new(b.max.x, b.max.y),
+        Vec2::new(b.min.x, b.max.y),
+    ]
 }
 
 pub(crate) fn layer_base_dims(
@@ -1369,6 +1410,26 @@ mod tests {
     }
 
     #[test]
+    fn gizmo_corners_use_frame_origin_for_paths() {
+        // Pen path in negative coords: gizmo corners must sit on the frame
+        // origin box (same box the shell and rasterizer use), not (0, 0).
+        let (project, comp_id) = path_project();
+        let layer = eval_first(&project, &comp_id);
+        let (base_w, base_h) = (216.0, 126.0);
+        let corners = gizmo_local_corners(&layer, base_w, base_h);
+        let frame = layer_local_box(&layer, base_w, base_h);
+        assert!(frame.min.x < 0.0 && frame.min.y < 0.0, "{frame:?}");
+        assert_eq!(corners[0], frame.min);
+        assert_eq!(corners[2], frame.max);
+        // Solid layers keep the classic (0, 0, base) box.
+        let (project, comp_id) = solid_layer();
+        let layer = eval_first(&project, &comp_id);
+        let corners = gizmo_local_corners(&layer, 100.0, 100.0);
+        assert_eq!(corners[0], project::Vec2::new(0.0, 0.0));
+        assert_eq!(corners[2], project::Vec2::new(100.0, 100.0));
+    }
+
+    #[test]
     fn path_frame_raster_covers_negative_coords() {
         use std::collections::HashMap;
         let (project, comp_id) = path_project();
@@ -1443,5 +1504,207 @@ mod tests {
         let mut d = dst.px[0];
         d.blend_over_at(src, BlendMode::Multiply, 0, 0);
         assert!((d.r - 1.0).abs() < 1e-4 && d.g.abs() < 1e-4 && d.b.abs() < 1e-4);
+    }
+
+    fn masked_solid_project(mode: project::MaskMode, invert: bool) -> (Project, String) {
+        let mut project = Project::new("p", "P");
+        let mut comp = Composition::hd_1080p_30fps("c", "C", 5.0);
+        let tc = TimeCode::from_frames(0, 30.0);
+        let out = TimeCode::from_frames(150, 30.0);
+        let mut layer = project::Layer::solid("l1", "L", Color::WHITE, 100, 100, tc, out);
+        let mut mask = project::Mask::with_path(
+            "m1",
+            "M",
+            project::Path::rectangle(0.0, 0.0, 50.0, 100.0),
+        );
+        mask.mode = mode;
+        mask.invert = invert;
+        layer.masks.push(mask);
+        comp.add_layer(layer).unwrap();
+        project.add_composition(comp).unwrap();
+        (project, "c".to_string())
+    }
+
+    fn rasterize_l1(project: &Project, comp_id: &str) -> (FloatBuf, bool) {
+        use std::collections::HashMap;
+        let layer = eval_first(project, comp_id);
+        let assets: HashMap<String, std::sync::Arc<image::RgbaImage>> = HashMap::new();
+        let (buf, _avg, empty) = rasterize_layer(
+            &layer, 100.0, 100.0, 100, 100, 1920.0, 1080.0, Color::BLACK, None, 0.0, 0,
+            false, 5.0, &assets,
+        );
+        (buf, empty)
+    }
+
+    #[test]
+    fn masked_solid_add_keeps_inside_transparent_outside() {
+        let (project, comp_id) = masked_solid_project(project::MaskMode::Add, false);
+        let (buf, empty) = rasterize_l1(&project, &comp_id);
+        assert!(!empty, "masked solid must hold ink");
+        // Inside the mask (left half): opaque white.
+        let inside = buf.get(25, 50);
+        assert!(inside.a > 0.9 && inside.r > 0.9, "{inside:?}");
+        // Outside the mask (right half): transparent (no black-opaque artifact).
+        assert!(buf.get(75, 50).a < 0.01, "{:?}", buf.get(75, 50));
+        // Every surviving pixel is white: no black artifacts anywhere.
+        for p in buf.px.iter().filter(|p| p.a > 0.5) {
+            assert!(p.r > 0.9 && p.g > 0.9 && p.b > 0.9, "{p:?}");
+        }
+    }
+
+    #[test]
+    fn masked_solid_subtract_and_invert_mirror() {
+        let (project, comp_id) = masked_solid_project(project::MaskMode::Subtract, false);
+        let (buf, empty) = rasterize_l1(&project, &comp_id);
+        assert!(!empty);
+        assert!(buf.get(25, 50).a < 0.01, "subtracted interior must clear");
+        assert!(buf.get(75, 50).a > 0.9, "subtracted exterior must stay");
+        for p in buf.px.iter().filter(|p| p.a > 0.5) {
+            assert!(p.r > 0.9 && p.g > 0.9 && p.b > 0.9, "{p:?}");
+        }
+        let (project, comp_id) = masked_solid_project(project::MaskMode::Add, true);
+        let (buf, _) = rasterize_l1(&project, &comp_id);
+        assert!(buf.get(25, 50).a < 0.01, "inverted interior must clear");
+        assert!(buf.get(75, 50).a > 0.9, "inverted exterior must stay");
+    }
+
+    fn masked_solid_shaped_project(feather: f32, expansion: f32, opacity: f32) -> (Project, String) {
+        let mut project = Project::new("p", "P");
+        let mut comp = Composition::hd_1080p_30fps("c", "C", 5.0);
+        let tc = TimeCode::from_frames(0, 30.0);
+        let out = TimeCode::from_frames(150, 30.0);
+        let mut layer = project::Layer::solid("l1", "L", Color::WHITE, 100, 100, tc, out);
+        let mut mask = project::Mask::with_path(
+            "m1",
+            "M",
+            project::Path::rectangle(10.0, 10.0, 80.0, 80.0),
+        );
+        mask.feather.set_value(feather);
+        mask.expansion.set_value(expansion);
+        mask.opacity.set_value(opacity);
+        layer.masks.push(mask);
+        comp.add_layer(layer).unwrap();
+        project.add_composition(comp).unwrap();
+        (project, "c".to_string())
+    }
+
+    #[test]
+    fn masked_text_and_shape_hold_ink() {
+        use std::collections::HashMap;
+        // Text layer with a wide Add mask: some glyph ink must survive, and
+        // surviving ink must keep the fill color (no black artifacts).
+        let mut project = Project::new("p", "P");
+        let mut comp = Composition::hd_1080p_30fps("c", "C", 5.0);
+        let tc = TimeCode::from_frames(0, 30.0);
+        let out = TimeCode::from_frames(150, 30.0);
+        let mut text = project::Layer::text(
+            "l1", "T", "Hello World", "Arial", 48.0, Color::WHITE, tc, out,
+        );
+        text.masks.push(project::Mask::with_path(
+            "m1",
+            "M",
+            project::Path::rectangle(-1000.0, -1000.0, 2000.0, 2000.0),
+        ));
+        comp.add_layer(text).unwrap();
+        project.add_composition(comp).unwrap();
+        let layer = eval_first(&project, "c");
+        let assets: HashMap<String, std::sync::Arc<image::RgbaImage>> = HashMap::new();
+        let (base_w, base_h) = layer_base_dims(&layer, 1920.0, 1080.0, &assets);
+        let (buf, _avg, empty) = rasterize_layer(
+            &layer, base_w, base_h, 64, 32, 1920.0, 1080.0, Color::BLACK, None, 0.0, 0,
+            false, 5.0, &assets,
+        );
+        assert!(!empty, "masked text must hold ink");
+        let ink = buf.px.iter().filter(|p| p.a > 0.5).count();
+        assert!(ink > 20, "masked text keeps glyph ink, got {ink}");
+        for p in buf.px.iter().filter(|p| p.a > 0.5) {
+            let (r, g, b) = (p.r / p.a, p.g / p.a, p.b / p.a);
+            assert!(r > 0.9 && g > 0.9 && b > 0.9, "text ink stays white: {p:?}");
+        }
+    }
+
+    #[test]
+    fn tiny_mask_does_not_mark_layer_empty() {
+        // A small but visible mask must still present the layer shell.
+        use std::collections::HashMap;
+        let mut project = Project::new("p", "P");
+        let mut comp = Composition::hd_1080p_30fps("c", "C", 5.0);
+        let tc = TimeCode::from_frames(0, 30.0);
+        let out = TimeCode::from_frames(150, 30.0);
+        let mut layer = project::Layer::solid("l1", "L", Color::WHITE, 1920, 1080, tc, out);
+        layer.masks.push(project::Mask::with_path(
+            "m1",
+            "M",
+            project::Path::rectangle(900.0, 500.0, 120.0, 80.0),
+        ));
+        comp.add_layer(layer).unwrap();
+        project.add_composition(comp).unwrap();
+        let layer = eval_first(&project, "c");
+        let assets: HashMap<String, std::sync::Arc<image::RgbaImage>> = HashMap::new();
+        let (buf, _avg, empty) = rasterize_layer(
+            &layer, 1920.0, 1080.0, 480, 270, 1920.0, 1080.0, Color::BLACK, None, 0.0, 0,
+            false, 5.0, &assets,
+        );
+        let ink = buf.px.iter().filter(|p| p.a > 0.05).count();
+        assert!(ink > 100, "small mask keeps visible ink, got {ink}");
+        assert!(!empty, "small mask must not mark the layer empty");
+    }
+
+    #[test]
+    fn masked_blend_over_backdrop_stays_clean() {
+        // Add-masked exotic blend over a solid backdrop buffer.
+        use project::BlendMode;
+        let mut project = Project::new("p", "P");
+        let mut comp = Composition::hd_1080p_30fps("c", "C", 5.0);
+        let tc = TimeCode::from_frames(0, 30.0);
+        let out = TimeCode::from_frames(150, 30.0);
+        let mut top = project::Layer::solid("l1", "L", Color::rgb(1.0, 0.0, 0.0), 100, 100, tc, out);
+        top.blend_mode = BlendMode::Multiply;
+        top.masks.push(project::Mask::with_path(
+            "m1",
+            "M",
+            project::Path::rectangle(0.0, 0.0, 50.0, 100.0),
+        ));
+        comp.add_layer(top).unwrap();
+        project.add_composition(comp).unwrap();
+        let layer = eval_first(&project, "c");
+        let assets: HashMap<String, std::sync::Arc<image::RgbaImage>> = HashMap::new();
+        let mut bg = FloatBuf::clear(100, 100);
+        for p in bg.px.iter_mut() {
+            *p = Px::from_color(Color::WHITE);
+        }
+        let (buf, _avg, empty) = rasterize_layer(
+            &layer, 100.0, 100.0, 100, 100, 1920.0, 1080.0, Color::WHITE, Some(&bg), 0.0, 0,
+            false, 5.0, &assets,
+        );
+        assert!(!empty);
+        // Masked half: multiply red over white = red, opaque.
+        let inside = buf.get(25, 50);
+        assert!(inside.a > 0.9 && inside.r > 0.9 && inside.g < 0.1, "{inside:?}");
+        // Unmasked half: transparent (shows backdrop through the shell).
+        assert!(buf.get(75, 50).a < 0.01, "{:?}", buf.get(75, 50));
+    }
+
+    #[test]
+    fn masked_solid_feather_expansion_opacity_stay_clean() {
+        for (feather, expansion, opacity) in [(8.0, 0.0, 100.0), (0.0, 6.0, 100.0), (0.0, 0.0, 50.0), (6.0, 4.0, 80.0)] {
+            let (project, comp_id) = masked_solid_shaped_project(feather, expansion, opacity);
+            let (buf, empty) = rasterize_l1(&project, &comp_id);
+            assert!(!empty, "shaped mask f={feather} e={expansion} o={opacity} must hold ink");
+            // Deep interior survives shaping.
+            let center = buf.get(50, 50);
+            assert!(center.a > 0.3, "center f={feather} e={expansion} o={opacity}: {center:?}");
+            // Far exterior stays clear.
+            assert!(buf.get(2, 2).a < 0.01, "corner must stay clear");
+            // No black-opaque artifacts anywhere (compare straight colors:
+            // premultiplied edge pixels are legitimately gray).
+            for p in buf.px.iter().filter(|p| p.a > 0.5) {
+                let (r, g, b) = (p.r / p.a, p.g / p.a, p.b / p.a);
+                assert!(
+                    r > 0.9 && g > 0.9 && b > 0.9,
+                    "f={feather} e={expansion} o={opacity}: {p:?}"
+                );
+            }
+        }
     }
 }
