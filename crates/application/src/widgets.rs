@@ -396,6 +396,7 @@ pub(crate) fn gradient_editor(
     let mut wrap = div().relative().child(bar);
     // Movable stop diamonds, centered on their offsets.
     for (i, stop) in stops.iter().enumerate() {
+        let stop_offset = stop.offset;
         let p_sel = panel.clone();
         let s_down = state.clone();
         let s_del = state.clone();
@@ -441,6 +442,7 @@ pub(crate) fn gradient_editor(
                             target: target_sel.clone(),
                             index: i,
                             moved: false,
+                            last_t: stop_offset,
                         });
                         cx.notify();
                     });

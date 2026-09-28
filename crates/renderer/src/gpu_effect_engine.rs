@@ -24,6 +24,18 @@ pub struct GpuEffectEngine {
     targets: Option<DoubleBufferedTarget>,
     intermediate_target: Option<RenderTarget>,
     fx_pass_cache: std::collections::HashMap<StockPlugin, FxPass>,
+    /// Pooled readback staging buffer (avoids a GPU buffer alloc + destroy
+    /// on every blur/readback call; recreated only when dims change).
+    readback: Option<PooledReadback>,
+}
+
+/// Reusable MAP_READ staging buffer for texture readbacks.
+struct PooledReadback {
+    buf: wgpu::Buffer,
+    /// Padded bytes-per-row the buffer was created for.
+    padded_bpr: u32,
+    /// Height (rows) the buffer was created for.
+    height: u32,
 }
 
 impl GpuEffectEngine {
@@ -36,6 +48,7 @@ impl GpuEffectEngine {
             targets: None,
             intermediate_target: None,
             fx_pass_cache: std::collections::HashMap::new(),
+            readback: None,
         })
     }
 
@@ -78,6 +91,81 @@ impl GpuEffectEngine {
             self.fx_pass_cache.insert(plugin, pass);
         }
         Ok(&self.fx_pass_cache[&plugin])
+    }
+
+    /// Read a render target back reusing the pooled staging buffer
+    /// (recreated only when dims change): steady frames perform zero GPU
+    /// buffer allocations on readback.
+    fn read_pooled(
+        pool: &mut Option<PooledReadback>,
+        gpu: &GpuContext,
+        target: &RenderTarget,
+    ) -> Result<Vec<u8>, GpuError> {
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let unpadded = target.width() * 4;
+        let padded = unpadded.div_ceil(align) * align;
+        let height = target.height();
+        let need = (padded * height) as u64;
+        let reuse = matches!(pool, Some(r) if r.padded_bpr == padded && r.height == height);
+        if !reuse {
+            *pool = Some(PooledReadback {
+                buf: gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Pooled Readback Staging Buffer"),
+                    size: need,
+                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }),
+                padded_bpr: padded,
+                height,
+            });
+        }
+        let staging = &pool.as_ref().expect("pool just created").buf;
+        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Pooled Readback Encoder"),
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: target.texture(),
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width: target.width(),
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        gpu.queue.submit(std::iter::once(encoder.finish()));
+        let slice = staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        gpu.device.poll(wgpu::Maintain::Wait);
+        match rx.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(GpuError::BufferAsyncError(format!("{e:?}"))),
+            Err(e) => return Err(GpuError::BufferAsyncError(e.to_string())),
+        }
+        let mapped_view = slice.get_mapped_range();
+        let mut tightly_packed = Vec::with_capacity((target.width() * height * 4) as usize);
+        for row in 0..height {
+            let start = (row * padded) as usize;
+            let end = start + unpadded as usize;
+            tightly_packed.extend_from_slice(&mapped_view[start..end]);
+        }
+        drop(mapped_view);
+        staging.unmap();
+        Ok(tightly_packed)
     }
 
     /// Process an RGBA8 frame through the evaluated effect stack on the GPU.
@@ -151,8 +239,12 @@ impl GpuEffectEngine {
         // 3. Single command buffer submission
         self.gpu.queue.submit(std::iter::once(encoder.finish()));
 
-        // 4. Download processed pixels back to CPU
-        targets.read_active_to_cpu(&self.gpu)
+        // 4. Download processed pixels back to CPU (pooled staging buffer:
+        // steady frames allocate nothing here).
+        let gpu = &self.gpu;
+        let pool = &mut self.readback;
+        let read = targets.read_target();
+        Self::read_pooled(pool, gpu, read)
     }
 
     /// Blur an RGBA8 buffer directly using the GPU compute blur pipeline with workgroup shared memory.

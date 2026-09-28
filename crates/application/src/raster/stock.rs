@@ -1793,11 +1793,13 @@ pub fn apply_stock(
         // adjustment layers and headless evaluation).
         S::Curves | S::ColorBalance | S::ColorWheels | S::TemperatureTint | S::Posterize
         | S::Threshold | S::DifferenceKey | S::SpillSuppress => {
+            // Resolve descriptor defaults once per layer (not per pixel).
+            let vals = compositor::fx::stock_params_resolved(plugin, params);
             for px in buf.px.iter_mut() {
                 if px.a <= 0.0 {
                     continue;
                 }
-                *px = Px::from_color(compositor::fx::process_color_stock(plugin, params, px.to_color()));
+                *px = Px::from_color(compositor::fx::process_color_stock_resolved(plugin, &vals, px.to_color()));
             }
         }
         // Blur

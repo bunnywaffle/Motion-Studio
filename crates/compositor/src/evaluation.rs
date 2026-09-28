@@ -10,32 +10,33 @@ use project::{
 use project::shader_interp::{self, PreviewEnv};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 /// Process-wide ShaderLab parse cache keyed by source hash. Effect
 /// evaluation runs per frame and per interaction tick; re-parsing GLSL on
 /// every pass made gizmo drags and effect scrubs stutter whenever a
 /// Shader Lab layer was present. Only successful parses are cached;
 /// broken sources retry (they surface a compile error in the panel).
-static SHADER_PROG_CACHE: OnceLock<Mutex<HashMap<u64, shader_interp::ParsedProg>>> =
+static SHADER_PROG_CACHE: OnceLock<RwLock<HashMap<u64, Arc<shader_interp::ParsedProg>>>> =
     OnceLock::new();
 
 fn parsed_prog_cached(
     source: &str,
     source_hash: u64,
-) -> Option<shader_interp::ParsedProg> {
-    let cache = SHADER_PROG_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(guard) = cache.lock() {
+) -> Option<Arc<shader_interp::ParsedProg>> {
+    let cache = SHADER_PROG_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+    // Fast path: shared read lock + Arc clone (no AST heap copy per tick).
+    if let Ok(guard) = cache.read() {
         if let Some(prog) = guard.get(&source_hash) {
-            return Some(prog.clone());
+            return Some(Arc::clone(prog));
         }
     }
-    let prog = shader_interp::parse_program(source).ok()?;
-    if let Ok(mut guard) = cache.lock() {
+    let prog = Arc::new(shader_interp::parse_program(source).ok()?);
+    if let Ok(mut guard) = cache.write() {
         if guard.len() > 64 {
             guard.clear();
         }
-        guard.insert(source_hash, prog.clone());
+        guard.insert(source_hash, Arc::clone(&prog));
     }
     Some(prog)
 }
@@ -284,12 +285,13 @@ pub enum EvaluatedEffectType {
     /// layer center for viewport feedback; the renderer compiles `source`
     /// (see `renderer::shader_lab`) and uploads `values` as uniforms.
     /// `source_hash` keys the pipeline cache. `prog` is the pre-parsed
-    /// preview program (skipped by serde; re-parsed on load).
+    /// preview program, reference-counted out of the shared parse cache
+    /// (skipped by serde; re-parsed on load).
     ShaderLab {
         source_hash: u64,
         values: HashMap<String, project::ShaderParamValue>,
         #[serde(skip)]
-        prog: Option<project::shader_interp::ParsedProg>,
+        prog: Option<Arc<project::shader_interp::ParsedProg>>,
     },
     Checkerboard {
         size: f32,
@@ -1189,12 +1191,44 @@ fn clamp_or_loop_seconds(
 /// - Effective opacity clamping and normalization
 /// - Relative frame and second timing offsets
 /// - Recursive nested composition evaluation with temporal alignment, time stretch, spatial matrix concatenation, and cycle protection
+/// Reusable scratch buffers for frame evaluation: per-level temporaries
+/// (matte/solo sets, matte pairs) that would otherwise allocate every
+/// frame. Retained on the evaluator and cleared per use; nested
+/// compositions fall back to fresh buffers via [`ScratchGuard`] (each
+/// nesting level needs its own temporaries).
+#[derive(Debug, Clone, Default)]
+pub struct EvaluationScratch {
+    matte_sources: HashSet<String>,
+    matte_pairs: Vec<Option<String>>,
+    solo_eligible: HashSet<String>,
+}
+
+/// Scratch ownership for one [`LayerStackEvaluator::evaluate_internal`]
+/// level: the shared buffers when uncontended, fresh ones while a parent
+/// level holds the borrow (nested pre-comps).
+enum ScratchGuard<'a> {
+    Shared(std::cell::RefMut<'a, EvaluationScratch>),
+    Fresh(EvaluationScratch),
+}
+
+impl ScratchGuard<'_> {
+    fn scratch(&mut self) -> &mut EvaluationScratch {
+        match self {
+            ScratchGuard::Shared(g) => g,
+            ScratchGuard::Fresh(s) => s,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LayerStackEvaluator {
     /// If true, layers consumed as track mattes are excluded from the main composite render list.
     pub consume_matte_sources: bool,
     /// Maximum allowed nested composition depth to prevent infinite recursion.
     pub max_nesting_depth: usize,
+    /// Retained per-frame scratch buffers (interior mutability: evaluation
+    /// takes `&self`).
+    scratch: std::cell::RefCell<EvaluationScratch>,
 }
 
 impl Default for LayerStackEvaluator {
@@ -1212,6 +1246,16 @@ impl LayerStackEvaluator {
         Self {
             consume_matte_sources: true,
             max_nesting_depth: Self::DEFAULT_MAX_NESTING_DEPTH,
+            scratch: std::cell::RefCell::new(EvaluationScratch::default()),
+        }
+    }
+
+    /// Borrow scratch buffers for one evaluation level (shared when
+    /// uncontended, fresh inside nested pre-comp recursion).
+    fn scratch(&self) -> ScratchGuard<'_> {
+        match self.scratch.try_borrow_mut() {
+            Ok(g) => ScratchGuard::Shared(g),
+            Err(_) => ScratchGuard::Fresh(EvaluationScratch::default()),
         }
     }
 
@@ -1292,13 +1336,18 @@ impl LayerStackEvaluator {
     ) -> Result<EvaluatedStack, SceneGraphError> {
         let stack_nodes = graph.layer_stack_order();
 
+        // Scratch temporaries (retained across frames; nested levels get
+        // fresh ones via the guard).
+        let mut guard = self.scratch();
+        let s = guard.scratch();
+        s.matte_sources.clear();
+        s.matte_pairs.clear();
+        s.solo_eligible.clear();
+
         // 1. Detect if any layer in the stack has solo enabled
         let any_solo = stack_nodes.iter().any(|n| n.is_solo());
 
         // 2. Identify track matte relationships
-        let mut matte_sources_set = HashSet::new();
-        let mut layer_matte_pairs = Vec::with_capacity(stack_nodes.len());
-
         for (idx, node) in stack_nodes.iter().enumerate() {
             let mut resolved_matte_source: Option<String> = None;
 
@@ -1313,21 +1362,20 @@ impl LayerStackEvaluator {
                 }
 
                 if let Some(ref source_id) = resolved_matte_source {
-                    matte_sources_set.insert(source_id.clone());
+                    s.matte_sources.insert(source_id.clone());
                 }
             }
 
-            layer_matte_pairs.push(resolved_matte_source);
+            s.matte_pairs.push(resolved_matte_source);
         }
 
         // 3. If solo is active, identify which matte sources belong to soloed layers
-        let mut solo_eligible_set = HashSet::new();
         if any_solo {
             for (idx, node) in stack_nodes.iter().enumerate() {
                 if node.is_solo() {
-                    solo_eligible_set.insert(node.id.clone());
-                    if let Some(ref matte_id) = layer_matte_pairs[idx] {
-                        solo_eligible_set.insert(matte_id.clone());
+                    s.solo_eligible.insert(node.id.clone());
+                    if let Some(ref matte_id) = s.matte_pairs[idx] {
+                        s.solo_eligible.insert(matte_id.clone());
                     }
                 }
             }
@@ -1344,7 +1392,7 @@ impl LayerStackEvaluator {
                 && time.frames() < node.out_point.frames();
 
             let solo_eligible = if any_solo {
-                solo_eligible_set.contains(&node.id)
+                s.solo_eligible.contains(&node.id)
             } else {
                 true
             };
@@ -1358,8 +1406,8 @@ impl LayerStackEvaluator {
                 0.0
             };
 
-            let is_matte_source = matte_sources_set.contains(&node.id);
-            let matte_source_id = layer_matte_pairs[idx].clone();
+            let is_matte_source = s.matte_sources.contains(&node.id);
+            let matte_source_id = s.matte_pairs[idx].clone();
 
             let time_offset_frames = time.frames() - node.in_point.frames();
             let time_offset_seconds = time.seconds() - node.in_point.seconds();

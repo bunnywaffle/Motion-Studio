@@ -4603,6 +4603,9 @@ pub struct GradientDrag {
     pub target: GradientTarget,
     pub index: usize,
     pub moved: bool,
+    /// Last committed offset: mousemove packets that don't move past this
+    /// (high-polling mice emit hundreds per frame) skip the commit.
+    pub last_t: f32,
 }
 
 struct TextInspectorInputs {
@@ -9626,6 +9629,8 @@ impl Render for PropertiesPanel {
                     }
                 }
                 // Gradient stop drag: absolute offset along the bar.
+                // Coalesced: sub-pixel packets (high-polling mice) skip the
+                // commit when the quantized offset hasn't moved.
                 if let Some(drag) = this.gradient_drag.clone() {
                     let prefix = drag.target.id_prefix();
                     if let Some((ox, w)) =
@@ -9635,30 +9640,35 @@ impl Render for PropertiesPanel {
                         let t = ((mx - ox) / w.max(1.0)).clamp(0.0, 1.0);
                         let target = drag.target.clone();
                         let idx = drag.index;
-                        let at = this.state.update(cx, |s, _| match &target {
-                            GradientTarget::Effect { layer_id, eff_id } => {
-                                s.move_effect_gradient_stop(layer_id, eff_id, idx, t)
-                            }
-                            GradientTarget::Fill { layer_id, key } => {
-                                s.move_fill_gradient_stop(layer_id, key, idx, t)
-                            }
-                        });
-                        if let Ok(at) = at {
-                            match &target {
-                                GradientTarget::Effect { eff_id, .. } => {
-                                    this.gradient_stop.insert(eff_id.clone(), at);
+                        // Coalesce sub-pixel packets: commit only on movement
+                        // (NaN initial offset always commits the first move).
+                        if drag.last_t.is_nan() || (t - drag.last_t).abs() >= 0.002 {
+                            let at = this.state.update(cx, |s, _| match &target {
+                                GradientTarget::Effect { layer_id, eff_id } => {
+                                    s.move_effect_gradient_stop(layer_id, eff_id, idx, t)
                                 }
-                                GradientTarget::Fill { key, .. } => {
-                                    this.color_picker_gradient_stop.insert(key.clone(), at);
+                                GradientTarget::Fill { layer_id, key } => {
+                                    s.move_fill_gradient_stop(layer_id, key, idx, t)
                                 }
+                            });
+                            if let Ok(at) = at {
+                                match &target {
+                                    GradientTarget::Effect { eff_id, .. } => {
+                                        this.gradient_stop.insert(eff_id.clone(), at);
+                                    }
+                                    GradientTarget::Fill { key, .. } => {
+                                        this.color_picker_gradient_stop.insert(key.clone(), at);
+                                    }
+                                }
+                                if let Some(d) = this.gradient_drag.as_mut() {
+                                    d.index = at;
+                                    d.moved = true;
+                                    d.last_t = t;
+                                }
+                                let s = this.state.clone();
+                                s.update(cx, |_, cx| cx.notify());
+                                cx.notify();
                             }
-                            if let Some(d) = this.gradient_drag.as_mut() {
-                                d.index = at;
-                                d.moved = true;
-                            }
-                            let s = this.state.clone();
-                            s.update(cx, |_, cx| cx.notify());
-                            cx.notify();
                         }
                     }
                 }
