@@ -183,6 +183,8 @@ pub struct EditorState {
     pub timeline_masks_reveal_path: bool,
     /// Copied property link `(layer_id, prop_path)` for Copy Link / Paste Link.
     pub copied_property_link: Option<(String, String)>,
+    /// Brief highlight toast when property link is copied or pasted.
+    pub property_link_toast: Option<String>,
 }
 
 /// One undo/redo snapshot: the whole project plus UI context.
@@ -726,6 +728,7 @@ impl EditorState {
             timeline_masks_reveal_all: false,
             timeline_masks_reveal_path: false,
             copied_property_link: None,
+            property_link_toast: None,
         }
     }
 
@@ -5930,6 +5933,25 @@ impl EditorState {
 
         // Remove any modifier graph on this property
         layer.remove_modifier_graph(prop_path);
+        // Remove any property link on this property and its aliases
+        let _ = layer.remove_property_link(prop_path);
+        match prop_path {
+            "anchor_x" => { let _ = layer.remove_property_link("transform.anchor_point.x"); }
+            "anchor_y" => { let _ = layer.remove_property_link("transform.anchor_point.y"); }
+            "pos_x" => { let _ = layer.remove_property_link("transform.position.x"); }
+            "pos_y" => { let _ = layer.remove_property_link("transform.position.y"); }
+            "scale_x" => { let _ = layer.remove_property_link("transform.scale.x"); }
+            "scale_y" => { let _ = layer.remove_property_link("transform.scale.y"); }
+            "rotation" => { let _ = layer.remove_property_link("transform.rotation"); }
+            "transform.anchor_point.x" => { let _ = layer.remove_property_link("anchor_x"); }
+            "transform.anchor_point.y" => { let _ = layer.remove_property_link("anchor_y"); }
+            "transform.position.x" => { let _ = layer.remove_property_link("pos_x"); }
+            "transform.position.y" => { let _ = layer.remove_property_link("pos_y"); }
+            "transform.scale.x" => { let _ = layer.remove_property_link("scale_x"); }
+            "transform.scale.y" => { let _ = layer.remove_property_link("scale_y"); }
+            "transform.rotation" => { let _ = layer.remove_property_link("rotation"); }
+            _ => {}
+        }
 
         match prop_path {
             "transform.anchor_point" => {
@@ -6086,18 +6108,24 @@ impl EditorState {
 
     /// Copy a property link `(layer_id, prop_path)` to the clipboard.
     pub fn copy_property_link(&mut self, layer_id: &str, prop_path: &str) {
+        let layer_name = self
+            .active_composition()
+            .and_then(|c| c.get_layer(layer_id))
+            .map(|l| l.name.clone())
+            .unwrap_or_else(|| "Layer".to_string());
         self.copied_property_link = Some((layer_id.to_string(), prop_path.to_string()));
+        self.property_link_toast = Some(format!("Copied with Property Links: {} · {}", layer_name, prop_path));
     }
 
     /// Paste the copied property link to target property on target layer.
-    /// Sets value and replicates modifier graph if present. Returns true if pasted.
+    /// Sets value, sets property link, and replicates modifier graph if present. Returns true if pasted.
     pub fn paste_property_link(&mut self, target_layer_id: &str, target_prop_path: &str) -> bool {
         let (src_lid, src_prop) = match &self.copied_property_link {
             Some(pair) => pair.clone(),
             None => return false,
         };
 
-        let src_val = self.get_layer_property_base_value(&src_lid, &src_prop);
+        let src_val = self.get_layer_property_live_value(&src_lid, &src_prop);
         let src_graph = self.get_layer_modifier_graph(&src_lid, &src_prop);
 
         self.checkpoint();
@@ -6114,6 +6142,9 @@ impl EditorState {
             Some(l) => l,
             None => return false,
         };
+
+        // Bind the property link on the target layer
+        layer.set_property_link(target_prop_path, project::PropertyLink::new(&src_lid, &src_prop));
 
         match target_prop_path {
             "transform.anchor_point.x" | "anchor_x" => {
@@ -6206,6 +6237,122 @@ impl EditorState {
             }
         }
         true
+    }
+
+    /// Remove the property link on a given layer's property path.
+    pub fn remove_property_link(&mut self, layer_id: &str, prop_path: &str) {
+        self.checkpoint();
+        if let Some(comp) = self.active_composition_mut() {
+            if let Some(layer) = comp.get_layer_mut(layer_id) {
+                let _ = layer.remove_property_link(prop_path);
+                match prop_path {
+                    "anchor_x" => { let _ = layer.remove_property_link("transform.anchor_point.x"); }
+                    "anchor_y" => { let _ = layer.remove_property_link("transform.anchor_point.y"); }
+                    "pos_x" => { let _ = layer.remove_property_link("transform.position.x"); }
+                    "pos_y" => { let _ = layer.remove_property_link("transform.position.y"); }
+                    "scale_x" => { let _ = layer.remove_property_link("transform.scale.x"); }
+                    "scale_y" => { let _ = layer.remove_property_link("transform.scale.y"); }
+                    "rotation" => { let _ = layer.remove_property_link("transform.rotation"); }
+                    "transform.anchor_point.x" => { let _ = layer.remove_property_link("anchor_x"); }
+                    "transform.anchor_point.y" => { let _ = layer.remove_property_link("anchor_y"); }
+                    "transform.position.x" => { let _ = layer.remove_property_link("pos_x"); }
+                    "transform.position.y" => { let _ = layer.remove_property_link("pos_y"); }
+                    "transform.scale.x" => { let _ = layer.remove_property_link("scale_x"); }
+                    "transform.scale.y" => { let _ = layer.remove_property_link("scale_y"); }
+                    "transform.rotation" => { let _ = layer.remove_property_link("rotation"); }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Check if a layer's property is currently driven by a PropertyLink.
+    pub fn is_layer_property_linked(&self, layer_id: &str, prop_path: &str) -> bool {
+        let comp = match self.active_composition() {
+            Some(c) => c,
+            None => return false,
+        };
+        let layer = match comp.get_layer(layer_id) {
+            Some(l) => l,
+            None => return false,
+        };
+        if layer.is_property_linked(prop_path) {
+            return true;
+        }
+        match prop_path {
+            "anchor_x" => layer.is_property_linked("transform.anchor_point.x"),
+            "anchor_y" => layer.is_property_linked("transform.anchor_point.y"),
+            "pos_x" => layer.is_property_linked("transform.position.x") || layer.is_property_linked("transform.position"),
+            "pos_y" => layer.is_property_linked("transform.position.y") || layer.is_property_linked("transform.position"),
+            "scale_x" => layer.is_property_linked("transform.scale.x") || layer.is_property_linked("transform.scale"),
+            "scale_y" => layer.is_property_linked("transform.scale.y") || layer.is_property_linked("transform.scale"),
+            "scale_u" => layer.is_property_linked("transform.scale.x") || layer.is_property_linked("transform.scale"),
+            "rotation" => layer.is_property_linked("transform.rotation"),
+            "transform.anchor_point.x" => layer.is_property_linked("anchor_x"),
+            "transform.anchor_point.y" => layer.is_property_linked("anchor_y"),
+            "transform.position.x" => layer.is_property_linked("pos_x") || layer.is_property_linked("transform.position"),
+            "transform.position.y" => layer.is_property_linked("pos_y") || layer.is_property_linked("transform.position"),
+            "transform.scale.x" => layer.is_property_linked("scale_x") || layer.is_property_linked("transform.scale"),
+            "transform.scale.y" => layer.is_property_linked("scale_y") || layer.is_property_linked("transform.scale"),
+            "transform.rotation" => layer.is_property_linked("rotation"),
+            _ => false,
+        }
+    }
+
+    /// Retrieve the property link attached to a layer's property, checking aliases.
+    pub fn get_layer_property_link(&self, layer_id: &str, prop_path: &str) -> Option<project::PropertyLink> {
+        let comp = self.active_composition()?;
+        let layer = comp.get_layer(layer_id)?;
+        if let Some(link) = layer.get_property_link(prop_path) {
+            return Some(link.clone());
+        }
+        let alias = match prop_path {
+            "anchor_x" => "transform.anchor_point.x",
+            "anchor_y" => "transform.anchor_point.y",
+            "pos_x" => "transform.position.x",
+            "pos_y" => "transform.position.y",
+            "scale_x" => "transform.scale.x",
+            "scale_y" => "transform.scale.y",
+            "scale_u" => "transform.scale.x",
+            "rotation" => "transform.rotation",
+            "transform.anchor_point.x" => "anchor_x",
+            "transform.anchor_point.y" => "anchor_y",
+            "transform.position.x" => "pos_x",
+            "transform.position.y" => "pos_y",
+            "transform.scale.x" => "scale_x",
+            "transform.scale.y" => "scale_y",
+            "transform.rotation" => "rotation",
+            _ => return None,
+        };
+        layer.get_property_link(alias).cloned()
+    }
+
+    /// Read the live value of a layer's property, resolving property links recursively (with cycle detection) if linked.
+    pub fn get_layer_property_live_value(&self, layer_id: &str, prop_path: &str) -> f32 {
+        let mut visited = std::collections::HashSet::new();
+        self.resolve_layer_property_live_value_recursive(layer_id, prop_path, &mut visited)
+    }
+
+    fn resolve_layer_property_live_value_recursive(
+        &self,
+        layer_id: &str,
+        prop_path: &str,
+        visited: &mut std::collections::HashSet<(String, String)>,
+    ) -> f32 {
+        let key = (layer_id.to_string(), prop_path.to_string());
+        if !visited.insert(key) {
+            return self.get_layer_property_base_value(layer_id, prop_path);
+        }
+
+        if let Some(link) = self.get_layer_property_link(layer_id, prop_path) {
+            self.resolve_layer_property_live_value_recursive(
+                &link.driver_layer_id,
+                &link.driver_prop_path,
+                visited,
+            )
+        } else {
+            self.get_layer_property_base_value(layer_id, prop_path)
+        }
     }
 
     /// Delete all keyframes across all animatable properties of a layer.

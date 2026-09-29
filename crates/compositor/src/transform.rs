@@ -1,8 +1,9 @@
 use crate::error::SceneGraphError;
+use crate::evaluation::resolve_property_link_value;
 use crate::graph::SceneGraph;
 use project::{TimeCode, Transform, Vec2};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::{Mul, MulAssign};
 
 /// A 2D affine transformation matrix for motion graphics compositing.
@@ -634,52 +635,102 @@ impl TransformResolver {
         for node in eval_order {
             let (mut anchor, mut position, mut scale, mut rotation) = node.transform.evaluate_at(time);
 
+            // Resolve any Property Links driving transform channels
+            if !node.property_links.is_empty() {
+                let mut visited = HashSet::new();
+                if let Some(link) = node.property_links.get("transform.anchor_point.x").or_else(|| node.property_links.get("anchor_x")) {
+                    if let Some(v) = resolve_property_link_value(graph, &link.driver_layer_id, &link.driver_prop_path, time, &mut visited) {
+                        anchor.x = v;
+                    }
+                }
+                visited.clear();
+                if let Some(link) = node.property_links.get("transform.anchor_point.y").or_else(|| node.property_links.get("anchor_y")) {
+                    if let Some(v) = resolve_property_link_value(graph, &link.driver_layer_id, &link.driver_prop_path, time, &mut visited) {
+                        anchor.y = v;
+                    }
+                }
+                visited.clear();
+                if let Some(link) = node.property_links.get("transform.position.x").or_else(|| node.property_links.get("pos_x")) {
+                    if let Some(v) = resolve_property_link_value(graph, &link.driver_layer_id, &link.driver_prop_path, time, &mut visited) {
+                        position.x = v;
+                    }
+                }
+                visited.clear();
+                if let Some(link) = node.property_links.get("transform.position.y").or_else(|| node.property_links.get("pos_y")) {
+                    if let Some(v) = resolve_property_link_value(graph, &link.driver_layer_id, &link.driver_prop_path, time, &mut visited) {
+                        position.y = v;
+                    }
+                }
+                visited.clear();
+                if let Some(link) = node.property_links.get("transform.scale.x").or_else(|| node.property_links.get("scale_x")) {
+                    if let Some(v) = resolve_property_link_value(graph, &link.driver_layer_id, &link.driver_prop_path, time, &mut visited) {
+                        scale.x = v;
+                    }
+                }
+                visited.clear();
+                if let Some(link) = node.property_links.get("transform.scale.y").or_else(|| node.property_links.get("scale_y")) {
+                    if let Some(v) = resolve_property_link_value(graph, &link.driver_layer_id, &link.driver_prop_path, time, &mut visited) {
+                        scale.y = v;
+                    }
+                }
+                visited.clear();
+                if let Some(link) = node.property_links.get("transform.rotation").or_else(|| node.property_links.get("rotation")) {
+                    if let Some(v) = resolve_property_link_value(graph, &link.driver_layer_id, &link.driver_prop_path, time, &mut visited) {
+                        rotation = v;
+                    }
+                }
+            }
+
             if !node.modifier_graphs.is_empty() {
                 let factor = node.progression_factor(time);
+                let resolver = |d_lid: &str, d_prop: &str| {
+                    let mut visited = HashSet::new();
+                    resolve_property_link_value(graph, d_lid, d_prop, time, &mut visited).unwrap_or(0.0)
+                };
                 if let Some(mg) = node
                     .modifier_graphs
                     .get("transform.anchor_point.x")
                     .or_else(|| node.modifier_graphs.get("transform.anchor_point"))
                 {
-                    anchor.x = mg.evaluate(anchor.x, factor);
+                    anchor.x = mg.evaluate_with_resolver(anchor.x, factor, &resolver);
                 }
                 if let Some(mg) = node
                     .modifier_graphs
                     .get("transform.anchor_point.y")
                     .or_else(|| node.modifier_graphs.get("transform.anchor_point"))
                 {
-                    anchor.y = mg.evaluate(anchor.y, factor);
+                    anchor.y = mg.evaluate_with_resolver(anchor.y, factor, &resolver);
                 }
                 if let Some(mg) = node
                     .modifier_graphs
                     .get("transform.position.x")
                     .or_else(|| node.modifier_graphs.get("transform.position"))
                 {
-                    position.x = mg.evaluate(position.x, factor);
+                    position.x = mg.evaluate_with_resolver(position.x, factor, &resolver);
                 }
                 if let Some(mg) = node
                     .modifier_graphs
                     .get("transform.position.y")
                     .or_else(|| node.modifier_graphs.get("transform.position"))
                 {
-                    position.y = mg.evaluate(position.y, factor);
+                    position.y = mg.evaluate_with_resolver(position.y, factor, &resolver);
                 }
                 if let Some(mg) = node
                     .modifier_graphs
                     .get("transform.scale.x")
                     .or_else(|| node.modifier_graphs.get("transform.scale"))
                 {
-                    scale.x = mg.evaluate(scale.x, factor);
+                    scale.x = mg.evaluate_with_resolver(scale.x, factor, &resolver);
                 }
                 if let Some(mg) = node
                     .modifier_graphs
                     .get("transform.scale.y")
                     .or_else(|| node.modifier_graphs.get("transform.scale"))
                 {
-                    scale.y = mg.evaluate(scale.y, factor);
+                    scale.y = mg.evaluate_with_resolver(scale.y, factor, &resolver);
                 }
                 if let Some(mg) = node.modifier_graphs.get("transform.rotation") {
-                    rotation = mg.evaluate(rotation, factor);
+                    rotation = mg.evaluate_with_resolver(rotation, factor, &resolver);
                 }
             }
 

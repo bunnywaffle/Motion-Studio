@@ -7,7 +7,7 @@ pub mod transform;
 
 pub use error::SceneGraphError;
 pub use evaluation::{
-    resolve_nested_time, EvaluatedEffect, EvaluatedEffectType, EvaluatedLayer, EvaluatedMask,
+    resolve_nested_time, resolve_property_link_value, EvaluatedEffect, EvaluatedEffectType, EvaluatedLayer, EvaluatedMask,
     EvaluatedStack, FlattenedRenderLayer, LayerStackEvaluator, NestedCompositionEvaluation,
     RenderPassDescriptor,
 };
@@ -2576,6 +2576,62 @@ mod tests {
         let eval_299 = evaluator.evaluate(&graph, &tc299);
         let l299 = eval_299.get_layer("l_mod").unwrap();
         assert!((l299.transform.position.x - 500.0).abs() < 3.0);
+    }
+
+    #[test]
+    fn test_property_links_live_synchronization() {
+        let mut comp = Composition::hd_1080p_30fps("comp_link", "Links Test", 5.0);
+        let tc0 = TimeCode::zero(30.0);
+        let tc150 = TimeCode::from_frames(150, 30.0);
+
+        let mut driver_layer = Layer::solid("driver", "Driver", Color::WHITE, 100, 100, tc0, tc150);
+        driver_layer.transform.rotation.set_value(45.0);
+        driver_layer.opacity.set_value(80.0);
+
+        let mut follower_layer = Layer::solid("follower", "Follower", Color::RED, 100, 100, tc0, tc150);
+        // Link follower rotation to driver rotation
+        follower_layer.set_property_link(
+            "transform.rotation",
+            project::PropertyLink::new("driver", "transform.rotation"),
+        );
+        // Link follower opacity to driver opacity
+        follower_layer.set_property_link(
+            "opacity",
+            project::PropertyLink::new("driver", "opacity"),
+        );
+
+        comp.add_layer(driver_layer).unwrap();
+        comp.add_layer(follower_layer).unwrap();
+
+        let graph = SceneGraph::from_composition(&comp).unwrap();
+        let evaluator = LayerStackEvaluator::new();
+
+        let eval = evaluator.evaluate(&graph, &tc0);
+        let follower_eval = eval.get_layer("follower").unwrap();
+        assert_eq!(follower_eval.transform.rotation, 45.0);
+        assert!((follower_eval.effective_opacity - 0.8).abs() < 1e-4);
+
+        // Now test when driver layer has animated keyframes:
+        let mut comp2 = Composition::hd_1080p_30fps("comp_link2", "Links Test 2", 5.0);
+        let mut driver_anim = Layer::solid("driver", "Driver", Color::WHITE, 100, 100, tc0, tc150);
+        driver_anim.transform.rotation.add_keyframe(project::Keyframe::linear(tc0, 0.0));
+        let tc60 = TimeCode::from_frames(60, 30.0);
+        driver_anim.transform.rotation.add_keyframe(project::Keyframe::linear(tc60, 120.0));
+
+        let mut follower_anim = Layer::solid("follower", "Follower", Color::RED, 100, 100, tc0, tc150);
+        follower_anim.set_property_link(
+            "transform.rotation",
+            project::PropertyLink::new("driver", "transform.rotation"),
+        );
+
+        comp2.add_layer(driver_anim).unwrap();
+        comp2.add_layer(follower_anim).unwrap();
+
+        let graph2 = SceneGraph::from_composition(&comp2).unwrap();
+        let eval_mid = evaluator.evaluate(&graph2, &TimeCode::from_frames(30, 30.0));
+        let follower_mid = eval_mid.get_layer("follower").unwrap();
+        // Halfway between 0 and 120 is 60.0
+        assert_eq!(follower_mid.transform.rotation, 60.0);
     }
 }
 

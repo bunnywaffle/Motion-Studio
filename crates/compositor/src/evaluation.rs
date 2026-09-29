@@ -41,6 +41,131 @@ fn parsed_prog_cached(
     Some(prog)
 }
 
+/// Resolve the live evaluated value of a driver layer's property link at a specific timecode.
+/// Recursively handles chains of links with cycle protection.
+pub fn resolve_property_link_value(
+    graph: &SceneGraph,
+    driver_layer_id: &str,
+    driver_prop_path: &str,
+    time: &TimeCode,
+    visited: &mut HashSet<(String, String)>,
+) -> Option<f32> {
+    let key = (driver_layer_id.to_string(), driver_prop_path.to_string());
+    if !visited.insert(key) {
+        // Circular link detected
+        return None;
+    }
+
+    let node = graph.get_node(driver_layer_id)?;
+
+    // Check if the driver property itself is driven by an upstream link (chaining)
+    if let Some(upstream_link) = node.property_links.get(driver_prop_path) {
+        if let Some(val) = resolve_property_link_value(
+            graph,
+            &upstream_link.driver_layer_id,
+            &upstream_link.driver_prop_path,
+            time,
+            visited,
+        ) {
+            return Some(val);
+        }
+    }
+
+    let val = match driver_prop_path {
+        "transform.anchor_point.x" | "anchor_x" => node.transform.anchor_point.evaluate_at(time).x,
+        "transform.anchor_point.y" | "anchor_y" => node.transform.anchor_point.evaluate_at(time).y,
+        "transform.position.x" | "pos_x" => node.transform.position.evaluate_at(time).x,
+        "transform.position.y" | "pos_y" => node.transform.position.evaluate_at(time).y,
+        "transform.scale.x" | "scale_x" => node.transform.scale.evaluate_at(time).x,
+        "transform.scale.y" | "scale_y" => node.transform.scale.evaluate_at(time).y,
+        "transform.rotation" | "rotation" => node.transform.rotation.evaluate_at(time),
+        "opacity" => node.opacity.evaluate_at(time),
+        "text.font_size" | "font_size" => {
+            if let LayerSource::Text { ref font_size, .. } = node.source {
+                font_size.evaluate_at(time)
+            } else {
+                0.0
+            }
+        }
+        "text.tracking" | "tracking" => {
+            if let LayerSource::Text { ref tracking, .. } = node.source {
+                tracking.evaluate_at(time)
+            } else {
+                0.0
+            }
+        }
+        "shape.rect_width" | "rect_width" | "width" => {
+            if let LayerSource::Shape { shape_type: project::ShapeType::Rectangle { ref width, .. } } = node.source {
+                width.evaluate_at(time)
+            } else {
+                0.0
+            }
+        }
+        "shape.rect_height" | "rect_height" | "height" => {
+            if let LayerSource::Shape { shape_type: project::ShapeType::Rectangle { ref height, .. } } = node.source {
+                height.evaluate_at(time)
+            } else {
+                0.0
+            }
+        }
+        "shape.corner_radius" | "corner_radius" => {
+            if let LayerSource::Shape { shape_type: project::ShapeType::Rectangle { ref corner_radius, .. } } = node.source {
+                corner_radius.evaluate_at(time)
+            } else {
+                0.0
+            }
+        }
+        "shape.ellipse_rx" | "radius_x" => {
+            if let LayerSource::Shape { shape_type: project::ShapeType::Ellipse { ref radius_x, .. } } = node.source {
+                radius_x.evaluate_at(time)
+            } else {
+                0.0
+            }
+        }
+        "shape.ellipse_ry" | "radius_y" => {
+            if let LayerSource::Shape { shape_type: project::ShapeType::Ellipse { ref radius_y, .. } } = node.source {
+                radius_y.evaluate_at(time)
+            } else {
+                0.0
+            }
+        }
+        _ => {
+            if let Some(rest) = driver_prop_path.strip_prefix("effect:") {
+                let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                if parts.len() == 2 {
+                    let (eff_id, param) = (parts[0], parts[1]);
+                    if let Some(eff) = node.effects.iter().find(|e| e.id == eff_id) {
+                        match (&eff.effect_type, param) {
+                            (project::EffectType::GaussianBlur { radius }, "radius") => radius.evaluate_at(time),
+                            (project::EffectType::BrightnessContrast { brightness, .. }, "brightness") => brightness.evaluate_at(time),
+                            (project::EffectType::BrightnessContrast { contrast, .. }, "contrast") => contrast.evaluate_at(time),
+                            (project::EffectType::Tint { amount, .. }, "amount") => amount.evaluate_at(time),
+                            (project::EffectType::Invert { amount }, "amount") => amount.evaluate_at(time),
+                            (project::EffectType::DropShadow { distance, .. }, "distance") => distance.evaluate_at(time),
+                            (project::EffectType::DropShadow { angle, .. }, "angle") => angle.evaluate_at(time),
+                            (project::EffectType::DropShadow { softness, .. }, "softness") => softness.evaluate_at(time),
+                            (project::EffectType::DropShadow { opacity, .. }, "opacity") => opacity.evaluate_at(time),
+                            (project::EffectType::GlslShader { param1, .. }, "param1") => param1.evaluate_at(time),
+                            (project::EffectType::GlslShader { param2, .. }, "param2") => param2.evaluate_at(time),
+                            (project::EffectType::GlslShader { param3, .. }, "param3") => param3.evaluate_at(time),
+                            (project::EffectType::GlslShader { param4, .. }, "param4") => param4.evaluate_at(time),
+                            _ => 0.0,
+                        }
+                    } else {
+                        0.0
+                    }
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            }
+        }
+    };
+
+    Some(val)
+}
+
 /// The evaluated state and frame context of an inner composition nested inside a layer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NestedCompositionEvaluation {
@@ -1406,10 +1531,20 @@ impl LayerStackEvaluator {
 
             let is_visible = is_active && node.visible && solo_eligible;
 
-            let base_opacity = node.opacity.evaluate_at(time);
+            let mut base_opacity = node.opacity.evaluate_at(time);
+            if let Some(link) = node.property_links.get("opacity") {
+                let mut visited = HashSet::new();
+                if let Some(v) = resolve_property_link_value(graph, &link.driver_layer_id, &link.driver_prop_path, time, &mut visited) {
+                    base_opacity = v;
+                }
+            }
             let local_opacity = if let Some(mg) = node.modifier_graphs.get("opacity") {
                 let factor = node.progression_factor(time);
-                mg.evaluate(base_opacity, factor).clamp(0.0, 100.0)
+                let resolver = |d_lid: &str, d_prop: &str| {
+                    let mut visited = HashSet::new();
+                    resolve_property_link_value(graph, d_lid, d_prop, time, &mut visited).unwrap_or(0.0)
+                };
+                mg.evaluate_with_resolver(base_opacity, factor, &resolver).clamp(0.0, 100.0)
             } else {
                 base_opacity.clamp(0.0, 100.0)
             };
@@ -1494,18 +1629,28 @@ impl LayerStackEvaluator {
             let mut evaluated_effects = Vec::with_capacity(node.effects.len());
             for eff in &node.effects {
                 if eff.enabled {
+                    let eval_eff_prop = |param_name: &str, def_val: f32| -> f32 {
+                        let path = format!("effect:{}:{}", eff.id, param_name);
+                        if let Some(link) = node.property_links.get(&path) {
+                            let mut visited = HashSet::new();
+                            resolve_property_link_value(graph, &link.driver_layer_id, &link.driver_prop_path, time, &mut visited).unwrap_or(def_val)
+                        } else {
+                            def_val
+                        }
+                    };
+
                     let eval_type = match &eff.effect_type {
                         EffectType::GaussianBlur { radius } => {
                             EvaluatedEffectType::GaussianBlur {
-                                radius: radius.evaluate_at(time),
+                                radius: eval_eff_prop("radius", radius.evaluate_at(time)),
                             }
                         }
                         EffectType::BrightnessContrast {
                             brightness,
                             contrast,
                         } => EvaluatedEffectType::BrightnessContrast {
-                            brightness: brightness.evaluate_at(time),
-                            contrast: contrast.evaluate_at(time),
+                            brightness: eval_eff_prop("brightness", brightness.evaluate_at(time)),
+                            contrast: eval_eff_prop("contrast", contrast.evaluate_at(time)),
                         },
                         EffectType::Tint {
                             map_black,
@@ -1514,10 +1659,10 @@ impl LayerStackEvaluator {
                         } => EvaluatedEffectType::Tint {
                             map_black: *map_black,
                             map_white: *map_white,
-                            amount: amount.evaluate_at(time),
+                            amount: eval_eff_prop("amount", amount.evaluate_at(time)),
                         },
                         EffectType::Invert { amount } => EvaluatedEffectType::Invert {
-                            amount: amount.evaluate_at(time),
+                            amount: eval_eff_prop("amount", amount.evaluate_at(time)),
                         },
                         EffectType::DropShadow {
                             distance,
@@ -1526,10 +1671,10 @@ impl LayerStackEvaluator {
                             opacity,
                             color,
                         } => EvaluatedEffectType::DropShadow {
-                            distance: distance.evaluate_at(time),
-                            angle: angle.evaluate_at(time),
-                            softness: softness.evaluate_at(time),
-                            opacity: opacity.evaluate_at(time),
+                            distance: eval_eff_prop("distance", distance.evaluate_at(time)),
+                            angle: eval_eff_prop("angle", angle.evaluate_at(time)),
+                            softness: eval_eff_prop("softness", softness.evaluate_at(time)),
+                            opacity: eval_eff_prop("opacity", opacity.evaluate_at(time)),
                             color: *color,
                         },
                         EffectType::GlslShader {
@@ -1540,10 +1685,10 @@ impl LayerStackEvaluator {
                             param4,
                         } => EvaluatedEffectType::GlslShader {
                             code: code.clone(),
-                            param1: param1.evaluate_at(time),
-                            param2: param2.evaluate_at(time),
-                            param3: param3.evaluate_at(time),
-                            param4: param4.evaluate_at(time),
+                            param1: eval_eff_prop("param1", param1.evaluate_at(time)),
+                            param2: eval_eff_prop("param2", param2.evaluate_at(time)),
+                            param3: eval_eff_prop("param3", param3.evaluate_at(time)),
+                            param4: eval_eff_prop("param4", param4.evaluate_at(time)),
                         },
                         EffectType::DisplacementMap {
                             max_horizontal,

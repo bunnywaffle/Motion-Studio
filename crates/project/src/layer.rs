@@ -378,6 +378,28 @@ pub struct Layer {
     /// keyed by property path (e.g. "transform.rotation", "transform.position.x").
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub modifier_graphs: std::collections::HashMap<String, crate::modifier::ModifierGraph>,
+    /// Live property links driving properties on this layer,
+    /// keyed by destination property path (e.g. "transform.rotation", "transform.position.x").
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub property_links: std::collections::HashMap<String, PropertyLink>,
+}
+
+/// A live driver link pointing to another layer's property (e.g. thisComp.layer("Driver").transform.rotation).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PropertyLink {
+    /// Source layer ID acting as the driver.
+    pub driver_layer_id: String,
+    /// Source property path on the driver layer (e.g. "transform.rotation", "transform.position.x", "opacity", "effect:blur_1:radius").
+    pub driver_prop_path: String,
+}
+
+impl PropertyLink {
+    pub fn new(driver_layer_id: impl Into<String>, driver_prop_path: impl Into<String>) -> Self {
+        Self {
+            driver_layer_id: driver_layer_id.into(),
+            driver_prop_path: driver_prop_path.into(),
+        }
+    }
 }
 
 impl Layer {
@@ -413,6 +435,7 @@ impl Layer {
             masks: Vec::new(),
             label_color: None,
             modifier_graphs: std::collections::HashMap::new(),
+            property_links: std::collections::HashMap::new(),
         }
     }
 
@@ -423,6 +446,26 @@ impl Layer {
         let cur_s = current_time.seconds();
         let span = (out_s - in_s).max(1e-6);
         ((cur_s - in_s) / span).clamp(0.0, 1.0) as f32
+    }
+
+    /// Retrieve the property link attached to a property path on this layer, if any.
+    pub fn get_property_link(&self, prop_path: &str) -> Option<&PropertyLink> {
+        self.property_links.get(prop_path)
+    }
+
+    /// Set or update the property link for a property path on this layer.
+    pub fn set_property_link(&mut self, prop_path: impl Into<String>, link: PropertyLink) {
+        self.property_links.insert(prop_path.into(), link);
+    }
+
+    /// Remove the property link for a property path on this layer.
+    pub fn remove_property_link(&mut self, prop_path: &str) -> Option<PropertyLink> {
+        self.property_links.remove(prop_path)
+    }
+
+    /// Check if a property on this layer is currently driven by a property link.
+    pub fn is_property_linked(&self, prop_path: &str) -> bool {
+        self.property_links.contains_key(prop_path)
     }
 
     /// Retrieve the modifier graph attached to a property path on this layer, if any.

@@ -282,18 +282,21 @@ impl Focusable for ModifierGraphView {
 
 impl Render for ModifierGraphView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (factor, base_val, evaluated_out) = {
+        let (factor, base_val, evaluated_out, is_driven) = {
             let s = self.editor_state.read(cx);
             let factor = s.get_layer_progression_factor(&self.layer_id);
-            let base = s.get_layer_property_base_value(&self.layer_id, &self.prop_path);
-            let out = self.graph.evaluate(base, factor);
-            (factor, base, out)
+            let is_driven = s.is_layer_property_linked(&self.layer_id, &self.prop_path);
+            let base = s.get_layer_property_live_value(&self.layer_id, &self.prop_path);
+            let out = self.graph.evaluate_with_resolver(base, factor, &|lid, prop| {
+                s.get_layer_property_live_value(lid, prop)
+            });
+            (factor, base, out, is_driven)
         };
 
         let entity = cx.entity().clone();
 
         // 1. Top Header & Toolbar
-        let header = self.render_header(factor, base_val, evaluated_out, &entity, cx);
+        let header = self.render_header(factor, base_val, evaluated_out, is_driven, &entity, cx);
 
         // 2. Node Canvas Area
         let canvas = self.render_canvas(&entity, cx);
@@ -315,6 +318,7 @@ impl ModifierGraphView {
         factor: f32,
         base_val: f32,
         evaluated_out: f32,
+        is_driven: bool,
         entity: &Entity<Self>,
         cx: &mut Context<Self>,
     ) -> Div {
@@ -327,6 +331,7 @@ impl ModifierGraphView {
         let ent_wave = entity.clone();
         let ent_step = entity.clone();
         let ent_const = entity.clone();
+        let ent_driver = entity.clone();
         let ent_reset = entity.clone();
 
         v_flex()
@@ -395,30 +400,41 @@ impl ModifierGraphView {
                                             .child(format!("{factor:.3}")),
                                     ),
                             )
-                            .child(
-                                h_flex()
+                            .child({
+                                let mut pill = h_flex()
                                     .gap_1p5()
                                     .px_2p5()
                                     .py_1()
                                     .rounded_md()
-                                    .bg(rgb(0x28231a))
+                                    .bg(if is_driven { rgb(0x2d1515) } else { rgb(0x28231a) })
                                     .border_1()
-                                    .border_color(rgb(0xd97706))
-                                    .child(
+                                    .border_color(if is_driven { rgb(0xef4444) } else { rgb(0xd97706) });
+                                if is_driven {
+                                    pill = pill.child(
                                         div()
-                                            .text_xs()
-                                            .font_semibold()
-                                            .text_color(rgb(0xfcd34d))
-                                            .child("Base Value:"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .font_bold()
-                                            .text_color(rgb(0xfbbf24))
-                                            .child(format!("{base_val:.2}")),
-                                    ),
-                            )
+                                            .w(px(14.))
+                                            .h(px(14.))
+                                            .items_center()
+                                            .justify_center()
+                                            .text_color(rgb(0xef4444))
+                                            .child(IconName::Link),
+                                    );
+                                }
+                                pill.child(
+                                    div()
+                                        .text_xs()
+                                        .font_semibold()
+                                        .text_color(if is_driven { rgb(0xfca5a5) } else { rgb(0xfcd34d) })
+                                        .child(if is_driven { "Driver Value:" } else { "Base Value:" }),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_bold()
+                                        .text_color(if is_driven { rgb(0xef4444) } else { rgb(0xfbbf24) })
+                                        .child(format!("{base_val:.2}")),
+                                )
+                            })
                             .child(
                                 h_flex()
                                     .gap_1p5()
@@ -521,6 +537,20 @@ impl ModifierGraphView {
                     }, cx))
                     .child(self.toolbar_btn("Constant", ent_const, move |this, cx| {
                         this.add_node(NodeKind::Constant { value: 1.0 }, cx);
+                    }, cx))
+                    .child(self.toolbar_btn("Driver Link", ent_driver, move |this, cx| {
+                        let copied = this.editor_state.read(cx).copied_property_link.clone();
+                        let (driver_layer_id, driver_prop_path) = match copied {
+                            Some((l, p)) => (l, p),
+                            None => (this.layer_id.clone(), "transform.rotation".to_string()),
+                        };
+                        this.add_node(
+                            NodeKind::DriverLink {
+                                driver_layer_id,
+                                driver_prop_path,
+                            },
+                            cx,
+                        );
                     }, cx))
                     .child(div().flex_grow(1.0))
                     .child(
@@ -843,6 +873,9 @@ impl ModifierGraphView {
             }
             NodeKind::Noise { .. } | NodeKind::Wave { .. } | NodeKind::Stepped { .. } => {
                 (rgb(0x14532d), rgb(0x86efac)) // Deep green
+            }
+            NodeKind::DriverLink { .. } => {
+                (rgb(0x7f1d1d), rgb(0xfca5a5)) // Deep red for driver links
             }
             NodeKind::Output => {
                 (rgb(0x78350f), rgb(0xfde68a)) // Deep amber
@@ -1453,6 +1486,35 @@ impl ModifierGraphView {
                                     }
                                 }
                             }, cx)),
+                    )
+            }
+
+            NodeKind::DriverLink { driver_layer_id, driver_prop_path } => {
+                let dl = driver_layer_id.clone();
+                let dp = driver_prop_path.clone();
+                h_flex()
+                    .w_full()
+                    .px_2()
+                    .py_1p5()
+                    .border_t_1()
+                    .border_color(rgb(0x2e303e))
+                    .items_center()
+                    .gap_1p5()
+                    .child(
+                        div()
+                            .w(px(14.))
+                            .h(px(14.))
+                            .items_center()
+                            .justify_center()
+                            .text_color(rgb(0xef4444))
+                            .child(IconName::Link),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_medium()
+                            .text_color(rgb(0xf87171))
+                            .child(format!("{} · {}", dl, dp)),
                     )
             }
 

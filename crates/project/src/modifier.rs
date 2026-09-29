@@ -111,6 +111,12 @@ pub enum NodeKind {
     /// Snaps/quantizes values into discrete stepped intervals.
     Stepped { steps: f32 },
 
+    /// Live Driver Link node that reads another property on another (or the same) layer.
+    DriverLink {
+        driver_layer_id: String,
+        driver_prop_path: String,
+    },
+
     /// Terminal node that outputs the final value to the property.
     Output,
 }
@@ -122,6 +128,7 @@ impl NodeKind {
             Self::GetLayerFactor => "Get Layer Factor",
             Self::BaseValueIn => "Base Value In",
             Self::Constant { .. } => "Constant",
+            Self::DriverLink { .. } => "Driver Link",
             Self::Math { .. } => "Math",
             Self::Lerp { .. } => "Lerp",
             Self::Clamp { .. } => "Clamp",
@@ -137,7 +144,7 @@ impl NodeKind {
     /// Input socket names for this node.
     pub fn input_sockets(&self) -> &'static [&'static str] {
         match self {
-            Self::GetLayerFactor | Self::BaseValueIn | Self::Constant { .. } => &[],
+            Self::GetLayerFactor | Self::BaseValueIn | Self::Constant { .. } | Self::DriverLink { .. } => &[],
             Self::Math { .. } => &["a", "b"],
             Self::Lerp { .. } => &["a", "b", "weight"],
             Self::Clamp { .. } => &["val", "min", "max"],
@@ -154,7 +161,7 @@ impl NodeKind {
     pub fn output_sockets(&self) -> &'static [&'static str] {
         match self {
             Self::GetLayerFactor => &["factor", "invert"],
-            Self::BaseValueIn | Self::Constant { .. } => &["value"],
+            Self::BaseValueIn | Self::Constant { .. } | Self::DriverLink { .. } => &["value"],
             Self::Math { .. }
             | Self::Lerp { .. }
             | Self::Clamp { .. }
@@ -309,9 +316,14 @@ impl ModifierGraph {
         self.connections.retain(|c| c != conn);
     }
 
-    /// Evaluate the modifier graph given the target property's base value
-    /// and the layer progression factor ($0.0 \to 1.0$).
-    pub fn evaluate(&self, base_value: f32, factor: f32) -> f32 {
+    /// Evaluate the modifier graph given the target property's base value,
+    /// the layer progression factor ($0.0 \to 1.0$), and a resolver callback for DriverLink nodes.
+    pub fn evaluate_with_resolver(
+        &self,
+        base_value: f32,
+        factor: f32,
+        resolver: &dyn Fn(&str, &str) -> f32,
+    ) -> f32 {
         let out_node = match self.nodes.iter().find(|n| matches!(n.kind, NodeKind::Output)) {
             Some(n) => n,
             None => return base_value,
@@ -325,19 +337,28 @@ impl ModifierGraph {
             "result",
             base_value,
             factor,
+            resolver,
             &mut memo,
             &mut call_stack,
         )
         .unwrap_or(base_value)
     }
 
+    /// Evaluate the modifier graph given the target property's base value
+    /// and the layer progression factor ($0.0 \to 1.0$).
+    pub fn evaluate(&self, base_value: f32, factor: f32) -> f32 {
+        self.evaluate_with_resolver(base_value, factor, &|_, _| 0.0)
+    }
+
     /// Resolve an input socket by looking up an incoming connection or falling back to node defaults.
+    #[allow(clippy::too_many_arguments)]
     fn resolve_input(
         &self,
         node_id: &str,
         socket: &str,
         base_value: f32,
         factor: f32,
+        resolver: &dyn Fn(&str, &str) -> f32,
         memo: &mut HashMap<(String, String), f32>,
         call_stack: &mut HashSet<String>,
     ) -> Option<f32> {
@@ -351,6 +372,7 @@ impl ModifierGraph {
                 &conn.from_socket,
                 base_value,
                 factor,
+                resolver,
                 memo,
                 call_stack,
             ));
@@ -385,12 +407,14 @@ impl ModifierGraph {
     }
 
     /// Evaluate an output socket of a node.
+    #[allow(clippy::too_many_arguments)]
     fn evaluate_node_output(
         &self,
         node_id: &str,
         socket: &str,
         base_value: f32,
         factor: f32,
+        resolver: &dyn Fn(&str, &str) -> f32,
         memo: &mut HashMap<(String, String), f32>,
         call_stack: &mut HashSet<String>,
     ) -> f32 {
@@ -422,12 +446,15 @@ impl ModifierGraph {
             }
             NodeKind::BaseValueIn => base_value,
             NodeKind::Constant { value } => *value,
+            NodeKind::DriverLink { driver_layer_id, driver_prop_path } => {
+                resolver(driver_layer_id, driver_prop_path)
+            }
             NodeKind::Math { op, default_b } => {
                 let a = self
-                    .resolve_input(node_id, "a", base_value, factor, memo, call_stack)
+                    .resolve_input(node_id, "a", base_value, factor, resolver, memo, call_stack)
                     .unwrap_or(base_value);
                 let b = self
-                    .resolve_input(node_id, "b", base_value, factor, memo, call_stack)
+                    .resolve_input(node_id, "b", base_value, factor, resolver, memo, call_stack)
                     .unwrap_or(*default_b);
                 match op {
                     MathOp::Add => a + b,
@@ -448,25 +475,25 @@ impl ModifierGraph {
                 default_b,
             } => {
                 let a = self
-                    .resolve_input(node_id, "a", base_value, factor, memo, call_stack)
+                    .resolve_input(node_id, "a", base_value, factor, resolver, memo, call_stack)
                     .unwrap_or(*default_a);
                 let b = self
-                    .resolve_input(node_id, "b", base_value, factor, memo, call_stack)
+                    .resolve_input(node_id, "b", base_value, factor, resolver, memo, call_stack)
                     .unwrap_or(*default_b);
                 let w = self
-                    .resolve_input(node_id, "weight", base_value, factor, memo, call_stack)
+                    .resolve_input(node_id, "weight", base_value, factor, resolver, memo, call_stack)
                     .unwrap_or(factor);
                 a + (b - a) * w
             }
             NodeKind::Clamp { min, max } => {
                 let val = self
-                    .resolve_input(node_id, "val", base_value, factor, memo, call_stack)
+                    .resolve_input(node_id, "val", base_value, factor, resolver, memo, call_stack)
                     .unwrap_or(base_value);
                 let mn = self
-                    .resolve_input(node_id, "min", base_value, factor, memo, call_stack)
+                    .resolve_input(node_id, "min", base_value, factor, resolver, memo, call_stack)
                     .unwrap_or(*min);
                 let mx = self
-                    .resolve_input(node_id, "max", base_value, factor, memo, call_stack)
+                    .resolve_input(node_id, "max", base_value, factor, resolver, memo, call_stack)
                     .unwrap_or(*max);
                 val.clamp(mn.min(mx), mn.max(mx))
             }
@@ -477,19 +504,19 @@ impl ModifierGraph {
                 out_max,
             } => {
                 let val = self
-                    .resolve_input(node_id, "val", base_value, factor, memo, call_stack)
+                    .resolve_input(node_id, "val", base_value, factor, resolver, memo, call_stack)
                     .unwrap_or(factor);
                 let imin = self
-                    .resolve_input(node_id, "in_min", base_value, factor, memo, call_stack)
+                    .resolve_input(node_id, "in_min", base_value, factor, resolver, memo, call_stack)
                     .unwrap_or(*in_min);
                 let imax = self
-                    .resolve_input(node_id, "in_max", base_value, factor, memo, call_stack)
+                    .resolve_input(node_id, "in_max", base_value, factor, resolver, memo, call_stack)
                     .unwrap_or(*in_max);
                 let omin = self
-                    .resolve_input(node_id, "out_min", base_value, factor, memo, call_stack)
+                    .resolve_input(node_id, "out_min", base_value, factor, resolver, memo, call_stack)
                     .unwrap_or(*out_min);
                 let omax = self
-                    .resolve_input(node_id, "out_max", base_value, factor, memo, call_stack)
+                    .resolve_input(node_id, "out_max", base_value, factor, resolver, memo, call_stack)
                     .unwrap_or(*out_max);
                 let span_in = (imax - imin).abs().max(1e-6);
                 let t = ((val - imin) / span_in).clamp(0.0, 1.0);
@@ -497,13 +524,13 @@ impl ModifierGraph {
             }
             NodeKind::Smoothstep { edge0, edge1 } => {
                 let val = self
-                    .resolve_input(node_id, "val", base_value, factor, memo, call_stack)
+                    .resolve_input(node_id, "val", base_value, factor, resolver, memo, call_stack)
                     .unwrap_or(factor);
                 let e0 = self
-                    .resolve_input(node_id, "edge0", base_value, factor, memo, call_stack)
+                    .resolve_input(node_id, "edge0", base_value, factor, resolver, memo, call_stack)
                     .unwrap_or(*edge0);
                 let e1 = self
-                    .resolve_input(node_id, "edge1", base_value, factor, memo, call_stack)
+                    .resolve_input(node_id, "edge1", base_value, factor, resolver, memo, call_stack)
                     .unwrap_or(*edge1);
                 let span = (e1 - e0).abs().max(1e-6);
                 let t = ((val - e0) / span).clamp(0.0, 1.0);
@@ -514,13 +541,13 @@ impl ModifierGraph {
                 amplitude,
             } => {
                 let f = self
-                    .resolve_input(node_id, "factor", base_value, factor, memo, call_stack)
+                    .resolve_input(node_id, "factor", base_value, factor, resolver, memo, call_stack)
                     .unwrap_or(factor);
                 let freq = self
-                    .resolve_input(node_id, "freq", base_value, factor, memo, call_stack)
+                    .resolve_input(node_id, "freq", base_value, factor, resolver, memo, call_stack)
                     .unwrap_or(*frequency);
                 let amp = self
-                    .resolve_input(node_id, "amp", base_value, factor, memo, call_stack)
+                    .resolve_input(node_id, "amp", base_value, factor, resolver, memo, call_stack)
                     .unwrap_or(*amplitude);
                 let x = f * freq;
                 let i0 = x.floor() as i64;
@@ -540,13 +567,13 @@ impl ModifierGraph {
                 offset,
             } => {
                 let f = self
-                    .resolve_input(node_id, "factor", base_value, factor, memo, call_stack)
+                    .resolve_input(node_id, "factor", base_value, factor, resolver, memo, call_stack)
                     .unwrap_or(factor);
                 let freq = self
-                    .resolve_input(node_id, "freq", base_value, factor, memo, call_stack)
+                    .resolve_input(node_id, "freq", base_value, factor, resolver, memo, call_stack)
                     .unwrap_or(*frequency);
                 let amp = self
-                    .resolve_input(node_id, "amp", base_value, factor, memo, call_stack)
+                    .resolve_input(node_id, "amp", base_value, factor, resolver, memo, call_stack)
                     .unwrap_or(*amplitude);
                 let phase = f * freq + *offset;
                 match wave_type {
@@ -565,16 +592,16 @@ impl ModifierGraph {
             }
             NodeKind::Stepped { steps } => {
                 let val = self
-                    .resolve_input(node_id, "val", base_value, factor, memo, call_stack)
+                    .resolve_input(node_id, "val", base_value, factor, resolver, memo, call_stack)
                     .unwrap_or(factor);
                 let s = self
-                    .resolve_input(node_id, "steps", base_value, factor, memo, call_stack)
+                    .resolve_input(node_id, "steps", base_value, factor, resolver, memo, call_stack)
                     .unwrap_or(*steps)
                     .max(1.0);
                 (val * s).floor() / s
             }
             NodeKind::Output => {
-                self.resolve_input(node_id, "result", base_value, factor, memo, call_stack)
+                self.resolve_input(node_id, "result", base_value, factor, resolver, memo, call_stack)
                     .unwrap_or(base_value)
             }
         };
@@ -796,5 +823,46 @@ mod tests {
         };
         // Circular loop must not hang or overflow the stack
         let _ = graph.evaluate(10.0, 0.5);
+    }
+
+    #[test]
+    fn test_driver_link_evaluation() {
+        let graph = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new(
+                    "driver_1",
+                    0.0,
+                    0.0,
+                    NodeKind::DriverLink {
+                        driver_layer_id: "layer_master".to_string(),
+                        driver_prop_path: "transform.rotation".to_string(),
+                    },
+                ),
+                ModifierNode::new(
+                    "math_double",
+                    150.0,
+                    0.0,
+                    NodeKind::Math {
+                        op: MathOp::Multiply,
+                        default_b: 2.0,
+                    },
+                ),
+                ModifierNode::new("out", 300.0, 0.0, NodeKind::Output),
+            ],
+            connections: vec![
+                NodeConnection::new("driver_1", "value", "math_double", "a"),
+                NodeConnection::new("math_double", "result", "out", "result"),
+            ],
+        };
+
+        // Driver resolves to 45.0
+        let res = graph.evaluate_with_resolver(0.0, 0.0, &|lid, prop| {
+            if lid == "layer_master" && prop == "transform.rotation" {
+                45.0
+            } else {
+                0.0
+            }
+        });
+        assert_eq!(res, 90.0);
     }
 }

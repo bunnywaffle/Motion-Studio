@@ -30,6 +30,7 @@ pub struct SceneNode {
     pub effects: Vec<Effect>,
     pub masks: Vec<Mask>,
     pub modifier_graphs: std::collections::HashMap<String, project::ModifierGraph>,
+    pub property_links: std::collections::HashMap<String, project::PropertyLink>,
 }
 
 impl SceneNode {
@@ -59,6 +60,7 @@ impl SceneNode {
             effects: layer.effects.clone(),
             masks: layer.masks.clone(),
             modifier_graphs: layer.modifier_graphs.clone(),
+            property_links: layer.property_links.clone(),
         }
     }
 

@@ -2683,6 +2683,62 @@ impl Render for AppView {
                 .into_any_element(),
             );
         }
+        if let Some(toast_text) = self.state.read(cx).property_link_toast.clone() {
+            let s_dismiss = self.state.clone();
+            let toast_pos = point(px((vw_f - 380.0).max(8.0) / 2.0), px(vh_f - 60.0));
+            dialogs.push(
+                deferred(
+                    Positioner::corner(Anchor::TopLeft, toast_pos)
+                        .margin(px(8.))
+                        .occlude()
+                        .child(
+                            h_flex()
+                                .id("property_link_toast")
+                                .test_support()
+                                .items_center()
+                                .gap_2()
+                                .px_3()
+                                .py_1p5()
+                                .rounded_full()
+                                .bg(rgb(0x1e293b))
+                                .border_1()
+                                .border_color(rgb(0x3b82f6))
+                                .shadow_lg()
+                                .child(
+                                    div()
+                                        .w(px(14.))
+                                        .h(px(14.))
+                                        .items_center()
+                                        .justify_center()
+                                        .text_color(rgb(0x60a5fa))
+                                        .child(gpui_kit::assets::IconName::Link),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_medium()
+                                        .text_color(rgb(0xf8fafc))
+                                        .child(toast_text),
+                                )
+                                .child(
+                                    div()
+                                        .cursor_pointer()
+                                        .text_xs()
+                                        .text_color(rgb(0x94a3b8))
+                                        .hover(|s| s.text_color(rgb(0xffffff)))
+                                        .child("✕")
+                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                            s_dismiss.update(cx, |s, cx| {
+                                                s.property_link_toast = None;
+                                                cx.notify();
+                                            });
+                                        }),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+            );
+        }
         let main_workspace = if is_full {
             v_flex()
                 .flex_1()
@@ -9159,6 +9215,73 @@ mod tests {
             assert!(p.context_menu.is_some());
             p.close_context_menu();
             assert!(p.context_menu.is_none());
+        });
+
+        cx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    fn test_property_links_live_workflow(cx: &mut TestAppContext) {
+        let (_root, app_view) = setup_test_window(cx);
+        let state = app_view.read_with(cx, |view, _| view.state.clone());
+
+        state.update(cx, |s, _| {
+            // Setup two layers: Driver (e.g. Master Rotation on layer_bg) and Follower (e.g. layer_accent)
+            // 1. Step 1: Copy Driver with Property Links
+            s.copy_property_link("layer_bg", "transform.rotation");
+            assert_eq!(
+                s.copied_property_link,
+                Some(("layer_bg".to_string(), "transform.rotation".to_string()))
+            );
+            assert!(s.property_link_toast.as_ref().unwrap().contains("Copied with Property Links"));
+
+            // 2. Step 2: Paste as Property Link onto layer_accent's rotation
+            let pasted = s.paste_property_link("layer_accent", "transform.rotation");
+            assert!(pasted);
+
+            // 3. Step 3: Verify link badge, locked input state, and live sync
+            assert!(s.is_layer_property_linked("layer_accent", "transform.rotation"));
+            assert!(s.is_layer_property_linked("layer_accent", "rotation"));
+
+            // Verify live sync: Initial values match
+            let driver_val = s.get_layer_property_live_value("layer_bg", "transform.rotation");
+            let follower_val = s.get_layer_property_live_value("layer_accent", "transform.rotation");
+            assert_eq!(driver_val, follower_val);
+
+            // Mutate the driver layer's property (e.g. rotate driver by 45 degrees)
+            s.select_layer(Some("layer_bg".to_string()));
+            s.nudge_rotation(45.0);
+
+            let new_driver_val = s.get_layer_property_live_value("layer_bg", "transform.rotation");
+            assert_eq!(new_driver_val, 45.0);
+
+            // Live Sync: follower immediately reflects driver value in real-time
+            let new_follower_val = s.get_layer_property_live_value("layer_accent", "transform.rotation");
+            assert_eq!(new_follower_val, 45.0);
+
+            // 4. Test Chaining: Third layer links to the follower
+            s.copy_property_link("layer_accent", "transform.rotation");
+            let pasted_third = s.paste_property_link("layer_badge", "transform.rotation");
+            assert!(pasted_third);
+            assert!(s.is_layer_property_linked("layer_badge", "transform.rotation"));
+            let chained_val = s.get_layer_property_live_value("layer_badge", "transform.rotation");
+            assert_eq!(chained_val, 45.0);
+
+            // Mutate driver again to 90 degrees
+            s.nudge_rotation(45.0);
+            assert_eq!(s.get_layer_property_live_value("layer_bg", "transform.rotation"), 90.0);
+            assert_eq!(s.get_layer_property_live_value("layer_accent", "transform.rotation"), 90.0);
+            assert_eq!(s.get_layer_property_live_value("layer_badge", "transform.rotation"), 90.0);
+
+            // 5. Test Unlinking / Reset Property
+            s.remove_property_link("layer_accent", "transform.rotation");
+            assert!(!s.is_layer_property_linked("layer_accent", "transform.rotation"));
+
+            // Resetting driver does not alter unlinked layer
+            s.reset_layer_property("layer_accent", "transform.rotation");
+            assert_eq!(s.get_layer_property_live_value("layer_accent", "transform.rotation"), 0.0);
+            // Driver is still 90.0
+            assert_eq!(s.get_layer_property_live_value("layer_bg", "transform.rotation"), 90.0);
         });
 
         cx.run_until_parked();

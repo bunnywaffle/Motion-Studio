@@ -5156,11 +5156,43 @@ where
     // target, render the live single-line editor instead of the value label.
     // (Drag-scrub and mouse-wheel still work on the label.)
     let edit_id = id.into();
+    let path_str = match prop_key.as_str() {
+        "anchor_x" => "transform.anchor_point.x",
+        "anchor_y" => "transform.anchor_point.y",
+        "pos_x" => "transform.position.x",
+        "pos_y" => "transform.position.y",
+        "scale_x" => "transform.scale.x",
+        "scale_y" => "transform.scale.y",
+        "scale_u" => "transform.scale.x",
+        "rotation" => "transform.rotation",
+        "opacity" => "opacity",
+        other => other,
+    };
+    let sel_lid_opt = state.read(cx).selected_layer_id.clone();
+    let is_linked = if let Some(ref lid) = sel_lid_opt {
+        state.read(cx).is_layer_property_linked(lid, path_str)
+    } else {
+        false
+    };
+    let display_label = if is_linked {
+        if let Some(ref lid) = sel_lid_opt {
+            let v = state.read(cx).get_layer_property_live_value(lid, path_str);
+            match prop_key.as_str() {
+                "opacity" | "scale_x" | "scale_y" | "scale_u" => format!("{:.1}%", v),
+                "rotation" => format!("{:.1}°", v),
+                _ => format!("{:.1}", v),
+            }
+        } else {
+            label
+        }
+    } else {
+        label
+    };
+
     // Edit-session state lives on EditorState so render can read it freely
-    // (reading the panel itself here would re-borrow it mid-render).
     let edit_state = state.read(cx);
     let editor_opt = edit_state.value_editor.clone();
-    let is_editing = edit_state.value_edit_key.as_deref() == Some(prop_key.as_str());
+    let is_editing = !is_linked && edit_state.value_edit_key.as_deref() == Some(prop_key.as_str());
     let value_child: AnyElement = match (is_editing, editor_opt) {
         (true, Some(editor)) => div()
             .w_full()
@@ -5180,35 +5212,103 @@ where
                     .w_full(),
             )
             .into_any_element(),
-        _ => div()
-            .id(edit_id)
-            .test_support()
-            .px_2()
-            .py_0p5()
-            .bg(cx.theme().muted)
-            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-            .border_1()
-            .border_color(cx.theme().border)
-            .rounded_sm()
-            .cursor_col_resize()
-            .text_xs()
-            .font_medium()
-            .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
-                let curr_x = event.position.x / px(1.0);
-                let p = prop_for_edit.clone();
-                panel_down.update(cx, |this, _| {
-                    this.scrub_prop = Some(p);
-                    this.scrub_last_x = Some(curr_x);
-                    this.scrub_moved = false;
-                });
-                // Scrubbing previews fast; release restores quality.
-                state_fast.update(cx, |s, cx| {
-                    s.checkpoint();
-                    s.preview_fast = true;
-                    cx.notify();
-                });
-            })
-            .on_mouse_down(MouseButton::Right, move |event, _window, cx| {
+        _ => {
+            let mut val_view = div()
+                .id(edit_id)
+                .test_support()
+                .px_2()
+                .py_0p5()
+                .border_1()
+                .rounded_sm()
+                .text_xs()
+                .font_medium();
+
+            if is_linked {
+                val_view = val_view
+                    .bg(rgb(0x2d1515))
+                    .border_color(rgb(0xef4444))
+                    .text_color(rgb(0xef4444))
+                    .cursor_not_allowed();
+            } else {
+                val_view = val_view
+                    .bg(cx.theme().muted)
+                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                    .border_color(cx.theme().border)
+                    .cursor_col_resize();
+            }
+
+            if !is_linked {
+                val_view = val_view
+                    .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+                        let curr_x = event.position.x / px(1.0);
+                        let p = prop_for_edit.clone();
+                        panel_down.update(cx, |this, _| {
+                            this.scrub_prop = Some(p);
+                            this.scrub_last_x = Some(curr_x);
+                            this.scrub_moved = false;
+                        });
+                        // Scrubbing previews fast; release restores quality.
+                        state_fast.update(cx, |s, cx| {
+                            s.checkpoint();
+                            s.preview_fast = true;
+                            cx.notify();
+                        });
+                    })
+                    .on_scroll_wheel(move |event, _window, cx| {
+                        let dy = match event.delta {
+                            ScrollDelta::Pixels(p) => p.y / px(1.0),
+                            ScrollDelta::Lines(l) => l.y * 5.0,
+                        };
+                        if dy != 0.0 {
+                            let step = if dy > 0.0 { 1.0 } else { -1.0 };
+                            let pk = prop_for_wheel.clone();
+                            state_scroll.update(cx, |s, cx| {
+                                // Discrete wheel step = one undoable nudge.
+                                s.checkpoint();
+                                match pk.as_str() {
+                                    "anchor_x" => s.nudge_anchor(step, 0.0),
+                                    "anchor_y" => s.nudge_anchor(0.0, step),
+                                    "pos_x" => s.nudge_position(step, 0.0),
+                                    "pos_y" => s.nudge_position(0.0, step),
+                                    "scale_x" => s.nudge_scale(step * 0.5, 0.0),
+                                    "scale_y" => s.nudge_scale(0.0, step * 0.5),
+                                    "scale_u" => s.nudge_scale(step * 0.5, 0.0),
+                                    "rotation" => s.nudge_rotation(step * 0.5),
+                                    "opacity" => s.nudge_opacity(step * 0.5),
+                                    other => {
+                                        if let Some(rest) = other.strip_prefix("slc:") {
+                                            let parts: Vec<&str> = rest.split(':').collect();
+                                            if parts.len() >= 3 {
+                                                if let Ok(idx) = parts[2].parse::<usize>() {
+                                                    let _ = s.nudge_shaderlab_component(parts[0], parts[1], idx, step * 0.25);
+                                                }
+                                            }
+                                        } else if let Some(rest) = other.strip_prefix("sl:") {
+                                            let parts: Vec<&str> = rest.split(':').collect();
+                                            if parts.len() >= 2 {
+                                                let _ = s.nudge_shaderlab_param(parts[0], parts[1], step);
+                                            }
+                                        } else if let Some(rest) = other.strip_prefix("fx:") {
+                                            let parts: Vec<&str> = rest.split(':').collect();
+                                            if parts.len() >= 2 {
+                                                let _ = s.nudge_effect_param(parts[0], parts[1], step * 2.0);
+                                            }
+                                        } else if let Some(rest) = other.strip_prefix("mask:") {
+                                            // mask:<layer>:<mask>:<param>
+                                            let parts: Vec<&str> = rest.split(':').collect();
+                                            if parts.len() >= 3 {
+                                                let _ = s.nudge_mask_param(parts[0], parts[1], parts[2], step);
+                                            }
+                                        }
+                                    }
+                                }
+                                cx.notify();
+                            });
+                        }
+                    });
+            }
+
+            val_view = val_view.on_mouse_down(MouseButton::Right, move |event, _window, cx| {
                 let sel_lid = state_rclick.read(cx).selected_layer_id.clone();
                 if let Some(lid) = sel_lid {
                     let path_str = match prop_for_rclick.as_str() {
@@ -5228,61 +5328,30 @@ where
                         cx.notify();
                     });
                 }
-            })
-            .on_scroll_wheel(move |event, _window, cx| {
-                let dy = match event.delta {
-                    ScrollDelta::Pixels(p) => p.y / px(1.0),
-                    ScrollDelta::Lines(l) => l.y * 5.0,
-                };
-                if dy != 0.0 {
-                    let step = if dy > 0.0 { 1.0 } else { -1.0 };
-                    let pk = prop_for_wheel.clone();
-                    state_scroll.update(cx, |s, cx| {
-                        // Discrete wheel step = one undoable nudge.
-                        s.checkpoint();
-                        match pk.as_str() {
-                            "anchor_x" => s.nudge_anchor(step, 0.0),
-                            "anchor_y" => s.nudge_anchor(0.0, step),
-                            "pos_x" => s.nudge_position(step, 0.0),
-                            "pos_y" => s.nudge_position(0.0, step),
-                            "scale_x" => s.nudge_scale(step * 0.5, 0.0),
-                            "scale_y" => s.nudge_scale(0.0, step * 0.5),
-                            "scale_u" => s.nudge_scale(step * 0.5, 0.0),
-                            "rotation" => s.nudge_rotation(step * 0.5),
-                            "opacity" => s.nudge_opacity(step * 0.5),
-                            other => {
-                                if let Some(rest) = other.strip_prefix("slc:") {
-                                    let parts: Vec<&str> = rest.split(':').collect();
-                                    if parts.len() >= 3 {
-                                        if let Ok(idx) = parts[2].parse::<usize>() {
-                                            let _ = s.nudge_shaderlab_component(parts[0], parts[1], idx, step * 0.25);
-                                        }
-                                    }
-                                } else if let Some(rest) = other.strip_prefix("sl:") {
-                                    let parts: Vec<&str> = rest.split(':').collect();
-                                    if parts.len() >= 2 {
-                                        let _ = s.nudge_shaderlab_param(parts[0], parts[1], step);
-                                    }
-                                } else if let Some(rest) = other.strip_prefix("fx:") {
-                                    let parts: Vec<&str> = rest.split(':').collect();
-                                    if parts.len() >= 2 {
-                                        let _ = s.nudge_effect_param(parts[0], parts[1], step * 2.0);
-                                    }
-                                } else if let Some(rest) = other.strip_prefix("mask:") {
-                                    // mask:<layer>:<mask>:<param>
-                                    let parts: Vec<&str> = rest.split(':').collect();
-                                    if parts.len() >= 3 {
-                                        let _ = s.nudge_mask_param(parts[0], parts[1], parts[2], step);
-                                    }
-                                }
-                            }
-                        }
-                        cx.notify();
-                    });
-                }
-            })
-            .child(label)
-            .into_any_element(),
+            });
+
+            if is_linked {
+                val_view
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .w(px(12.))
+                                    .h(px(12.))
+                                    .items_center()
+                                    .justify_center()
+                                    .text_color(rgb(0xef4444))
+                                    .child(gpui_kit::assets::IconName::Link),
+                            )
+                            .child(display_label),
+                    )
+                    .into_any_element()
+            } else {
+                val_view.child(display_label).into_any_element()
+            }
+        }
     };
 
     h_flex()
@@ -5318,9 +5387,29 @@ where
     let prop_for_rclick = prop_key.clone();
 
     let edit_id = id.into();
+    let path_str = match prop_for_rclick.as_str() {
+        "font_size" => "text.font_size",
+        other => other,
+    };
+    let sel_lid_opt = state.read(cx).selected_layer_id.clone();
+    let is_linked = if let Some(ref lid) = sel_lid_opt {
+        state.read(cx).is_layer_property_linked(lid, path_str)
+    } else {
+        false
+    };
+    let display_label = if is_linked {
+        if let Some(ref lid) = sel_lid_opt {
+            let v = state.read(cx).get_layer_property_live_value(lid, path_str);
+            format!("{:.1}", v)
+        } else {
+            label
+        }
+    } else {
+        label
+    };
     let edit_state = state.read(cx);
     let editor_opt = edit_state.value_editor.clone();
-    let is_editing = edit_state.value_edit_key.as_deref() == Some(prop_key.as_str());
+    let is_editing = !is_linked && edit_state.value_edit_key.as_deref() == Some(prop_key.as_str());
 
     let value_child: AnyElement = match (is_editing, editor_opt) {
         (true, Some(editor)) => div()
@@ -5341,32 +5430,87 @@ where
                     .w(px(70.)),
             )
             .into_any_element(),
-        _ => div()
-            .id(edit_id)
-            .test_support()
-            .px_1p5()
-            .py_0p5()
-            .text_color(rgb(0x3b82f6))
-            .hover(|s| s.text_color(rgb(0x60a5fa)).bg(rgba(0x3b82f620)))
-            .rounded_sm()
-            .cursor_col_resize()
-            .text_xs()
-            .font_medium()
-            .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
-                let curr_x = event.position.x / px(1.0);
-                let p = prop_for_edit.clone();
-                panel_down.update(cx, |this, _| {
-                    this.scrub_prop = Some(p);
-                    this.scrub_last_x = Some(curr_x);
-                    this.scrub_moved = false;
-                });
-                state_fast.update(cx, |s, cx| {
-                    s.checkpoint();
-                    s.preview_fast = true;
-                    cx.notify();
-                });
-            })
-            .on_mouse_down(MouseButton::Right, move |event, _window, cx| {
+        _ => {
+            let mut val_view = div()
+                .id(edit_id)
+                .test_support()
+                .px_1p5()
+                .py_0p5()
+                .rounded_sm()
+                .text_xs()
+                .font_medium();
+
+            if is_linked {
+                val_view = val_view
+                    .text_color(rgb(0xef4444))
+                    .bg(rgba(0xef444420))
+                    .cursor_not_allowed();
+            } else {
+                val_view = val_view
+                    .text_color(rgb(0x3b82f6))
+                    .hover(|s| s.text_color(rgb(0x60a5fa)).bg(rgba(0x3b82f620)))
+                    .cursor_col_resize();
+            }
+
+            if !is_linked {
+                val_view = val_view
+                    .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+                        let curr_x = event.position.x / px(1.0);
+                        let p = prop_for_edit.clone();
+                        panel_down.update(cx, |this, _| {
+                            this.scrub_prop = Some(p);
+                            this.scrub_last_x = Some(curr_x);
+                            this.scrub_moved = false;
+                        });
+                        state_fast.update(cx, |s, cx| {
+                            s.checkpoint();
+                            s.preview_fast = true;
+                            cx.notify();
+                        });
+                    })
+                    .on_scroll_wheel(move |event, _window, cx| {
+                        let dy = match event.delta {
+                            ScrollDelta::Pixels(p) => p.y / px(1.0),
+                            ScrollDelta::Lines(l) => l.y * 5.0,
+                        };
+                        if dy != 0.0 {
+                            let step = if dy > 0.0 { 1.0 } else { -1.0 };
+                            let pk = prop_for_wheel.clone();
+                            state_scroll.update(cx, |s, cx| {
+                                s.checkpoint();
+                                if pk == "font_size" {
+                                    if let Some(lid) = s.selected_layer_id.clone() {
+                                        let _ = s.nudge_layer_font_size(&lid, step);
+                                    }
+                                } else if pk == "font_weight" || pk == "text_weight" {
+                                    if let Some(lid) = s.selected_layer_id.clone() {
+                                        let cur = match s.selected_layer().map(|l| &l.source) {
+                                            Some(LayerSource::Text { weight, .. }) => *weight as f32,
+                                            _ => 400.0,
+                                        };
+                                        let _ = s.set_layer_font_weight(&lid, (cur + step * 50.0).clamp(100.0, 900.0).round() as u16);
+                                    }
+                                } else if let Some((head, _)) = pk.split_once(':') {
+                                    if let Some(lid) = s.selected_layer_id.clone() {
+                                        let field = match head {
+                                            "text_tracking" => "tracking",
+                                            "text_leading" => "leading",
+                                            "text_stroke_w" => "stroke_width",
+                                            "text_baseline" => "baseline_shift",
+                                            "text_box_h" => "box_height",
+                                            _ => "box_width",
+                                        };
+                                        let cur = s.scrub_current_value(head).unwrap_or(0.0);
+                                        let _ = s.set_layer_text_scalar(&lid, field, cur + step);
+                                    }
+                                }
+                                cx.notify();
+                            });
+                        }
+                    });
+            }
+
+            val_view = val_view.on_mouse_down(MouseButton::Right, move |event, _window, cx| {
                 let sel_lid = state_rclick.read(cx).selected_layer_id.clone();
                 if let Some(lid) = sel_lid {
                     let path_str = match prop_for_rclick.as_str() {
@@ -5379,49 +5523,30 @@ where
                         cx.notify();
                     });
                 }
-            })
-            .on_scroll_wheel(move |event, _window, cx| {
-                let dy = match event.delta {
-                    ScrollDelta::Pixels(p) => p.y / px(1.0),
-                    ScrollDelta::Lines(l) => l.y * 5.0,
-                };
-                if dy != 0.0 {
-                    let step = if dy > 0.0 { 1.0 } else { -1.0 };
-                    let pk = prop_for_wheel.clone();
-                    state_scroll.update(cx, |s, cx| {
-                        s.checkpoint();
-                        if pk == "font_size" {
-                            if let Some(lid) = s.selected_layer_id.clone() {
-                                let _ = s.nudge_layer_font_size(&lid, step);
-                            }
-                        } else if pk == "font_weight" || pk == "text_weight" {
-                            if let Some(lid) = s.selected_layer_id.clone() {
-                                let cur = match s.selected_layer().map(|l| &l.source) {
-                                    Some(LayerSource::Text { weight, .. }) => *weight as f32,
-                                    _ => 400.0,
-                                };
-                                let _ = s.set_layer_font_weight(&lid, (cur + step * 50.0).clamp(100.0, 900.0).round() as u16);
-                            }
-                        } else if let Some((head, _)) = pk.split_once(':') {
-                            if let Some(lid) = s.selected_layer_id.clone() {
-                                let field = match head {
-                                    "text_tracking" => "tracking",
-                                    "text_leading" => "leading",
-                                    "text_stroke_w" => "stroke_width",
-                                    "text_baseline" => "baseline_shift",
-                                    "text_box_h" => "box_height",
-                                    _ => "box_width",
-                                };
-                                let cur = s.scrub_current_value(head).unwrap_or(0.0);
-                                let _ = s.set_layer_text_scalar(&lid, field, cur + step);
-                            }
-                        }
-                        cx.notify();
-                    });
-                }
-            })
-            .child(label)
-            .into_any_element(),
+            });
+
+            if is_linked {
+                val_view
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .w(px(12.))
+                                    .h(px(12.))
+                                    .items_center()
+                                    .justify_center()
+                                    .text_color(rgb(0xef4444))
+                                    .child(gpui_kit::assets::IconName::Link),
+                            )
+                            .child(display_label),
+                    )
+                    .into_any_element()
+            } else {
+                val_view.child(display_label).into_any_element()
+            }
+        }
     };
 
     h_flex()
@@ -12040,10 +12165,10 @@ impl Render for PropertiesPanel {
                             cx.notify();
                         });
                     })
-                    .child("Copy Link"),
+                    .child("Copy with Property Links"),
             );
 
-            // 4. Paste Link
+            // 4. Paste as Property Link
             let has_link = s_menu.read(cx).copied_property_link.is_some();
             let s_pst = s_menu.clone();
             let p_pst = p_close.clone();
@@ -12075,7 +12200,38 @@ impl Render for PropertiesPanel {
                     .text_color(cx.theme().muted_foreground)
                     .cursor_not_allowed();
             }
-            menu_items = menu_items.child(pst_item.child("Paste Link"));
+            menu_items = menu_items.child(pst_item.child("Paste as Property Link"));
+
+            // 5. Remove Property Link (if linked)
+            if s_menu.read(cx).is_layer_property_linked(&lid_str, &path_str) {
+                let s_rm = s_menu.clone();
+                let p_rm = p_close.clone();
+                let l_rm = lid_str.clone();
+                let pt_rm = path_str.clone();
+                menu_items = menu_items.child(
+                    div()
+                        .id("props_ctx_remove_link")
+                        .test_support()
+                        .cursor_pointer()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .text_xs()
+                        .text_color(rgb(0xef4444))
+                        .hover(|s| s.bg(cx.theme().accent))
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            s_rm.update(cx, |s, cx| {
+                                s.remove_property_link(&l_rm, &pt_rm);
+                                cx.notify();
+                            });
+                            p_rm.update(cx, |this, cx| {
+                                this.close_context_menu();
+                                cx.notify();
+                            });
+                        })
+                        .child("Remove Property Link"),
+                );
+            }
 
             let p_cancel = p_close.clone();
             menu_items = menu_items.child(
@@ -12914,13 +13070,36 @@ fn timeline_scrub(
     panel_entity: &Entity<TimelinePanel>,
     cx: &App,
 ) -> Div {
+    let prop_path_static: &'static str = match value_key.as_str() {
+        "anchor_x" => "transform.anchor_point.x",
+        "anchor_y" => "transform.anchor_point.y",
+        "pos_x" => "transform.position.x",
+        "pos_y" => "transform.position.y",
+        "scale_x" => "transform.scale.x",
+        "scale_y" => "transform.scale.y",
+        "rotation" => "transform.rotation",
+        "opacity" => "opacity",
+        _ => "transform.position",
+    };
+    let is_linked = state.read(cx).is_layer_property_linked(&layer_id, prop_path_static);
+    let display_str = if is_linked {
+        let v = state.read(cx).get_layer_property_live_value(&layer_id, prop_path_static);
+        match value_key.as_str() {
+            "rotation" => format!("{:.1}°", v),
+            "scale_x" | "scale_y" | "opacity" => format!("{:.0}%", v),
+            _ => format!("{:.0}", v),
+        }
+    } else {
+        val_str
+    };
+
     // After Effects-style value pill: drag horizontally to scrub,
     // mouse-wheel for fine steps, click (no drag) for keyboard entry.
     // There are no +/- buttons anywhere on timeline values.
     let edit_key = format!("tl:{}:{}", layer_id, value_key);
     let edit_state = state.read(cx);
     let editor_opt = edit_state.value_editor.clone();
-    let is_editing = edit_state.value_edit_key.as_deref() == Some(edit_key.as_str());
+    let is_editing = !is_linked && edit_state.value_edit_key.as_deref() == Some(edit_key.as_str());
     let edit_id = id.into();
     let value_child: AnyElement = match (is_editing, editor_opt) {
         (true, Some(editor)) => div()
@@ -12949,85 +13128,109 @@ fn timeline_scrub(
             let lid_down = layer_id.clone();
             let key_down = value_key.clone();
             let lid_rclick = layer_id.clone();
-            let key_rclick = value_key.clone();
             let lid_wheel = layer_id.clone();
             let key_wheel = value_key.clone();
-            div()
+
+            let mut val_view = div()
                 .id(edit_id)
                 .test_support()
                 .px_1p5()
                 .py_0p5()
                 .rounded_sm()
-                .bg(cx.theme().secondary)
                 .border_1()
-                .border_color(cx.theme().border)
                 .text_xs()
-                .font_medium()
-                .text_color(cx.theme().foreground)
-                .cursor_col_resize()
-                .hover(|s| {
-                    s.bg(cx.theme().accent)
-                        .text_color(cx.theme().accent_foreground)
-                })
-                .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
-                    let curr_x = event.position.x / px(1.0);
-                    panel_down.update(cx, |this, _| {
-                        this.scrub_layer = Some(lid_down.clone());
-                        this.scrub_key = Some(key_down.clone());
-                        this.scrub_last_x = Some(curr_x);
-                        this.scrub_moved = false;
-                        this.scrub_factor = drag_factor;
+                .font_medium();
+
+            if is_linked {
+                val_view = val_view
+                    .bg(rgb(0x2d1515))
+                    .border_color(rgb(0xef4444))
+                    .text_color(rgb(0xef4444))
+                    .cursor_not_allowed();
+            } else {
+                val_view = val_view
+                    .bg(cx.theme().secondary)
+                    .border_color(cx.theme().border)
+                    .text_color(cx.theme().foreground)
+                    .cursor_col_resize()
+                    .hover(|s| {
+                        s.bg(cx.theme().accent)
+                            .text_color(cx.theme().accent_foreground)
                     });
-                    // Scrubbing previews fast; release restores quality.
-                    state_fast.update(cx, |s, cx| {
-                        s.checkpoint();
-                        s.preview_fast = true;
-                        cx.notify();
-                    });
-                })
-                .on_mouse_down(MouseButton::Right, move |event, _window, cx| {
-                    let pos = event.position;
-                    let prop_path_static: &'static str = match key_rclick.as_str() {
-                        "anchor_x" => "transform.anchor_point.x",
-                        "anchor_y" => "transform.anchor_point.y",
-                        "pos_x" => "transform.position.x",
-                        "pos_y" => "transform.position.y",
-                        "scale_x" => "transform.scale.x",
-                        "scale_y" => "transform.scale.y",
-                        "rotation" => "transform.rotation",
-                        "opacity" => "opacity",
-                        _ => "transform.position",
-                    };
-                    panel_rclick.update(cx, |this, cx| {
-                        this.open_context_menu(
-                            ContextMenuTarget::Property {
-                                layer_id: lid_rclick.clone(),
-                                prop_path: prop_path_static,
-                            },
-                            pos,
-                        );
-                        cx.notify();
-                    });
-                })
-                .on_scroll_wheel(move |event, _window, cx| {
-                    let dy = match event.delta {
-                        ScrollDelta::Pixels(p) => p.y / px(1.0),
-                        ScrollDelta::Lines(l) => l.y * 5.0,
-                    };
-                    if dy != 0.0 {
-                        let step = if dy > 0.0 { wheel_step } else { -wheel_step };
-                        let lid = lid_wheel.clone();
-                        let key = key_wheel.clone();
-                        state_wheel.update(cx, |s, cx| {
-                            // Discrete wheel step = one undoable nudge.
+            }
+
+            if !is_linked {
+                val_view = val_view
+                    .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+                        let curr_x = event.position.x / px(1.0);
+                        panel_down.update(cx, |this, _| {
+                            this.scrub_layer = Some(lid_down.clone());
+                            this.scrub_key = Some(key_down.clone());
+                            this.scrub_last_x = Some(curr_x);
+                            this.scrub_moved = false;
+                            this.scrub_factor = drag_factor;
+                        });
+                        // Scrubbing previews fast; release restores quality.
+                        state_fast.update(cx, |s, cx| {
                             s.checkpoint();
-                            s.nudge_timeline_value(&lid, &key, step);
+                            s.preview_fast = true;
                             cx.notify();
                         });
-                    }
-                })
-                .child(val_str)
-                .into_any_element()
+                    })
+                    .on_scroll_wheel(move |event, _window, cx| {
+                        let dy = match event.delta {
+                            ScrollDelta::Pixels(p) => p.y / px(1.0),
+                            ScrollDelta::Lines(l) => l.y * 5.0,
+                        };
+                        if dy != 0.0 {
+                            let step = if dy > 0.0 { wheel_step } else { -wheel_step };
+                            let lid = lid_wheel.clone();
+                            let key = key_wheel.clone();
+                            state_wheel.update(cx, |s, cx| {
+                                // Discrete wheel step = one undoable nudge.
+                                s.checkpoint();
+                                s.nudge_timeline_value(&lid, &key, step);
+                                cx.notify();
+                            });
+                        }
+                    });
+            }
+
+            val_view = val_view.on_mouse_down(MouseButton::Right, move |event, _window, cx| {
+                let pos = event.position;
+                panel_rclick.update(cx, |this, cx| {
+                    this.open_context_menu(
+                        ContextMenuTarget::Property {
+                            layer_id: lid_rclick.clone(),
+                            prop_path: prop_path_static,
+                        },
+                        pos,
+                    );
+                    cx.notify();
+                });
+            });
+
+            if is_linked {
+                val_view
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .w(px(12.))
+                                    .h(px(12.))
+                                    .items_center()
+                                    .justify_center()
+                                    .text_color(rgb(0xef4444))
+                                    .child(gpui_kit::assets::IconName::Link),
+                            )
+                            .child(display_str),
+                    )
+                    .into_any_element()
+            } else {
+                val_view.child(display_str).into_any_element()
+            }
         }
     };
 
@@ -17687,10 +17890,10 @@ impl Render for TimelinePanel {
                                     cx.notify();
                                 });
                             })
-                            .child("Copy Link"),
+                            .child("Copy with Property Links"),
                     );
 
-                    // 4. Paste Link
+                    // 4. Paste as Property Link
                     let has_link = s_menu.read(cx).copied_property_link.is_some();
                     let s_pst = s_menu.clone();
                     let p_pst = p_close.clone();
@@ -17721,7 +17924,37 @@ impl Render for TimelinePanel {
                             .text_color(cx.theme().muted_foreground)
                             .cursor_not_allowed();
                     }
-                    menu_items = menu_items.child(pst_item.child("Paste Link"));
+                    menu_items = menu_items.child(pst_item.child("Paste as Property Link"));
+
+                    // 4b. Remove Property Link (if linked)
+                    if s_menu.read(cx).is_layer_property_linked(&lid, path) {
+                        let s_rm = s_menu.clone();
+                        let p_rm = p_close.clone();
+                        let l_rm = lid.clone();
+                        menu_items = menu_items.child(
+                            div()
+                                .id("timeline_ctx_remove_link")
+                                .test_support()
+                                .cursor_pointer()
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .text_xs()
+                                .text_color(rgb(0xef4444))
+                                .hover(|s| s.bg(cx.theme().accent))
+                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                    s_rm.update(cx, |s, cx| {
+                                        s.remove_property_link(&l_rm, path);
+                                        cx.notify();
+                                    });
+                                    p_rm.update(cx, |this, cx| {
+                                        this.close_context_menu();
+                                        cx.notify();
+                                    });
+                                })
+                                .child("Remove Property Link"),
+                        );
+                    }
 
                     // 5. Add/Remove Keyframe at CTI
                     let s1 = s_menu.clone();
