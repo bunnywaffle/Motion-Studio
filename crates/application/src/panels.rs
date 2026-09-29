@@ -7996,6 +7996,7 @@ fn render_applied_effects(
     ui: &PropUi,
     selects: &HashMap<(String, String), Entity<ComboboxState<SearchableVec<String>>>>,
     enums: &HashMap<(String, String), Entity<ComboboxState<SearchableVec<String>>>>,
+    balance_cats: &HashMap<String, Entity<ComboboxState<SearchableVec<String>>>>,
     collapsed: &HashSet<String>,
     group_collapsed: &HashSet<String>,
     cx: &App,
@@ -8954,6 +8955,52 @@ fn render_applied_effects(
                 }
                 // Modular stock plug-ins render from the same declarations
                 // as every other effect (scalars + color slots).
+                // Color Balance gets a range picker (Shadows / Midtones /
+                // Highlights) that filters its nine sliders to one group.
+                EffectType::Stock { plugin, .. }
+                    if *plugin == project::StockPlugin::ColorBalance =>
+                {
+                    let range = balance_cats
+                        .get(&eff_id)
+                        .and_then(|cb| cb.read(cx).selected_value())
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "Shadows".to_string());
+                    let prefix = match range.as_str() {
+                        "Midtones" => "midtones_",
+                        "Highlights" => "highlights_",
+                        _ => "shadows_",
+                    };
+                    let picker: AnyElement = match balance_cats.get(&eff_id) {
+                        Some(cb) => div()
+                            .id(SharedString::from(format!("stock_balance_cat_{eff_id}")))
+                            .test_support()
+                            .w(px(140.))
+                            .child(Combobox::new(cb).into_any_element())
+                            .into_any_element(),
+                        None => div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(range.clone())
+                            .into_any_element(),
+                    };
+                    effect_box = effect_box.child(
+                        h_flex()
+                            .items_center()
+                            .justify_between()
+                            .text_xs()
+                            .child(
+                                div()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Range"),
+                            )
+                            .child(picker),
+                    );
+                    for decl in effect.declarations() {
+                        if decl.field.starts_with(prefix) {
+                            effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, &enums, cx));
+                        }
+                    }
+                }
                 EffectType::Stock { .. } => {
                     for decl in effect.declarations() {
                         effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, &enums, cx));
@@ -9486,6 +9533,13 @@ impl Render for PropertiesPanel {
             (String, String),
             Entity<ComboboxState<SearchableVec<String>>>,
         > = HashMap::new();
+        // Color Balance range picker (Shadows / Midtones / Highlights):
+        // display-only selection read back at render time to filter the
+        // nine sliders, so no commit subscription is needed.
+        let mut stock_bal_cats: HashMap<
+            String,
+            Entity<ComboboxState<SearchableVec<String>>>,
+        > = HashMap::new();
         {
             let live: HashSet<(String, String, usize)> = fx_enum_targets
                 .iter()
@@ -9495,8 +9549,32 @@ impl Render for PropertiesPanel {
                 .iter()
                 .map(|(e, p, _, i)| (format!("fx:{e}"), p.clone(), *i))
                 .collect();
-            self.combo_states.retain(|k, _| live.contains(k) || enum_live.contains(k));
-            self.combo_subs.retain(|k, _| live.contains(k) || enum_live.contains(k));
+            let bal_live: HashSet<(String, String, usize)> = {
+                let s = self.state.read(cx);
+                s.active_composition()
+                    .zip(s.selected_layer_id.clone())
+                    .and_then(|(c, lid)| c.get_layer(&lid))
+                    .map(|l| {
+                        l.effects
+                            .iter()
+                            .filter(|e| {
+                                matches!(
+                                    &e.effect_type,
+                                    EffectType::Stock { plugin, .. }
+                                    if *plugin == project::StockPlugin::ColorBalance
+                                )
+                            })
+                            .map(|e| (e.id.clone(), "range".to_string(), 0usize))
+                            .collect::<HashSet<_>>()
+                    })
+                    .unwrap_or_default()
+            };
+            self.combo_states.retain(|k, _| {
+                live.contains(k) || enum_live.contains(k) || bal_live.contains(k)
+            });
+            self.combo_subs.retain(|k, _| {
+                live.contains(k) || enum_live.contains(k) || bal_live.contains(k)
+            });
             for (eid, pname, options, idx) in &fx_enum_targets {
                 let key = (eid.clone(), pname.clone(), *idx);
                 if !self.combo_states.contains_key(&key) {
@@ -9565,6 +9643,23 @@ impl Render for PropertiesPanel {
                 }
                 if let Some(st) = self.combo_states.get(&(format!("fx:{eid}"), field.clone(), *idx)) {
                     fx_enums.insert((eid.clone(), field.clone()), st.clone());
+                }
+            }
+            for (eid, _, _) in &bal_live {
+                let key = (eid.clone(), "range".to_string(), 0usize);
+                if !self.combo_states.contains_key(&key) {
+                    let delegate = SearchableVec::new(vec![
+                        "Shadows".to_string(),
+                        "Midtones".to_string(),
+                        "Highlights".to_string(),
+                    ]);
+                    let st = cx.new(|cx| {
+                        ComboboxState::new(delegate, vec![IndexPath::new(0)], window, cx)
+                    });
+                    self.combo_states.insert(key.clone(), st);
+                }
+                if let Some(st) = self.combo_states.get(&key) {
+                    stock_bal_cats.insert(eid.clone(), st.clone());
                 }
             }
         }
@@ -10161,6 +10256,7 @@ impl Render for PropertiesPanel {
                             },
                             &fx_selects,
                             &fx_enums,
+                            &stock_bal_cats,
                             &self.fx_collapsed,
                             &self.fx_group_collapsed,
                             cx,

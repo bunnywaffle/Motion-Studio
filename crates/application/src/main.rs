@@ -5113,6 +5113,71 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn test_balance_range_picker_filters_sliders(cx: &mut TestAppContext) {
+        // Color Balance range picker: Shadows shows only shadow sliders,
+        // switching to Midtones swaps the visible rows.
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        let bal = app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, _| {
+                s.select_layer(Some("layer_accent".to_string()));
+                s.add_effect_to_selected_layer(project::EffectType::Stock {
+                    plugin: project::StockPlugin::ColorBalance,
+                    params: project::EffectType::stock_params(
+                        project::StockPlugin::ColorBalance,
+                    ),
+                    colors: project::EffectType::stock_colors(
+                        project::StockPlugin::ColorBalance,
+                    ),
+                })
+                .unwrap()
+            })
+        });
+        app_view.update(cx, |view, cx| {
+            view.panels().properties.update(cx, |this, cx| {
+                this.source_expanded = false;
+                this.transform_expanded = false;
+                this.switches_expanded = false;
+                this.tools_expanded = false;
+                cx.notify();
+            });
+        });
+        let cat = SharedString::from(format!("stock_balance_cat_{bal}"));
+        let shadow_row = SharedString::from(format!("param_shadows_cyan_red_{bal}"));
+        let mid_row = SharedString::from(format!("param_midtones_cyan_red_{bal}"));
+        let hi_row = SharedString::from(format!("param_highlights_cyan_red_{bal}"));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find(cat.clone()).visible());
+            // Default range: Shadows only.
+            assert!(window.find(shadow_row.clone()).visible());
+            assert!(window.try_find(mid_row.clone()).is_none());
+            assert!(window.try_find(hi_row.clone()).is_none());
+            // Switch to Midtones.
+            window.click(cat.clone(), cx);
+            window.press("down", cx);
+            window.press("enter", cx);
+        })
+        .expect("update_window failed");
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find(mid_row.clone()).visible());
+            assert!(window.try_find(shadow_row.clone()).is_none());
+            assert!(window.try_find(hi_row.clone()).is_none());
+        })
+        .expect("update_window failed");
+    }
+
+    #[gpui_kit::test]
     fn test_tiler_enum_and_mirror_widgets(cx: &mut TestAppContext) {
         // Tiler Layout/Cell Comboboxes + Mirror checkbox: keyboard pick
         // commits through the generic enum/bool setters.
