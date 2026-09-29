@@ -8981,16 +8981,62 @@ mod tests {
                 .unwrap()
                 .id
                 .clone();
-            this.connect_sockets("node_factor", "factor", &math_node_id, "a", cx);
-            this.connect_sockets(&math_node_id, "result", "node_output", "result", cx);
+            // Interactive drag-and-drop: drag wire from node_factor's output socket and drop onto math node card
+            let math_node = this.graph.get_node(&math_node_id).unwrap();
+            let (m_pos_x, m_pos_y) = (math_node.pos_x, math_node.pos_y);
+
+            this.connecting_wire = Some(crate::modifier_graph_view::WireDragState {
+                is_from_input: false,
+                node_id: "node_factor".to_string(),
+                socket_name: "factor".to_string(),
+                cur_x: m_pos_x + 50.0,
+                cur_y: m_pos_y + 30.0,
+                start_x: 40.0 + 186.0,
+                start_y: 220.0 + 41.0,
+            });
+            let connected = this.try_finish_wire_connection(m_pos_x + 50.0, m_pos_y + 30.0, 0.0, 0.0, cx);
+            assert!(connected, "should snap and connect output socket to math node input socket 'a'");
+            assert!(this.connecting_wire.is_none());
+            assert!(this.graph.connections.iter().any(|c| c.from_node == "node_factor" && c.to_node == math_node_id && c.to_socket == "a"));
+
+            // Drag from math node's output socket to node_output
+            let out_node = this.graph.get_node("node_output").unwrap();
+            let (o_pos_x, o_pos_y) = (out_node.pos_x, out_node.pos_y);
+
+            this.connecting_wire = Some(crate::modifier_graph_view::WireDragState {
+                is_from_input: false,
+                node_id: math_node_id.clone(),
+                socket_name: "result".to_string(),
+                cur_x: o_pos_x + 20.0,
+                cur_y: o_pos_y + 40.0,
+                start_x: m_pos_x + 186.0,
+                start_y: m_pos_y + 41.0,
+            });
+            let connected_out = this.try_finish_wire_connection(o_pos_x + 20.0, o_pos_y + 40.0, 0.0, 0.0, cx);
+            assert!(connected_out, "should connect math output to output node");
+            assert!(this.connecting_wire.is_none());
 
             // Verify evaluation with factor = 0.5: 0.5 * 2.0 = 1.0
             let out = this.graph.evaluate(100.0, 0.5);
             assert_eq!(out, 1.0);
 
-            // Reconnect input socket: disconnect a and reconnect to node_base:value
+            // Reconnect input socket: disconnect socket 'a' and drag from input socket 'a' back to node_base:value
             this.disconnect_socket(&math_node_id, "a", cx);
-            this.connect_sockets("node_base", "value", &math_node_id, "a", cx);
+            let base_node = this.graph.get_node("node_base").unwrap();
+            let (b_pos_x, b_pos_y) = (base_node.pos_x, base_node.pos_y);
+
+            this.connecting_wire = Some(crate::modifier_graph_view::WireDragState {
+                is_from_input: true,
+                node_id: math_node_id.clone(),
+                socket_name: "a".to_string(),
+                cur_x: b_pos_x + 186.0,
+                cur_y: b_pos_y + 41.0,
+                start_x: m_pos_x + 14.0,
+                start_y: m_pos_y + 41.0,
+            });
+            let connected_base = this.try_finish_wire_connection(b_pos_x + 186.0, b_pos_y + 41.0, 0.0, 0.0, cx);
+            assert!(connected_base, "should reconnect input socket to base value node");
+            assert!(this.connecting_wire.is_none());
 
             // Verify evaluation with base = 50.0: 50.0 * 2.0 = 100.0
             let out2 = this.graph.evaluate(50.0, 0.5);
