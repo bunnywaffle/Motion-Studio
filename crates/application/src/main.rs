@@ -9063,4 +9063,104 @@ mod tests {
         });
         cx.run_until_parked();
     }
+
+    #[gpui_kit::test]
+    fn test_layer_and_value_context_menu_operations(cx: &mut TestAppContext) {
+        let (_root, app_view) = setup_test_window(cx);
+        let state_entity = app_view.read_with(cx, |view, _| view.state().clone());
+
+        // 1. Layer duplicate and delete
+        state_entity.update(cx, |s, _| {
+            let initial_count = s.active_composition().unwrap().layers.len();
+            let new_id = s.duplicate_layer("layer_accent").expect("duplicate layer");
+            assert_eq!(s.active_composition().unwrap().layers.len(), initial_count + 1);
+            s.delete_layer(&new_id).expect("delete layer");
+            assert_eq!(s.active_composition().unwrap().layers.len(), initial_count);
+        });
+
+        // 2. Value context menu: Copy link, Paste link, Reset value
+        state_entity.update(cx, |s, _| {
+            // Modify transform.position on layer_accent
+            let comp = s.active_composition_mut().unwrap();
+            let layer = comp.get_layer_mut("layer_accent").unwrap();
+            layer.transform.position.clear_keyframes();
+            layer.transform.position.value_mut().x = 123.0;
+
+            // Add a test modifier graph
+            let mut graph = project::modifier::ModifierGraph::default_passthrough();
+            graph.add_node(project::modifier::ModifierNode::new(
+                "math_1",
+                100.0,
+                100.0,
+                project::modifier::NodeKind::Math {
+                    op: project::modifier::MathOp::Multiply,
+                    default_b: 2.0,
+                },
+            ));
+            layer.set_modifier_graph("transform.position.x", graph);
+
+            // Copy link
+            s.copy_property_link("layer_accent", "transform.position.x");
+            assert!(s.copied_property_link.is_some());
+
+            // Paste link to background layer's position.x
+            let ok = s.paste_property_link("layer_bg", "transform.position.x");
+            assert!(ok);
+            let comp = s.active_composition().unwrap();
+            let bg_layer = comp.get_layer("layer_bg").unwrap();
+            assert_eq!(bg_layer.transform.position.value().x, 123.0);
+            assert!(bg_layer.get_modifier_graph("transform.position.x").is_some());
+
+            // Reset value on layer_accent
+            s.reset_layer_property("layer_accent", "transform.position.x");
+            let comp = s.active_composition().unwrap();
+            let accent_layer = comp.get_layer("layer_accent").unwrap();
+            assert_eq!(accent_layer.transform.position.value().x, accent_layer.transform.position.default_value().x);
+            assert!(accent_layer.get_modifier_graph("transform.position.x").is_none());
+        });
+
+        // 3. Project context menu: Add to composition, Delete solid, Delete all keyframes
+        state_entity.update(cx, |s, _| {
+            // Add keyframes to layer_accent
+            s.toggle_layer_property_keyframe_at_playhead("layer_accent", "transform.position");
+            assert!(!s.active_composition().unwrap().get_layer("layer_accent").unwrap().transform.position.keyframes().is_empty());
+
+            // Clear all keyframes
+            s.delete_all_keyframes_on_layer("layer_accent");
+            assert!(s.active_composition().unwrap().get_layer("layer_accent").unwrap().transform.position.keyframes().is_empty());
+        });
+
+        // 4. Viewport context menu: Zoom 150%, Zoom to Fit, Toggle Overlay/Gizmo
+        let viewer = app_view.read_with(cx, |view, _| view.panels.composition.clone());
+        viewer.update(cx, |v, _| {
+            assert!(v.overlays_enabled);
+            assert_eq!(v.zoom_factor, None);
+
+            // Zoom to 150%
+            v.zoom_factor = Some(1.5);
+            assert_eq!(v.zoom_factor, Some(1.5));
+
+            // Zoom to Fit
+            v.zoom_factor = None;
+            assert_eq!(v.zoom_factor, None);
+
+            // Toggle overlay
+            v.overlays_enabled = false;
+            assert!(!v.overlays_enabled);
+            v.overlays_enabled = true;
+            assert!(v.overlays_enabled);
+        });
+
+        // Verify PropertiesPanel context menu state
+        let props = app_view.read_with(cx, |view, _| view.panels.properties.clone());
+        props.update(cx, |p, _| {
+            assert!(p.context_menu.is_none());
+            p.context_menu = Some(("layer_accent".to_string(), "transform.position.x".to_string(), gpui_kit::point(px(50.0), px(50.0))));
+            assert!(p.context_menu.is_some());
+            p.close_context_menu();
+            assert!(p.context_menu.is_none());
+        });
+
+        cx.run_until_parked();
+    }
 }

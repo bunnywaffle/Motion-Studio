@@ -1998,6 +1998,9 @@ impl Render for ProjectPanel {
                         let aid2 = asset_id.clone();
                         let s_del = s_menu.clone();
                         let p_del = p_close.clone();
+                        let aid3 = asset_id.clone();
+                        let s_kf = s_menu.clone();
+                        let p_kf = p_close.clone();
                         menu_items = menu_items
                             .child(
                                 div()
@@ -2042,13 +2045,63 @@ impl Render for ProjectPanel {
                                         });
                                     })
                                     .child("Delete Asset"),
+                            )
+                            .child(
+                                div()
+                                    .id("proj_ctx_del_keyframes_asset")
+                                    .test_support()
+                                    .cursor_pointer()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .text_xs()
+                                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        s_kf.update(cx, |s, cx| {
+                                            s.delete_all_keyframes_for_asset(&aid3);
+                                            cx.notify();
+                                        });
+                                        p_kf.update(cx, |this, cx| {
+                                            this.close_context_menu();
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child("Delete All Keyframes"),
                             );
                     }
                     ProjectContextMenuTarget::Solid(solid_id) => {
                         let sid = solid_id.clone();
                         let s_del = s_menu.clone();
                         let p_del = p_close.clone();
+                        let sid_add = solid_id.clone();
+                        let s_add = s_menu.clone();
+                        let p_add = p_close.clone();
+                        let sid_kf = solid_id.clone();
+                        let s_kf = s_menu.clone();
+                        let p_kf = p_close.clone();
                         menu_items = menu_items
+                            .child(
+                                div()
+                                    .id("proj_ctx_add_solid")
+                                    .test_support()
+                                    .cursor_pointer()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .text_xs()
+                                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        s_add.update(cx, |s, cx| {
+                                            let _ = s.duplicate_layer(&sid_add);
+                                            cx.notify();
+                                        });
+                                        p_add.update(cx, |this, cx| {
+                                            this.close_context_menu();
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child("Add to Composition"),
+                            )
                             .child(
                                 div()
                                     .id("proj_ctx_del_solid")
@@ -2070,6 +2123,28 @@ impl Render for ProjectPanel {
                                         });
                                     })
                                     .child("Delete Solid"),
+                            )
+                            .child(
+                                div()
+                                    .id("proj_ctx_del_keyframes_solid")
+                                    .test_support()
+                                    .cursor_pointer()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .text_xs()
+                                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        s_kf.update(cx, |s, cx| {
+                                            s.delete_all_keyframes_on_layer(&sid_kf);
+                                            cx.notify();
+                                        });
+                                        p_kf.update(cx, |this, cx| {
+                                            this.close_context_menu();
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child("Delete All Keyframes"),
                             );
                     }
                 }
@@ -2242,6 +2317,10 @@ pub struct CompositionViewerPanel {
     pub canvas_comp_buf: Option<crate::raster::FloatBuf>,
     /// Fingerprint of the canvas composite (dims + bg + underlying layers).
     pub canvas_comp_fingerprint: Option<u64>,
+    /// Viewport zoom factor (e.g. 1.5 for 150%, None for fit-to-view).
+    pub zoom_factor: Option<f32>,
+    /// Whether transformation gizmos, handles, and path overlays are enabled.
+    pub overlays_enabled: bool,
 }
 
 /// Evaluated world-space AABB of one layer for viewport picking (comp px).
@@ -2328,6 +2407,8 @@ impl CompositionViewerPanel {
             pick_boxes: Vec::new(),
             canvas_comp_buf: None,
             canvas_comp_fingerprint: None,
+            zoom_factor: None,
+            overlays_enabled: true,
         }
     }
 
@@ -2405,11 +2486,13 @@ impl Render for CompositionViewerPanel {
         let fit = ((avail_w - 32.0) / comp_w)
             .min((avail_h - 32.0) / comp_h)
             .clamp(0.05, 4.0);
-        let canvas_w = (comp_w * fit).max(2.0);
-        let canvas_h = (comp_h * fit).max(2.0);
+        let zoom = self.zoom_factor.unwrap_or(1.0);
+        let current_scale = (fit * zoom).clamp(0.01, 10.0);
+        let canvas_w = (comp_w * current_scale).max(2.0);
+        let canvas_h = (comp_h * current_scale).max(2.0);
         // Uniform canvas scale (comp px -> canvas px).
-        let scale_x = fit;
-        let scale_y = fit;
+        let scale_x = current_scale;
+        let scale_y = current_scale;
         self.canvas_px = Some((canvas_w, canvas_h));
         let frame_org = frame_origin_or_center(
             self.frame_origin,
@@ -4171,8 +4254,10 @@ impl Render for CompositionViewerPanel {
             }
         }
                                     })
-                                    .children(rendered_layers)
-                                    .children(gizmo_els);
+                                    .children(rendered_layers);
+                                if self.overlays_enabled {
+                                    canvas_frame = canvas_frame.children(gizmo_els);
+                                }
 
                                 let p_canvas_rclick = cx.entity().clone();
                                 canvas_frame = canvas_frame.on_mouse_down(MouseButton::Right, move |event, _window, cx| {
@@ -4202,6 +4287,40 @@ impl Render for CompositionViewerPanel {
                                                         .border_color(cx.theme().border)
                                                         .child("Composition Canvas"),
                                                 )
+                                                .child(menu_button("Zoom to 150%", cx, {
+                                                    let p = p_close.clone();
+                                                    move |cx| {
+                                                        p.update(cx, |this, cx| {
+                                                            this.zoom_factor = Some(1.5);
+                                                            this.close_context_menu();
+                                                            cx.notify();
+                                                        });
+                                                    }
+                                                }))
+                                                .child(menu_button("Zoom to Fit", cx, {
+                                                    let p = p_close.clone();
+                                                    move |cx| {
+                                                        p.update(cx, |this, cx| {
+                                                            this.zoom_factor = None;
+                                                            this.close_context_menu();
+                                                            cx.notify();
+                                                        });
+                                                    }
+                                                }))
+                                                .child(menu_button(
+                                                    if self.overlays_enabled { "Disable Overlay / Gizmo" } else { "Enable Overlay / Gizmo" },
+                                                    cx,
+                                                    {
+                                                        let p = p_close.clone();
+                                                        move |cx| {
+                                                            p.update(cx, |this, cx| {
+                                                                this.overlays_enabled = !this.overlays_enabled;
+                                                                this.close_context_menu();
+                                                                cx.notify();
+                                                            });
+                                                        }
+                                                    },
+                                                ))
                                                 .child(menu_button("New Text Layer", cx, {
                                                     let s = s_menu.clone();
                                                     let p = p_close.clone();
@@ -4260,6 +4379,22 @@ impl Render for CompositionViewerPanel {
                                                         .border_color(cx.theme().border)
                                                         .child(format!("Layer: {lid}")),
                                                 )
+                                                .child(menu_button("Delete Layer", cx, {
+                                                    let s = s_menu.clone();
+                                                    let p = p_close.clone();
+                                                    move |cx| {
+                                                        s.update(cx, |s, cx| { let _ = s.remove_layer_by_id(&lid_del); cx.notify(); });
+                                                        p.update(cx, |this, cx| { this.close_context_menu(); cx.notify(); });
+                                                    }
+                                                }))
+                                                .child(menu_button("Duplicate Layer", cx, {
+                                                    let s = s_menu.clone();
+                                                    let p = p_close.clone();
+                                                    move |cx| {
+                                                        s.update(cx, |s, cx| { let _ = s.duplicate_layer(&lid_dup); cx.notify(); });
+                                                        p.update(cx, |this, cx| { this.close_context_menu(); cx.notify(); });
+                                                    }
+                                                }))
                                                 .child(menu_button("Reset Transform", cx, {
                                                     let s = s_menu.clone();
                                                     let p = p_close.clone();
@@ -4276,14 +4411,6 @@ impl Render for CompositionViewerPanel {
                                                         p.update(cx, |this, cx| { this.close_context_menu(); cx.notify(); });
                                                     }
                                                 }))
-                                                .child(menu_button("Duplicate Layer", cx, {
-                                                    let s = s_menu.clone();
-                                                    let p = p_close.clone();
-                                                    move |cx| {
-                                                        s.update(cx, |s, cx| { let _ = s.duplicate_layer(&lid_dup); cx.notify(); });
-                                                        p.update(cx, |this, cx| { this.close_context_menu(); cx.notify(); });
-                                                    }
-                                                }))
                                                 .child(menu_button("Bring Forward", cx, {
                                                     let s = s_menu.clone();
                                                     let p = p_close.clone();
@@ -4297,14 +4424,6 @@ impl Render for CompositionViewerPanel {
                                                     let p = p_close.clone();
                                                     move |cx| {
                                                         s.update(cx, |s, cx| { let _ = s.move_selected_layer_down(); cx.notify(); });
-                                                        p.update(cx, |this, cx| { this.close_context_menu(); cx.notify(); });
-                                                    }
-                                                }))
-                                                .child(menu_button("Delete Layer", cx, {
-                                                    let s = s_menu.clone();
-                                                    let p = p_close.clone();
-                                                    move |cx| {
-                                                        s.update(cx, |s, cx| { let _ = s.remove_layer_by_id(&lid_del); cx.notify(); });
                                                         p.update(cx, |this, cx| { this.close_context_menu(); cx.notify(); });
                                                     }
                                                 }));
@@ -4449,6 +4568,7 @@ pub struct PropertiesPanel {
     focus_handle: FocusHandle,
     state: Entity<EditorState>,
     _subscription: Subscription,
+    pub context_menu: Option<(String, String, Point<Pixels>)>,
     pub scrub_prop: Option<String>,
     pub scrub_last_x: Option<f32>,
     /// True once the current scrub drag has moved (distinguishes scrub-drag
@@ -4629,6 +4749,7 @@ impl PropertiesPanel {
             focus_handle: cx.focus_handle(),
             state,
             _subscription,
+            context_menu: None,
             scrub_prop: None,
             scrub_last_x: None,
             scrub_moved: false,
@@ -4666,6 +4787,10 @@ impl PropertiesPanel {
             combobox_subs: HashMap::new(),
             combobox_fp: HashMap::new(),
         }
+    }
+
+    pub fn close_context_menu(&mut self) {
+        self.context_menu = None;
     }
 
     pub fn standalone(cx: &mut Context<Self>) -> Self {
@@ -5019,6 +5144,7 @@ where
     FPlus: Fn(&mut App) + 'static,
 {
     let panel_down = panel_entity.clone();
+    let panel_rclick = panel_entity.clone();
     let state_scroll = state.clone();
     let state_fast = state.clone();
     let state_rclick = state.clone();
@@ -5082,7 +5208,7 @@ where
                     cx.notify();
                 });
             })
-            .on_mouse_down(MouseButton::Right, move |_event, _window, cx| {
+            .on_mouse_down(MouseButton::Right, move |event, _window, cx| {
                 let sel_lid = state_rclick.read(cx).selected_layer_id.clone();
                 if let Some(lid) = sel_lid {
                     let path_str = match prop_for_rclick.as_str() {
@@ -5096,12 +5222,11 @@ where
                         "opacity" => "opacity",
                         other => other,
                     };
-                    crate::modifier_graph_view::open_modifier_graph_window(
-                        state_rclick.clone(),
-                        lid,
-                        path_str.to_string(),
-                        cx,
-                    );
+                    let pos = event.position;
+                    panel_rclick.update(cx, |this, cx| {
+                        this.context_menu = Some((lid, path_str.to_string(), pos));
+                        cx.notify();
+                    });
                 }
             })
             .on_scroll_wheel(move |event, _window, cx| {
@@ -5184,10 +5309,13 @@ where
     FPlus: Fn(&mut App) + 'static,
 {
     let panel_down = panel_entity.clone();
+    let panel_rclick = panel_entity.clone();
     let state_scroll = state.clone();
     let state_fast = state.clone();
+    let state_rclick = state.clone();
     let prop_for_wheel = prop_key.clone();
     let prop_for_edit = prop_key.clone();
+    let prop_for_rclick = prop_key.clone();
 
     let edit_id = id.into();
     let edit_state = state.read(cx);
@@ -5237,6 +5365,20 @@ where
                     s.preview_fast = true;
                     cx.notify();
                 });
+            })
+            .on_mouse_down(MouseButton::Right, move |event, _window, cx| {
+                let sel_lid = state_rclick.read(cx).selected_layer_id.clone();
+                if let Some(lid) = sel_lid {
+                    let path_str = match prop_for_rclick.as_str() {
+                        "font_size" => "text.font_size",
+                        other => other,
+                    };
+                    let pos = event.position;
+                    panel_rclick.update(cx, |this, cx| {
+                        this.context_menu = Some((lid, path_str.to_string(), pos));
+                        cx.notify();
+                    });
+                }
             })
             .on_scroll_wheel(move |event, _window, cx| {
                 let dy = match event.delta {
@@ -9625,7 +9767,7 @@ impl Render for PropertiesPanel {
                 );
         }
 
-        div()
+        let mut root = div()
             .id("properties_panel")
             .test_support()
             .track_focus(&self.focus_handle)
@@ -11803,7 +11945,203 @@ impl Render for PropertiesPanel {
                             render_tool_settings(&self.state, cx),
                         ]
                     }),
-            )
+            );
+
+        if let Some((ref lid, ref path, pos)) = self.context_menu {
+            let p_close = cx.entity().clone();
+            let p_dismiss_bg = cx.entity().clone();
+            let p_dismiss_r = cx.entity().clone();
+            let s_menu = self.state.clone();
+            let lid_str = lid.clone();
+            let path_str = path.clone();
+
+            let mut menu_items = v_flex().gap_0p5().p_1();
+
+            // 1. Reset Value
+            let s_rst = s_menu.clone();
+            let p_rst = p_close.clone();
+            let l_rst = lid_str.clone();
+            let pt_rst = path_str.clone();
+            menu_items = menu_items.child(
+                div()
+                    .id("props_ctx_reset_value")
+                    .test_support()
+                    .cursor_pointer()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .text_xs()
+                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        s_rst.update(cx, |s, cx| {
+                            s.reset_layer_property(&l_rst, &pt_rst);
+                            cx.notify();
+                        });
+                        p_rst.update(cx, |this, cx| {
+                            this.close_context_menu();
+                            cx.notify();
+                        });
+                    })
+                    .child("Reset Value"),
+            );
+
+            // 2. Modifier Graph...
+            let s_mod = s_menu.clone();
+            let p_mod = p_close.clone();
+            let l_mod = lid_str.clone();
+            let pt_mod = path_str.clone();
+            menu_items = menu_items.child(
+                div()
+                    .id("props_ctx_modifier_graph")
+                    .test_support()
+                    .cursor_pointer()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .text_xs()
+                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        crate::modifier_graph_view::open_modifier_graph_window(
+                            s_mod.clone(),
+                            l_mod.clone(),
+                            pt_mod.clone(),
+                            cx,
+                        );
+                        p_mod.update(cx, |this, cx| {
+                            this.close_context_menu();
+                            cx.notify();
+                        });
+                    })
+                    .child("Modifier Graph..."),
+            );
+
+            // 3. Copy Link
+            let s_cp = s_menu.clone();
+            let p_cp = p_close.clone();
+            let l_cp = lid_str.clone();
+            let pt_cp = path_str.clone();
+            menu_items = menu_items.child(
+                div()
+                    .id("props_ctx_copy_link")
+                    .test_support()
+                    .cursor_pointer()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .text_xs()
+                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        s_cp.update(cx, |s, cx| {
+                            s.copy_property_link(&l_cp, &pt_cp);
+                            cx.notify();
+                        });
+                        p_cp.update(cx, |this, cx| {
+                            this.close_context_menu();
+                            cx.notify();
+                        });
+                    })
+                    .child("Copy Link"),
+            );
+
+            // 4. Paste Link
+            let has_link = s_menu.read(cx).copied_property_link.is_some();
+            let s_pst = s_menu.clone();
+            let p_pst = p_close.clone();
+            let l_pst = lid_str.clone();
+            let pt_pst = path_str.clone();
+            let mut pst_item = div()
+                .id("props_ctx_paste_link")
+                .test_support()
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .text_xs();
+            if has_link {
+                pst_item = pst_item
+                    .cursor_pointer()
+                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        s_pst.update(cx, |s, cx| {
+                            let _ = s.paste_property_link(&l_pst, &pt_pst);
+                            cx.notify();
+                        });
+                        p_pst.update(cx, |this, cx| {
+                            this.close_context_menu();
+                            cx.notify();
+                        });
+                    });
+            } else {
+                pst_item = pst_item
+                    .text_color(cx.theme().muted_foreground)
+                    .cursor_not_allowed();
+            }
+            menu_items = menu_items.child(pst_item.child("Paste Link"));
+
+            let p_cancel = p_close.clone();
+            menu_items = menu_items.child(
+                div()
+                    .cursor_pointer()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .hover(|s| s.bg(cx.theme().muted))
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        p_cancel.update(cx, |this, cx| {
+                            this.close_context_menu();
+                            cx.notify();
+                        });
+                    })
+                    .child("Cancel"),
+            );
+
+            let menu_w = px(170.0);
+            let left_pos = pos.x.max(px(0.0));
+            let top_pos = pos.y.max(px(0.0));
+
+            root = root
+                .child(deferred(
+                    Positioner::corner(Anchor::TopLeft, point(px(0.), px(0.)))
+                        .margin(px(0.))
+                        .child(
+                            div()
+                                .id("props_context_menu_backdrop")
+                                .test_support()
+                                .size_full()
+                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                    p_dismiss_bg.update(cx, |this, cx| {
+                                        this.close_context_menu();
+                                        cx.notify();
+                                    });
+                                })
+                                .on_mouse_down(MouseButton::Right, move |_event, _window, cx| {
+                                    p_dismiss_r.update(cx, |this, cx| {
+                                        this.close_context_menu();
+                                        cx.notify();
+                                    });
+                                }),
+                        ),
+                ))
+                .child(deferred(
+                    Positioner::corner(Anchor::TopLeft, point(left_pos, top_pos))
+                        .margin(px(0.))
+                        .occlude()
+                        .child(
+                            div()
+                                .w(menu_w)
+                                .bg(cx.theme().popover)
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .rounded_md()
+                                .shadow_lg()
+                                .text_color(cx.theme().foreground)
+                                .child(menu_items),
+                        ),
+                ));
+        }
+
+        root
     }
 }
 
@@ -16763,9 +17101,35 @@ impl Render for TimelinePanel {
                     let target_lid = lid.clone();
                     let s1 = s_menu.clone();
                     let p1 = p_close.clone();
+                    let s_del_top = s_menu.clone();
+                    let p_del_top = p_close.clone();
+                    let t_del_top = target_lid.clone();
+                    menu_items = menu_items.child(
+                        div()
+                            .id("timeline_ctx_del_layer")
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .hover(|s| s.bg(rgb(0xef4444)).text_color(rgb(0xffffff)))
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                s_del_top.update(cx, |s, cx| {
+                                    let _ = s.remove_layer_by_id(&t_del_top);
+                                    cx.notify();
+                                });
+                                p_del_top.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    cx.notify();
+                                });
+                            })
+                            .child("Delete Layer"),
+                    );
+
                     let t1 = target_lid.clone();
                     menu_items = menu_items.child(
                         div()
+                            .id("timeline_ctx_dup_layer")
                             .cursor_pointer()
                             .px_2()
                             .py_1()
@@ -17027,29 +17391,6 @@ impl Render for TimelinePanel {
                             .child("Move Down"),
                     );
 
-                    let s6 = s_menu.clone();
-                    let p6 = p_close.clone();
-                    let t6 = target_lid.clone();
-                    menu_items = menu_items.child(
-                        div()
-                            .cursor_pointer()
-                            .px_2()
-                            .py_1()
-                            .rounded_sm()
-                            .text_xs()
-                            .hover(|s| s.bg(rgb(0xef4444)).text_color(rgb(0xffffff)))
-                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                s6.update(cx, |s, cx| {
-                                    let _ = s.remove_layer_by_id(&t6);
-                                    cx.notify();
-                                });
-                                p6.update(cx, |this, cx| {
-                                    this.close_context_menu();
-                                    cx.notify();
-                                });
-                            })
-                            .child("Delete Layer"),
-                    );
 
                     let s_adj = s_menu.clone();
                     let p_adj = p_close.clone();
@@ -17207,11 +17548,15 @@ impl Render for TimelinePanel {
                 ContextMenuTarget::Property { layer_id, prop_path } => {
                     let lid = layer_id.clone();
                     let path = *prop_path;
-                    let s1 = s_menu.clone();
-                    let p1 = p_close.clone();
-                    let l1 = lid.clone();
+
+                    // 1. Reset Value
+                    let s_rst = s_menu.clone();
+                    let p_rst = p_close.clone();
+                    let l_rst = lid.clone();
                     menu_items = menu_items.child(
                         div()
+                            .id("timeline_ctx_reset_value")
+                            .test_support()
                             .cursor_pointer()
                             .px_2()
                             .py_1()
@@ -17219,48 +17564,26 @@ impl Render for TimelinePanel {
                             .text_xs()
                             .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
                             .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                s1.update(cx, |s, cx| {
-                                    s.toggle_layer_property_keyframe_at_playhead(&l1, path);
+                                s_rst.update(cx, |s, cx| {
+                                    s.reset_layer_property(&l_rst, path);
                                     cx.notify();
                                 });
-                                p1.update(cx, |this, cx| {
+                                p_rst.update(cx, |this, cx| {
                                     this.close_context_menu();
                                     cx.notify();
                                 });
                             })
-                            .child("Add/Remove Keyframe at CTI"),
+                            .child("Reset Value"),
                     );
 
-                    let s2 = s_menu.clone();
-                    let p2 = p_close.clone();
-                    let l2 = lid.clone();
-                    menu_items = menu_items.child(
-                        div()
-                            .cursor_pointer()
-                            .px_2()
-                            .py_1()
-                            .rounded_sm()
-                            .text_xs()
-                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                s2.update(cx, |s, cx| {
-                                    s.toggle_layer_property_animation(&l2, path);
-                                    cx.notify();
-                                });
-                                p2.update(cx, |this, cx| {
-                                    this.close_context_menu();
-                                    cx.notify();
-                                });
-                            })
-                            .child("Toggle Stopwatch Animation"),
-                    );
-
+                    // 2. Modifier Graph...
                     let s3 = s_menu.clone();
                     let p3 = p_close.clone();
                     let l3 = lid.clone();
                     menu_items = menu_items.child(
                         div()
                             .id("timeline_ctx_modifier_graph")
+                            .test_support()
                             .cursor_pointer()
                             .px_2()
                             .py_1()
@@ -17339,6 +17662,118 @@ impl Render for TimelinePanel {
                                 .child("Modifier Graph (Y)..."),
                         );
                     }
+
+                    // 3. Copy Link
+                    let s_cp = s_menu.clone();
+                    let p_cp = p_close.clone();
+                    let l_cp = lid.clone();
+                    menu_items = menu_items.child(
+                        div()
+                            .id("timeline_ctx_copy_link")
+                            .test_support()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                s_cp.update(cx, |s, cx| {
+                                    s.copy_property_link(&l_cp, path);
+                                    cx.notify();
+                                });
+                                p_cp.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    cx.notify();
+                                });
+                            })
+                            .child("Copy Link"),
+                    );
+
+                    // 4. Paste Link
+                    let has_link = s_menu.read(cx).copied_property_link.is_some();
+                    let s_pst = s_menu.clone();
+                    let p_pst = p_close.clone();
+                    let l_pst = lid.clone();
+                    let mut pst_item = div()
+                        .id("timeline_ctx_paste_link")
+                        .test_support()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .text_xs();
+                    if has_link {
+                        pst_item = pst_item
+                            .cursor_pointer()
+                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                s_pst.update(cx, |s, cx| {
+                                    let _ = s.paste_property_link(&l_pst, path);
+                                    cx.notify();
+                                });
+                                p_pst.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    cx.notify();
+                                });
+                            });
+                    } else {
+                        pst_item = pst_item
+                            .text_color(cx.theme().muted_foreground)
+                            .cursor_not_allowed();
+                    }
+                    menu_items = menu_items.child(pst_item.child("Paste Link"));
+
+                    // 5. Add/Remove Keyframe at CTI
+                    let s1 = s_menu.clone();
+                    let p1 = p_close.clone();
+                    let l1 = lid.clone();
+                    menu_items = menu_items.child(
+                        div()
+                            .id("timeline_ctx_add_remove_kf")
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                s1.update(cx, |s, cx| {
+                                    s.toggle_layer_property_keyframe_at_playhead(&l1, path);
+                                    cx.notify();
+                                });
+                                p1.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    cx.notify();
+                                });
+                            })
+                            .child("Add/Remove Keyframe at CTI"),
+                    );
+
+                    // 6. Toggle Stopwatch Animation
+                    let s2 = s_menu.clone();
+                    let p2 = p_close.clone();
+                    let l2 = lid.clone();
+                    menu_items = menu_items.child(
+                        div()
+                            .id("timeline_ctx_toggle_stopwatch")
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                s2.update(cx, |s, cx| {
+                                    s.toggle_layer_property_animation(&l2, path);
+                                    cx.notify();
+                                });
+                                p2.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    cx.notify();
+                                });
+                            })
+                            .child("Toggle Stopwatch Animation"),
+                    );
                 }
                 ContextMenuTarget::Mask { layer_id, mask_id } => {
                     let lid = layer_id.clone();

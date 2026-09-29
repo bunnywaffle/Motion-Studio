@@ -181,6 +181,8 @@ pub struct EditorState {
     pub timeline_masks_reveal_all: bool,
     /// True when M shortcut toggled mask path visibility.
     pub timeline_masks_reveal_path: bool,
+    /// Copied property link `(layer_id, prop_path)` for Copy Link / Paste Link.
+    pub copied_property_link: Option<(String, String)>,
 }
 
 /// One undo/redo snapshot: the whole project plus UI context.
@@ -723,6 +725,7 @@ impl EditorState {
             last_m_press_time: None,
             timeline_masks_reveal_all: false,
             timeline_masks_reveal_path: false,
+            copied_property_link: None,
         }
     }
 
@@ -5911,6 +5914,410 @@ impl EditorState {
             .and_then(|c| c.get_layer(layer_id))
             .map(|l| l.progression_factor(&tc))
             .unwrap_or(0.0)
+    }
+
+    /// Reset an animatable property to its default value, clearing its keyframes and removing any modifier graph.
+    pub fn reset_layer_property(&mut self, layer_id: &str, prop_path: &str) {
+        self.checkpoint();
+        let comp = match self.active_composition_mut() {
+            Some(c) => c,
+            None => return,
+        };
+        let layer = match comp.get_layer_mut(layer_id) {
+            Some(l) => l,
+            None => return,
+        };
+
+        // Remove any modifier graph on this property
+        layer.remove_modifier_graph(prop_path);
+
+        match prop_path {
+            "transform.anchor_point" => {
+                layer.transform.anchor_point.reset();
+                layer.transform.anchor_point.clear_keyframes();
+            }
+            "transform.anchor_point.x" | "anchor_x" => {
+                let def_x = layer.transform.anchor_point.default_value().x;
+                layer.transform.anchor_point.value_mut().x = def_x;
+                layer.transform.anchor_point.clear_keyframes();
+            }
+            "transform.anchor_point.y" | "anchor_y" => {
+                let def_y = layer.transform.anchor_point.default_value().y;
+                layer.transform.anchor_point.value_mut().y = def_y;
+                layer.transform.anchor_point.clear_keyframes();
+            }
+            "transform.position" => {
+                layer.transform.position.reset();
+                layer.transform.position.clear_keyframes();
+            }
+            "transform.position.x" | "pos_x" => {
+                let def_x = layer.transform.position.default_value().x;
+                layer.transform.position.value_mut().x = def_x;
+                layer.transform.position.clear_keyframes();
+            }
+            "transform.position.y" | "pos_y" => {
+                let def_y = layer.transform.position.default_value().y;
+                layer.transform.position.value_mut().y = def_y;
+                layer.transform.position.clear_keyframes();
+            }
+            "transform.scale" => {
+                layer.transform.scale.reset();
+                layer.transform.scale.clear_keyframes();
+            }
+            "transform.scale.x" | "scale_x" => {
+                let def_x = layer.transform.scale.default_value().x;
+                layer.transform.scale.value_mut().x = def_x;
+                layer.transform.scale.clear_keyframes();
+            }
+            "transform.scale.y" | "scale_y" => {
+                let def_y = layer.transform.scale.default_value().y;
+                layer.transform.scale.value_mut().y = def_y;
+                layer.transform.scale.clear_keyframes();
+            }
+            "transform.rotation" | "rotation" => {
+                layer.transform.rotation.reset();
+                layer.transform.rotation.clear_keyframes();
+            }
+            "opacity" => {
+                layer.opacity.reset();
+                layer.opacity.clear_keyframes();
+            }
+            "text.font_size" | "font_size" => {
+                if let LayerSource::Text { ref mut font_size, .. } = layer.source {
+                    font_size.reset();
+                    font_size.clear_keyframes();
+                }
+            }
+            "text.tracking" | "tracking" => {
+                if let LayerSource::Text { ref mut tracking, .. } = layer.source {
+                    tracking.reset();
+                    tracking.clear_keyframes();
+                }
+            }
+            "text.leading" | "leading" => {
+                if let LayerSource::Text { ref mut leading, .. } = layer.source {
+                    leading.reset();
+                    leading.clear_keyframes();
+                }
+            }
+            "text.stroke_width" | "stroke_width" => {
+                if let LayerSource::Text { ref mut stroke_width, .. } = layer.source {
+                    stroke_width.reset();
+                    stroke_width.clear_keyframes();
+                }
+            }
+            "text.baseline_shift" | "baseline_shift" => {
+                if let LayerSource::Text { ref mut baseline_shift, .. } = layer.source {
+                    baseline_shift.reset();
+                    baseline_shift.clear_keyframes();
+                }
+            }
+            "text.box_width" | "box_width" => {
+                if let LayerSource::Text { ref mut box_width, .. } = layer.source {
+                    box_width.reset();
+                    box_width.clear_keyframes();
+                }
+            }
+            "text.fill_color" | "fill_color" => {
+                if let LayerSource::Text { ref mut fill_color, .. } = layer.source {
+                    fill_color.reset();
+                    fill_color.clear_keyframes();
+                }
+            }
+            "shape.rect_width" | "rect_width" | "width" => {
+                if let LayerSource::Shape { shape_type: project::ShapeType::Rectangle { ref mut width, .. } } = layer.source {
+                    width.reset();
+                    width.clear_keyframes();
+                }
+            }
+            "shape.rect_height" | "rect_height" | "height" => {
+                if let LayerSource::Shape { shape_type: project::ShapeType::Rectangle { ref mut height, .. } } = layer.source {
+                    height.reset();
+                    height.clear_keyframes();
+                }
+            }
+            "shape.corner_radius" | "corner_radius" => {
+                if let LayerSource::Shape { shape_type: project::ShapeType::Rectangle { ref mut corner_radius, .. } } = layer.source {
+                    corner_radius.reset();
+                    corner_radius.clear_keyframes();
+                }
+            }
+            "shape.ellipse_rx" | "radius_x" => {
+                if let LayerSource::Shape { shape_type: project::ShapeType::Ellipse { ref mut radius_x, .. } } = layer.source {
+                    radius_x.reset();
+                    radius_x.clear_keyframes();
+                }
+            }
+            "shape.ellipse_ry" | "radius_y" => {
+                if let LayerSource::Shape { shape_type: project::ShapeType::Ellipse { ref mut radius_y, .. } } = layer.source {
+                    radius_y.reset();
+                    radius_y.clear_keyframes();
+                }
+            }
+            _ => {
+                if let Some(rest) = prop_path.strip_prefix("effect:") {
+                    let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                    if parts.len() == 2 {
+                        let fx_id = parts[0];
+                        let param_name = parts[1];
+                        if let Some(fx) = layer.get_effect_mut(fx_id) {
+                            if let Some(prop) = fx.get_param_property_mut(param_name) {
+                                prop.reset();
+                                prop.clear_keyframes();
+                            }
+                        }
+                    }
+                } else if let Some(rest) = prop_path.strip_prefix("mask:") {
+                    let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                    if parts.len() == 2 {
+                        let mask_id = parts[0];
+                        let param_name = parts[1];
+                        if let Some(mask) = layer.masks.iter_mut().find(|m| m.id == mask_id) {
+                            if let Some(prop) = mask.get_param_property_mut(param_name) {
+                                prop.reset();
+                                prop.clear_keyframes();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Copy a property link `(layer_id, prop_path)` to the clipboard.
+    pub fn copy_property_link(&mut self, layer_id: &str, prop_path: &str) {
+        self.copied_property_link = Some((layer_id.to_string(), prop_path.to_string()));
+    }
+
+    /// Paste the copied property link to target property on target layer.
+    /// Sets value and replicates modifier graph if present. Returns true if pasted.
+    pub fn paste_property_link(&mut self, target_layer_id: &str, target_prop_path: &str) -> bool {
+        let (src_lid, src_prop) = match &self.copied_property_link {
+            Some(pair) => pair.clone(),
+            None => return false,
+        };
+
+        let src_val = self.get_layer_property_base_value(&src_lid, &src_prop);
+        let src_graph = self.get_layer_modifier_graph(&src_lid, &src_prop);
+
+        self.checkpoint();
+
+        if let Some(g) = src_graph {
+            self.set_layer_modifier_graph(target_layer_id, target_prop_path, g);
+        }
+
+        let comp = match self.active_composition_mut() {
+            Some(c) => c,
+            None => return false,
+        };
+        let layer = match comp.get_layer_mut(target_layer_id) {
+            Some(l) => l,
+            None => return false,
+        };
+
+        match target_prop_path {
+            "transform.anchor_point.x" | "anchor_x" => {
+                layer.transform.anchor_point.value_mut().x = src_val;
+            }
+            "transform.anchor_point.y" | "anchor_y" => {
+                layer.transform.anchor_point.value_mut().y = src_val;
+            }
+            "transform.anchor_point" => {
+                layer.transform.anchor_point.set_value(Vec2::new(src_val, src_val));
+            }
+            "transform.position.x" | "pos_x" => {
+                layer.transform.position.value_mut().x = src_val;
+            }
+            "transform.position.y" | "pos_y" => {
+                layer.transform.position.value_mut().y = src_val;
+            }
+            "transform.position" => {
+                layer.transform.position.set_value(Vec2::new(src_val, src_val));
+            }
+            "transform.scale.x" | "scale_x" => {
+                layer.transform.scale.value_mut().x = src_val;
+            }
+            "transform.scale.y" | "scale_y" => {
+                layer.transform.scale.value_mut().y = src_val;
+            }
+            "transform.scale" => {
+                layer.transform.scale.set_value(Vec2::new(src_val, src_val));
+            }
+            "transform.rotation" | "rotation" => {
+                layer.transform.rotation.set_value(src_val);
+            }
+            "opacity" => {
+                layer.opacity.set_value(src_val);
+            }
+            "text.font_size" | "font_size" => {
+                if let LayerSource::Text { ref mut font_size, .. } = layer.source {
+                    font_size.set_value(src_val);
+                }
+            }
+            "text.tracking" | "tracking" => {
+                if let LayerSource::Text { ref mut tracking, .. } = layer.source {
+                    tracking.set_value(src_val);
+                }
+            }
+            "text.leading" | "leading" => {
+                if let LayerSource::Text { ref mut leading, .. } = layer.source {
+                    leading.set_value(src_val);
+                }
+            }
+            "text.stroke_width" | "stroke_width" => {
+                if let LayerSource::Text { ref mut stroke_width, .. } = layer.source {
+                    stroke_width.set_value(src_val);
+                }
+            }
+            "text.baseline_shift" | "baseline_shift" => {
+                if let LayerSource::Text { ref mut baseline_shift, .. } = layer.source {
+                    baseline_shift.set_value(src_val);
+                }
+            }
+            "text.box_width" | "box_width" => {
+                if let LayerSource::Text { ref mut box_width, .. } = layer.source {
+                    box_width.set_value(src_val);
+                }
+            }
+            _ => {
+                if let Some(rest) = target_prop_path.strip_prefix("effect:") {
+                    let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                    if parts.len() == 2 {
+                        let fx_id = parts[0];
+                        let param_name = parts[1];
+                        if let Some(fx) = layer.get_effect_mut(fx_id) {
+                            if let Some(prop) = fx.get_param_property_mut(param_name) {
+                                prop.set_value(src_val);
+                            }
+                        }
+                    }
+                } else if let Some(rest) = target_prop_path.strip_prefix("mask:") {
+                    let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                    if parts.len() == 2 {
+                        let mask_id = parts[0];
+                        let param_name = parts[1];
+                        if let Some(mask) = layer.masks.iter_mut().find(|m| m.id == mask_id) {
+                            if let Some(prop) = mask.get_param_property_mut(param_name) {
+                                prop.set_value(src_val);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// Delete all keyframes across all animatable properties of a layer.
+    pub fn delete_all_keyframes_on_layer(&mut self, layer_id: &str) {
+        self.checkpoint();
+        let comp = match self.active_composition_mut() {
+            Some(c) => c,
+            None => return,
+        };
+        let layer = match comp.get_layer_mut(layer_id) {
+            Some(l) => l,
+            None => return,
+        };
+        layer.transform.position.clear_keyframes();
+        layer.transform.anchor_point.clear_keyframes();
+        layer.transform.scale.clear_keyframes();
+        layer.transform.rotation.clear_keyframes();
+        layer.opacity.clear_keyframes();
+        match &mut layer.source {
+            LayerSource::Text {
+                text,
+                font_size,
+                tracking,
+                leading,
+                stroke_width,
+                baseline_shift,
+                box_width,
+                box_height,
+                fill_color,
+                ..
+            } => {
+                text.clear_keyframes();
+                font_size.clear_keyframes();
+                tracking.clear_keyframes();
+                leading.clear_keyframes();
+                stroke_width.clear_keyframes();
+                baseline_shift.clear_keyframes();
+                box_width.clear_keyframes();
+                box_height.clear_keyframes();
+                fill_color.clear_keyframes();
+            }
+            LayerSource::Shape { shape_type, .. } => match shape_type {
+                project::ShapeType::Rectangle {
+                    width,
+                    height,
+                    corner_radius,
+                    ..
+                } => {
+                    width.clear_keyframes();
+                    height.clear_keyframes();
+                    corner_radius.clear_keyframes();
+                }
+                project::ShapeType::Ellipse {
+                    radius_x,
+                    radius_y,
+                    ..
+                } => {
+                    radius_x.clear_keyframes();
+                    radius_y.clear_keyframes();
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+        for effect in &mut layer.effects {
+            for decl in effect.declarations() {
+                if let Some(prop) = effect.get_param_property_mut(&decl.field) {
+                    prop.clear_keyframes();
+                }
+            }
+        }
+        for mask in &mut layer.masks {
+            mask.path.clear_keyframes();
+            mask.opacity.clear_keyframes();
+            mask.feather.clear_keyframes();
+            mask.expansion.clear_keyframes();
+        }
+    }
+
+    /// Delete all keyframes on any layer in the active composition referencing this asset.
+    pub fn delete_all_keyframes_for_asset(&mut self, asset_id: &str) {
+        let matching_layer_ids: Vec<String> = if let Some(comp) = self.active_composition() {
+            comp.layers.iter().filter_map(|l| {
+                match &l.source {
+                    LayerSource::Image { asset_id: aid } | LayerSource::Video { asset_id: aid, .. } => {
+                        if aid == asset_id || l.name == asset_id || l.id == asset_id {
+                            Some(l.id.clone())
+                        } else {
+                            None
+                        }
+                    }
+                    _ => {
+                        if l.name == asset_id || l.id == asset_id {
+                            Some(l.id.clone())
+                        } else {
+                            None
+                        }
+                    }
+                }
+            }).collect()
+        } else {
+            Vec::new()
+        };
+
+        for lid in matching_layer_ids {
+            self.delete_all_keyframes_on_layer(&lid);
+        }
+    }
+
+    /// Delete / remove a layer from the active composition by id.
+    pub fn delete_layer(&mut self, layer_id: &str) -> Result<(), String> {
+        self.remove_layer_by_id(layer_id)
     }
 
     /// Seek to the previous keyframe for the given property path on the layer.
