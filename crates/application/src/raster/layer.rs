@@ -7,6 +7,9 @@ use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use gpui_kit::gpui::RenderImage;
+
+
 use super::affine::{Aff, aff_apply, aff_invert, aff_mul, fold_transform, skew_about};
 use super::buffer::{FloatBuf, blur_buffer};
 use super::effects::{RasterFx, apply_effect_pixels, apply_sharpen, apply_vignette};
@@ -672,6 +675,8 @@ pub struct RasterEntry {
     /// Straight-alpha BGRA8 bytes sized w*h (feeds `RenderImage` directly —
     /// no PNG encode/decode round-trip on the display path).
     pub bgra: Arc<Vec<u8>>,
+    /// Cached GPUI RenderImage (avoids cloning multi-megabyte vectors per frame).
+    pub render_image: Option<Arc<RenderImage>>,
     pub w: u32,
     pub h: u32,
     pub avg: Color,
@@ -700,6 +705,57 @@ pub fn rasterize_layer(
 ) -> (FloatBuf, Color, bool) {
     let (ow, oh) = (out_w.max(1), out_h.max(1));
     let mut out = FloatBuf::clear(ow, oh);
+
+    // Direct zero-allocation fast-path for uniform solids with no effects, no masks, and axis-aligned transform:
+    if let LayerSource::Solid { color, fill_gradient: None, .. } = &layer.source {
+        let has_active_fx = layer.effects.iter().any(|e| e.enabled);
+        if !has_active_fx && layer.masks.is_empty() {
+            let wm = layer.world_matrix();
+            let is_axis_aligned = wm.b.abs() < 1e-4 && wm.c.abs() < 1e-4;
+            if is_axis_aligned && layer.blend_mode == BlendMode::Normal {
+                let op = layer.effective_opacity.clamp(0.0, 1.0);
+                let p = Px {
+                    r: color.r * op,
+                    g: color.g * op,
+                    b: color.b * op,
+                    a: color.a * op,
+                };
+                for px in out.px.iter_mut() {
+                    *px = p;
+                }
+                let avg = Color::rgba(p.r, p.g, p.b, p.a);
+                let empty = p.a < 0.004;
+                return (out, avg, empty);
+            }
+        }
+    }
+
+    // Direct zero-allocation fast-path for non-rounded rectangular shapes with no effects and no masks:
+    if let LayerSource::Shape { shape_type: ShapeType::Rectangle { corner_radius, fill, fill_gradient: None, .. } } = &layer.source {
+        if corner_radius.value <= 0.01 {
+            let has_active_fx = layer.effects.iter().any(|e| e.enabled);
+            if !has_active_fx && layer.masks.is_empty() {
+                let wm = layer.world_matrix();
+                let is_axis_aligned = wm.b.abs() < 1e-4 && wm.c.abs() < 1e-4;
+                if is_axis_aligned && layer.blend_mode == BlendMode::Normal {
+                    let op = layer.effective_opacity.clamp(0.0, 1.0);
+                    let p = Px {
+                        r: fill.r * op,
+                        g: fill.g * op,
+                        b: fill.b * op,
+                        a: fill.a * op,
+                    };
+                    for px in out.px.iter_mut() {
+                        *px = p;
+                    }
+                    let avg = Color::rgba(p.r, p.g, p.b, p.a);
+                    let empty = p.a < 0.004;
+                    return (out, avg, empty);
+                }
+            }
+        }
+    }
+
     if matches!(&layer.source, LayerSource::Adjustment) {
         // If the adjustment layer has zero enabled effects and normal blend mode,
         // it applies no transformations to the composite. Return empty = true so
@@ -708,6 +764,7 @@ pub fn rasterize_layer(
         if !has_active_fx && layer.blend_mode == BlendMode::Normal {
             return (out, Color::TRANSPARENT, true);
         }
+
 
         let fx = RasterFx {
             time_s,

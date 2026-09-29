@@ -2721,22 +2721,30 @@ impl Render for CompositionViewerPanel {
                                 duration_s,
                                 &self.asset_cache,
                             );
-                            let bgra = std::sync::Arc::new(buf.to_bgra8());
+                            let bgra_vec = buf.to_bgra8();
+                            let render_image = if !empty && rw > 0 && rh > 0 {
+                                let frame = image::Frame::new(
+                                    image::RgbaImage::from_raw(rw, rh, bgra_vec.clone())
+                                        .unwrap_or_else(|| image::RgbaImage::new(rw, rh)),
+                                );
+                                Some(std::sync::Arc::new(gpui::RenderImage::new(vec![frame])))
+                            } else {
+                                None
+                            };
+                            let bgra = std::sync::Arc::new(bgra_vec);
                             let e = crate::raster::RasterEntry {
                                 key: cache_key,
                                 bgra,
+                                render_image,
                                 w: rw,
                                 h: rh,
                                 avg,
                                 empty,
                             };
                             self.raster_cache.insert(layer.id.clone(), e.clone());
-                            // Bound memory: BGRA payloads are ~4MB at full
-                            // res, so the cap is tighter than the PNG days.
-                            if self.raster_cache.len() > 48 {
-                                self.raster_cache.clear();
-                                self.img_cache.clear();
-                                self.raster_cache.insert(layer.id.clone(), e.clone());
+                            // Bound memory: retain active & selected layers rather than wiping everything
+                            if self.raster_cache.len() > 64 {
+                                self.raster_cache.retain(|id, _| id == &layer.id || state.selected_layer_id.as_deref() == Some(id));
                             }
                             e
                         }
@@ -2929,25 +2937,11 @@ impl Render for CompositionViewerPanel {
                     // no content hashing, no async decode pop-in — the
                     // synchronous `Render` path presents the same tick.
                     if !entry.empty {
-                        let img_key = (layer.id.clone(), cache_key);
-                        let img = match self.img_cache.get(&img_key) {
-                            Some(im) => im.clone(),
-                            None => {
-                                let frame = image::Frame::new(
-                                    image::RgbaImage::from_raw(entry.w, entry.h, (*entry.bgra).clone())
-                                        .unwrap_or_else(|| image::RgbaImage::new(entry.w, entry.h)),
-                                );
-                                let im = std::sync::Arc::new(gpui::RenderImage::new(vec![frame]));
-                                self.img_cache.insert(img_key, im.clone());
-                                if self.img_cache.len() > 48 {
-                                    self.img_cache.clear();
-                                }
-                                im
-                            }
-                        };
-                        layer_el = layer_el.child(
-                            gpui::img(img).w(px(l_w)).h(px(l_h)),
-                        );
+                        if let Some(im) = &entry.render_image {
+                            layer_el = layer_el.child(
+                                gpui::img(im.clone()).w(px(l_w)).h(px(l_h)),
+                            );
+                        }
                     }
 
                     if is_adjustment {
