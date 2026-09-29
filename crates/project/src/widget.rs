@@ -262,6 +262,7 @@ mod tests {
             fx(EffectType::DisplacementMap { max_horizontal: p(0.0), max_vertical: p(0.0) }),
             fx(EffectType::ChromaKey { key_color: Color::GREEN, tolerance: p(30.0), feather: p(10.0) }),
             fx(EffectType::LumaKey { threshold: p(50.0), feather: p(5.0) }),
+            fx(EffectType::SwapColor { from_color: Color::GREEN, to_color: Color::RED, tolerance: p(30.0), feather: p(10.0) }),
             fx(EffectType::NoiseGenerator { amount: p(50.0), monochrome: false }),
             fx(EffectType::Checkerboard { size: p(32.0), color_a: Color::BLACK, color_b: Color::WHITE }),
             fx(EffectType::GradientRamp { color_a: Color::BLACK, color_b: Color::WHITE, angle: p(90.0), stops: Vec::new() }),
@@ -279,7 +280,7 @@ mod tests {
             fx(EffectType::Vignette { amount: p(50.0), softness: p(50.0) }),
             Effect::stock("s", StockPlugin::Solid),
         ];
-        assert_eq!(cases.len(), 25);
+        assert_eq!(cases.len(), 26);
         for fx in &cases {
             let decls = fx.declarations();
             assert!(!decls.is_empty(), "{:?}", fx.effect_type);
@@ -291,9 +292,9 @@ mod tests {
         let tint = &cases[2].declarations();
         assert!(tint.iter().any(|d| d.widget == WidgetKind::Color));
         assert!(tint.iter().any(|d| d.widget == WidgetKind::Percentage));
-        let noise = &cases[9].declarations();
+        let noise = &cases[10].declarations();
         assert!(noise.iter().any(|d| d.widget == WidgetKind::Checkbox));
-        let tiler = &cases[16].declarations();
+        let tiler = &cases[17].declarations();
         assert!(tiler.iter().any(|d| d.widget == WidgetKind::Dropdown));
         assert!(tiler.iter().any(|d| d.widget == WidgetKind::Integer));
         assert!(tiler.iter().any(|d| d.widget == WidgetKind::Checkbox));

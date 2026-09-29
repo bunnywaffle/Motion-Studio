@@ -174,6 +174,23 @@ pub fn luma_key() -> ColorFilter {
     )
 }
 
+/// Swap pixels near one color to another (tolerance + feather falloff).
+pub fn swap_color() -> ColorFilter {
+    color_filter!(
+        "swap_color",
+        r#"fn fx_swap_color(uv: vec2<f32>, color: vec4<f32>, from_color: vec3<f32>, to_color: vec3<f32>, tolerance: f32, feather: f32) -> vec4<f32> {
+    let dist = length(color.rgb - from_color);
+    let tol = max(tolerance / 100.0, 0.001);
+    let f = max(feather / 100.0, 0.001);
+    let m = clamp((tol + f - dist) / f, 0.0, 1.0);
+    if (m <= 0.0) {
+        return color;
+    }
+    return vec4<f32>(clamp(mix(color.rgb, to_color, m), vec3<f32>(0.0), vec3<f32>(1.0)), color.a);
+}"#
+    )
+}
+
 /// Value-hash film grain (CPU parity; amount 0..100, monochrome flag).
 pub fn noise() -> ColorFilter {
     color_filter!(
@@ -544,15 +561,24 @@ pub fn stock_curves() -> ColorFilter {
 pub fn stock_color_balance() -> ColorFilter {
     color_filter!(
         "stock_color_balance",
-        r#"fn fx_stock_color_balance(uv: vec2<f32>, color: vec4<f32>, balance: vec3<f32>) -> vec4<f32> {
-    let m = clamp(sin(color.rgb * 3.14159265), vec3<f32>(0.0), vec3<f32>(1.0));
-    var rgb = color.rgb;
-    let cr = balance.x / 100.0;
-    let mg = balance.y / 100.0;
-    let yb = balance.z / 100.0;
-    if (cr >= 0.0) { rgb.r += cr * m.r * 0.5; } else { rgb.g += -cr * m.g * 0.25; rgb.b += -cr * m.b * 0.25; }
-    if (mg >= 0.0) { rgb.g += mg * m.g * 0.5; } else { rgb.r += -mg * m.r * 0.25; rgb.b += -mg * m.b * 0.25; }
-    if (yb >= 0.0) { rgb.b += yb * m.b * 0.5; } else { rgb.r += -yb * m.r * 0.25; rgb.g += -yb * m.g * 0.25; }
+        r#"fn fx_cb_zone(x: f32) -> vec3<f32> {
+    let ws = (1.0 - x) * (1.0 - x);
+    let wm = 1.0 - (2.0 * x - 1.0) * (2.0 * x - 1.0);
+    let wh = x * x;
+    return vec3<f32>(ws, wm, wh);
+}
+fn fx_stock_color_balance(uv: vec2<f32>, color: vec4<f32>, shadows: vec3<f32>, mids: vec3<f32>, highs: vec3<f32>) -> vec4<f32> {
+    let wr = fx_cb_zone(color.r);
+    let wg = fx_cb_zone(color.g);
+    let wb = fx_cb_zone(color.b);
+    let tr = vec3<f32>(shadows.x, mids.x, highs.x);
+    let tg = vec3<f32>(shadows.y, mids.y, highs.y);
+    let tb = vec3<f32>(shadows.z, mids.z, highs.z);
+    let zero = vec3<f32>(0.0);
+    var rgb = color.rgb + vec3<f32>(dot(tr, wr), dot(tg, wg), dot(tb, wb)) / 100.0 * 0.5;
+    rgb.g += (dot(max(-tr, zero), wr) + dot(max(-tb, zero), wb)) * 0.25 / 100.0;
+    rgb.b += (dot(max(-tr, zero), wr) + dot(max(-tg, zero), wg)) * 0.25 / 100.0;
+    rgb.r += (dot(max(-tg, zero), wg) + dot(max(-tb, zero), wb)) * 0.25 / 100.0;
     return vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)), color.a);
 }"#
     )
@@ -1169,6 +1195,7 @@ pub fn all_color_filters() -> Vec<ColorFilter> {
         displacement(),
         chroma_key(),
         luma_key(),
+        swap_color(),
         noise(),
         checkerboard(),
         gradient_ramp(),

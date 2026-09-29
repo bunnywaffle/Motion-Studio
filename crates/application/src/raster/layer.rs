@@ -470,6 +470,7 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
         EvaluatedEffectType::DisplacementMap { .. } => 7,
         EvaluatedEffectType::ChromaKey { .. } => 8,
         EvaluatedEffectType::LumaKey { .. } => 9,
+        EvaluatedEffectType::SwapColor { .. } => 26,
         EvaluatedEffectType::NoiseGenerator { .. } => 10,
         EvaluatedEffectType::ShaderLab { .. } => 11,
         EvaluatedEffectType::Checkerboard { .. } => 12,
@@ -526,6 +527,12 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
         }
         EvaluatedEffectType::LumaKey { threshold, feather } => {
             threshold.to_bits().hash(h);
+            feather.to_bits().hash(h);
+        }
+        EvaluatedEffectType::SwapColor { from_color, to_color, tolerance, feather } => {
+            color_hash(from_color, h);
+            color_hash(to_color, h);
+            tolerance.to_bits().hash(h);
             feather.to_bits().hash(h);
         }
         EvaluatedEffectType::NoiseGenerator { amount, monochrome } => {

@@ -133,9 +133,36 @@ fn get_gpu_engine() -> &'static Mutex<Option<GpuEffectEngine>> {
 /// Gaussian blur a straight-alpha buffer in place.
 /// Uses GPU Compute Shader blur with workgroup shared memory tiles when available,
 /// falling back seamlessly to the CPU kernel.
+/// Wide radii (> 8px) downsample first (cost drops with the square of the
+/// factor; gaussian-soft signals resample cleanly), then blur small.
 pub fn blur_buffer(buf: &mut FloatBuf, radius_px: f32) {
     let radius_px = radius_px.clamp(0.0, 48.0);
     if radius_px < 0.5 || buf.w == 0 || buf.h == 0 {
+        return;
+    }
+    if radius_px > 8.0 {
+        // Downsample factor keeps the effective radius ≤ 8.
+        let k = ((radius_px / 8.0).ceil().max(2.0)).min(8.0);
+        let (sw, sh) = (
+            ((buf.w as f32 / k).ceil().max(2.0)) as u32,
+            ((buf.h as f32 / k).ceil().max(2.0)) as u32,
+        );
+        let mut small = FloatBuf::clear(sw, sh);
+        for y in 0..sh {
+            for x in 0..sw {
+                let sx = (x as f32 + 0.5) / sw as f32 * buf.w as f32 - 0.5;
+                let sy = (y as f32 + 0.5) / sh as f32 * buf.h as f32 - 0.5;
+                small.px[(y * sw + x) as usize] = buf.sample(sx, sy);
+            }
+        }
+        blur_buffer(&mut small, radius_px / k);
+        for y in 0..buf.h {
+            for x in 0..buf.w {
+                let sx = (x as f32 + 0.5) / buf.w as f32 * sw as f32 - 0.5;
+                let sy = (y as f32 + 0.5) / buf.h as f32 * sh as f32 - 0.5;
+                buf.px[(y * buf.w + x) as usize] = small.sample(sx, sy);
+            }
+        }
         return;
     }
     // Attempt GPU compute blur (its shader apron covers radii up to 8;
@@ -198,5 +225,43 @@ mod tests {
         blur_buffer(&mut buf2, 0.0);
         blur_buffer(&mut buf2, 500.0);
         assert!(buf2.px.iter().all(|p| p.a == 0.0));
+    }
+
+    #[test]
+    fn wide_blur_matches_direct_kernel_within_tolerance() {
+        // 64px white box on transparent, radius 24: downsampled path must
+        // agree with the direct CPU kernel (smooth signal, resample-safe).
+        fn boxed() -> FloatBuf {
+            let mut buf = FloatBuf::clear(64, 64);
+            for y in 16..48 {
+                for x in 16..48 {
+                    buf.px[(y * 64 + x) as usize] = Px { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+                }
+            }
+            buf
+        }
+        let mut fast = boxed();
+        blur_buffer(&mut fast, 24.0);
+        let mut ref_px = boxed();
+        let mut bytes = ref_px.to_rgba8();
+        renderer::gaussian_blur_rgba(&mut bytes, 64, 64, 24.0);
+        for (i, p) in ref_px.px.iter_mut().enumerate() {
+            let a = bytes[i * 4 + 3] as f32 / 255.0;
+            *p = Px {
+                r: bytes[i * 4] as f32 / 255.0 * a,
+                g: bytes[i * 4 + 1] as f32 / 255.0 * a,
+                b: bytes[i * 4 + 2] as f32 / 255.0 * a,
+                a,
+            };
+        }
+        // Deep interior stays strongly covered, far exterior ~clear
+        // (gaussian tails never hit exactly zero).
+        assert!(fast.get(32, 32).a > 0.7);
+        assert!(fast.get(2, 2).a < 0.05);
+        let mut worst = 0.0f32;
+        for (a, b) in fast.px.iter().zip(ref_px.px.iter()) {
+            worst = worst.max((a.a - b.a).abs());
+        }
+        assert!(worst < 0.12, "downsampled blur drift {worst}");
     }
 }

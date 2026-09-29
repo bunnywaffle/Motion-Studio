@@ -689,6 +689,7 @@ pub(crate) fn widget_for_decl(
     eff_id: &str,
     decl: &PropDecl,
     wheels: &HashMap<(String, String), Entity<InspectorColorPicker>>,
+    enums: &HashMap<(String, String), Entity<ComboboxState<SearchableVec<String>>>>,
     cx: &App,
 ) -> AnyElement {
     use project::PropValue;
@@ -731,6 +732,7 @@ pub(crate) fn widget_for_decl(
         WidgetKind::Checkbox => match decl.value {
             PropValue::Bool(on) => {
                 let s_t = state.clone();
+                let lid = layer_id.to_string();
                 let eid = eff_id.to_string();
                 let fld = decl.field.clone();
                 widget_bool(
@@ -738,19 +740,60 @@ pub(crate) fn widget_for_decl(
                     on,
                     format!("fx_bool_{}_{}", decl.field, eff_id),
                     &format!("Toggle {}", decl.label),
-                    move |_on: bool, cx: &mut App| {
-                        let (eid, fld) = (eid.clone(), fld.clone());
+                    move |is_on: bool, cx: &mut App| {
+                        let (lid, eid, fld) = (lid.clone(), eid.clone(), fld.clone());
                         s_t.update(cx, |s, cx| {
-                            // Classic bool params toggle through their own
-                            // setters (only monochrome exists today).
                             if fld == "monochrome" {
                                 let _ = s.toggle_noise_monochrome(&eid);
+                            } else {
+                                let _ = s.set_effect_bool(&lid, &eid, &fld, is_on);
                             }
                             cx.notify();
                         });
                     },
                     cx,
                 )
+            }
+            _ => div().into_any_element(),
+        },
+        WidgetKind::Dropdown => match &decl.value {
+            PropValue::EnumSel { index } => {
+                let options = decl.meta.options.clone();
+                let label = decl.label.clone();
+                let combo_el: AnyElement =
+                    match enums.get(&(eff_id.to_string(), decl.field.clone())) {
+                        Some(st) => div()
+                            .id(SharedString::from(format!(
+                                "fx_enum_{}_{}",
+                                eff_id, decl.field
+                            )))
+                            .test_support()
+                            .child(
+                                Combobox::new(st).placeholder(label.clone()),
+                            )
+                            .into_any_element(),
+                        None => div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(
+                                options
+                                    .get(*index)
+                                    .cloned()
+                                    .unwrap_or_else(|| "—".to_string()),
+                            )
+                            .into_any_element(),
+                    };
+                h_flex()
+                    .items_center()
+                    .justify_between()
+                    .text_xs()
+                    .child(
+                        div()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(label),
+                    )
+                    .child(combo_el)
+                    .into_any_element()
             }
             _ => div().into_any_element(),
         },

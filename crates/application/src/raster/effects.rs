@@ -272,6 +272,7 @@ pub fn apply_effect_pixels(
         | EvaluatedEffectType::DropShadow { .. }
         | EvaluatedEffectType::ChromaKey { .. }
         | EvaluatedEffectType::LumaKey { .. }
+        | EvaluatedEffectType::SwapColor { .. }
         | EvaluatedEffectType::Bloom { .. }
         | EvaluatedEffectType::Exposure { .. }
         | EvaluatedEffectType::Levels { .. }

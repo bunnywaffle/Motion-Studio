@@ -4568,6 +4568,56 @@ impl EditorState {
         }
     }
 
+    /// Set a named enum option by index on an effect (Tiler layout/cell).
+    pub fn set_effect_enum(
+        &mut self,
+        layer_id: &str,
+        effect_id: &str,
+        field: &str,
+        index: usize,
+    ) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let effect = layer
+            .get_effect_mut(effect_id)
+            .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
+        if effect.set_enum_value(field, index) {
+            Ok(())
+        } else {
+            Err(format!("Enum field {field} not found on effect {effect_id}"))
+        }
+    }
+
+    /// Set a named boolean flag on an effect (Tiler mirror).
+    pub fn set_effect_bool(
+        &mut self,
+        layer_id: &str,
+        effect_id: &str,
+        field: &str,
+        value: bool,
+    ) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let effect = layer
+            .get_effect_mut(effect_id)
+            .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
+        if effect.set_bool_value(field, value) {
+            Ok(())
+        } else {
+            Err(format!("Bool field {field} not found on effect {effect_id}"))
+        }
+    }
+
     /// Read a Gradient Ramp's working stops (explicit stops, else the
     /// endpoint pair) for the shared gradient editor.
     pub fn effect_gradient_stops(

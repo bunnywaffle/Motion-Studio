@@ -5113,6 +5113,74 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn test_tiler_enum_and_mirror_widgets(cx: &mut TestAppContext) {
+        // Tiler Layout/Cell Comboboxes + Mirror checkbox: keyboard pick
+        // commits through the generic enum/bool setters.
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        let tiler = app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, _| {
+                s.select_layer(Some("layer_accent".to_string()));
+                s.add_effect_to_selected_layer(project::EffectType::tiler(2.0, 2.0)).unwrap()
+            })
+        });
+        app_view.update(cx, |view, cx| {
+            view.panels().properties.update(cx, |this, cx| {
+                this.source_expanded = false;
+                this.transform_expanded = false;
+                this.switches_expanded = false;
+                this.tools_expanded = false;
+                cx.notify();
+            });
+        });
+        let mode_trigger = SharedString::from(format!("fx_enum_{tiler}_mode"));
+        let cell_trigger = SharedString::from(format!("fx_enum_{tiler}_cell"));
+        let mirror_toggle = SharedString::from(format!("fx_bool_mirror_{tiler}"));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find(mode_trigger.clone()).visible());
+            assert!(window.find(cell_trigger.clone()).visible());
+            assert!(window.find(mirror_toggle.clone()).visible());
+            // Layout: Grid -> Radial (second option).
+            window.click(mode_trigger.clone(), cx);
+            window.press("down", cx);
+            window.press("enter", cx);
+        })
+        .expect("update_window failed");
+        assert!(app_view.read_with(cx, |view, cx| {
+            matches!(
+                view.state().read(cx).active_composition().unwrap()
+                    .get_layer("layer_accent").unwrap()
+                    .get_effect(&tiler).unwrap().effect_type,
+                project::EffectType::Tiler { mode: project::TileMode::Radial, .. }
+            )
+        }));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            // Mirror checkbox toggles on.
+            window.click(mirror_toggle.clone(), cx);
+        })
+        .expect("update_window failed");
+        assert!(app_view.read_with(cx, |view, cx| {
+            matches!(
+                view.state().read(cx).active_composition().unwrap()
+                    .get_layer("layer_accent").unwrap()
+                    .get_effect(&tiler).unwrap().effect_type,
+                project::EffectType::Tiler { mirror: true, .. }
+            )
+        }));
+    }
+
+    #[gpui_kit::test]
     fn test_widget_gradient_and_checkbox(cx: &mut TestAppContext) {
         use gpui_kit::test::TestWindowExt;
 

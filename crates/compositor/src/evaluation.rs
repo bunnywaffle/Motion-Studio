@@ -401,6 +401,12 @@ pub enum EvaluatedEffectType {
         threshold: f32,
         feather: f32,
     },
+    SwapColor {
+        from_color: Color,
+        to_color: Color,
+        tolerance: f32,
+        feather: f32,
+    },
     NoiseGenerator {
         amount: f32,
         monochrome: bool,
@@ -504,6 +510,7 @@ impl EvaluatedEffectType {
             Self::DisplacementMap { .. } => "Displacement Map",
             Self::ChromaKey { .. } => "Chroma Key",
             Self::LumaKey { .. } => "Luma Key",
+            Self::SwapColor { .. } => "Swap Color",
             Self::NoiseGenerator { .. } => "Noise Generator",
             Self::ShaderLab { .. } => "Shader Lab",
             Self::Checkerboard { .. } => "Checkerboard",
@@ -536,6 +543,7 @@ impl EvaluatedEffectType {
             Self::DisplacementMap { .. } => "net.sf.openfx.displacement",
             Self::ChromaKey { .. } => "net.sf.openfx.chroma_key",
             Self::LumaKey { .. } => "net.sf.openfx.luma_key",
+            Self::SwapColor { .. } => "net.sf.openfx.swap_color",
             Self::NoiseGenerator { .. } => "net.sf.openfx.noise",
             Self::ShaderLab { .. } => "net.sf.openfx.custom.shader_lab",
             Self::Checkerboard { .. } => "net.sf.openfx.checkerboard",
@@ -680,6 +688,28 @@ impl EvaluatedEffectType {
                     Color::rgba(c.r, c.g, c.b, c.a * alpha_mult)
                 } else {
                     c
+                }
+            }
+            Self::SwapColor { from_color, to_color, tolerance, feather } => {
+                let dr = c.r - from_color.r;
+                let dg = c.g - from_color.g;
+                let db = c.b - from_color.b;
+                let dist = (dr * dr + dg * dg + db * db).sqrt();
+                // Same distance scale as Chroma Key: tolerance is the full
+                // swap radius, feather the smooth falloff band beyond it.
+                let tol = (*tolerance / 100.0).max(0.001);
+                let f = (*feather / 100.0).max(0.001);
+                // Full swap inside tolerance, smooth falloff across feather.
+                let m = ((tol + f - dist) / f).clamp(0.0, 1.0);
+                if m <= 0.0 {
+                    c
+                } else {
+                    Color::rgba(
+                        (c.r + (to_color.r - c.r) * m).clamp(0.0, 1.0),
+                        (c.g + (to_color.g - c.g) * m).clamp(0.0, 1.0),
+                        (c.b + (to_color.b - c.b) * m).clamp(0.0, 1.0),
+                        c.a,
+                    )
                 }
             }
             Self::NoiseGenerator { amount, monochrome } => {
@@ -1712,6 +1742,14 @@ impl LayerStackEvaluator {
                                 feather: feather.evaluate_at(time),
                             }
                         }
+                        EffectType::SwapColor { from_color, to_color, tolerance, feather } => {
+                            EvaluatedEffectType::SwapColor {
+                                from_color: *from_color,
+                                to_color: *to_color,
+                                tolerance: tolerance.evaluate_at(time),
+                                feather: feather.evaluate_at(time),
+                            }
+                        }
                         EffectType::NoiseGenerator {
                             amount,
                             monochrome,
@@ -2006,6 +2044,27 @@ mod tests {
         let o = desat.process_color(Color::rgba(0.8, 0.2, 0.2, 0.7));
         assert!((o.r - o.g).abs() < 1e-5 && (o.g - o.b).abs() < 1e-5);
         assert!((o.a - 0.7).abs() < 1e-6);
+    }
+
+    #[test]
+    fn swap_color_replaces_inside_tolerance_smoothly() {
+        let fx = EvaluatedEffectType::SwapColor {
+            from_color: Color::rgba(1.0, 0.0, 0.0, 1.0),
+            to_color: Color::rgba(0.0, 0.0, 1.0, 1.0),
+            tolerance: 20.0,
+            feather: 10.0,
+        };
+        // Exact match fully swaps (alpha preserved).
+        let o = fx.process_color(Color::rgba(1.0, 0.0, 0.0, 0.7));
+        assert!((o.b - 1.0).abs() < 1e-4 && o.r < 1e-4 && (o.a - 0.7).abs() < 1e-6, "{o:?}");
+        // Far color untouched.
+        let far = Color::rgba(0.0, 1.0, 0.0, 1.0);
+        assert_eq!(fx.process_color(far), far);
+        // Feather band is a blend between source and target.
+        let edge = fx.process_color(Color::rgba(0.75, 0.1, 0.1, 1.0));
+        assert!(edge.r > 0.05 && edge.r < 0.95 && edge.b > 0.05 && edge.b < 0.95, "{edge:?}");
+        assert!(!fx.is_spatial());
+        assert_eq!(fx.ofx_plugin_id(), "net.sf.openfx.swap_color");
     }
 
     #[test]

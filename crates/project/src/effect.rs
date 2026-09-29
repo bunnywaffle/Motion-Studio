@@ -178,6 +178,12 @@ pub enum EffectType {
         threshold: Property<f32>,
         feather: Property<f32>,
     },
+    SwapColor {
+        from_color: Color,
+        to_color: Color,
+        tolerance: Property<f32>,
+        feather: Property<f32>,
+    },
     NoiseGenerator {
         amount: Property<f32>,
         monochrome: bool,
@@ -312,6 +318,7 @@ impl EffectType {
             Self::DisplacementMap { .. } => "Displacement Map",
             Self::ChromaKey { .. } => "Chroma Key",
             Self::LumaKey { .. } => "Luma Key",
+            Self::SwapColor { .. } => "Swap Color",
             Self::NoiseGenerator { .. } => "Noise Generator",
             Self::Checkerboard { .. } => "Checkerboard",
             Self::GradientRamp { .. } => "Gradient Ramp",
@@ -412,6 +419,17 @@ impl EffectType {
     pub fn luma_key(threshold: f32, feather: f32) -> Self {
         Self::LumaKey {
             threshold: Property::new("Threshold", threshold.clamp(0.0, 100.0)),
+            feather: Property::new("Feather", feather.clamp(0.0, 100.0)),
+        }
+    }
+
+    /// Construct a Swap Color effect type (recolors pixels near
+    /// `from_color` to `to_color` with tolerance + feather falloff).
+    pub fn swap_color(from_color: Color, to_color: Color, tolerance: f32, feather: f32) -> Self {
+        Self::SwapColor {
+            from_color,
+            to_color,
+            tolerance: Property::new("Tolerance", tolerance.clamp(0.0, 100.0)),
             feather: Property::new("Feather", feather.clamp(0.0, 100.0)),
         }
     }
@@ -656,6 +674,7 @@ impl EffectType {
             Self::DisplacementMap { .. } => "net.sf.openfx.displacement",
             Self::ChromaKey { .. } => "net.sf.openfx.chroma_key",
             Self::LumaKey { .. } => "net.sf.openfx.luma_key",
+            Self::SwapColor { .. } => "net.sf.openfx.swap_color",
             Self::NoiseGenerator { .. } => "net.sf.openfx.noise",
             Self::Checkerboard { .. } => "net.sf.openfx.checkerboard",
             Self::GradientRamp { .. } => "net.sf.openfx.gradient_ramp",
@@ -773,6 +792,21 @@ impl Effect {
     /// Factory for creating a Luma Key effect.
     pub fn luma_key(id: impl Into<String>, threshold: f32, feather: f32) -> Self {
         Self::new(id, "Luma Key", EffectType::luma_key(threshold, feather))
+    }
+
+    /// Factory for creating a Swap Color effect.
+    pub fn swap_color(
+        id: impl Into<String>,
+        from_color: Color,
+        to_color: Color,
+        tolerance: f32,
+        feather: f32,
+    ) -> Self {
+        Self::new(
+            id,
+            "Swap Color",
+            EffectType::swap_color(from_color, to_color, tolerance, feather),
+        )
     }
 
     /// Factory for creating a Noise Generator effect.
@@ -1042,6 +1076,17 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 } else {
                     false
                 }
+            }
+            EffectType::SwapColor { from_color, to_color, .. } => {
+                if field.eq_ignore_ascii_case("from_color") || field.eq_ignore_ascii_case("from") {
+                    *from_color = next;
+                    true
+                } else if field.eq_ignore_ascii_case("to_color") || field.eq_ignore_ascii_case("to") {
+                    *to_color = next;
+                    true
+                } else {
+                    false
+                }
             }            EffectType::Checkerboard { color_a, color_b, .. } => {
                 if field.eq_ignore_ascii_case("color_a") || field.eq_ignore_ascii_case("a") {
                     *color_a = next;
@@ -1288,6 +1333,15 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
             EffectType::LumaKey { threshold, feather } => {
                 if param_name.eq_ignore_ascii_case("threshold") {
                     threshold.set_value((threshold.value + delta).clamp(0.0, 100.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("feather") {
+                    feather.set_value((feather.value + delta).clamp(0.0, 100.0));
+                    return true;
+                }
+            }
+            EffectType::SwapColor { tolerance, feather, .. } => {
+                if param_name.eq_ignore_ascii_case("tolerance") {
+                    tolerance.set_value((tolerance.value + delta).clamp(0.0, 100.0));
                     return true;
                 } else if param_name.eq_ignore_ascii_case("feather") {
                     feather.set_value((feather.value + delta).clamp(0.0, 100.0));
@@ -1553,6 +1607,15 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     None
                 }
             }
+            EffectType::SwapColor { tolerance, feather, .. } => {
+                if param_name.eq_ignore_ascii_case("tolerance") {
+                    Some(tolerance)
+                } else if param_name.eq_ignore_ascii_case("feather") {
+                    Some(feather)
+                } else {
+                    None
+                }
+            }
             EffectType::NoiseGenerator { amount, .. } => {
                 if param_name.eq_ignore_ascii_case("amount") {
                     Some(amount)
@@ -1800,6 +1863,15 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
             EffectType::LumaKey { threshold, feather } => {
                 if param_name.eq_ignore_ascii_case("threshold") {
                     Some(threshold)
+                } else if param_name.eq_ignore_ascii_case("feather") {
+                    Some(feather)
+                } else {
+                    None
+                }
+            }
+            EffectType::SwapColor { tolerance, feather, .. } => {
+                if param_name.eq_ignore_ascii_case("tolerance") {
+                    Some(tolerance)
                 } else if param_name.eq_ignore_ascii_case("feather") {
                     Some(feather)
                 } else {
@@ -2099,6 +2171,12 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 scalar("threshold", "Threshold", WidgetKind::Slider, ParamMeta::slider(0.0, 100.0, 5.0, 1, "", 100.0), threshold),
                 scalar("feather", "Feather", WidgetKind::Slider, ParamMeta::slider(0.0, 100.0, 2.0, 1, "", 100.0), feather),
             ],
+            EffectType::SwapColor { from_color, to_color, tolerance, feather } => vec![
+                PropDecl::color("from_color", "From Color", *from_color),
+                PropDecl::color("to_color", "To Color", *to_color),
+                scalar("tolerance", "Tolerance", WidgetKind::Slider, ParamMeta::slider(0.0, 100.0, 5.0, 1, "", 100.0), tolerance),
+                scalar("feather", "Feather", WidgetKind::Slider, ParamMeta::slider(0.0, 100.0, 2.0, 1, "", 100.0), feather),
+            ],
             EffectType::NoiseGenerator { amount, monochrome } => vec![
                 scalar("amount", "Amount", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 1, "%", 100.0), amount),
                 PropDecl::boolean("monochrome", "Monochrome", *monochrome),
@@ -2290,6 +2368,11 @@ mod tests {
             },
             EffectType::DropShadow { color, .. } => Some(*color),
             EffectType::ChromaKey { key_color, .. } => Some(*key_color),
+            EffectType::SwapColor { from_color, to_color, .. } => match field {
+                "from_color" => Some(*from_color),
+                "to_color" => Some(*to_color),
+                _ => None,
+            },
             EffectType::Checkerboard { color_a, color_b, .. } => match field {
                 "color_a" => Some(*color_a),
                 "color_b" => Some(*color_b),

@@ -17,9 +17,9 @@ pub fn stock_p(plugin: StockPlugin, params: &[f32], i: usize) -> f32 {
 }
 
 /// Resolved param slots for the hot per-pixel kernels (max descriptor
-/// length is 5; 8 slots leave headroom). Unpack once per layer/frame —
+/// length is 9; 12 slots leave headroom). Unpack once per layer/frame —
 /// never inside a pixel loop, where descriptor lookups stall.
-pub const STOCK_MAX_PARAMS: usize = 8;
+pub const STOCK_MAX_PARAMS: usize = 12;
 
 /// Unpack raw params against descriptor defaults into a fixed stack array.
 pub fn stock_params_resolved(plugin: StockPlugin, params: &[f32]) -> [f32; STOCK_MAX_PARAMS] {
@@ -71,22 +71,33 @@ pub fn process_color_stock_resolved(
             Color::rgba(grade(c.r), grade(c.g), grade(c.b), c.a)
         }
         StockPlugin::ColorBalance => {
-            let cr = vals[0] / 100.0;
-            let mg = vals[1] / 100.0;
-            let yb = vals[2] / 100.0;
-            let adj = |x: f32| {
-                let m = (x * std::f32::consts::PI).sin().clamp(0.0, 1.0);
-                (x, m)
+            // 9 params, tone-major: shadows/midtones/highlights × CMY.
+            // Each zone shifts with the classic cross-channel balance math,
+            // weighted by its tonal mask (same masks as Color Wheels).
+            let zone = |x: f32| {
+                let ws = (1.0 - x) * (1.0 - x);
+                let wm = 1.0 - (2.0 * x - 1.0) * (2.0 * x - 1.0);
+                let wh = x * x;
+                (ws, wm, wh)
             };
-            let (r, mr) = adj(c.r);
-            let (g, mgm) = adj(c.g);
-            let (b, mb) = adj(c.b);
-            let mut r = r;
-            let mut g = g;
-            let mut b = b;
-            if cr >= 0.0 { r += cr * mr * 0.5; } else { g += -cr * mgm * 0.25; b += -cr * mb * 0.25; }
-            if mg >= 0.0 { g += mg * mgm * 0.5; } else { r += -mg * mr * 0.25; b += -mg * mb * 0.25; }
-            if yb >= 0.0 { b += yb * mb * 0.5; } else { r += -yb * mr * 0.25; g += -yb * mgm * 0.25; }
+            let apply = |x: f32, ws: f32, wm: f32, wh: f32, sh: f32, mi: f32, hi: f32| {
+                // Positive pushes the channel, negative pushes its complement
+                // pair (cyan↔red, magenta↔green, yellow↔blue live per channel
+                // here; complements resolve in the channel loop below).
+                (x + (sh * ws + mi * wm + hi * wh) / 100.0 * 0.5).clamp(0.0, 1.0)
+            };
+            let (sr, sg, sb) = (zone(c.r), zone(c.g), zone(c.b));
+            let mut r = apply(c.r, sr.0, sr.1, sr.2, vals[0], vals[3], vals[6]);
+            let mut g = apply(c.g, sg.0, sg.1, sg.2, vals[1], vals[4], vals[7]);
+            let mut b = apply(c.b, sb.0, sb.1, sb.2, vals[2], vals[5], vals[8]);
+            // Negative (complementary) side: push the other two channels.
+            let neg = |v: f32, w: f32| (-v).max(0.0) * w * 0.25 / 100.0;
+            g += neg(vals[0], sr.0) + neg(vals[3], sr.1) + neg(vals[6], sr.2);
+            b += neg(vals[0], sr.0) + neg(vals[3], sr.1) + neg(vals[6], sr.2);
+            r += neg(vals[1], sg.0) + neg(vals[4], sg.1) + neg(vals[7], sg.2);
+            b += neg(vals[1], sg.0) + neg(vals[4], sg.1) + neg(vals[7], sg.2);
+            r += neg(vals[2], sb.0) + neg(vals[5], sb.1) + neg(vals[8], sb.2);
+            g += neg(vals[2], sb.0) + neg(vals[5], sb.1) + neg(vals[8], sb.2);
             Color::rgba(r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0), c.a)
         }
         StockPlugin::ColorWheels => {
@@ -225,6 +236,45 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn color_balance_zones_isolate() {
+        // Params are tone-major: shadows/midtones/highlights × CMY.
+        let p = StockPlugin::ColorBalance;
+        let dark = Color::rgba(0.1, 0.1, 0.1, 1.0);
+        let mid = Color::rgba(0.5, 0.5, 0.5, 1.0);
+        let bright = Color::rgba(0.9, 0.9, 0.9, 1.0);
+        // Identity at all zeros.
+        for c in [dark, mid, bright] {
+            let o = process_color_stock(p, &[0.0; 9], c);
+            assert!((o.r - c.r).abs() < 1e-5 && (o.g - c.g).abs() < 1e-5 && (o.b - c.b).abs() < 1e-5);
+        }
+        // Shadows red (+100) lifts darks, spares brights.
+        let sh_red = [100.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let d = process_color_stock(p, &sh_red, dark);
+        let b = process_color_stock(p, &sh_red, bright);
+        assert!(d.r - dark.r > 0.2, "{d:?}");
+        assert!((b.r - bright.r).abs() < 0.05, "{b:?}");
+        // Highlights blue (+100) lifts brights, spares darks.
+        let hi_blue = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 100.0];
+        let d = process_color_stock(p, &hi_blue, dark);
+        let b = process_color_stock(p, &hi_blue, bright);
+        assert!((d.b - dark.b).abs() < 0.05, "{d:?}");
+        assert!(b.b - bright.b > 0.05, "{b:?}");
+        // Midtones green (+100) moves mids far more than extremes
+        // (broad cosine falloff, same as Color Wheels).
+        let mid_green = [0.0, 0.0, 0.0, 0.0, 100.0, 0.0, 0.0, 0.0, 0.0];
+        let m = process_color_stock(p, &mid_green, mid);
+        let dm = m.g - mid.g;
+        assert!(dm > 0.3, "{m:?}");
+        let d = process_color_stock(p, &mid_green, dark);
+        let b = process_color_stock(p, &mid_green, bright);
+        assert!(d.g - dark.g < dm / 2.0 && b.g - bright.g < dm / 2.0);
+        // Negative (cyan) spills into green and blue.
+        let sh_cyan = [-100.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let d = process_color_stock(p, &sh_cyan, dark);
+        assert!(d.g > dark.g && d.b > dark.b, "{d:?}");
     }
 
     #[test]

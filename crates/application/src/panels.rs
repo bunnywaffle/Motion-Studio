@@ -6407,6 +6407,7 @@ fn fx_color_fields(effect: &project::Effect) -> Vec<&'static str> {
         EffectType::Tint { .. } => vec!["map_black", "map_white"],
         EffectType::DropShadow { .. } => vec!["color"],
         EffectType::ChromaKey { .. } => vec!["key_color"],
+        EffectType::SwapColor { .. } => vec!["from_color", "to_color"],
         EffectType::Checkerboard { .. } => vec!["color_a", "color_b"],
         EffectType::GradientRamp { .. } => vec!["color_a", "color_b"],
         EffectType::TextOutline { .. } => vec!["color"],
@@ -7994,6 +7995,7 @@ fn render_applied_effects(
     wheels: &HashMap<(String, String), Entity<InspectorColorPicker>>,
     ui: &PropUi,
     selects: &HashMap<(String, String), Entity<ComboboxState<SearchableVec<String>>>>,
+    enums: &HashMap<(String, String), Entity<ComboboxState<SearchableVec<String>>>>,
     collapsed: &HashSet<String>,
     group_collapsed: &HashSet<String>,
     cx: &App,
@@ -8113,7 +8115,7 @@ fn render_applied_effects(
                 // only their bespoke parts (pickers, editors, gradients).
                 EffectType::GaussianBlur { .. } | EffectType::BrightnessContrast { .. } => {
                     for decl in effect.declarations() {
-                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, cx));
+                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, &enums, cx));
                     }
                 }
                 EffectType::Tint { map_black, map_white, .. } => {
@@ -8253,7 +8255,7 @@ fn render_applied_effects(
                     // bespoke rows above keep the fixed Black/White pickers.
                     for decl in effect.declarations() {
                         if decl.is_scalar() {
-                            effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, cx));
+                            effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, &enums, cx));
                         }
                     }
                 }
@@ -8261,7 +8263,7 @@ fn render_applied_effects(
                     // Fully declarative: the amount row renders from its
                     // declaration (scalar widget).
                     for decl in effect.declarations() {
-                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, cx));
+                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, &enums, cx));
                     }
                 }
                 EffectType::DropShadow { color, .. } => {
@@ -8338,7 +8340,7 @@ fn render_applied_effects(
                     // above keeps the fixed shadow picker.
                     for decl in effect.declarations() {
                         if decl.is_scalar() {
-                            effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, cx));
+                            effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, &enums, cx));
                         }
                     }
                 }
@@ -8379,7 +8381,7 @@ fn render_applied_effects(
                     // P1..P4 ride their declarations (scalar widgets); the
                     // code editor below stays bespoke.
                     for decl in effect.declarations() {
-                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, cx));
+                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, &enums, cx));
                     }
                     effect_box = effect_box
                         .child(
@@ -8800,7 +8802,7 @@ fn render_applied_effects(
                 }
                 EffectType::DisplacementMap { .. } => {
                     for decl in effect.declarations() {
-                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, cx));
+                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, &enums, cx));
                     }
                 }
                 EffectType::ChromaKey { key_color, .. } => {
@@ -8885,26 +8887,26 @@ fn render_applied_effects(
                     // fixed chroma picker.
                     for decl in effect.declarations() {
                         if decl.is_scalar() {
-                            effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, cx));
+                            effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, &enums, cx));
                         }
                     }
                 }
                 EffectType::LumaKey { .. } => {
                     // Fully declarative: both rows render from declarations.
                     for decl in effect.declarations() {
-                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, cx));
+                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, &enums, cx));
                     }
                 }
                 EffectType::NoiseGenerator { .. } => {
                     // Amount + monochrome checkbox ride their declarations.
                     for decl in effect.declarations() {
-                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, cx));
+                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, &enums, cx));
                     }
                 }
                 EffectType::Checkerboard { .. } => {
                     // Swatches + size ride their declarations.
                     for decl in effect.declarations() {
-                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, cx));
+                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, &enums, cx));
                     }
                 }
                 EffectType::GradientRamp { .. } => {
@@ -8930,7 +8932,7 @@ fn render_applied_effects(
                         cx,
                     ));
                     if let Some(angle) = find("angle") {
-                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &angle, wheels, cx));
+                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &angle, wheels, &enums, cx));
                     }
                 }
                 EffectType::Perspective { .. }
@@ -8938,6 +8940,7 @@ fn render_applied_effects(
                 | EffectType::TextBevel { .. }
                 | EffectType::Bloom { .. }
                 | EffectType::Tiler { .. }
+                | EffectType::SwapColor { .. }
                 | EffectType::Warp { .. }
                 | EffectType::Exposure { .. }
                 | EffectType::Vibrance { .. }
@@ -8946,14 +8949,14 @@ fn render_applied_effects(
                 | EffectType::Sharpen { .. }
                 | EffectType::Vignette { .. } => {
                     for decl in effect.declarations() {
-                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, cx));
+                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, &enums, cx));
                     }
                 }
                 // Modular stock plug-ins render from the same declarations
                 // as every other effect (scalars + color slots).
                 EffectType::Stock { .. } => {
                     for decl in effect.declarations() {
-                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, cx));
+                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, &enums, cx));
                     }
                 }
             }
@@ -9439,7 +9442,47 @@ impl Render for PropertiesPanel {
                 None => Vec::new(),
             }
         };
+        // Effect-declaration enums (Tiler layout/cell shape): same retained
+        // pattern, committed through the generic enum setter. Keys are
+        // prefixed (`fx:`) so they never collide with shader-param keys.
+        let fx_decl_enum_targets: Vec<(String, String, Vec<String>, usize)> = {
+            let s = self.state.read(cx);
+            match s
+                .active_composition()
+                .zip(s.selected_layer_id.clone())
+                .and_then(|(c, lid)| c.get_layer(&lid))
+            {
+                Some(layer) => layer
+                    .effects
+                    .iter()
+                    .flat_map(|e| {
+                        let eid = e.id.clone();
+                        e.declarations()
+                            .into_iter()
+                            .filter_map(|d| {
+                                if d.widget != project::WidgetKind::Dropdown {
+                                    return None;
+                                }
+                                let project::PropValue::EnumSel { index } = d.value else {
+                                    return None;
+                                };
+                                if d.meta.options.is_empty() {
+                                    return None;
+                                }
+                                let idx = index.min(d.meta.options.len() - 1);
+                                Some((eid.clone(), d.field.clone(), d.meta.options.clone(), idx))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect(),
+                None => Vec::new(),
+            }
+        };
         let mut fx_selects: HashMap<
+            (String, String),
+            Entity<ComboboxState<SearchableVec<String>>>,
+        > = HashMap::new();
+        let mut fx_enums: HashMap<
             (String, String),
             Entity<ComboboxState<SearchableVec<String>>>,
         > = HashMap::new();
@@ -9448,8 +9491,12 @@ impl Render for PropertiesPanel {
                 .iter()
                 .map(|(e, p, _, i)| (e.clone(), p.clone(), *i))
                 .collect();
-            self.combo_states.retain(|k, _| live.contains(k));
-            self.combo_subs.retain(|k, _| live.contains(k));
+            let enum_live: HashSet<(String, String, usize)> = fx_decl_enum_targets
+                .iter()
+                .map(|(e, p, _, i)| (format!("fx:{e}"), p.clone(), *i))
+                .collect();
+            self.combo_states.retain(|k, _| live.contains(k) || enum_live.contains(k));
+            self.combo_subs.retain(|k, _| live.contains(k) || enum_live.contains(k));
             for (eid, pname, options, idx) in &fx_enum_targets {
                 let key = (eid.clone(), pname.clone(), *idx);
                 if !self.combo_states.contains_key(&key) {
@@ -9482,6 +9529,42 @@ impl Render for PropertiesPanel {
                 }
                 if let Some(st) = self.combo_states.get(&(eid.clone(), pname.clone(), *idx)) {
                     fx_selects.insert((eid.clone(), pname.clone()), st.clone());
+                }
+            }
+            for (eid, field, options, idx) in &fx_decl_enum_targets {
+                let key = (format!("fx:{eid}"), field.clone(), *idx);
+                if !self.combo_states.contains_key(&key) {
+                    let delegate = SearchableVec::new(options.clone());
+                    let st = cx.new(|cx| {
+                        ComboboxState::new(delegate, vec![IndexPath::new(*idx)], window, cx)
+                    });
+                    let editor = self.state.clone();
+                    let (eid_s, field_s, opts_s) =
+                        (eid.clone(), field.clone(), options.clone());
+                    let sub = cx.subscribe(
+                        &st,
+                        move |_, _, event: &ComboboxEvent<SearchableVec<String>>, cx| {
+                            let vals = match event {
+                                ComboboxEvent::Confirm(v) => v,
+                                ComboboxEvent::Change(v) => v,
+                            };
+                            let Some(v) = vals.first() else {
+                                return;
+                            };
+                            let i = opts_s.iter().position(|o| o == v).unwrap_or(0);
+                            editor.update(cx, |state, cx| {
+                                if let Some(lid) = state.selected_layer_id.clone() {
+                                    let _ = state.set_effect_enum(&lid, &eid_s, &field_s, i);
+                                    cx.notify();
+                                }
+                            });
+                        },
+                    );
+                    self.combo_states.insert(key.clone(), st);
+                    self.combo_subs.insert(key, sub);
+                }
+                if let Some(st) = self.combo_states.get(&(format!("fx:{eid}"), field.clone(), *idx)) {
+                    fx_enums.insert((eid.clone(), field.clone()), st.clone());
                 }
             }
         }
@@ -10077,6 +10160,7 @@ impl Render for PropertiesPanel {
                                 gradient_stop: self.gradient_stop.clone(),
                             },
                             &fx_selects,
+                            &fx_enums,
                             &self.fx_collapsed,
                             &self.fx_group_collapsed,
                             cx,
@@ -12530,6 +12614,9 @@ fn effect_template_for(plugin_id: &str) -> Option<EffectType> {
             EffectType::chroma_key(Color::from_hex("#00FF00").unwrap(), 30.0, 10.0)
         }
         "net.sf.openfx.luma_key" => EffectType::luma_key(20.0, 10.0),
+        "net.sf.openfx.swap_color" => {
+            EffectType::swap_color(Color::from_hex("#00FF00").unwrap(), Color::from_hex("#FF0000").unwrap(), 30.0, 10.0)
+        }
         "net.sf.openfx.drop_shadow" => {
             EffectType::drop_shadow(8.0, 45.0, 10.0, 75.0, Color::BLACK)
         }
