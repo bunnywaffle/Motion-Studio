@@ -142,7 +142,7 @@ pub fn blur_buffer(buf: &mut FloatBuf, radius_px: f32) {
     }
     if radius_px > 8.0 {
         // Downsample factor keeps the effective radius ≤ 8.
-        let k = ((radius_px / 8.0).ceil().max(2.0)).min(8.0);
+        let k = (radius_px / 8.0).ceil().clamp(2.0, 8.0);
         let (sw, sh) = (
             ((buf.w as f32 / k).ceil().max(2.0)) as u32,
             ((buf.h as f32 / k).ceil().max(2.0)) as u32,

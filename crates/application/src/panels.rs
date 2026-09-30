@@ -183,6 +183,22 @@ fn gizmo_to_comp(
     )
 }
 
+/// Uniform canvas scale (comp px -> canvas px): base viewport fit times
+/// zoom, exactly as the render path computes it. Every drag path must use
+/// this — recomputing a zoom-less fit in a handler offsets commits by
+/// `1/zoom` (mask points jumping far from the cursor).
+pub(crate) fn canvas_scale(
+    viewport_px: Option<(f32, f32)>,
+    zoom_factor: Option<f32>,
+    cw: f32,
+    ch: f32,
+) -> f32 {
+    let fit = viewport_px
+        .map(|(vw, vh)| ((vw - 32.0) / cw).min((vh - 32.0) / ch).clamp(0.05, 4.0))
+        .unwrap_or(1.0);
+    (fit * zoom_factor.unwrap_or(1.0)).clamp(0.01, 10.0)
+}
+
 /// Frame origin with a centering fallback for pre-measure frames: the
 /// wrap centers content, so origin = wrap origin + (wrap - canvas) / 2.
 fn frame_origin_or_center(
@@ -2349,6 +2365,10 @@ pub struct MaskDrag {
     pub mask_id: String,
     pub index: usize,
     pub kind: MaskDragKind,
+    /// Cursor-minus-dot delta in comp px at grab time. Drags commit the
+    /// cursor position, so without this every grab teleports the point by
+    /// the within-dot grab error.
+    pub grab_offset: (f32, f32),
 }
 
 /// Viewport transform-gizmo drag state (After Effects-style direct
@@ -3297,9 +3317,14 @@ impl Render for CompositionViewerPanel {
                                 } else {
                                     Rgba { r: 1.0, g: 0.85, b: 0.25, a: 0.45 * dim }
                                 };
-                                // Sampled curve dots (bounded count).
+                                // Sampled curve dots (bounded count). Only a
+                                // closed 3+ point path cuts in the rasterizer
+                                // — drawing an outline otherwise promises a
+                                // cut that never renders (nodes/handles below
+                                // still draw so the path stays editable).
+                                let can_cut = mask.path.closed && mask.path.points.len() >= 3;
                                 let flat = mask.path.flatten(0.75);
-                                if !flat.is_empty() {
+                                if can_cut && !flat.is_empty() {
                                     let step = (flat.len() / 120).max(1);
                                     for p in flat.iter().step_by(step) {
                                         let (cxp, cyp) = m2c(*p);
@@ -3315,7 +3340,7 @@ impl Render for CompositionViewerPanel {
                                                 .into_any_element(),
                                         );
                                     }
-                                } else if mask.path.points.len() >= 2 {
+                                } else if can_cut && mask.path.points.len() >= 2 {
                                     let pts = &mask.path.points;
                                     for i in 0..pts.len() - 1 {
                                         let (x0, y0) = m2c(pts[i].pos);
@@ -3400,7 +3425,14 @@ impl Render for CompositionViewerPanel {
                                             if closed {
                                                 return;
                                             }
-                                            let _ = gizmo_to_comp(mx, my, h_frame, h_fit, h_cw, h_ch);
+                                            let (cur_cmx, cur_cmy) = gizmo_to_comp(mx, my, h_frame, h_fit, h_cw, h_ch);
+                                            // Dot center back in comp px: grab offset keeps the
+                                            // point under the cursor instead of teleporting it.
+                                            let (fox0, foy0) = h_frame.unwrap_or((0.0, 0.0));
+                                            let grab = (
+                                                cur_cmx - ((nx - fox0) / h_fit - h_cw / 2.0),
+                                                cur_cmy - ((ny - foy0) / h_fit - h_ch / 2.0),
+                                            );
                                             p_h.update(cx, |this, cx| {
                                                 this.mask_edit_point = Some(idx);
                                                 this.mask_down_moved = false;
@@ -3409,6 +3441,7 @@ impl Render for CompositionViewerPanel {
                                                     mask_id: mid_h.clone(),
                                                     index: idx,
                                                     kind: MaskDragKind::Point,
+                                                    grab_offset: grab,
                                                 });
                                                 cx.notify();
                                             });
@@ -3444,7 +3477,7 @@ impl Render for CompositionViewerPanel {
                                                     ),
                                                     hx,
                                                     hy,
-                                                    7.0,
+                                                    9.0,
                                                     Rgba { r: 0.35, g: 0.85, b: 1.0, a: 1.0 },
                                                     white,
                                                     true,
@@ -3458,7 +3491,12 @@ impl Render for CompositionViewerPanel {
                                                         s.preview_fast = true;
                                                         cx.notify();
                                                     });
-                                                    let _ = gizmo_to_comp(mx, my, hh_frame, hh_fit, hh_cw, hh_ch);
+                                                    let (cur_cmx, cur_cmy) = gizmo_to_comp(mx, my, hh_frame, hh_fit, hh_cw, hh_ch);
+                                                    let (fox0, foy0) = hh_frame.unwrap_or((0.0, 0.0));
+                                                    let grab = (
+                                                        cur_cmx - ((hx - fox0) / hh_fit - hh_cw / 2.0),
+                                                        cur_cmy - ((hy - foy0) / hh_fit - hh_ch / 2.0),
+                                                    );
                                                     p_hh.update(cx, |this, cx| {
                                                         this.mask_edit_point = Some(idx);
                                                         this.mask_down_moved = true;
@@ -3471,6 +3509,7 @@ impl Render for CompositionViewerPanel {
                                                             } else {
                                                                 MaskDragKind::OutHandle
                                                             },
+                                                            grab_offset: grab,
                                                         });
                                                         cx.notify();
                                                     });
@@ -3730,14 +3769,11 @@ impl Render for CompositionViewerPanel {
                             None => (1920.0, 1080.0),
                         }
                     };
-                    let fit_here = this
-                        .viewport_px
-                        .map(|(vw, vh)| {
-                            ((vw - 32.0) / cw).min((vh - 32.0) / ch).clamp(0.05, 4.0)
-                        })
-                        .unwrap_or(1.0);
-                    let cmx = (curr_x - fox) / fit_here - cw / 2.0;
-                    let cmy = (curr_y - foy) / fit_here - ch / 2.0;
+                    // Same scale the overlay rendered with (fit * zoom):
+                    // anything else offsets the commit from the cursor.
+                    let fit_here = canvas_scale(this.viewport_px, this.zoom_factor, cw, ch);
+                    let cmx = (curr_x - fox) / fit_here - cw / 2.0 - mdrag.grab_offset.0;
+                    let cmy = (curr_y - foy) / fit_here - ch / 2.0 - mdrag.grab_offset.1;
                     let st = this.state.clone();
                     let local = st.read(cx).comp_to_layer_local(&mdrag.layer_id, Vec2::new(cmx, cmy));
                     if let Some(loc) = local {
@@ -3812,21 +3848,17 @@ impl Render for CompositionViewerPanel {
                         this.canvas_px,
                     );
                     let (fox, foy) = frame_org.unwrap_or((0.0, 0.0));
-                    // Re-derive the uniform fit from the live composition so
-                    // stale renders never skew a drag.
-                    let (cw, ch, vfit) = {
+                    // Re-derive the uniform scale from the live composition
+                    // so stale renders never skew a drag (fit * zoom, as
+                    // rendered — a zoom-less fit offsets commits by 1/zoom).
+                    let (cw, ch) = {
                         let s = this.state.read(cx);
                         match s.active_composition() {
-                            Some(c) => (c.width as f32, c.height as f32, 1.0),
-                            None => (1920.0, 1080.0, 1.0),
+                            Some(c) => (c.width as f32, c.height as f32),
+                            None => (1920.0, 1080.0),
                         }
                     };
-                    let fit_here = this
-                        .viewport_px
-                        .map(|(vw, vh)| {
-                            ((vw - 32.0) / cw).min((vh - 32.0) / ch).clamp(0.05, 4.0)
-                        })
-                        .unwrap_or(vfit);
+                    let fit_here = canvas_scale(this.viewport_px, this.zoom_factor, cw, ch);
                     let cmx = (curr_x - fox) / fit_here - cw / 2.0;
                     let cmy = (curr_y - foy) / fit_here - ch / 2.0;
                     let st = this.state.clone();
@@ -4102,11 +4134,14 @@ impl Render for CompositionViewerPanel {
                                     .on_mouse_down(MouseButton::Left, {
                                         let p_drag = cx.entity().clone();
                                         let s_tool = self.state.clone();
-                                        // Captured fit + frame origin map window px to comp px
+                                        // Captured scale + frame origin map window px to comp px
                                         // exactly (no hardcoded 1920/512 factors, no missing
                                         // panel offset): click-to-place and drags stay correct
-                                        // for any composition size and any window layout.
-                                        let fit_pick = fit;
+                                        // for any composition size, zoom, and window layout.
+                                        // This is fit * zoom (the rendered canvas scale), not
+                                        // the bare fit — a zoom-less fit misplaces picks by
+                                        // 1/zoom.
+                                        let fit_pick = current_scale;
                                         let comp_pw = comp_w;
                                         let comp_ph = comp_h;
                                         move |event, _window, cx| {
@@ -4231,6 +4266,9 @@ impl Render for CompositionViewerPanel {
                                                                 mask_id: mid,
                                                                 index: idx,
                                                                 kind: MaskDragKind::OutHandle,
+                                                                // Fresh point was just placed at the
+                                                                // cursor: no grab offset.
+                                                                grab_offset: (0.0, 0.0),
                                                             });
                                                             this.mask_edit_point = Some(idx);
                                                             this.mask_down_moved = false;
@@ -4580,6 +4618,9 @@ pub struct PropertiesPanel {
     pub text_collapsed: HashSet<&'static str>,
     /// Collapsed applied-effect cards by effect id (empty = all expanded).
     pub fx_collapsed: HashSet<String>,
+    /// Effect ids already seeded into `fx_collapsed` once, so cards start
+    /// collapsed but explicit user expand/collapse choices stick.
+    fx_seen: HashSet<String>,
     /// Collapsed Shader Lab parameter groups (`effect_id:group`).
     pub fx_group_collapsed: HashSet<String>,
     /// Effect ID with the Shader Lab source editor open (`None` = closed).
@@ -4755,6 +4796,7 @@ impl PropertiesPanel {
             tools_expanded: false,
             text_collapsed: HashSet::new(),
             fx_collapsed: HashSet::new(),
+            fx_seen: HashSet::new(),
             fx_group_collapsed: HashSet::new(),
             shader_editor_open: None,
             shader_editor: None,
@@ -6199,15 +6241,12 @@ fn property_keyframe_controls(
                         }
                     }
                     "solid.gradient" => {
-                        if let LayerSource::Solid { ref fill_gradient, .. } = layer.source {
-                            match fill_gradient {
-                                Some(p) => (
-                                    p.has_keyframe_at(&current_tc),
-                                    p.previous_keyframe_time(&current_tc).is_some(),
-                                    p.next_keyframe_time(&current_tc).is_some(),
-                                ),
-                                None => (false, false, false),
-                            }
+                        if let LayerSource::Solid { fill_gradient: Some(p), .. } = &layer.source {
+                            (
+                                p.has_keyframe_at(&current_tc),
+                                p.previous_keyframe_time(&current_tc).is_some(),
+                                p.next_keyframe_time(&current_tc).is_some(),
+                            )
                         } else {
                             (false, false, false)
                         }
@@ -6232,29 +6271,23 @@ fn property_keyframe_controls(
                         }
                     }
                     "text.fill_gradient" => {
-                        if let LayerSource::Text { ref fill_gradient, .. } = layer.source {
-                            match fill_gradient {
-                                Some(p) => (
-                                    p.has_keyframe_at(&current_tc),
-                                    p.previous_keyframe_time(&current_tc).is_some(),
-                                    p.next_keyframe_time(&current_tc).is_some(),
-                                ),
-                                None => (false, false, false),
-                            }
+                        if let LayerSource::Text { fill_gradient: Some(p), .. } = &layer.source {
+                            (
+                                p.has_keyframe_at(&current_tc),
+                                p.previous_keyframe_time(&current_tc).is_some(),
+                                p.next_keyframe_time(&current_tc).is_some(),
+                            )
                         } else {
                             (false, false, false)
                         }
                     }
                     "text.stroke_gradient" => {
-                        if let LayerSource::Text { ref stroke_gradient, .. } = layer.source {
-                            match stroke_gradient {
-                                Some(p) => (
-                                    p.has_keyframe_at(&current_tc),
-                                    p.previous_keyframe_time(&current_tc).is_some(),
-                                    p.next_keyframe_time(&current_tc).is_some(),
-                                ),
-                                None => (false, false, false),
-                            }
+                        if let LayerSource::Text { stroke_gradient: Some(p), .. } = &layer.source {
+                            (
+                                p.has_keyframe_at(&current_tc),
+                                p.previous_keyframe_time(&current_tc).is_some(),
+                                p.next_keyframe_time(&current_tc).is_some(),
+                            )
                         } else {
                             (false, false, false)
                         }
@@ -8144,8 +8177,8 @@ fn render_applied_effects(
             let s_toggle = state.clone();
             let s_del = state.clone();
             let p_disc = panel_entity.clone();
-            // Nested-collapsible state: expanded by default so every
-            // `param_*` / `shader_*` test id stays visible until collapsed.
+            // Nested-collapsible state: collapsed by default (ids are
+            // seeded into `collapsed` on first sight); expanding is sticky.
             let fx_open = !collapsed.contains(&eff_id);
 
             // Parameter body (nested inside the collapsible card below).
@@ -8239,7 +8272,7 @@ fn render_applied_effects(
                 // only their bespoke parts (pickers, editors, gradients).
                 EffectType::GaussianBlur { .. } | EffectType::BrightnessContrast { .. } => {
                     for decl in effect.declarations() {
-                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, &enums, cx));
+                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, enums, cx));
                     }
                 }
                 EffectType::Tint { map_black, map_white, .. } => {
@@ -8379,7 +8412,7 @@ fn render_applied_effects(
                     // bespoke rows above keep the fixed Black/White pickers.
                     for decl in effect.declarations() {
                         if decl.is_scalar() {
-                            effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, &enums, cx));
+                            effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, enums, cx));
                         }
                     }
                 }
@@ -8387,7 +8420,7 @@ fn render_applied_effects(
                     // Fully declarative: the amount row renders from its
                     // declaration (scalar widget).
                     for decl in effect.declarations() {
-                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, &enums, cx));
+                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, enums, cx));
                     }
                 }
                 EffectType::DropShadow { color, .. } => {
@@ -8464,7 +8497,7 @@ fn render_applied_effects(
                     // above keeps the fixed shadow picker.
                     for decl in effect.declarations() {
                         if decl.is_scalar() {
-                            effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, &enums, cx));
+                            effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, enums, cx));
                         }
                     }
                 }
@@ -8505,7 +8538,7 @@ fn render_applied_effects(
                     // P1..P4 ride their declarations (scalar widgets); the
                     // code editor below stays bespoke.
                     for decl in effect.declarations() {
-                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, &enums, cx));
+                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, enums, cx));
                     }
                     effect_box = effect_box
                         .child(
@@ -8927,7 +8960,7 @@ fn render_applied_effects(
                 }
                 EffectType::DisplacementMap { .. } => {
                     for decl in effect.declarations() {
-                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, &enums, cx));
+                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, enums, cx));
                     }
                 }
                 EffectType::ChromaKey { key_color, .. } => {
@@ -9012,26 +9045,26 @@ fn render_applied_effects(
                     // fixed chroma picker.
                     for decl in effect.declarations() {
                         if decl.is_scalar() {
-                            effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, &enums, cx));
+                            effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, enums, cx));
                         }
                     }
                 }
                 EffectType::LumaKey { .. } => {
                     // Fully declarative: both rows render from declarations.
                     for decl in effect.declarations() {
-                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, &enums, cx));
+                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, enums, cx));
                     }
                 }
                 EffectType::NoiseGenerator { .. } => {
                     // Amount + monochrome checkbox ride their declarations.
                     for decl in effect.declarations() {
-                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, &enums, cx));
+                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, enums, cx));
                     }
                 }
                 EffectType::Checkerboard { .. } => {
                     // Swatches + size ride their declarations.
                     for decl in effect.declarations() {
-                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, &enums, cx));
+                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, enums, cx));
                     }
                 }
                 EffectType::GradientRamp { .. } => {
@@ -9057,7 +9090,7 @@ fn render_applied_effects(
                         cx,
                     ));
                     if let Some(angle) = find("angle") {
-                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &angle, wheels, &enums, cx));
+                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &angle, wheels, enums, cx));
                     }
                 }
                 EffectType::Perspective { .. }
@@ -9074,7 +9107,7 @@ fn render_applied_effects(
                 | EffectType::Sharpen { .. }
                 | EffectType::Vignette { .. } => {
                     for decl in effect.declarations() {
-                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, &enums, cx));
+                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, enums, cx));
                     }
                 }
                 // Modular stock plug-ins render from the same declarations
@@ -9121,13 +9154,13 @@ fn render_applied_effects(
                     );
                     for decl in effect.declarations() {
                         if decl.field.starts_with(prefix) {
-                            effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, &enums, cx));
+                            effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, enums, cx));
                         }
                     }
                 }
                 EffectType::Stock { .. } => {
                     for decl in effect.declarations() {
-                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, &enums, cx));
+                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, enums, cx));
                     }
                 }
             }
@@ -10363,6 +10396,14 @@ impl Render for PropertiesPanel {
                         let tint_black_picker_state = tint_black_color_picker.read(cx).state.clone();
                         let tint_white_picker_state = tint_white_color_picker.read(cx).state.clone();
                         let shadow_picker_state = shadow_color_picker.read(cx).state.clone();
+                        // Applied-effect cards start collapsed: seed ids never
+                        // seen before into fx_collapsed (insert returns true
+                        // only for new ids, so user toggles stick).
+                        for eff in &layer.effects {
+                            if self.fx_seen.insert(eff.id.clone()) {
+                                self.fx_collapsed.insert(eff.id.clone());
+                            }
+                        }
                         let effects_list = render_applied_effects(
                             &self.state,
                             layer,
@@ -12640,6 +12681,8 @@ pub struct EffectsPanel {
     /// header to expand, After Effects-style accordion).
     collapsed: HashSet<&'static str>,
     pub last_selected_id: Option<String>,
+    /// Live search query filtering the browser list below.
+    pub search_query: String,
 }
 
 impl EffectsPanel {
@@ -12659,6 +12702,7 @@ impl EffectsPanel {
             _subscription: None,
             collapsed: Self::all_collapsed(),
             last_selected_id: None,
+            search_query: String::new(),
         }
     }
 
@@ -12677,6 +12721,7 @@ impl EffectsPanel {
             _subscription: Some(_subscription),
             collapsed: Self::all_collapsed(),
             last_selected_id,
+            search_query: String::new(),
         }
     }
 
@@ -12883,9 +12928,34 @@ fn effect_template_for(plugin_id: &str) -> Option<EffectType> {
 }
 
 impl Render for EffectsPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let panel = cx.entity().clone();
         let is_open = |key: &str| !self.collapsed.contains(key);
+
+        // Live search input (retained across renders so typing keeps focus).
+        let panel_for_search = cx.entity().clone();
+        let search_input = window.use_keyed_state("effects_search_input", cx, move |window, cx| {
+            let input = cx.new(|cx| {
+                InputState::new(window, cx).placeholder("Search Effects & Presets...")
+            });
+            let subscription = cx.subscribe(&input, move |_, input, event: &InputEvent, cx| {
+                if !matches!(event, InputEvent::Change) {
+                    return;
+                }
+                let value = input.read(cx).value().to_string();
+                panel_for_search.update(cx, |this, cx| {
+                    this.search_query = value;
+                    cx.notify();
+                });
+            });
+            (input, subscription)
+        });
+        let query = self.search_query.trim().to_lowercase();
+        let matches_query = |label: &str, id: &str| {
+            query.is_empty()
+                || label.to_lowercase().contains(&query)
+                || id.to_lowercase().contains(&query)
+        };
 
         // Registry-driven accordion: every row comes from the OFX suites
         // (`project::ofx`), so new plug-ins appear with zero panel code.
@@ -12913,16 +12983,26 @@ impl Render for EffectsPanel {
             project::OfxCategory::Custom,
         ] {
             let key = ofx_category_key(cat);
+            // A non-empty query auto-opens categories that contain hits.
+            let has_hit = !query.is_empty()
+                && project::ofx_in_category(cat).iter().any(|desc| {
+                    effect_template_for(desc.id).is_some()
+                        && matches_query(desc.label, desc.id)
+                });
+            let open = is_open(key) || has_hit;
             cats = cats.child(category_header(
                 key,
                 cat.label(),
                 ofx_category_icon(cat),
-                is_open(key),
+                open,
                 &panel,
                 cx,
             ));
-            if is_open(key) {
+            if open {
                 for desc in project::ofx_in_category(cat) {
+                    if !matches_query(desc.label, desc.id) {
+                        continue;
+                    }
                     if let Some(template) = effect_template_for(desc.id) {
                         let slug = desc.id.rsplit('.').next().unwrap_or(desc.id);
                         cats = cats.child(effect_item_row(slug, desc.label, template, &self.state, cx));
@@ -12950,18 +13030,11 @@ impl Render for EffectsPanel {
                     .border_color(cx.theme().border)
                     .bg(cx.theme().secondary)
                     .child(
-                        h_flex()
+                        div()
                             .flex_1()
-                            .px_2()
-                            .py_1()
-                            .rounded_sm()
-                            .bg(cx.theme().muted)
-                            .text_color(cx.theme().muted_foreground)
-                            .text_xs()
-                            .gap_1p5()
-                            .items_center()
-                            .child(icon_box(IconName::FolderOpen))
-                            .child("Search Effects & Presets..."),
+                            .id("effects_search_input")
+                            .test_support()
+                            .child(Input::new(&search_input.read(cx).0)),
                     ),
             )
             // Effects Category List (collapsible accordion)

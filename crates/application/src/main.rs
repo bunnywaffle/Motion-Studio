@@ -13,7 +13,7 @@ pub use gpui_kit::base::{h_flex, v_flex, Positioner, StyledExt, TestSupportExt};
 pub use gpui_kit::component::dock::{
     panel_handle, BasePanel, DockArea, DockLayout, DockPlacement, DockSkin, Panel, PanelStyle,
 };
-use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
+use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode, WindowExt};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::*;
 
@@ -2789,7 +2789,12 @@ impl Render for AppView {
             .text_color(cx.theme().foreground)
             .on_action({
                 let state = self.state.clone();
-                move |_: &TogglePlayback, _window, cx| {
+                move |_: &TogglePlayback, window, cx| {
+                    // Typing in any text input (layer text, font/size
+                    // fields, scrub editors) must not toggle playback.
+                    if window.has_focused_input(cx) {
+                        return;
+                    }
                     state.update(cx, |s, cx| {
                         s.toggle_playback();
                         cx.notify();
@@ -2863,7 +2868,10 @@ impl Render for AppView {
                     });
                 }
             })
-            .on_key_down(move |event, _window, cx| {
+            .on_key_down(move |event, window, cx| {
+                // Space with a focused text input types a space; it must
+                // not reach the playback toggle below.
+                let typing_in_input = window.has_focused_input(cx);
                 let mods = event.keystroke.modifiers;
                 let ctrl = mods.control || mods.platform;
                 let key = event.keystroke.key.to_lowercase();
@@ -2942,10 +2950,12 @@ impl Render for AppView {
                     return;
                 }
                 if key == "space" || key == " " {
-                    state_key.update(cx, |s, cx| {
-                        s.toggle_playback();
-                        cx.notify();
-                    });
+                    if !typing_in_input {
+                        state_key.update(cx, |s, cx| {
+                            s.toggle_playback();
+                            cx.notify();
+                        });
+                    }
                 } else if key == "delete" || key == "backspace" {
                     state_key.update(cx, |s, cx| {
                         if let Some((lid, mid)) = s.active_mask_edit.take() {
@@ -3063,9 +3073,9 @@ mod tests {
     use crate::state::EditorState;
     use project::Vec2;
     use gpui_kit::component::dock::{DockPlacement, PanelId};
-    use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
+use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
     use gpui_kit::test::TestWindowExt;
-    use gpui_kit::{px, size, AppContext as _, Entity, SharedString, TestAppContext};
+    use gpui_kit::{px, size, Action as _, AppContext as _, Entity, SharedString, TestAppContext};
 
     fn setup_test_window(cx: &mut TestAppContext) -> (Entity<Root>, Entity<AppView>) {
         cx.update(gpui_kit::init);
@@ -3615,6 +3625,61 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn test_effects_search_filters_browser_list(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            Theme::change(ThemeMode::Dark, None, cx);
+        });
+
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
+            window.activate_window();
+            window.set_window_title("Motion Compositor");
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+
+        let app_view = app_view_entity.expect("AppView created");
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+
+            let dock_area = app_view.read(cx).dock_area().clone();
+            let panels = app_view.read(cx).panels().clone();
+            let effects_id = PanelId::from(panels.effects.entity_id());
+            dock_area.update(cx, |dock, cx| {
+                dock.select_panel(effects_id, window, cx);
+            });
+            window.render_frame(cx);
+
+            // Search field is present; categories start collapsed (no rows).
+            assert!(window.find("effects_search_input").visible());
+            assert!(window.try_find("effect_item_blur").is_none());
+
+            // A query auto-opens matching categories and filters rows.
+            panels.effects.update(cx, |this, cx| {
+                this.search_query = "blur".to_string();
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert!(window.find("effect_item_blur").visible());
+            assert!(window.try_find("effect_item_glow").is_none());
+
+            // Clearing the query restores the collapsed browser.
+            panels.effects.update(cx, |this, cx| {
+                this.search_query = String::new();
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert!(window.try_find("effect_item_blur").is_none());
+        })
+        .expect("update_window failed");
+    }
+
+    #[gpui_kit::test]
     fn test_editor_state_initialization(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let (_root, app_view) = setup_test_window(cx);
@@ -3903,6 +3968,62 @@ mod tests {
 
         cx.run_until_parked();
         assert!(!app_view.read_with(cx, |view, cx| view.state().read(cx).is_playing));
+    }
+
+    #[gpui_kit::test]
+    fn test_space_in_focused_text_input_does_not_toggle_playback(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, _| {
+                let id = s.add_text_layer("Hi", None).unwrap();
+                s.select_layer(Some(id.clone()));
+            })
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            // Focus the inspector text field: playback toggles (both the
+            // action and the key fallback) must stand down while typing.
+            window.click(SharedString::from("text_content_input"), cx);
+            window.render_frame(cx);
+            window.dispatch_action(crate::TogglePlayback.boxed_clone(), cx);
+            window.dispatch_keystroke(gpui_kit::Keystroke::parse("space").unwrap(), cx);
+        })
+        .expect("update_window failed");
+
+        cx.run_until_parked();
+        assert!(!app_view.read_with(cx, |view, cx| view.state().read(cx).is_playing));
+
+        // Unfocused, the same inputs toggle playback as before.
+        cx.update_window(handle.into(), |_, window, cx| {
+            let focus_handle = app_view.read(cx).focus_handle().clone();
+            window.focus(&focus_handle, cx);
+            window.render_frame(cx);
+            window.dispatch_action(crate::TogglePlayback.boxed_clone(), cx);
+        })
+        .expect("update_window failed");
+
+        cx.run_until_parked();
+        assert!(app_view.read_with(cx, |view, cx| view.state().read(cx).is_playing));
+    }
+
+    #[test]
+    fn test_canvas_scale_includes_zoom() {
+        // Regression: drag handlers recomputed a zoom-less fit, offsetting
+        // mask commits by 1/zoom. Render, overlay, and drags share this.
+        let viewport = Some((512.0, 288.0));
+        let base = crate::panels::canvas_scale(viewport, None, 1920.0, 1080.0);
+        let zoomed = crate::panels::canvas_scale(viewport, Some(2.0), 1920.0, 1080.0);
+        assert!((zoomed - base * 2.0).abs() < 1e-5, "{base} {zoomed}");
     }
 
     #[gpui_kit::test]
@@ -4260,6 +4381,9 @@ mod tests {
 
             assert!(window.find(SharedString::from(format!("effect_toggle_{eff_id}"))).visible());
             assert!(window.find(SharedString::from(format!("effect_delete_{eff_id}"))).visible());
+            // Cards start collapsed: expand via disclosure first.
+            window.click(SharedString::from(format!("effect_disclosure_{eff_id}")), cx);
+            window.render_frame(cx);
             // Value field scrubs (drag/wheel) and types (click): no +/- buttons.
             assert!(window.find(SharedString::from(format!("param_radius_{eff_id}"))).visible());
 
@@ -4957,6 +5081,9 @@ mod tests {
         });
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
+            // Card starts collapsed: expand first.
+            window.click(SharedString::from(format!("effect_disclosure_{noise}")), cx);
+            window.render_frame(cx);
             let id = SharedString::from(format!("fx_bool_monochrome_{noise}"));
             assert!(window.find(id.clone()).visible());
             window.click(id, cx);
@@ -5085,6 +5212,9 @@ mod tests {
         });
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
+            // Card starts collapsed: expand first.
+            window.click(SharedString::from(format!("effect_disclosure_{eff}")), cx);
+            window.render_frame(cx);
             // Vec widget: link pill + per-component rows.
             assert!(window.find(SharedString::from(format!("vec_link_{eff}_offset"))).visible());
             assert!(window.find(SharedString::from(format!("shader_param_{eff}_offset_0"))).visible());
@@ -5157,6 +5287,9 @@ mod tests {
         let hi_row = SharedString::from(format!("param_highlights_cyan_red_{bal}"));
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
+            // Card starts collapsed: expand first.
+            window.click(SharedString::from(format!("effect_disclosure_{bal}")), cx);
+            window.render_frame(cx);
             assert!(window.find(cat.clone()).visible());
             // Default range: Shadows only.
             assert!(window.find(shadow_row.clone()).visible());
@@ -5211,6 +5344,9 @@ mod tests {
         let cell_trigger = SharedString::from(format!("fx_enum_{tiler}_cell"));
         let mirror_toggle = SharedString::from(format!("fx_bool_mirror_{tiler}"));
         cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            // Card starts collapsed: expand first.
+            window.click(SharedString::from(format!("effect_disclosure_{tiler}")), cx);
             window.render_frame(cx);
             assert!(window.find(mode_trigger.clone()).visible());
             assert!(window.find(cell_trigger.clone()).visible());
@@ -5286,6 +5422,10 @@ mod tests {
             });
         });
         cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            // Cards start collapsed: expand both first.
+            window.click(SharedString::from(format!("effect_disclosure_{ramp}")), cx);
+            window.click(SharedString::from(format!("effect_disclosure_{noise}")), cx);
             window.render_frame(cx);
             // Gradient editor: stops, reverse, selected-stop wheel.
             assert!(window.find(SharedString::from(format!("gradient_stop0_{ramp}"))).visible());
@@ -5502,6 +5642,9 @@ mod tests {
         // Drag stop 0 onto the bar center: offset lands near 0.5.
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
+            // Card starts collapsed: expand first.
+            window.click(SharedString::from(format!("effect_disclosure_{ramp}")), cx);
+            window.render_frame(cx);
             window.drag_to(
                 SharedString::from(format!("gradient_stop0_{ramp}")),
                 SharedString::from(format!("gradient_bar_{ramp}")),
@@ -5673,6 +5816,12 @@ mod tests {
             out
         });
         cx.run_until_parked();
+        // Card starts collapsed: expand first.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click(SharedString::from(format!("effect_disclosure_{eff_id}")), cx);
+        })
+        .expect("window update");
         for field in ["color_a", "color_b"] {
             let id = format!("fx_wheel_btn_{field}_{eff_id}");
             let visible = cx.update_window(handle.into(), |_, window, _| {
@@ -7506,16 +7655,21 @@ mod tests {
             }
         }));
 
-        // 7. Applied Effects Card with nested Collapsible
+        // 7. Applied Effects Card with nested Collapsible (collapsed by
+        // default; disclosure expands).
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             let card_id = SharedString::from(format!("applied_effect_{blur_id}"));
             let disc_id = SharedString::from(format!("effect_disclosure_{blur_id}"));
             assert!(window.find(card_id.clone()).visible());
             assert!(window.find(disc_id.clone()).visible());
-            // Parameter is visible while open
+            // Card starts collapsed: parameter not mounted until expanded.
+            assert!(window.try_find(SharedString::from(format!("param_radius_{blur_id}"))).is_none());
+            // Click disclosure to expand.
+            window.click(disc_id.clone(), cx);
+            window.render_frame(cx);
             assert!(window.find(SharedString::from(format!("param_radius_{blur_id}"))).visible());
-            // Click disclosure to collapse
+            // Click disclosure again to collapse.
             window.click(disc_id, cx);
         })
         .expect("update_window failed");
