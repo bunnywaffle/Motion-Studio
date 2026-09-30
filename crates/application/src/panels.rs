@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::state::{EditorState, EditorTool, EasingPreset, GraphSeries};
+use crate::state::{AnimationPreset, EditorState, EditorTool, EasingPreset, GraphSeries};
 use project::shader::{presets as shader_presets, ShaderParamValue};
 use project::{BlendMode, Color, EffectType, LayerSource, ShapeType, TimeCode, TrackMatteMode, Vec2};
 
@@ -13592,6 +13592,9 @@ pub struct ContextMenuState {
 }
 
 pub struct TimelinePanel {
+    pub easing_dropdown_open: bool,
+    pub animation_dropdown_open: bool,
+
     focus_handle: FocusHandle,
     state: Entity<EditorState>,
     _subscription: Subscription,
@@ -14152,52 +14155,50 @@ fn render_graph_view(
                 .child("Keys"),
         );
 
-    // Easing preset bar (applies to focused prop, else all series).
-    let mut easing_row = h_flex().gap_1().items_center();
-    {
-        let presets = [
-            (EasingPreset::Linear, "Linear"),
-            (EasingPreset::EaseIn, "Ease In"),
-            (EasingPreset::EaseOut, "Ease Out"),
-            (EasingPreset::EasyEase, "Easy Ease"),
-            (EasingPreset::Hold, "Hold"),
-        ];
-        for (preset, label) in presets {
-            let s_e = state.clone();
-            let lid_e = lid_opt.clone();
-            let focus_e = spline_prop.clone();
-            let series_paths: Vec<String> = series.iter().map(|se| se.path.clone()).collect();
-            easing_row = easing_row.child(
-                div()
-                    .cursor_pointer()
-                    .px_2()
-                    .py_0p5()
-                    .rounded_sm()
-                    .bg(ae::control())
-                    .hover(|s| s.bg(ae::hover()))
-                    .text_color(ae::text())
-                    .text_xs()
-                    .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
-                        if let Some(ref lid) = lid_e {
-                            let paths = series_paths.clone();
-                            let focus = focus_e.clone();
-                            s_e.update(cx, |s, cx| {
-                                s.checkpoint();
-                                if !focus.is_empty() && paths.iter().any(|p| p == &focus) {
-                                    s.set_layer_property_easing(lid, &focus, preset);
-                                } else {
-                                    for p in &paths {
-                                        s.set_layer_property_easing(lid, p, preset);
-                                    }
-                                }
-                                cx.notify();
-                            });
-                        }
-                    })
-                    .child(label),
-            );
-        }
-    }
+    // Easing preset button
+    let easing_row = h_flex().gap_1().items_center().child(
+        div()
+            .cursor_pointer()
+            .px_2()
+            .py_0p5()
+            .rounded_sm()
+            .bg(ae::control())
+            .hover(|s| s.bg(ae::hover()))
+            .text_color(ae::text())
+            .text_xs()
+            .on_mouse_down(MouseButton::Left, {
+                let panel = panel_entity.clone();
+                move |_e, _w, cx| {
+                    panel.update(cx, |p, cx| {
+                        p.easing_dropdown_open = !p.easing_dropdown_open;
+                        p.animation_dropdown_open = false;
+                        cx.notify();
+                    });
+                }
+            })
+            .child("Easing ▾")
+    ).child(
+        div()
+            .cursor_pointer()
+            .px_2()
+            .py_0p5()
+            .rounded_sm()
+            .bg(ae::control())
+            .hover(|s| s.bg(ae::hover()))
+            .text_color(ae::text())
+            .text_xs()
+            .on_mouse_down(MouseButton::Left, {
+                let panel = panel_entity.clone();
+                move |_e, _w, cx| {
+                    panel.update(cx, |p, cx| {
+                        p.animation_dropdown_open = !p.animation_dropdown_open;
+                        p.easing_dropdown_open = false;
+                        cx.notify();
+                    });
+                }
+            })
+            .child("★ Presets ▾")
+    );
 
     // --- Legend column: layer blocks with per-series eye, value, key ---
     // (AE Graphed Properties pane). One block per layer carrying curves;
@@ -14219,17 +14220,17 @@ fn render_graph_view(
                 .collect(),
             None => Vec::new(),
         };
-        let mut col = v_flex()
+        let mut col = h_flex()
             .id("graph_legend")
             .test_support()
-            .w(px(210.))
             .flex_none()
-            .gap_0p5()
+            .w_full()
+            .flex_wrap()
+            .gap_2()
             .py_1()
-            .pr_2()
-            .border_r_1()
-            .border_color(ae::border())
-            .overflow_y_scroll();
+            .px_2()
+            .border_b_1()
+            .border_color(ae::border());
         for (llid, lname, is_sel) in layers {
             let lseries = s.graph_series(&llid);
             if lseries.is_empty() && !is_sel {
@@ -14962,36 +14963,33 @@ fn render_graph_view(
         .id("spline_graph_scroll")
         .test_support()
         .flex_1()
-        .overflow_y_scroll()
+        .overflow_hidden()
         .bg(ae::bg())
         .text_color(ae::text())
         .child(header)
+        .child(legend)
         .child(
-            h_flex()
+            v_flex()
                 .flex_1()
                 .min_h_0()
-                .child(legend)
+                .min_w_0()
+                .px_2()
+                .py_1()
+                .gap_1()
+                .child(ruler)
+                .child(h_flex().flex_1().min_h_0().gap_0().child(axis).child(plot))
                 .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .px_2()
-                        .py_1()
-                        .gap_1()
-                        .child(ruler)
-                        .child(h_flex().gap_0().child(axis).child(plot))
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .flex_wrap()
                         .child(
-                            h_flex()
-                                .gap_2()
-                                .items_center()
-                                .flex_wrap()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(ae::dim())
-                                        .child("Ease:"),
-                                )
-                                .child(easing_row)
+                            div()
+                                .text_xs()
+                                .text_color(ae::dim())
+                                .child("Ease/Animate:"),
+                        )
+                        .child(easing_row)
                                 .child(
                                     div()
                                         .cursor_pointer()
@@ -15029,8 +15027,7 @@ fn render_graph_view(
                                             "Click-drag diamonds to move time + value · right-click cycles interp"
                                         }),
                                 ),
-                        ),
-                ),
+                        )
         )
         .into_any_element()
 }
@@ -15067,6 +15064,8 @@ impl TimelinePanel {
             scrub_factor: 1.0,
             graph_drag: None,
             graph_tan_drag: None,
+            easing_dropdown_open: false,
+            animation_dropdown_open: false,
             graph_tab: GraphTab::Value,
             graph_isolate: false,
             graph_show_grid: true,
@@ -17659,12 +17658,31 @@ impl Render for TimelinePanel {
                         view: self.graph_view,
                         drag: self.graph_drag.clone(),
                     };
-                    div()
+                    h_flex()
                         .flex_1()
-                        .flex()
-                        .flex_col()
+                        .size_full()
                         .overflow_hidden()
-                        .child(render_graph_view(&self.state, &panel_entity, sel, &gui, cx))
+                        .child(
+                            v_flex()
+                                .id("timeline_graph_layer_list")
+                                .w(px(380.))
+                                .flex_none()
+                                .h_full()
+                                .border_r_1()
+                                .border_color(ae::border())
+                                .min_h_0()
+                                .overflow_y_scroll()
+                                .children(timeline_rows)
+                        )
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .h_full()
+                                .min_h_0()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .child(render_graph_view(&self.state, &panel_entity, sel, &gui, cx))
+                        )
                         .into_any_element()
                 } else {
                     v_flex()
@@ -18638,6 +18656,205 @@ impl Render for TimelinePanel {
                     ),
             );
             root = root.child(context_menu_overlay);
+        }
+
+        // Dropdown Overlay Logic
+        if self.easing_dropdown_open {
+            let p_tl_dismiss_bg = cx.entity().clone();
+            let p_tl_dismiss_r = cx.entity().clone();
+            let p_tl_out = cx.entity().clone();
+            let tl_backdrop = deferred(
+                Positioner::corner(Anchor::TopLeft, point(px(0.), px(0.)))
+                    .child(
+                        div()
+                            .id("easing_dropdown_backdrop")
+                            .size_full()
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                p_tl_dismiss_bg.update(cx, |this, cx| {
+                                    this.easing_dropdown_open = false;
+                                    cx.notify();
+                                });
+                            })
+                            .on_mouse_down(MouseButton::Right, move |_event, _window, cx| {
+                                p_tl_dismiss_r.update(cx, |this, cx| {
+                                    this.easing_dropdown_open = false;
+                                    cx.notify();
+                                });
+                            }),
+                    ),
+            );
+            root = root.child(tl_backdrop);
+
+            let s_e = self.state.clone();
+            let lid_opt = self.state.read(cx).selected_layer_id.clone();
+            let focus_e = self.state.read(cx).spline_prop_path.clone();
+            let mut list = v_flex().gap_0p5().p_1();
+
+            let groups = [
+                ("Standard", vec![EasingPreset::Linear, EasingPreset::Hold]),
+                ("Sine", vec![EasingPreset::SineIn, EasingPreset::SineOut, EasingPreset::SineInOut]),
+                ("Quad", vec![EasingPreset::QuadIn, EasingPreset::QuadOut, EasingPreset::QuadInOut]),
+                ("Cubic", vec![EasingPreset::CubicIn, EasingPreset::CubicOut, EasingPreset::CubicInOut]),
+                ("Quart", vec![EasingPreset::QuartIn, EasingPreset::QuartOut, EasingPreset::QuartInOut]),
+                ("Quint", vec![EasingPreset::QuintIn, EasingPreset::QuintOut, EasingPreset::QuintInOut]),
+                ("Expo", vec![EasingPreset::ExpoIn, EasingPreset::ExpoOut, EasingPreset::ExpoInOut]),
+                ("Circ", vec![EasingPreset::CircIn, EasingPreset::CircOut, EasingPreset::CircInOut]),
+                ("Back/Overshoot", vec![EasingPreset::BackIn, EasingPreset::BackOut, EasingPreset::BackInOut]),
+                ("Smooth", vec![EasingPreset::EasyEase, EasingPreset::AppleDecel, EasingPreset::Punchy]),
+            ];
+
+            for (group_name, presets) in groups {
+                list = list.child(div().text_xs().text_color(ae::dim()).font_semibold().py_0p5().px_2().child(group_name));
+                for preset in presets {
+                    let s_click = s_e.clone();
+                    let l_click = lid_opt.clone();
+                    let f_click = focus_e.clone();
+                    let p_click = cx.entity().clone();
+                    list = list.child(
+                        div()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_0p5()
+                            .rounded_sm()
+                            .text_xs()
+                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                            .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                                if let Some(ref lid) = l_click {
+                                    s_click.update(cx, |s, cx| {
+                                        s.checkpoint();
+                                        s.set_layer_property_easing(lid, &f_click, preset);
+                                        cx.notify();
+                                    });
+                                }
+                                p_click.update(cx, |p, cx| {
+                                    p.easing_dropdown_open = false;
+                                    cx.notify();
+                                });
+                            })
+                            .child(preset.label())
+                    );
+                }
+            }
+
+            let dropdown = deferred(
+                Positioner::corner(Anchor::TopRight, point(px(200.), px(80.)))
+                    .margin(px(8.))
+                    .occlude()
+                    .child(
+                        div()
+                            .id("easing_dropdown")
+                            .w(px(200.))
+                            .h(px(400.))
+                            .overflow_y_scroll()
+                            .bg(cx.theme().background)
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .rounded_md()
+                            .shadow_lg()
+                            .on_mouse_down_out(move |_event, _window, cx| {
+                                p_tl_out.update(cx, |this, cx| {
+                                    this.easing_dropdown_open = false;
+                                    cx.notify();
+                                });
+                            })
+                            .child(list),
+                    ),
+            );
+            root = root.child(dropdown);
+        }
+
+        if self.animation_dropdown_open {
+            let p_tl_dismiss_bg = cx.entity().clone();
+            let p_tl_dismiss_r = cx.entity().clone();
+            let p_tl_out = cx.entity().clone();
+            let tl_backdrop = deferred(
+                Positioner::corner(Anchor::TopLeft, point(px(0.), px(0.)))
+                    .child(
+                        div()
+                            .id("animation_dropdown_backdrop")
+                            .size_full()
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                p_tl_dismiss_bg.update(cx, |this, cx| {
+                                    this.animation_dropdown_open = false;
+                                    cx.notify();
+                                });
+                            })
+                            .on_mouse_down(MouseButton::Right, move |_event, _window, cx| {
+                                p_tl_dismiss_r.update(cx, |this, cx| {
+                                    this.animation_dropdown_open = false;
+                                    cx.notify();
+                                });
+                            }),
+                    ),
+            );
+            root = root.child(tl_backdrop);
+
+            let s_e = self.state.clone();
+            let lid_opt = self.state.read(cx).selected_layer_id.clone();
+            let mut list = v_flex().gap_0p5().p_1();
+
+            let groups = [
+                ("Entrance", vec![AnimationPreset::FadeIn, AnimationPreset::SlideInUp, AnimationPreset::SlideInDown, AnimationPreset::SlideInLeft, AnimationPreset::SlideInRight, AnimationPreset::PopIn, AnimationPreset::DropIn, AnimationPreset::WhipIn]),
+                ("Exit", vec![AnimationPreset::FadeOut, AnimationPreset::SlideOutUp, AnimationPreset::SlideOutDown, AnimationPreset::SlideOutLeft, AnimationPreset::SlideOutRight, AnimationPreset::ShrinkOut, AnimationPreset::DropOut]),
+                ("Emphasis", vec![AnimationPreset::Pulse, AnimationPreset::Shake, AnimationPreset::Float, AnimationPreset::Spin, AnimationPreset::Flash]),
+            ];
+
+            for (group_name, presets) in groups {
+                list = list.child(div().text_xs().text_color(ae::dim()).font_semibold().py_0p5().px_2().child(group_name));
+                for preset in presets {
+                    let s_click = s_e.clone();
+                    let l_click = lid_opt.clone();
+                    let p_click = cx.entity().clone();
+                    list = list.child(
+                        div()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_0p5()
+                            .rounded_sm()
+                            .text_xs()
+                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                            .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                                if let Some(ref lid) = l_click {
+                                    s_click.update(cx, |s, cx| {
+                                        s.apply_animation_preset(lid, preset);
+                                        cx.notify();
+                                    });
+                                }
+                                p_click.update(cx, |p, cx| {
+                                    p.animation_dropdown_open = false;
+                                    cx.notify();
+                                });
+                            })
+                            .child(preset.label())
+                    );
+                }
+            }
+
+            let dropdown = deferred(
+                Positioner::corner(Anchor::TopRight, point(px(100.), px(80.)))
+                    .margin(px(8.))
+                    .occlude()
+                    .child(
+                        div()
+                            .id("animation_dropdown")
+                            .w(px(200.))
+                            .h(px(400.))
+                            .overflow_y_scroll()
+                            .bg(cx.theme().background)
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .rounded_md()
+                            .shadow_lg()
+                            .on_mouse_down_out(move |_event, _window, cx| {
+                                p_tl_out.update(cx, |this, cx| {
+                                    this.animation_dropdown_open = false;
+                                    cx.notify();
+                                });
+                            })
+                            .child(list),
+                    ),
+            );
+            root = root.child(dropdown);
         }
 
         root

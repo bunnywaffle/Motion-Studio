@@ -224,20 +224,52 @@ impl HistoryEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EasingPreset {
     Linear,
-    EaseIn,
-    EaseOut,
-    EasyEase,
     Hold,
+    SineIn, SineOut, SineInOut,
+    QuadIn, QuadOut, QuadInOut,
+    CubicIn, CubicOut, CubicInOut,
+    QuartIn, QuartOut, QuartInOut,
+    QuintIn, QuintOut, QuintInOut,
+    ExpoIn, ExpoOut, ExpoInOut,
+    CircIn, CircOut, CircInOut,
+    BackIn, BackOut, BackInOut,
+    EasyEase,
+    AppleDecel,
+    Punchy,
 }
 
 impl EasingPreset {
     pub fn label(self) -> &'static str {
         match self {
             Self::Linear => "Linear",
-            Self::EaseIn => "Ease In",
-            Self::EaseOut => "Ease Out",
-            Self::EasyEase => "Easy Ease",
             Self::Hold => "Hold",
+            Self::SineIn => "Sine In",
+            Self::SineOut => "Sine Out",
+            Self::SineInOut => "Sine In Out",
+            Self::QuadIn => "Quad In",
+            Self::QuadOut => "Quad Out",
+            Self::QuadInOut => "Quad In Out",
+            Self::CubicIn => "Cubic In",
+            Self::CubicOut => "Cubic Out",
+            Self::CubicInOut => "Cubic In Out",
+            Self::QuartIn => "Quart In",
+            Self::QuartOut => "Quart Out",
+            Self::QuartInOut => "Quart In Out",
+            Self::QuintIn => "Quint In",
+            Self::QuintOut => "Quint Out",
+            Self::QuintInOut => "Quint In Out",
+            Self::ExpoIn => "Expo In",
+            Self::ExpoOut => "Expo Out",
+            Self::ExpoInOut => "Expo In Out",
+            Self::CircIn => "Circ In",
+            Self::CircOut => "Circ Out",
+            Self::CircInOut => "Circ In Out",
+            Self::BackIn => "Back In",
+            Self::BackOut => "Back Out",
+            Self::BackInOut => "Back In Out",
+            Self::EasyEase => "Easy Ease",
+            Self::AppleDecel => "Apple Decel",
+            Self::Punchy => "Punchy",
         }
     }
 }
@@ -247,29 +279,85 @@ fn apply_easing_to_prop<T: project::Interpolate>(prop: &mut project::Property<T>
         match easing {
             EasingPreset::Linear => {
                 kf.interpolation = project::KeyframeInterpolation::Linear;
-                kf.in_tangent = Some(project::KeyframeTangent::linear_in());
-                kf.out_tangent = Some(project::KeyframeTangent::linear_out());
-            }
-            EasingPreset::EaseIn => {
-                kf.interpolation = project::KeyframeInterpolation::Bezier;
-                kf.in_tangent = Some(project::KeyframeTangent::ease_in_in());
-                kf.out_tangent = Some(project::KeyframeTangent::ease_in_out());
-            }
-            EasingPreset::EaseOut => {
-                kf.interpolation = project::KeyframeInterpolation::Bezier;
-                kf.in_tangent = Some(project::KeyframeTangent::ease_out_in());
-                kf.out_tangent = Some(project::KeyframeTangent::ease_out_out());
-            }
-            EasingPreset::EasyEase => {
-                kf.interpolation = project::KeyframeInterpolation::Bezier;
-                kf.in_tangent = Some(project::KeyframeTangent::ease_in_out_in());
-                kf.out_tangent = Some(project::KeyframeTangent::ease_in_out_out());
+                kf.out_tangent = Some(project::KeyframeTangent::new(1.0/3.0, 1.0/3.0));
+                kf.in_tangent = Some(project::KeyframeTangent::new(2.0/3.0, 2.0/3.0));
             }
             EasingPreset::Hold => {
                 kf.interpolation = project::KeyframeInterpolation::Hold;
                 kf.in_tangent = None;
                 kf.out_tangent = None;
             }
+            _ => {
+                kf.interpolation = project::KeyframeInterpolation::Bezier;
+                let (out_p, in_p) = match easing {
+                    EasingPreset::SineIn => ((0.47, 0.0), (0.745, 0.715)),
+                    EasingPreset::SineOut => ((0.39, 0.575), (0.565, 1.0)),
+                    EasingPreset::SineInOut => ((0.445, 0.05), (0.55, 0.95)),
+                    EasingPreset::QuadIn => ((0.55, 0.085), (0.68, 0.53)),
+                    EasingPreset::QuadOut => ((0.25, 0.46), (0.45, 0.94)),
+                    EasingPreset::QuadInOut => ((0.455, 0.03), (0.515, 0.955)),
+                    EasingPreset::CubicIn => ((0.55, 0.055), (0.675, 0.19)),
+                    EasingPreset::CubicOut => ((0.215, 0.61), (0.355, 1.0)),
+                    EasingPreset::CubicInOut => ((0.645, 0.045), (0.355, 1.0)),
+                    EasingPreset::QuartIn => ((0.895, 0.03), (0.685, 0.22)),
+                    EasingPreset::QuartOut => ((0.165, 0.84), (0.44, 1.0)),
+                    EasingPreset::QuartInOut => ((0.77, 0.0), (0.175, 1.0)),
+                    EasingPreset::QuintIn => ((0.755, 0.05), (0.855, 0.06)),
+                    EasingPreset::QuintOut => ((0.23, 1.0), (0.32, 0.0)),
+                    EasingPreset::QuintInOut => ((0.86, 0.0), (0.07, 1.0)),
+                    EasingPreset::ExpoIn => ((0.95, 0.05), (0.795, 0.035)),
+                    EasingPreset::ExpoOut => ((0.19, 1.0), (0.22, 1.0)),
+                    EasingPreset::ExpoInOut => ((1.0, 0.0), (0.0, 1.0)),
+                    EasingPreset::CircIn => ((0.6, 0.04), (0.98, 0.335)),
+                    EasingPreset::CircOut => ((0.075, 0.82), (0.165, 1.0)),
+                    EasingPreset::CircInOut => ((0.785, 0.135), (0.15, 0.86)),
+                    EasingPreset::BackIn => ((0.6, -0.28), (0.735, 0.045)),
+                    EasingPreset::BackOut => ((0.175, 0.885), (0.32, 1.275)),
+                    EasingPreset::BackInOut => ((0.68, -0.55), (0.265, 1.55)),
+                    EasingPreset::EasyEase => ((0.42, 0.0), (0.58, 1.0)),
+                    EasingPreset::AppleDecel => ((0.0, 0.0), (0.2, 1.0)),
+                    EasingPreset::Punchy => ((0.8, 0.0), (0.2, 1.0)),
+                    _ => ((0.0, 0.0), (1.0, 1.0)) // Unreachable
+                };
+                kf.out_tangent = Some(project::KeyframeTangent::new(out_p.0, out_p.1));
+                kf.in_tangent = Some(project::KeyframeTangent::new(in_p.0, in_p.1));
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnimationPreset {
+    FadeIn, SlideInUp, SlideInDown, SlideInLeft, SlideInRight,
+    PopIn, DropIn, WhipIn,
+    FadeOut, SlideOutUp, SlideOutDown, SlideOutLeft, SlideOutRight,
+    ShrinkOut, DropOut,
+    Pulse, Shake, Float, Spin, Flash,
+}
+
+impl AnimationPreset {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::FadeIn => "Fade In",
+            Self::SlideInUp => "Slide In Up",
+            Self::SlideInDown => "Slide In Down",
+            Self::SlideInLeft => "Slide In Left",
+            Self::SlideInRight => "Slide In Right",
+            Self::PopIn => "Pop In",
+            Self::DropIn => "Drop In",
+            Self::WhipIn => "Whip In",
+            Self::FadeOut => "Fade Out",
+            Self::SlideOutUp => "Slide Out Up",
+            Self::SlideOutDown => "Slide Out Down",
+            Self::SlideOutLeft => "Slide Out Left",
+            Self::SlideOutRight => "Slide Out Right",
+            Self::ShrinkOut => "Shrink Out",
+            Self::DropOut => "Drop Out",
+            Self::Pulse => "Pulse",
+            Self::Shake => "Shake",
+            Self::Float => "Float",
+            Self::Spin => "Spin",
+            Self::Flash => "Flash",
         }
     }
 }
@@ -5871,6 +5959,161 @@ impl EditorState {
     }
 
     /// Toggle a keyframe at the current playback timecode for a property path on the layer.
+    pub fn apply_animation_preset(&mut self, layer_id: &str, preset: AnimationPreset) {
+        self.checkpoint();
+        let current_tc = self.clock.timecode();
+        let t0 = current_tc.seconds();
+        
+        let comp = match self.active_composition_mut() {
+            Some(c) => c,
+            None => return,
+        };
+        let fps = comp.frame_rate;
+        let layer = match comp.get_layer_mut(layer_id) {
+            Some(l) => l,
+            None => return,
+        };
+
+        let tc = |s: f64| project::TimeCode::from_seconds(s, fps);
+        let ez_f32 = |time_s: f64, val: f32, ease_out: (f32, f32), ease_in: (f32, f32)| {
+            let mut kf = project::Keyframe::new(tc(time_s), val);
+            kf.interpolation = project::KeyframeInterpolation::Bezier;
+            kf.out_tangent = Some(project::KeyframeTangent::new(ease_out.0, ease_out.1));
+            kf.in_tangent = Some(project::KeyframeTangent::new(ease_in.0, ease_in.1));
+            kf
+        };
+        let ez_vec2 = |time_s: f64, val: project::Vec2, ease_out: (f32, f32), ease_in: (f32, f32)| {
+            let mut kf = project::Keyframe::new(tc(time_s), val);
+            kf.interpolation = project::KeyframeInterpolation::Bezier;
+            kf.out_tangent = Some(project::KeyframeTangent::new(ease_out.0, ease_out.1));
+            kf.in_tangent = Some(project::KeyframeTangent::new(ease_in.0, ease_in.1));
+            kf
+        };
+        let lin_f32 = |time_s: f64, val: f32| {
+            let mut kf = project::Keyframe::new(tc(time_s), val);
+            kf.interpolation = project::KeyframeInterpolation::Linear;
+            kf.out_tangent = Some(project::KeyframeTangent::new(1.0/3.0, 1.0/3.0));
+            kf.in_tangent = Some(project::KeyframeTangent::new(2.0/3.0, 2.0/3.0));
+            kf
+        };
+        let lin_vec2 = |time_s: f64, val: project::Vec2| {
+            let mut kf = project::Keyframe::new(tc(time_s), val);
+            kf.interpolation = project::KeyframeInterpolation::Linear;
+            kf.out_tangent = Some(project::KeyframeTangent::new(1.0/3.0, 1.0/3.0));
+            kf.in_tangent = Some(project::KeyframeTangent::new(2.0/3.0, 2.0/3.0));
+            kf
+        };
+        let hold_f32 = |time_s: f64, val: f32| {
+            let mut kf = project::Keyframe::new(tc(time_s), val);
+            kf.interpolation = project::KeyframeInterpolation::Hold;
+            kf
+        };
+
+        let current_pos = if layer.transform.position.is_animated() { layer.transform.position.evaluate_at(&current_tc) } else { layer.transform.position.value };
+        let current_scale = if layer.transform.scale.is_animated() { layer.transform.scale.evaluate_at(&current_tc) } else { layer.transform.scale.value };
+        let current_rot = if layer.transform.rotation.is_animated() { layer.transform.rotation.evaluate_at(&current_tc) } else { layer.transform.rotation.value };
+
+        let back_out = ((0.175, 0.885), (0.32, 1.275));
+        let back_in = ((0.6, -0.28), (0.735, 0.045));
+        let expo_out = ((0.19, 1.0), (0.22, 1.0));
+        let expo_in = ((0.95, 0.05), (0.795, 0.035));
+        let ease_out = ((0.25, 0.46), (0.45, 0.94)); // QuadOut
+        let ease_in = ((0.55, 0.085), (0.68, 0.53)); // QuadIn
+        let easy_ease = ((0.42, 0.0), (0.58, 1.0));
+        let sine_in_out = ((0.445, 0.05), (0.55, 0.95));
+
+        match preset {
+            AnimationPreset::FadeIn => {
+                layer.opacity.add_keyframe(ez_f32(t0, 0.0, easy_ease.0, easy_ease.1));
+                layer.opacity.add_keyframe(ez_f32(t0 + 0.5, 100.0, easy_ease.0, easy_ease.1));
+            }
+            AnimationPreset::FadeOut => {
+                layer.opacity.add_keyframe(ez_f32(t0, 100.0, ease_in.0, ease_in.1));
+                layer.opacity.add_keyframe(ez_f32(t0 + 0.5, 0.0, ease_in.0, ease_in.1));
+            }
+            AnimationPreset::SlideInUp => {
+                layer.transform.position.add_keyframe(ez_vec2(t0, project::Vec2 { x: current_pos.x, y: current_pos.y + 200.0 }, ease_out.0, ease_out.1));
+                layer.transform.position.add_keyframe(ez_vec2(t0 + 0.5, current_pos, ease_out.0, ease_out.1));
+            }
+            AnimationPreset::SlideInDown => {
+                layer.transform.position.add_keyframe(ez_vec2(t0, project::Vec2 { x: current_pos.x, y: current_pos.y - 200.0 }, ease_out.0, ease_out.1));
+                layer.transform.position.add_keyframe(ez_vec2(t0 + 0.5, current_pos, ease_out.0, ease_out.1));
+            }
+            AnimationPreset::SlideInLeft => {
+                layer.transform.position.add_keyframe(ez_vec2(t0, project::Vec2 { x: current_pos.x + 200.0, y: current_pos.y }, ease_out.0, ease_out.1));
+                layer.transform.position.add_keyframe(ez_vec2(t0 + 0.5, current_pos, ease_out.0, ease_out.1));
+            }
+            AnimationPreset::SlideInRight => {
+                layer.transform.position.add_keyframe(ez_vec2(t0, project::Vec2 { x: current_pos.x - 200.0, y: current_pos.y }, ease_out.0, ease_out.1));
+                layer.transform.position.add_keyframe(ez_vec2(t0 + 0.5, current_pos, ease_out.0, ease_out.1));
+            }
+            AnimationPreset::PopIn => {
+                layer.transform.scale.add_keyframe(ez_vec2(t0, project::Vec2 { x: 0.0, y: 0.0 }, back_out.0, back_out.1));
+                layer.transform.scale.add_keyframe(ez_vec2(t0 + 0.4, project::Vec2 { x: 100.0, y: 100.0 }, back_out.0, back_out.1));
+            }
+            AnimationPreset::DropIn => {
+                layer.transform.position.add_keyframe(ez_vec2(t0, project::Vec2 { x: current_pos.x, y: current_pos.y - 300.0 }, back_out.0, back_out.1));
+                layer.transform.position.add_keyframe(ez_vec2(t0 + 0.6, current_pos, back_out.0, back_out.1));
+            }
+            AnimationPreset::WhipIn => {
+                layer.transform.position.add_keyframe(ez_vec2(t0, project::Vec2 { x: current_pos.x + 400.0, y: current_pos.y }, expo_out.0, expo_out.1));
+                layer.transform.position.add_keyframe(ez_vec2(t0 + 0.35, current_pos, expo_out.0, expo_out.1));
+            }
+            AnimationPreset::SlideOutUp => {
+                layer.transform.position.add_keyframe(ez_vec2(t0, current_pos, expo_in.0, expo_in.1));
+                layer.transform.position.add_keyframe(ez_vec2(t0 + 0.5, project::Vec2 { x: current_pos.x, y: current_pos.y - 200.0 }, expo_in.0, expo_in.1));
+            }
+            AnimationPreset::SlideOutDown => {
+                layer.transform.position.add_keyframe(ez_vec2(t0, current_pos, expo_in.0, expo_in.1));
+                layer.transform.position.add_keyframe(ez_vec2(t0 + 0.5, project::Vec2 { x: current_pos.x, y: current_pos.y + 200.0 }, expo_in.0, expo_in.1));
+            }
+            AnimationPreset::SlideOutLeft => {
+                layer.transform.position.add_keyframe(ez_vec2(t0, current_pos, expo_in.0, expo_in.1));
+                layer.transform.position.add_keyframe(ez_vec2(t0 + 0.5, project::Vec2 { x: current_pos.x - 200.0, y: current_pos.y }, expo_in.0, expo_in.1));
+            }
+            AnimationPreset::SlideOutRight => {
+                layer.transform.position.add_keyframe(ez_vec2(t0, current_pos, expo_in.0, expo_in.1));
+                layer.transform.position.add_keyframe(ez_vec2(t0 + 0.5, project::Vec2 { x: current_pos.x + 200.0, y: current_pos.y }, expo_in.0, expo_in.1));
+            }
+            AnimationPreset::ShrinkOut => {
+                layer.transform.scale.add_keyframe(ez_vec2(t0, current_scale, back_in.0, back_in.1));
+                layer.transform.scale.add_keyframe(ez_vec2(t0 + 0.4, project::Vec2 { x: 0.0, y: 0.0 }, back_in.0, back_in.1));
+            }
+            AnimationPreset::DropOut => {
+                layer.transform.position.add_keyframe(ez_vec2(t0, current_pos, expo_in.0, expo_in.1));
+                layer.transform.position.add_keyframe(ez_vec2(t0 + 0.5, project::Vec2 { x: current_pos.x, y: current_pos.y + 300.0 }, expo_in.0, expo_in.1));
+            }
+            AnimationPreset::Pulse => {
+                layer.transform.scale.add_keyframe(ez_vec2(t0, current_scale, sine_in_out.0, sine_in_out.1));
+                layer.transform.scale.add_keyframe(ez_vec2(t0 + 0.25, project::Vec2 { x: current_scale.x * 1.1, y: current_scale.y * 1.1 }, sine_in_out.0, sine_in_out.1));
+                layer.transform.scale.add_keyframe(ez_vec2(t0 + 0.5, current_scale, sine_in_out.0, sine_in_out.1));
+            }
+            AnimationPreset::Shake => {
+                let steps = [0.0, -20.0, 20.0, -15.0, 15.0, -8.0, 8.0, 0.0];
+                let dt = 0.5 / 7.0;
+                for (i, &offset) in steps.iter().enumerate() {
+                    layer.transform.position.add_keyframe(lin_vec2(t0 + (i as f64) * dt, project::Vec2 { x: current_pos.x + offset, y: current_pos.y }));
+                }
+            }
+            AnimationPreset::Float => {
+                layer.transform.position.add_keyframe(ez_vec2(t0, current_pos, sine_in_out.0, sine_in_out.1));
+                layer.transform.position.add_keyframe(ez_vec2(t0 + 0.5, project::Vec2 { x: current_pos.x, y: current_pos.y - 15.0 }, sine_in_out.0, sine_in_out.1));
+                layer.transform.position.add_keyframe(ez_vec2(t0 + 1.0, current_pos, sine_in_out.0, sine_in_out.1));
+            }
+            AnimationPreset::Spin => {
+                layer.transform.rotation.add_keyframe(lin_f32(t0, current_rot));
+                layer.transform.rotation.add_keyframe(lin_f32(t0 + 0.5, current_rot + 360.0));
+            }
+            AnimationPreset::Flash => {
+                let dt = 0.4 / 4.0;
+                for i in 0..5 {
+                    let val = if i % 2 == 0 { 100.0 } else { 0.0 };
+                    layer.opacity.add_keyframe(hold_f32(t0 + (i as f64) * dt, val));
+                }
+            }
+        }
+    }
+
     pub fn toggle_layer_keyframe_at_current_time(&mut self, layer_id: &str, prop_path: &str) {
         self.checkpoint();        let current_tc = self.clock.timecode();
         let comp = match self.active_composition_mut() {
