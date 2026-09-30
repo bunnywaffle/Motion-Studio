@@ -255,6 +255,36 @@ impl ProjectSortMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CompPresetDef {
+    pub name: &'static str,
+    pub width: u32,
+    pub height: u32,
+    pub fps: f64,
+    pub duration: f64,
+}
+
+pub const COMP_PRESET_DEFS: &[CompPresetDef] = &[
+    CompPresetDef { name: "1080p FHD (1920 × 1080 @ 30fps)", width: 1920, height: 1080, fps: 30.0, duration: 10.0 },
+    CompPresetDef { name: "1080p FHD (1920 × 1080 @ 60fps)", width: 1920, height: 1080, fps: 60.0, duration: 10.0 },
+    CompPresetDef { name: "4K UHD (3840 × 2160 @ 30fps)", width: 3840, height: 2160, fps: 30.0, duration: 10.0 },
+    CompPresetDef { name: "4K UHD (3840 × 2160 @ 60fps)", width: 3840, height: 2160, fps: 60.0, duration: 10.0 },
+    CompPresetDef { name: "720p HD (1280 × 720 @ 30fps)", width: 1280, height: 720, fps: 30.0, duration: 10.0 },
+    CompPresetDef { name: "2K QHD (2560 × 1440 @ 60fps)", width: 2560, height: 1440, fps: 60.0, duration: 10.0 },
+    CompPresetDef { name: "Social Reel / Shorts 9:16 (1080 × 1920 @ 30fps)", width: 1080, height: 1920, fps: 30.0, duration: 15.0 },
+    CompPresetDef { name: "Social Square 1:1 (1080 × 1080 @ 30fps)", width: 1080, height: 1080, fps: 30.0, duration: 10.0 },
+    CompPresetDef { name: "Social Portrait 4:5 (1080 × 1350 @ 30fps)", width: 1080, height: 1350, fps: 30.0, duration: 10.0 },
+    CompPresetDef { name: "Cinematic 2.39:1 (1920 × 804 @ 24fps)", width: 1920, height: 804, fps: 24.0, duration: 10.0 },
+];
+
+pub struct NewCompDialogInputs {
+    pub name: Entity<InputState>,
+    pub width: Entity<InputState>,
+    pub height: Entity<InputState>,
+    pub fps: Entity<InputState>,
+    pub duration: Entity<InputState>,
+}
+
 pub struct ProjectPanel {
     focus_handle: FocusHandle,
     state: Entity<EditorState>,
@@ -275,6 +305,8 @@ pub struct ProjectPanel {
     pub nc_dur: f64,
     /// 0 = Black, 1 = White, 2 = Transparent, 3 = Dark Gray.
     pub nc_bg: u8,
+    pub nc_preset_open: bool,
+    pub nc_preset_idx: usize,
     pub last_project_fp: (usize, usize, String, Option<usize>),
 }
 
@@ -319,6 +351,8 @@ impl ProjectPanel {
             nc_fps: 30.0,
             nc_dur: 10.0,
             nc_bg: 0,
+            nc_preset_open: false,
+            nc_preset_idx: 0,
             last_project_fp,
         }
     }
@@ -345,47 +379,191 @@ impl ProjectPanel {
     /// resolution (width & height with nudge steppers & presets), frame rate
     /// (with nudge steppers & standard broadcast/animation presets), duration
     /// (with steppers & presets), composition name, and background color.
-    fn render_new_comp_dialog(&self, panel: &Entity<ProjectPanel>, cx: &App) -> impl IntoElement {
-        let sizes: &[(u32, u32, &str)] = &[
-            (1920, 1080, "1080p FHD"),
-            (1280, 720, "720p HD"),
-            (3840, 2160, "4K UHD"),
-            (2560, 1440, "2K QHD"),
-            (1080, 1920, "9:16 Vertical"),
-            (1080, 1080, "1:1 Square"),
-        ];
-        let fps_opts: &[(f64, &str)] = &[
-            (23.976, "23.98"),
-            (24.0, "24"),
-            (25.0, "25"),
-            (29.97, "29.97"),
-            (30.0, "30"),
-            (50.0, "50"),
-            (59.94, "59.94"),
-            (60.0, "60"),
-        ];
-        let dur_opts: &[(f64, &str)] = &[
-            (5.0, "5s"),
-            (10.0, "10s"),
-            (15.0, "15s"),
-            (30.0, "30s"),
-            (60.0, "1m"),
-            (120.0, "2m"),
-        ];
-        let bg_opts: &[(u8, &str)] = &[
-            (0, "Black"),
-            (1, "White"),
-            (2, "Transparent"),
-            (3, "Dark Gray"),
-        ];
-        let name_presets = ["Comp 1", "Main Comp", "Reel / Short", "Social Square", "4K Master"];
+    fn render_new_comp_dialog(
+        &self,
+        panel: &Entity<ProjectPanel>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let nc_inputs = window.use_keyed_state("nc_dialog_inputs", cx, |window, cx| {
+            let name = cx.new(|cx| {
+                let mut st = InputState::new(window, cx);
+                st.set_value("Comp 1", window, cx);
+                st
+            });
+            let width = cx.new(|cx| {
+                let mut st = InputState::new(window, cx);
+                st.set_value("1920", window, cx);
+                st
+            });
+            let height = cx.new(|cx| {
+                let mut st = InputState::new(window, cx);
+                st.set_value("1080", window, cx);
+                st
+            });
+            let fps = cx.new(|cx| {
+                let mut st = InputState::new(window, cx);
+                st.set_value("30", window, cx);
+                st
+            });
+            let duration = cx.new(|cx| {
+                let mut st = InputState::new(window, cx);
+                st.set_value("10.0", window, cx);
+                st
+            });
+            NewCompDialogInputs {
+                name,
+                width,
+                height,
+                fps,
+                duration,
+            }
+        });
 
-        // Name presets row
-        let mut name_row = h_flex().gap_1().items_center().flex_wrap();
+        let name_inp = nc_inputs.read(cx).name.clone();
+        let w_inp = nc_inputs.read(cx).width.clone();
+        let h_inp = nc_inputs.read(cx).height.clone();
+        let fps_inp = nc_inputs.read(cx).fps.clone();
+        let dur_inp = nc_inputs.read(cx).duration.clone();
+
+        // Sync inputs if not focused
+        let name_focused = name_inp.read(cx).focus_handle(cx).is_focused(window);
+        let w_focused = w_inp.read(cx).focus_handle(cx).is_focused(window);
+        let h_focused = h_inp.read(cx).focus_handle(cx).is_focused(window);
+        let fps_focused = fps_inp.read(cx).focus_handle(cx).is_focused(window);
+        let dur_focused = dur_inp.read(cx).focus_handle(cx).is_focused(window);
+
+        if !name_focused {
+            let cur = name_inp.read(cx).value();
+            if cur != self.nc_name.as_str() {
+                name_inp.update(cx, |inp, cx| inp.set_value(&self.nc_name, window, cx));
+            }
+        }
+        if !w_focused {
+            let cur = w_inp.read(cx).value();
+            let target = self.nc_w.to_string();
+            if cur != target.as_str() {
+                w_inp.update(cx, |inp, cx| inp.set_value(&target, window, cx));
+            }
+        }
+        if !h_focused {
+            let cur = h_inp.read(cx).value();
+            let target = self.nc_h.to_string();
+            if cur != target.as_str() {
+                h_inp.update(cx, |inp, cx| inp.set_value(&target, window, cx));
+            }
+        }
+        if !fps_focused {
+            let cur = fps_inp.read(cx).value();
+            let target = if (self.nc_fps - self.nc_fps.round()).abs() < 1e-3 {
+                format!("{:.0}", self.nc_fps)
+            } else {
+                format!("{:.2}", self.nc_fps)
+            };
+            if cur != target.as_str() {
+                fps_inp.update(cx, |inp, cx| inp.set_value(&target, window, cx));
+            }
+        }
+        if !dur_focused {
+            let cur = dur_inp.read(cx).value();
+            let target = format!("{:.1}", self.nc_dur);
+            if cur != target.as_str() {
+                dur_inp.update(cx, |inp, cx| inp.set_value(&target, window, cx));
+            }
+        }
+
+        // Active preset name for the Combobox trigger
+        let matched_preset = COMP_PRESET_DEFS.iter().position(|p| {
+            p.width == self.nc_w && p.height == self.nc_h && (p.fps - self.nc_fps).abs() < 0.01
+        });
+        let combobox_label = match matched_preset {
+            Some(idx) => COMP_PRESET_DEFS[idx].name,
+            None => "Custom Settings",
+        };
+
+        let p_toggle_preset = panel.clone();
+        let preset_combobox_trigger = div()
+            .id("nc_preset_combobox")
+            .test_support()
+            .cursor_pointer()
+            .w_full()
+            .px_2p5()
+            .py_1p5()
+            .rounded_sm()
+            .bg(cx.theme().secondary)
+            .border_1()
+            .border_color(cx.theme().border)
+            .hover(|s| s.border_color(cx.theme().primary))
+            .flex()
+            .justify_between()
+            .items_center()
+            .text_xs()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(div().font_semibold().text_color(cx.theme().primary).child("Preset:"))
+                    .child(div().text_color(cx.theme().foreground).child(combobox_label))
+            )
+            .child(div().text_xs().text_color(cx.theme().muted_foreground).child(if self.nc_preset_open { "▲" } else { "▼" }))
+            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                p_toggle_preset.update(cx, |this, cx| {
+                    this.nc_preset_open = !this.nc_preset_open;
+                    cx.notify();
+                });
+            });
+
+        let mut preset_dropdown_list = v_flex()
+            .id("nc_preset_dropdown")
+            .test_support()
+            .w_full()
+            .max_h(px(180.))
+            .overflow_y_scroll()
+            .bg(cx.theme().background)
+            .border_1()
+            .border_color(cx.theme().border)
+            .rounded_sm()
+            .shadow_md()
+            .p_1()
+            .gap_0p5();
+
+        for (idx, pdef) in COMP_PRESET_DEFS.iter().enumerate() {
+            let is_sel = matched_preset == Some(idx);
+            let p_pick = panel.clone();
+            let p_def = *pdef;
+            preset_dropdown_list = preset_dropdown_list.child(
+                div()
+                    .id(SharedString::from(format!("nc_preset_item_{idx}")))
+                    .test_support()
+                    .cursor_pointer()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .text_xs()
+                    .bg(if is_sel { cx.theme().primary } else { cx.theme().background })
+                    .text_color(if is_sel { cx.theme().primary_foreground } else { cx.theme().foreground })
+                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                    .child(pdef.name)
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        p_pick.update(cx, |this, cx| {
+                            this.nc_w = p_def.width;
+                            this.nc_h = p_def.height;
+                            this.nc_fps = p_def.fps;
+                            this.nc_dur = p_def.duration;
+                            this.nc_preset_idx = idx;
+                            this.nc_preset_open = false;
+                            cx.notify();
+                        });
+                    })
+            );
+        }
+
+        // Quick Name presets chips
+        let name_presets = ["Comp 1", "Main Comp", "Reel / Short", "Social Square", "4K Master"];
+        let mut name_chips = h_flex().gap_1().items_center().flex_wrap();
         for &preset in &name_presets {
-            let sel = self.nc_name == preset;
             let p_name = panel.clone();
-            name_row = name_row.child(
+            name_chips = name_chips.child(
                 div()
                     .id(SharedString::from(format!("nc_name_preset_{preset}")))
                     .test_support()
@@ -393,8 +571,8 @@ impl ProjectPanel {
                     .px_1p5()
                     .py_0p5()
                     .rounded_sm()
-                    .bg(if sel { cx.theme().primary } else { cx.theme().muted })
-                    .text_color(if sel { cx.theme().primary_foreground } else { cx.theme().foreground })
+                    .bg(cx.theme().muted)
+                    .text_color(cx.theme().muted_foreground)
                     .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
                     .text_xs()
                     .child(preset)
@@ -407,102 +585,7 @@ impl ProjectPanel {
             );
         }
 
-        // Quick suffix steppers for comp name
-        let p_name_inc = panel.clone();
-        let p_name_dec = panel.clone();
-        let name_controls = h_flex()
-            .gap_1p5()
-            .items_center()
-            .child(
-                div()
-                    .id("nc_name_display")
-                    .test_support()
-                    .font_semibold()
-                    .text_xs()
-                    .text_color(cx.theme().foreground)
-                    .child(format!("Name: \"{}\"", self.nc_name)),
-            )
-            .child(
-                div()
-                    .id("nc_name_prev")
-                    .test_support()
-                    .cursor_pointer()
-                    .px_1p5()
-                    .py_0p5()
-                    .rounded_sm()
-                    .bg(cx.theme().muted)
-                    .hover(|s| s.bg(cx.theme().accent))
-                    .text_xs()
-                    .child("◀ Prev")
-                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                        p_name_dec.update(cx, |this, cx| {
-                            if let Some(idx) = name_presets.iter().position(|&p| p == this.nc_name) {
-                                if idx > 0 {
-                                    this.nc_name = name_presets[idx - 1].to_string();
-                                }
-                            } else {
-                                this.nc_name = "Comp 1".to_string();
-                            }
-                            cx.notify();
-                        });
-                    }),
-            )
-            .child(
-                div()
-                    .id("nc_name_next")
-                    .test_support()
-                    .cursor_pointer()
-                    .px_1p5()
-                    .py_0p5()
-                    .rounded_sm()
-                    .bg(cx.theme().muted)
-                    .hover(|s| s.bg(cx.theme().accent))
-                    .text_xs()
-                    .child("Next ▶")
-                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                        p_name_inc.update(cx, |this, cx| {
-                            if let Some(idx) = name_presets.iter().position(|&p| p == this.nc_name) {
-                                if idx + 1 < name_presets.len() {
-                                    this.nc_name = name_presets[idx + 1].to_string();
-                                }
-                            } else {
-                                this.nc_name = "Main Comp".to_string();
-                            }
-                            cx.notify();
-                        });
-                    }),
-            );
-
-        // Size presets row
-        let mut size_row = h_flex().gap_1().items_center().flex_wrap();
-        for (w, h, label) in sizes {
-            let (w, h) = (*w, *h);
-            let sel = self.nc_w == w && self.nc_h == h;
-            let p_pick = panel.clone();
-            size_row = size_row.child(
-                div()
-                    .id(SharedString::from(format!("nc_size_{w}x{h}")))
-                    .test_support()
-                    .cursor_pointer()
-                    .px_1p5()
-                    .py_0p5()
-                    .rounded_sm()
-                    .bg(if sel { cx.theme().primary } else { cx.theme().muted })
-                    .text_color(if sel { cx.theme().primary_foreground } else { cx.theme().foreground })
-                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-                    .text_xs()
-                    .child(format!("{label} ({w}×{h})"))
-                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                        p_pick.update(cx, |this, cx| {
-                            this.nc_w = w;
-                            this.nc_h = h;
-                            cx.notify();
-                        });
-                    }),
-            );
-        }
-
-        // Custom resolution controls with step nudge buttons
+        // Custom resolution steppers
         let p_w_sub100 = panel.clone();
         let p_w_sub10 = panel.clone();
         let p_w_add10 = panel.clone();
@@ -513,217 +596,35 @@ impl ProjectPanel {
         let p_h_add100 = panel.clone();
         let p_swap = panel.clone();
 
-        let custom_res_row = h_flex()
-            .gap_2()
-            .items_center()
-            .flex_wrap()
-            .child(
-                h_flex()
-                    .gap_1()
-                    .items_center()
-                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("W:"))
-                    .child(
-                        div()
-                            .id("nc_w_display")
-                            .test_support()
-                            .text_xs()
-                            .font_semibold()
-                            .child(format!("{}px", self.nc_w)),
-                    )
-                    .child(
-                        div()
-                            .id("nc_w_sub_100")
-                            .test_support()
-                            .cursor_pointer()
-                            .px_1()
-                            .py_0p5()
-                            .rounded_sm()
-                            .bg(cx.theme().muted)
-                            .hover(|s| s.bg(cx.theme().accent))
-                            .text_xs()
-                            .child("-100")
-                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                p_w_sub100.update(cx, |this, cx| {
-                                    this.nc_w = this.nc_w.saturating_sub(100).max(16);
-                                    cx.notify();
-                                });
-                            }),
-                    )
-                    .child(
-                        div()
-                            .id("nc_w_sub_10")
-                            .test_support()
-                            .cursor_pointer()
-                            .px_1()
-                            .py_0p5()
-                            .rounded_sm()
-                            .bg(cx.theme().muted)
-                            .hover(|s| s.bg(cx.theme().accent))
-                            .text_xs()
-                            .child("-10")
-                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                p_w_sub10.update(cx, |this, cx| {
-                                    this.nc_w = this.nc_w.saturating_sub(10).max(16);
-                                    cx.notify();
-                                });
-                            }),
-                    )
-                    .child(
-                        div()
-                            .id("nc_w_add_10")
-                            .test_support()
-                            .cursor_pointer()
-                            .px_1()
-                            .py_0p5()
-                            .rounded_sm()
-                            .bg(cx.theme().muted)
-                            .hover(|s| s.bg(cx.theme().accent))
-                            .text_xs()
-                            .child("+10")
-                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                p_w_add10.update(cx, |this, cx| {
-                                    this.nc_w = (this.nc_w + 10).min(16384);
-                                    cx.notify();
-                                });
-                            }),
-                    )
-                    .child(
-                        div()
-                            .id("nc_w_add_100")
-                            .test_support()
-                            .cursor_pointer()
-                            .px_1()
-                            .py_0p5()
-                            .rounded_sm()
-                            .bg(cx.theme().muted)
-                            .hover(|s| s.bg(cx.theme().accent))
-                            .text_xs()
-                            .child("+100")
-                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                p_w_add100.update(cx, |this, cx| {
-                                    this.nc_w = (this.nc_w + 100).min(16384);
-                                    cx.notify();
-                                });
-                            }),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap_1()
-                    .items_center()
-                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("H:"))
-                    .child(
-                        div()
-                            .id("nc_h_display")
-                            .test_support()
-                            .text_xs()
-                            .font_semibold()
-                            .child(format!("{}px", self.nc_h)),
-                    )
-                    .child(
-                        div()
-                            .id("nc_h_sub_100")
-                            .test_support()
-                            .cursor_pointer()
-                            .px_1()
-                            .py_0p5()
-                            .rounded_sm()
-                            .bg(cx.theme().muted)
-                            .hover(|s| s.bg(cx.theme().accent))
-                            .text_xs()
-                            .child("-100")
-                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                p_h_sub100.update(cx, |this, cx| {
-                                    this.nc_h = this.nc_h.saturating_sub(100).max(16);
-                                    cx.notify();
-                                });
-                            }),
-                    )
-                    .child(
-                        div()
-                            .id("nc_h_sub_10")
-                            .test_support()
-                            .cursor_pointer()
-                            .px_1()
-                            .py_0p5()
-                            .rounded_sm()
-                            .bg(cx.theme().muted)
-                            .hover(|s| s.bg(cx.theme().accent))
-                            .text_xs()
-                            .child("-10")
-                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                p_h_sub10.update(cx, |this, cx| {
-                                    this.nc_h = this.nc_h.saturating_sub(10).max(16);
-                                    cx.notify();
-                                });
-                            }),
-                    )
-                    .child(
-                        div()
-                            .id("nc_h_add_10")
-                            .test_support()
-                            .cursor_pointer()
-                            .px_1()
-                            .py_0p5()
-                            .rounded_sm()
-                            .bg(cx.theme().muted)
-                            .hover(|s| s.bg(cx.theme().accent))
-                            .text_xs()
-                            .child("+10")
-                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                p_h_add10.update(cx, |this, cx| {
-                                    this.nc_h = (this.nc_h + 10).min(16384);
-                                    cx.notify();
-                                });
-                            }),
-                    )
-                    .child(
-                        div()
-                            .id("nc_h_add_100")
-                            .test_support()
-                            .cursor_pointer()
-                            .px_1()
-                            .py_0p5()
-                            .rounded_sm()
-                            .bg(cx.theme().muted)
-                            .hover(|s| s.bg(cx.theme().accent))
-                            .text_xs()
-                            .child("+100")
-                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                p_h_add100.update(cx, |this, cx| {
-                                    this.nc_h = (this.nc_h + 100).min(16384);
-                                    cx.notify();
-                                });
-                            }),
-                    ),
-            )
-            .child(
-                div()
-                    .id("nc_swap_wh")
-                    .test_support()
-                    .cursor_pointer()
-                    .px_1p5()
-                    .py_0p5()
-                    .rounded_sm()
-                    .bg(cx.theme().muted)
-                    .hover(|s| s.bg(cx.theme().primary).text_color(cx.theme().primary_foreground))
-                    .text_xs()
-                    .child("⇄ Swap W/H")
-                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                        p_swap.update(cx, |this, cx| {
-                            std::mem::swap(&mut this.nc_w, &mut this.nc_h);
-                            cx.notify();
-                        });
-                    }),
-            );
+        // Custom FPS steppers
+        let p_fps_sub1 = panel.clone();
+        let p_fps_sub01 = panel.clone();
+        let p_fps_add01 = panel.clone();
+        let p_fps_add1 = panel.clone();
 
-        // Frame rate presets row
-        let mut fps_row = h_flex().gap_1().items_center().flex_wrap();
-        for (f, label) in fps_opts {
+        // Custom Duration steppers
+        let p_dur_sub5 = panel.clone();
+        let p_dur_sub1 = panel.clone();
+        let p_dur_add1 = panel.clone();
+        let p_dur_add5 = panel.clone();
+
+        // Quick FPS buttons
+        let fps_quick: &[(f64, &str)] = &[
+            (23.976, "23.98"),
+            (24.0, "24"),
+            (25.0, "25"),
+            (29.97, "29.97"),
+            (30.0, "30"),
+            (50.0, "50"),
+            (59.94, "59.94"),
+            (60.0, "60"),
+        ];
+        let mut fps_quick_row = h_flex().gap_1().items_center().flex_wrap();
+        for (f, label) in fps_quick {
             let f = *f;
             let sel = (self.nc_fps - f).abs() < 0.005;
             let p_pick = panel.clone();
-            fps_row = fps_row.child(
+            fps_quick_row = fps_quick_row.child(
                 div()
                     .id(SharedString::from(format!("nc_fps_{f}")))
                     .test_support()
@@ -732,7 +633,7 @@ impl ProjectPanel {
                     .py_0p5()
                     .rounded_sm()
                     .bg(if sel { cx.theme().primary } else { cx.theme().muted })
-                    .text_color(if sel { cx.theme().primary_foreground } else { cx.theme().foreground })
+                    .text_color(if sel { cx.theme().primary_foreground } else { cx.theme().muted_foreground })
                     .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
                     .text_xs()
                     .child(*label)
@@ -745,107 +646,21 @@ impl ProjectPanel {
             );
         }
 
-        // Custom FPS controls with step nudge buttons
-        let p_fps_sub1 = panel.clone();
-        let p_fps_sub01 = panel.clone();
-        let p_fps_add01 = panel.clone();
-        let p_fps_add1 = panel.clone();
-        let custom_fps_row = h_flex()
-            .gap_1()
-            .items_center()
-            .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Custom:"))
-            .child(
-                div()
-                    .id("nc_fps_display")
-                    .test_support()
-                    .text_xs()
-                    .font_semibold()
-                    .child(format!("{:.2} fps", self.nc_fps)),
-            )
-            .child(
-                div()
-                    .id("nc_fps_sub_1")
-                    .test_support()
-                    .cursor_pointer()
-                    .px_1()
-                    .py_0p5()
-                    .rounded_sm()
-                    .bg(cx.theme().muted)
-                    .hover(|s| s.bg(cx.theme().accent))
-                    .text_xs()
-                    .child("-1")
-                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                        p_fps_sub1.update(cx, |this, cx| {
-                            this.nc_fps = (this.nc_fps - 1.0).max(1.0);
-                            cx.notify();
-                        });
-                    }),
-            )
-            .child(
-                div()
-                    .id("nc_fps_sub_01")
-                    .test_support()
-                    .cursor_pointer()
-                    .px_1()
-                    .py_0p5()
-                    .rounded_sm()
-                    .bg(cx.theme().muted)
-                    .hover(|s| s.bg(cx.theme().accent))
-                    .text_xs()
-                    .child("-0.1")
-                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                        p_fps_sub01.update(cx, |this, cx| {
-                            this.nc_fps = (this.nc_fps - 0.1).max(1.0);
-                            cx.notify();
-                        });
-                    }),
-            )
-            .child(
-                div()
-                    .id("nc_fps_add_01")
-                    .test_support()
-                    .cursor_pointer()
-                    .px_1()
-                    .py_0p5()
-                    .rounded_sm()
-                    .bg(cx.theme().muted)
-                    .hover(|s| s.bg(cx.theme().accent))
-                    .text_xs()
-                    .child("+0.1")
-                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                        p_fps_add01.update(cx, |this, cx| {
-                            this.nc_fps = (this.nc_fps + 0.1).min(240.0);
-                            cx.notify();
-                        });
-                    }),
-            )
-            .child(
-                div()
-                    .id("nc_fps_add_1")
-                    .test_support()
-                    .cursor_pointer()
-                    .px_1()
-                    .py_0p5()
-                    .rounded_sm()
-                    .bg(cx.theme().muted)
-                    .hover(|s| s.bg(cx.theme().accent))
-                    .text_xs()
-                    .child("+1")
-                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                        p_fps_add1.update(cx, |this, cx| {
-                            this.nc_fps = (this.nc_fps + 1.0).min(240.0);
-                            cx.notify();
-                        });
-                    }),
-            );
-
-        // Duration presets row
-        let mut dur_row = h_flex().gap_1().items_center().flex_wrap();
-        for (d, label) in dur_opts {
+        // Quick Duration buttons
+        let dur_quick: &[(f64, &str)] = &[
+            (5.0, "5s"),
+            (10.0, "10s"),
+            (15.0, "15s"),
+            (30.0, "30s"),
+            (60.0, "1m"),
+            (120.0, "2m"),
+        ];
+        let mut dur_quick_row = h_flex().gap_1().items_center().flex_wrap();
+        for (d, label) in dur_quick {
             let d = *d;
             let sel = (self.nc_dur - d).abs() < 1e-4;
             let p_pick = panel.clone();
-            dur_row = dur_row.child(
+            dur_quick_row = dur_quick_row.child(
                 div()
                     .id(SharedString::from(format!("nc_dur_{d}")))
                     .test_support()
@@ -854,7 +669,7 @@ impl ProjectPanel {
                     .py_0p5()
                     .rounded_sm()
                     .bg(if sel { cx.theme().primary } else { cx.theme().muted })
-                    .text_color(if sel { cx.theme().primary_foreground } else { cx.theme().foreground })
+                    .text_color(if sel { cx.theme().primary_foreground } else { cx.theme().muted_foreground })
                     .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
                     .text_xs()
                     .child(*label)
@@ -867,102 +682,13 @@ impl ProjectPanel {
             );
         }
 
-        // Custom duration controls with step nudge buttons
-        let p_dur_sub5 = panel.clone();
-        let p_dur_sub1 = panel.clone();
-        let p_dur_add1 = panel.clone();
-        let p_dur_add5 = panel.clone();
-        let frames_total = (self.nc_dur * self.nc_fps).round() as u64;
-        let custom_dur_row = h_flex()
-            .gap_1()
-            .items_center()
-            .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Custom:"))
-            .child(
-                div()
-                    .id("nc_dur_display")
-                    .test_support()
-                    .text_xs()
-                    .font_semibold()
-                    .child(format!("{:.1}s ({}f)", self.nc_dur, frames_total)),
-            )
-            .child(
-                div()
-                    .id("nc_dur_sub_5")
-                    .test_support()
-                    .cursor_pointer()
-                    .px_1()
-                    .py_0p5()
-                    .rounded_sm()
-                    .bg(cx.theme().muted)
-                    .hover(|s| s.bg(cx.theme().accent))
-                    .text_xs()
-                    .child("-5s")
-                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                        p_dur_sub5.update(cx, |this, cx| {
-                            this.nc_dur = (this.nc_dur - 5.0).max(0.1);
-                            cx.notify();
-                        });
-                    }),
-            )
-            .child(
-                div()
-                    .id("nc_dur_sub_1")
-                    .test_support()
-                    .cursor_pointer()
-                    .px_1()
-                    .py_0p5()
-                    .rounded_sm()
-                    .bg(cx.theme().muted)
-                    .hover(|s| s.bg(cx.theme().accent))
-                    .text_xs()
-                    .child("-1s")
-                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                        p_dur_sub1.update(cx, |this, cx| {
-                            this.nc_dur = (this.nc_dur - 1.0).max(0.1);
-                            cx.notify();
-                        });
-                    }),
-            )
-            .child(
-                div()
-                    .id("nc_dur_add_1")
-                    .test_support()
-                    .cursor_pointer()
-                    .px_1()
-                    .py_0p5()
-                    .rounded_sm()
-                    .bg(cx.theme().muted)
-                    .hover(|s| s.bg(cx.theme().accent))
-                    .text_xs()
-                    .child("+1s")
-                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                        p_dur_add1.update(cx, |this, cx| {
-                            this.nc_dur = (this.nc_dur + 1.0).min(3600.0);
-                            cx.notify();
-                        });
-                    }),
-            )
-            .child(
-                div()
-                    .id("nc_dur_add_5")
-                    .test_support()
-                    .cursor_pointer()
-                    .px_1()
-                    .py_0p5()
-                    .rounded_sm()
-                    .bg(cx.theme().muted)
-                    .hover(|s| s.bg(cx.theme().accent))
-                    .text_xs()
-                    .child("+5s")
-                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                        p_dur_add5.update(cx, |this, cx| {
-                            this.nc_dur = (this.nc_dur + 5.0).min(3600.0);
-                            cx.notify();
-                        });
-                    }),
-            );
-
-        // Background presets row
+        // Background options
+        let bg_opts: &[(u8, &str)] = &[
+            (0, "Black"),
+            (1, "White"),
+            (2, "Transparent"),
+            (3, "Dark Gray"),
+        ];
         let mut bg_row = h_flex().gap_1().items_center().flex_wrap();
         for (b, label) in bg_opts {
             let (b, label) = (*b, *label);
@@ -973,11 +699,11 @@ impl ProjectPanel {
                     .id(SharedString::from(format!("nc_bg_{b}")))
                     .test_support()
                     .cursor_pointer()
-                    .px_1p5()
+                    .px_2()
                     .py_0p5()
                     .rounded_sm()
                     .bg(if sel { cx.theme().primary } else { cx.theme().muted })
-                    .text_color(if sel { cx.theme().primary_foreground } else { cx.theme().foreground })
+                    .text_color(if sel { cx.theme().primary_foreground } else { cx.theme().muted_foreground })
                     .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
                     .text_xs()
                     .child(label)
@@ -996,6 +722,7 @@ impl ProjectPanel {
             3 => "Dark Gray",
             _ => "Black",
         };
+        let frames_total = (self.nc_dur * self.nc_fps).round() as u64;
         let summary = format!(
             "\"{}\" • {}×{} • {:.2} fps • {:.1}s ({} frames) • {bg_name}",
             self.nc_name, self.nc_w, self.nc_h, self.nc_fps, self.nc_dur, frames_total
@@ -1003,8 +730,13 @@ impl ProjectPanel {
 
         let p_create = panel.clone();
         let s_create = self.state.clone();
-        let (cw, ch, cfps, cdur, cbg) = (self.nc_w, self.nc_h, self.nc_fps, self.nc_dur, self.nc_bg);
-        let cname = self.nc_name.clone();
+        let (cw_fb, ch_fb, cfps_fb, cdur_fb, cbg) = (self.nc_w, self.nc_h, self.nc_fps, self.nc_dur, self.nc_bg);
+        let name_inp_create = name_inp.clone();
+        let w_inp_create = w_inp.clone();
+        let h_inp_create = h_inp.clone();
+        let fps_inp_create = fps_inp.clone();
+        let dur_inp_create = dur_inp.clone();
+
         let p_cancel = panel.clone();
         let p_dismiss_bg = panel.clone();
         let p_dismiss_r = panel.clone();
@@ -1015,7 +747,6 @@ impl ProjectPanel {
             .absolute()
             .inset_0()
             .child(
-                // Transparent backdrop to dismiss on outside click
                 div()
                     .id("nc_backdrop")
                     .test_support()
@@ -1040,7 +771,7 @@ impl ProjectPanel {
                     .test_support()
                     .occlude()
                     .absolute()
-                    .top(px(40.))
+                    .top(px(30.))
                     .left(px(12.))
                     .right(px(12.))
                     .bg(cx.theme().background)
@@ -1051,7 +782,7 @@ impl ProjectPanel {
                     .p_3()
                     .child(
                         v_flex()
-                            .gap_2()
+                            .gap_2p5()
                             .child(
                                 h_flex()
                                     .justify_between()
@@ -1077,41 +808,250 @@ impl ProjectPanel {
                                             }),
                                     ),
                             )
+                            // 1. Presets Combobox
+                            .child({
+                                let mut sec = v_flex()
+                                    .gap_1()
+                                    .child(div().text_xs().font_semibold().text_color(cx.theme().muted_foreground).child("Preset (Dropdown)"))
+                                    .child(preset_combobox_trigger);
+                                if self.nc_preset_open {
+                                    sec = sec.child(preset_dropdown_list);
+                                }
+                                sec
+                            })
+                            // 2. Custom Composition Name
                             .child(
                                 v_flex()
                                     .gap_1()
-                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Composition Name"))
-                                    .child(name_row)
-                                    .child(name_controls),
+                                    .child(div().text_xs().font_semibold().text_color(cx.theme().muted_foreground).child("Composition Name"))
+                                    .child(Input::new(&name_inp).id("nc_name_input").w_full())
+                                    .child(name_chips)
                             )
+                            // 3. Custom Dimensions (Width & Height)
+                            .child(
+                                v_flex()
+                                    .gap_1p5()
+                                    .child(div().text_xs().font_semibold().text_color(cx.theme().muted_foreground).child("Custom Dimensions"))
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .items_center()
+                                            .child(div().w(px(50.)).text_xs().text_color(cx.theme().muted_foreground).child("Width:"))
+                                            .child(Input::new(&w_inp).id("nc_w_input").w(px(80.)))
+                                            .child(div().text_xs().text_color(cx.theme().muted_foreground).child("px"))
+                                            .child(
+                                                div().id("nc_w_sub_100").test_support().cursor_pointer().px_1().py_0p5().rounded_sm().bg(cx.theme().muted).hover(|s| s.bg(cx.theme().accent)).text_xs().child("-100")
+                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                        p_w_sub100.update(cx, |this, cx| {
+                                                            this.nc_w = this.nc_w.saturating_sub(100).max(16);
+                                                            cx.notify();
+                                                        });
+                                                    })
+                                            )
+                                            .child(
+                                                div().id("nc_w_sub_10").test_support().cursor_pointer().px_1().py_0p5().rounded_sm().bg(cx.theme().muted).hover(|s| s.bg(cx.theme().accent)).text_xs().child("-10")
+                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                        p_w_sub10.update(cx, |this, cx| {
+                                                            this.nc_w = this.nc_w.saturating_sub(10).max(16);
+                                                            cx.notify();
+                                                        });
+                                                    })
+                                            )
+                                            .child(
+                                                div().id("nc_w_add_10").test_support().cursor_pointer().px_1().py_0p5().rounded_sm().bg(cx.theme().muted).hover(|s| s.bg(cx.theme().accent)).text_xs().child("+10")
+                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                        p_w_add10.update(cx, |this, cx| {
+                                                            this.nc_w = (this.nc_w + 10).min(16384);
+                                                            cx.notify();
+                                                        });
+                                                    })
+                                            )
+                                            .child(
+                                                div().id("nc_w_add_100").test_support().cursor_pointer().px_1().py_0p5().rounded_sm().bg(cx.theme().muted).hover(|s| s.bg(cx.theme().accent)).text_xs().child("+100")
+                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                        p_w_add100.update(cx, |this, cx| {
+                                                            this.nc_w = (this.nc_w + 100).min(16384);
+                                                            cx.notify();
+                                                        });
+                                                    })
+                                            )
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .items_center()
+                                            .child(div().w(px(50.)).text_xs().text_color(cx.theme().muted_foreground).child("Height:"))
+                                            .child(Input::new(&h_inp).id("nc_h_input").w(px(80.)))
+                                            .child(div().text_xs().text_color(cx.theme().muted_foreground).child("px"))
+                                            .child(
+                                                div().id("nc_h_sub_100").test_support().cursor_pointer().px_1().py_0p5().rounded_sm().bg(cx.theme().muted).hover(|s| s.bg(cx.theme().accent)).text_xs().child("-100")
+                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                        p_h_sub100.update(cx, |this, cx| {
+                                                            this.nc_h = this.nc_h.saturating_sub(100).max(16);
+                                                            cx.notify();
+                                                        });
+                                                    })
+                                            )
+                                            .child(
+                                                div().id("nc_h_sub_10").test_support().cursor_pointer().px_1().py_0p5().rounded_sm().bg(cx.theme().muted).hover(|s| s.bg(cx.theme().accent)).text_xs().child("-10")
+                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                        p_h_sub10.update(cx, |this, cx| {
+                                                            this.nc_h = this.nc_h.saturating_sub(10).max(16);
+                                                            cx.notify();
+                                                        });
+                                                    })
+                                            )
+                                            .child(
+                                                div().id("nc_h_add_10").test_support().cursor_pointer().px_1().py_0p5().rounded_sm().bg(cx.theme().muted).hover(|s| s.bg(cx.theme().accent)).text_xs().child("+10")
+                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                        p_h_add10.update(cx, |this, cx| {
+                                                            this.nc_h = (this.nc_h + 10).min(16384);
+                                                            cx.notify();
+                                                        });
+                                                    })
+                                            )
+                                            .child(
+                                                div().id("nc_h_add_100").test_support().cursor_pointer().px_1().py_0p5().rounded_sm().bg(cx.theme().muted).hover(|s| s.bg(cx.theme().accent)).text_xs().child("+100")
+                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                        p_h_add100.update(cx, |this, cx| {
+                                                            this.nc_h = (this.nc_h + 100).min(16384);
+                                                            cx.notify();
+                                                        });
+                                                    })
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("nc_swap_wh")
+                                                    .test_support()
+                                                    .cursor_pointer()
+                                                    .px_1p5()
+                                                    .py_0p5()
+                                                    .rounded_sm()
+                                                    .bg(cx.theme().muted)
+                                                    .hover(|s| s.bg(cx.theme().primary).text_color(cx.theme().primary_foreground))
+                                                    .text_xs()
+                                                    .child("⇄ Swap")
+                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                        p_swap.update(cx, |this, cx| {
+                                                            std::mem::swap(&mut this.nc_w, &mut this.nc_h);
+                                                            cx.notify();
+                                                        });
+                                                    })
+                                            )
+                                    )
+                            )
+                            // 4. Custom Frame Rate
                             .child(
                                 v_flex()
                                     .gap_1()
-                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Frame Size & Aspect Ratio"))
-                                    .child(size_row)
-                                    .child(custom_res_row),
+                                    .child(div().text_xs().font_semibold().text_color(cx.theme().muted_foreground).child("Custom Frame Rate"))
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .items_center()
+                                            .child(div().w(px(50.)).text_xs().text_color(cx.theme().muted_foreground).child("FPS:"))
+                                            .child(Input::new(&fps_inp).id("nc_fps_input").w(px(80.)))
+                                            .child(div().text_xs().text_color(cx.theme().muted_foreground).child("fps"))
+                                            .child(
+                                                div().id("nc_fps_sub_1").test_support().cursor_pointer().px_1().py_0p5().rounded_sm().bg(cx.theme().muted).hover(|s| s.bg(cx.theme().accent)).text_xs().child("-1")
+                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                        p_fps_sub1.update(cx, |this, cx| {
+                                                            this.nc_fps = (this.nc_fps - 1.0).max(1.0);
+                                                            cx.notify();
+                                                        });
+                                                    })
+                                            )
+                                            .child(
+                                                div().id("nc_fps_sub_01").test_support().cursor_pointer().px_1().py_0p5().rounded_sm().bg(cx.theme().muted).hover(|s| s.bg(cx.theme().accent)).text_xs().child("-0.1")
+                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                        p_fps_sub01.update(cx, |this, cx| {
+                                                            this.nc_fps = (this.nc_fps - 0.1).max(1.0);
+                                                            cx.notify();
+                                                        });
+                                                    })
+                                            )
+                                            .child(
+                                                div().id("nc_fps_add_01").test_support().cursor_pointer().px_1().py_0p5().rounded_sm().bg(cx.theme().muted).hover(|s| s.bg(cx.theme().accent)).text_xs().child("+0.1")
+                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                        p_fps_add01.update(cx, |this, cx| {
+                                                            this.nc_fps = (this.nc_fps + 0.1).min(240.0);
+                                                            cx.notify();
+                                                        });
+                                                    })
+                                            )
+                                            .child(
+                                                div().id("nc_fps_add_1").test_support().cursor_pointer().px_1().py_0p5().rounded_sm().bg(cx.theme().muted).hover(|s| s.bg(cx.theme().accent)).text_xs().child("+1")
+                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                        p_fps_add1.update(cx, |this, cx| {
+                                                            this.nc_fps = (this.nc_fps + 1.0).min(240.0);
+                                                            cx.notify();
+                                                        });
+                                                    })
+                                            )
+                                    )
+                                    .child(fps_quick_row)
                             )
+                            // 5. Custom Duration
                             .child(
                                 v_flex()
                                     .gap_1()
-                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Frame Rate"))
-                                    .child(fps_row)
-                                    .child(custom_fps_row),
+                                    .child(div().text_xs().font_semibold().text_color(cx.theme().muted_foreground).child("Custom Duration"))
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .items_center()
+                                            .child(div().w(px(50.)).text_xs().text_color(cx.theme().muted_foreground).child("Duration:"))
+                                            .child(Input::new(&dur_inp).id("nc_dur_input").w(px(80.)))
+                                            .child(div().text_xs().text_color(cx.theme().muted_foreground).child("sec"))
+                                            .child(
+                                                div().id("nc_dur_sub_5").test_support().cursor_pointer().px_1().py_0p5().rounded_sm().bg(cx.theme().muted).hover(|s| s.bg(cx.theme().accent)).text_xs().child("-5s")
+                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                        p_dur_sub5.update(cx, |this, cx| {
+                                                            this.nc_dur = (this.nc_dur - 5.0).max(0.1);
+                                                            cx.notify();
+                                                        });
+                                                    })
+                                            )
+                                            .child(
+                                                div().id("nc_dur_sub_1").test_support().cursor_pointer().px_1().py_0p5().rounded_sm().bg(cx.theme().muted).hover(|s| s.bg(cx.theme().accent)).text_xs().child("-1s")
+                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                        p_dur_sub1.update(cx, |this, cx| {
+                                                            this.nc_dur = (this.nc_dur - 1.0).max(0.1);
+                                                            cx.notify();
+                                                        });
+                                                    })
+                                            )
+                                            .child(
+                                                div().id("nc_dur_add_1").test_support().cursor_pointer().px_1().py_0p5().rounded_sm().bg(cx.theme().muted).hover(|s| s.bg(cx.theme().accent)).text_xs().child("+1s")
+                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                        p_dur_add1.update(cx, |this, cx| {
+                                                            this.nc_dur = (this.nc_dur + 1.0).min(3600.0);
+                                                            cx.notify();
+                                                        });
+                                                    })
+                                            )
+                                            .child(
+                                                div().id("nc_dur_add_5").test_support().cursor_pointer().px_1().py_0p5().rounded_sm().bg(cx.theme().muted).hover(|s| s.bg(cx.theme().accent)).text_xs().child("+5s")
+                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                        p_dur_add5.update(cx, |this, cx| {
+                                                            this.nc_dur = (this.nc_dur + 5.0).min(3600.0);
+                                                            cx.notify();
+                                                        });
+                                                    })
+                                            )
+                                    )
+                                    .child(dur_quick_row)
                             )
+                            // 6. Background
                             .child(
                                 v_flex()
                                     .gap_1()
-                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Duration"))
-                                    .child(dur_row)
-                                    .child(custom_dur_row),
+                                    .child(div().text_xs().font_semibold().text_color(cx.theme().muted_foreground).child("Background Color"))
+                                    .child(bg_row)
                             )
-                            .child(
-                                v_flex()
-                                    .gap_1()
-                                    .child(div().text_color(cx.theme().muted_foreground).text_xs().child("Background"))
-                                    .child(bg_row),
-                            )
+                            // Summary
                             .child(div().text_xs().text_color(cx.theme().primary).font_semibold().child(summary))
+                            // Create & Cancel Buttons
                             .child(
                                 h_flex()
                                     .gap_2()
@@ -1136,13 +1076,17 @@ impl ProjectPanel {
                                                     3 => Color::from_rgba_u8(38, 38, 38, 255),
                                                     _ => Color::BLACK,
                                                 };
-                                                let final_name = if cname.trim().is_empty() {
-                                                    "Comp 1".to_string()
-                                                } else {
-                                                    cname.trim().to_string()
+                                                let final_name = {
+                                                    let val = name_inp_create.read(cx).value().trim().to_string();
+                                                    if val.is_empty() { "Comp 1".to_string() } else { val }
                                                 };
+                                                let w = w_inp_create.read(cx).value().trim().parse::<u32>().unwrap_or(cw_fb).clamp(16, 16384);
+                                                let h = h_inp_create.read(cx).value().trim().parse::<u32>().unwrap_or(ch_fb).clamp(16, 16384);
+                                                let fps = fps_inp_create.read(cx).value().trim().parse::<f64>().unwrap_or(cfps_fb).clamp(1.0, 240.0);
+                                                let dur = dur_inp_create.read(cx).value().trim().parse::<f64>().unwrap_or(cdur_fb).clamp(0.1, 3600.0);
+
                                                 s_create.update(cx, |s, cx| {
-                                                    let _ = s.add_composition(&final_name, cw, ch, cfps, cdur, bg);
+                                                    let _ = s.add_composition(&final_name, w, h, fps, dur, bg);
                                                     cx.notify();
                                                 });
                                                 p_create.update(cx, |this, cx| {
@@ -1195,7 +1139,7 @@ impl Focusable for ProjectPanel {
 }
 
 impl Render for ProjectPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
         let comp_opt = state.active_composition();
         let add_state = self.state.clone();
@@ -2243,7 +2187,7 @@ impl Render for ProjectPanel {
 
             if self.show_new_comp {
                 let panel_self = cx.entity().clone();
-                root = root.child(self.render_new_comp_dialog(&panel_self, cx));
+                root = root.child(self.render_new_comp_dialog(&panel_self, window, cx));
             }
 
             root
@@ -3365,6 +3309,7 @@ impl Render for CompositionViewerPanel {
                                 // Nodes (+ handles for the selected node).
                                 for (idx, node) in mask.path.points.iter().enumerate() {
                                     let (nx, ny) = m2c(node.pos);
+                                    let node_w = full.transform_point(node.pos);
                                     // NOTE: read panel state from `self`
                                     // directly — `cx.read()` on our own
                                     // entity panics inside render.
@@ -3423,13 +3368,9 @@ impl Render for CompositionViewerPanel {
                                                 return;
                                             }
                                             let (cur_cmx, cur_cmy) = gizmo_to_comp(mx, my, h_frame, h_fit, h_cw, h_ch);
-                                            // Dot center back in comp px: grab offset keeps the
-                                            // point under the cursor instead of teleporting it.
-                                            let (fox0, foy0) = h_frame.unwrap_or((0.0, 0.0));
-                                            let grab = (
-                                                cur_cmx - ((nx - fox0) / h_fit - h_cw / 2.0),
-                                                cur_cmy - ((ny - foy0) / h_fit - h_ch / 2.0),
-                                            );
+                                            // Exact comp-space grab offset keeps the
+                                            // point under the cursor without phantom window offsets.
+                                            let grab = (cur_cmx - node_w.x, cur_cmy - node_w.y);
                                             p_h.update(cx, |this, cx| {
                                                 this.mask_edit_point = Some(idx);
                                                 this.mask_down_moved = false;
@@ -3457,6 +3398,7 @@ impl Render for CompositionViewerPanel {
                                     if is_sel {
                                         for (is_in, tip) in [(true, node.in_abs()), (false, node.out_abs())] {
                                             let (hx, hy) = m2c(tip);
+                                            let tip_w = full.transform_point(tip);
                                             let p_hh = giz_panel.clone();
                                             let s_hh = giz_state.clone();
                                             let lid_hh = giz_lid.clone();
@@ -3489,11 +3431,7 @@ impl Render for CompositionViewerPanel {
                                                         cx.notify();
                                                     });
                                                     let (cur_cmx, cur_cmy) = gizmo_to_comp(mx, my, hh_frame, hh_fit, hh_cw, hh_ch);
-                                                    let (fox0, foy0) = hh_frame.unwrap_or((0.0, 0.0));
-                                                    let grab = (
-                                                        cur_cmx - ((hx - fox0) / hh_fit - hh_cw / 2.0),
-                                                        cur_cmy - ((hy - foy0) / hh_fit - hh_ch / 2.0),
-                                                    );
+                                                    let grab = (cur_cmx - tip_w.x, cur_cmy - tip_w.y);
                                                     p_hh.update(cx, |this, cx| {
                                                         this.mask_edit_point = Some(idx);
                                                         this.mask_down_moved = true;
@@ -4262,7 +4200,7 @@ impl Render for CompositionViewerPanel {
                                                                 layer_id: lid,
                                                                 mask_id: mid,
                                                                 index: idx,
-                                                                kind: MaskDragKind::OutHandle,
+                                                                kind: MaskDragKind::InHandle,
                                                                 // Fresh point was just placed at the
                                                                 // cursor: no grab offset.
                                                                 grab_offset: (0.0, 0.0),

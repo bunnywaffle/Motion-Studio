@@ -74,18 +74,18 @@ impl AppView {
         dock_skin.set_panel_style(PanelStyle::TabBar, cx);
         let panels = AppPanels::new(state.clone(), cx);
 
-        // Bind spacebar key to TogglePlayback
-        cx.bind_keys([KeyBinding::new("space", TogglePlayback, None)]);
+        // Bind spacebar key to TogglePlayback only outside text inputs
+        cx.bind_keys([KeyBinding::new("space", TogglePlayback, Some("!Input"))]);
         // One desktop command per tool (toolbar clicks dispatch the same
         // actions — see the root view's on_action handlers).
         cx.bind_keys([
-            KeyBinding::new("v", SelectMoveTool, None),
-            KeyBinding::new("h", SelectHandTool, None),
-            KeyBinding::new("w", SelectRotateTool, None),
-            KeyBinding::new("g", SelectPenTool, None),
-            KeyBinding::new("t", SelectTextTool, None),
-            KeyBinding::new("q", CycleShapeTool, None),
-            KeyBinding::new("f", FitGraphView, None),
+            KeyBinding::new("v", SelectMoveTool, Some("!Input")),
+            KeyBinding::new("h", SelectHandTool, Some("!Input")),
+            KeyBinding::new("w", SelectRotateTool, Some("!Input")),
+            KeyBinding::new("g", SelectPenTool, Some("!Input")),
+            KeyBinding::new("t", SelectTextTool, Some("!Input")),
+            KeyBinding::new("q", CycleShapeTool, Some("!Input")),
+            KeyBinding::new("f", FitGraphView, Some("!Input")),
         ]);
 
         // Setup background 60Hz playback loop
@@ -1940,12 +1940,59 @@ impl Render for AppView {
         }
         if self.show_project_manager {
             let a_close = cx.entity().clone();
-            let dlg_w = 480.0f32;
-            let dlg_h = 440.0f32;
+            let dlg_w = 520.0f32;
+            let dlg_h = 560.0f32;
             let dlg_pos = point(
                 px((vw_f - dlg_w).max(8.0) / 2.0),
                 px((vh_f - dlg_h).max(8.0) / 2.0),
             );
+
+            let pm_name_inp: Entity<InputState> = window.use_keyed_state("pm_new_comp_name", cx, |window, cx| {
+                let mut st = InputState::new(window, cx);
+                st.set_value("Comp 2", window, cx);
+                st
+            });
+            let pm_w_inp: Entity<InputState> = window.use_keyed_state("pm_new_comp_w", cx, |window, cx| {
+                let mut st = InputState::new(window, cx);
+                st.set_value("1920", window, cx);
+                st
+            });
+            let pm_h_inp: Entity<InputState> = window.use_keyed_state("pm_new_comp_h", cx, |window, cx| {
+                let mut st = InputState::new(window, cx);
+                st.set_value("1080", window, cx);
+                st
+            });
+            let pm_fps_inp: Entity<InputState> = window.use_keyed_state("pm_new_comp_fps", cx, |window, cx| {
+                let mut st = InputState::new(window, cx);
+                st.set_value("30", window, cx);
+                st
+            });
+            let pm_dur_inp: Entity<InputState> = window.use_keyed_state("pm_new_comp_dur", cx, |window, cx| {
+                let mut st = InputState::new(window, cx);
+                st.set_value("10.0", window, cx);
+                st
+            });
+
+            let pm_act_w_inp: Entity<InputState> = window.use_keyed_state("pm_act_w", cx, |window, cx| {
+                let mut st = InputState::new(window, cx);
+                st.set_value("1920", window, cx);
+                st
+            });
+            let pm_act_h_inp: Entity<InputState> = window.use_keyed_state("pm_act_h", cx, |window, cx| {
+                let mut st = InputState::new(window, cx);
+                st.set_value("1080", window, cx);
+                st
+            });
+            let pm_act_fps_inp: Entity<InputState> = window.use_keyed_state("pm_act_fps", cx, |window, cx| {
+                let mut st = InputState::new(window, cx);
+                st.set_value("30", window, cx);
+                st
+            });
+            let pm_act_dur_inp: Entity<InputState> = window.use_keyed_state("pm_act_dur", cx, |window, cx| {
+                let mut st = InputState::new(window, cx);
+                st.set_value("5.0", window, cx);
+                st
+            });
 
             let s_r = self.state.read(cx);
             let proj_name = s_r.project.name.clone();
@@ -2061,6 +2108,7 @@ impl Render for AppView {
             let s_new_1080 = self.state.clone();
             let s_new_4k = self.state.clone();
             let s_new_sq = self.state.clone();
+            let s_new_custom = self.state.clone();
             let a_new = cx.entity().clone();
 
             dialogs.push(
@@ -2072,8 +2120,8 @@ impl Render for AppView {
                             div()
                                 .id("project_manager_dialog")
                                 .test_support()
-                                .w(px(dlg_w))
-                                .max_h(px(520.))
+                                .w(px(580.0))
+                                .max_h(px(640.0))
                                 .overflow_y_scroll()
                                 .bg(cx.theme().background)
                                 .border_1()
@@ -2141,79 +2189,143 @@ impl Render for AppView {
                                                 )
                                                 .child(comp_rows)
                                                 .child(
-                                                    h_flex()
-                                                        .gap_1p5()
-                                                        .items_center()
-                                                        .text_xs()
-                                                        .child(div().text_color(cx.theme().muted_foreground).child("+ New Comp:"))
+                                                    v_flex()
+                                                        .gap_2()
+                                                        .p_2()
+                                                        .rounded_sm()
+                                                        .bg(cx.theme().muted.opacity(0.3))
+                                                        .border_1()
+                                                        .border_color(cx.theme().border)
                                                         .child(
-                                                            div()
-                                                                .id("pm_create_1080p")
-                                                                .test_support()
-                                                                .cursor_pointer()
-                                                                .px_2()
-                                                                .py_0p5()
-                                                                .rounded_sm()
-                                                                .bg(cx.theme().muted)
-                                                                .hover(|s| s.bg(cx.theme().primary).text_color(cx.theme().primary_foreground))
-                                                                .on_mouse_down(MouseButton::Left, {
-                                                                    let a = a_new.clone();
-                                                                    move |_event, _window, cx| {
-                                                                        s_new_1080.update(cx, |s, cx| {
-                                                                            let num = s.project.compositions.len() + 1;
-                                                                            let _ = s.create_composition(&format!("Comp {num} (1080p)"), 1920, 1080, 30.0, 5.0);
-                                                                            cx.notify();
-                                                                        });
-                                                                        a.update(cx, |_this, cx| cx.notify());
-                                                                    }
-                                                                })
-                                                                .child("1080p 30fps")
+                                                            h_flex()
+                                                                .gap_1p5()
+                                                                .items_center()
+                                                                .text_xs()
+                                                                .child(div().font_semibold().text_color(cx.theme().foreground).child("+ Quick Presets:"))
+                                                                .child(
+                                                                    div()
+                                                                        .id("pm_create_1080p")
+                                                                        .test_support()
+                                                                        .cursor_pointer()
+                                                                        .px_2()
+                                                                        .py_0p5()
+                                                                        .rounded_sm()
+                                                                        .bg(cx.theme().muted)
+                                                                        .hover(|s| s.bg(cx.theme().primary).text_color(cx.theme().primary_foreground))
+                                                                        .on_mouse_down(MouseButton::Left, {
+                                                                            let a = a_new.clone();
+                                                                            move |_event, _window, cx| {
+                                                                                s_new_1080.update(cx, |s, cx| {
+                                                                                    let num = s.project.compositions.len() + 1;
+                                                                                    let _ = s.create_composition(&format!("Comp {num} (1080p)"), 1920, 1080, 30.0, 5.0);
+                                                                                    cx.notify();
+                                                                                });
+                                                                                a.update(cx, |_this, cx| cx.notify());
+                                                                            }
+                                                                        })
+                                                                        .child("1080p 30fps")
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .id("pm_create_4k")
+                                                                        .test_support()
+                                                                        .cursor_pointer()
+                                                                        .px_2()
+                                                                        .py_0p5()
+                                                                        .rounded_sm()
+                                                                        .bg(cx.theme().muted)
+                                                                        .hover(|s| s.bg(cx.theme().primary).text_color(cx.theme().primary_foreground))
+                                                                        .on_mouse_down(MouseButton::Left, {
+                                                                            let a = a_new.clone();
+                                                                            move |_event, _window, cx| {
+                                                                                s_new_4k.update(cx, |s, cx| {
+                                                                                    let num = s.project.compositions.len() + 1;
+                                                                                    let _ = s.create_composition(&format!("Comp {num} (4K)"), 3840, 2160, 60.0, 5.0);
+                                                                                    cx.notify();
+                                                                                });
+                                                                                a.update(cx, |_this, cx| cx.notify());
+                                                                            }
+                                                                        })
+                                                                        .child("4K 60fps")
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .id("pm_create_square")
+                                                                        .test_support()
+                                                                        .cursor_pointer()
+                                                                        .px_2()
+                                                                        .py_0p5()
+                                                                        .rounded_sm()
+                                                                        .bg(cx.theme().muted)
+                                                                        .hover(|s| s.bg(cx.theme().primary).text_color(cx.theme().primary_foreground))
+                                                                        .on_mouse_down(MouseButton::Left, {
+                                                                            let a = a_new.clone();
+                                                                            move |_event, _window, cx| {
+                                                                                s_new_sq.update(cx, |s, cx| {
+                                                                                    let num = s.project.compositions.len() + 1;
+                                                                                    let _ = s.create_composition(&format!("Comp {num} (Square)"), 1080, 1080, 30.0, 5.0);
+                                                                                    cx.notify();
+                                                                                });
+                                                                                a.update(cx, |_this, cx| cx.notify());
+                                                                            }
+                                                                        })
+                                                                        .child("Square 1:1")
+                                                                )
                                                         )
                                                         .child(
-                                                            div()
-                                                                .id("pm_create_4k")
-                                                                .test_support()
-                                                                .cursor_pointer()
-                                                                .px_2()
-                                                                .py_0p5()
-                                                                .rounded_sm()
-                                                                .bg(cx.theme().muted)
-                                                                .hover(|s| s.bg(cx.theme().primary).text_color(cx.theme().primary_foreground))
-                                                                .on_mouse_down(MouseButton::Left, {
-                                                                    let a = a_new.clone();
-                                                                    move |_event, _window, cx| {
-                                                                        s_new_4k.update(cx, |s, cx| {
-                                                                            let num = s.project.compositions.len() + 1;
-                                                                            let _ = s.create_composition(&format!("Comp {num} (4K)"), 3840, 2160, 60.0, 5.0);
-                                                                            cx.notify();
-                                                                        });
-                                                                        a.update(cx, |_this, cx| cx.notify());
-                                                                    }
-                                                                })
-                                                                .child("4K 60fps")
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .id("pm_create_square")
-                                                                .test_support()
-                                                                .cursor_pointer()
-                                                                .px_2()
-                                                                .py_0p5()
-                                                                .rounded_sm()
-                                                                .bg(cx.theme().muted)
-                                                                .hover(|s| s.bg(cx.theme().primary).text_color(cx.theme().primary_foreground))
-                                                                .on_mouse_down(MouseButton::Left, {
-                                                                    let a = a_new.clone();
-                                                                    move |_event, _window, cx| {
-                                                                        s_new_sq.update(cx, |s, cx| {
-                                                                            let num = s.project.compositions.len() + 1;
-                                                                            let _ = s.create_composition(&format!("Comp {num} (Square)"), 1080, 1080, 30.0, 5.0);
-                                                                            cx.notify();
-                                                                        });
-                                                                        a.update(cx, |_this, cx| cx.notify());
-                                                                    }
-                                                                })
-                                                                .child("Square 1:1")
+                                                            h_flex()
+                                                                .gap_1p5()
+                                                                .items_center()
+                                                                .text_xs()
+                                                                .child(div().text_color(cx.theme().muted_foreground).child("Custom:"))
+                                                                .child(Input::new(&pm_name_inp).id("pm_custom_name_input").w(px(100.)))
+                                                                .child(Input::new(&pm_w_inp).id("pm_custom_w_input").w(px(55.)))
+                                                                .child(div().text_color(cx.theme().muted_foreground).child("×"))
+                                                                .child(Input::new(&pm_h_inp).id("pm_custom_h_input").w(px(55.)))
+                                                                .child(div().text_color(cx.theme().muted_foreground).child("fps:"))
+                                                                .child(Input::new(&pm_fps_inp).id("pm_custom_fps_input").w(px(45.)))
+                                                                .child(div().text_color(cx.theme().muted_foreground).child("dur:"))
+                                                                .child(Input::new(&pm_dur_inp).id("pm_custom_dur_input").w(px(45.)))
+                                                                .child(
+                                                                    div()
+                                                                        .id("pm_create_custom")
+                                                                        .test_support()
+                                                                        .cursor_pointer()
+                                                                        .px_2()
+                                                                        .py_1()
+                                                                        .rounded_sm()
+                                                                        .bg(cx.theme().primary)
+                                                                        .text_color(cx.theme().primary_foreground)
+                                                                        .font_semibold()
+                                                                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                                                        .on_mouse_down(MouseButton::Left, {
+                                                                            let a = a_new.clone();
+                                                                            let p_name = pm_name_inp.clone();
+                                                                            let p_w = pm_w_inp.clone();
+                                                                            let p_h = pm_h_inp.clone();
+                                                                            let p_fps = pm_fps_inp.clone();
+                                                                            let p_dur = pm_dur_inp.clone();
+                                                                            move |_event, _window, cx| {
+                                                                                let name = p_name.read(cx).value().trim().to_string();
+                                                                                let w_val: u32 = p_w.read(cx).value().trim().parse().unwrap_or(1920);
+                                                                                let h_val: u32 = p_h.read(cx).value().trim().parse().unwrap_or(1080);
+                                                                                let fps_val: f64 = p_fps.read(cx).value().trim().parse().unwrap_or(30.0);
+                                                                                let dur_val: f64 = p_dur.read(cx).value().trim().parse().unwrap_or(10.0);
+                                                                                s_new_custom.update(cx, |s, cx| {
+                                                                                    let name_str = if name.trim().is_empty() {
+                                                                                        let num = s.project.compositions.len() + 1;
+                                                                                        format!("Comp {num}")
+                                                                                    } else {
+                                                                                        name
+                                                                                    };
+                                                                                    let _ = s.create_composition(&name_str, w_val, h_val, fps_val, dur_val);
+                                                                                    cx.notify();
+                                                                                });
+                                                                                a.update(cx, |_this, cx| cx.notify());
+                                                                            }
+                                                                        })
+                                                                        .child("+ Create")
+                                                                )
                                                         )
                                                 )
                                         )
@@ -2224,9 +2336,15 @@ impl Render for AppView {
                                             let s_fps2 = self.state.clone();
                                             let s_dur1 = self.state.clone();
                                             let s_dur2 = self.state.clone();
+                                            let s_apply_cust = self.state.clone();
                                             let a_upd = cx.entity().clone();
 
                                             let (cur_w, cur_h, cur_fps, cur_dur) = active_comp.as_ref().map(|c| (c.width, c.height, c.frame_rate, c.duration.seconds())).unwrap_or((1920, 1080, 30.0, 5.0));
+
+                                            let act_w_clone = pm_act_w_inp.clone();
+                                            let act_h_clone = pm_act_h_inp.clone();
+                                            let act_fps_clone = pm_act_fps_inp.clone();
+                                            let act_dur_clone = pm_act_dur_inp.clone();
 
                                             v_flex()
                                                 .gap_2()
@@ -2241,7 +2359,7 @@ impl Render for AppView {
                                                         .items_center()
                                                         .justify_between()
                                                         .text_xs()
-                                                        .child(div().text_color(cx.theme().muted_foreground).child("Resolution Preset"))
+                                                        .child(div().text_color(cx.theme().muted_foreground).child("Quick Resolution"))
                                                         .child(
                                                             h_flex()
                                                                 .gap_1()
@@ -2296,7 +2414,7 @@ impl Render for AppView {
                                                         .items_center()
                                                         .justify_between()
                                                         .text_xs()
-                                                        .child(div().text_color(cx.theme().muted_foreground).child("Frame Rate"))
+                                                        .child(div().text_color(cx.theme().muted_foreground).child("Quick Frame Rate"))
                                                         .child(
                                                             h_flex()
                                                                 .gap_1()
@@ -2351,7 +2469,7 @@ impl Render for AppView {
                                                         .items_center()
                                                         .justify_between()
                                                         .text_xs()
-                                                        .child(div().text_color(cx.theme().muted_foreground).child("Duration"))
+                                                        .child(div().text_color(cx.theme().muted_foreground).child("Quick Duration"))
                                                         .child(
                                                             h_flex()
                                                                 .gap_1()
@@ -2399,6 +2517,60 @@ impl Render for AppView {
                                                                             }
                                                                         })
                                                                 )
+                                                        )
+                                                )
+                                                .child(
+                                                    h_flex()
+                                                        .items_center()
+                                                        .justify_between()
+                                                        .text_xs()
+                                                        .pt_1()
+                                                        .border_t_1()
+                                                        .border_color(cx.theme().border)
+                                                        .child(
+                                                            h_flex()
+                                                                .gap_1p5()
+                                                                .items_center()
+                                                                .child(div().text_color(cx.theme().muted_foreground).child("Custom:"))
+                                                                .child(Input::new(&act_w_clone).id("pm_act_w_input").w(px(55.)))
+                                                                .child(div().text_color(cx.theme().muted_foreground).child("×"))
+                                                                .child(Input::new(&act_h_clone).id("pm_act_h_input").w(px(55.)))
+                                                                .child(div().text_color(cx.theme().muted_foreground).child("fps:"))
+                                                                .child(Input::new(&act_fps_clone).id("pm_act_fps_input").w(px(45.)))
+                                                                .child(div().text_color(cx.theme().muted_foreground).child("dur:"))
+                                                                .child(Input::new(&act_dur_clone).id("pm_act_dur_input").w(px(45.)))
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .id("pm_apply_custom_settings")
+                                                                .test_support()
+                                                                .cursor_pointer()
+                                                                .px_2()
+                                                                .py_1()
+                                                                .rounded_sm()
+                                                                .bg(cx.theme().primary)
+                                                                .text_color(cx.theme().primary_foreground)
+                                                                .font_semibold()
+                                                                .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                                                .on_mouse_down(MouseButton::Left, {
+                                                                    let a = a_upd.clone();
+                                                                    let w_in = act_w_clone.clone();
+                                                                    let h_in = act_h_clone.clone();
+                                                                    let fps_in = act_fps_clone.clone();
+                                                                    let dur_in = act_dur_clone.clone();
+                                                                    move |_event, _window, cx| {
+                                                                        let w_val: u32 = w_in.read(cx).value().trim().parse().unwrap_or(cur_w);
+                                                                        let h_val: u32 = h_in.read(cx).value().trim().parse().unwrap_or(cur_h);
+                                                                        let fps_val: f64 = fps_in.read(cx).value().trim().parse().unwrap_or(cur_fps);
+                                                                        let dur_val: f64 = dur_in.read(cx).value().trim().parse().unwrap_or(cur_dur);
+                                                                        s_apply_cust.update(cx, |s, cx| {
+                                                                            s.update_project_settings("", w_val, h_val, fps_val, dur_val);
+                                                                            cx.notify();
+                                                                        });
+                                                                        a.update(cx, |_this, cx| cx.notify());
+                                                                    }
+                                                                })
+                                                                .child("Apply")
                                                         )
                                                 )
                                         })
@@ -2960,14 +3132,16 @@ impl Render for AppView {
                         });
                     }
                 } else if key == "delete" || key == "backspace" {
-                    state_key.update(cx, |s, cx| {
-                        if let Some((lid, mid)) = s.active_mask_edit.take() {
-                            let _ = s.remove_layer_mask(&lid, &mid);
-                        } else {
-                            let _ = s.delete_selected_layer();
-                        }
-                        cx.notify();
-                    });
+                    if !typing_in_input {
+                        state_key.update(cx, |s, cx| {
+                            if let Some((lid, mid)) = s.active_mask_edit.take() {
+                                let _ = s.remove_layer_mask(&lid, &mid);
+                            } else {
+                                let _ = s.delete_selected_layer();
+                            }
+                            cx.notify();
+                        });
+                    }
                 } else if key == "home" {
                     state_key.update(cx, |s, cx| {
                         s.jump_to_start();
@@ -9620,6 +9794,71 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             assert_eq!(s.get_layer_property_live_value("layer_bg", "transform.rotation"), 90.0);
         });
 
+        cx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    fn test_mask_control_point_downward_drag_moves_down(cx: &mut TestAppContext) {
+        use project::Vec2;
+        let (_root, app_view) = setup_test_window(cx);
+        let state = app_view.read_with(cx, |view, _| view.state.clone());
+
+        // Setup a layer with a mask
+        let (lid, mid) = state.update(cx, |s, _| {
+            let layer_id = "layer_accent";
+            let mid = s.add_mask_to_layer(layer_id).expect("mask added");
+            (layer_id.to_string(), mid)
+        });
+
+        // Test downward drag: moving mouse down (+50px on Y) must move mask point down (+Y in layer local space)
+        state.update(cx, |s, _| {
+            let initial_pos = s.active_composition().unwrap().get_layer(&lid).unwrap().get_mask(&mid).unwrap().path.value.points[0].pos;
+
+            // Simulating downward move (+50.0 down in layer local space)
+            let new_loc = Vec2::new(initial_pos.x, initial_pos.y + 50.0);
+            let res = s.move_mask_point_live(&lid, &mid, 0, new_loc);
+            assert!(res.is_ok());
+
+            let updated_pos = s.active_composition().unwrap().get_layer(&lid).unwrap().get_mask(&mid).unwrap().path.value.points[0].pos;
+            assert_eq!(updated_pos.y, initial_pos.y + 50.0, "downward drag must increase Y coordinate (downwards, not inverted)");
+            assert!(updated_pos.y > initial_pos.y);
+        });
+
+        cx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    fn test_project_manager_and_new_comp_custom_inputs(cx: &mut TestAppContext) {
+        let (root, app_view) = setup_test_window(cx);
+        let state = app_view.read_with(cx, |view, _| view.state.clone());
+
+        // 1. Create a custom composition with custom values via EditorState (used by New Comp Dialog and Project Manager)
+        state.update(cx, |s, _| {
+            let initial_comp_count = s.project.compositions.len();
+            let new_comp_id = s.create_composition("Custom 1440p", 2560, 1440, 120.0, 15.0);
+            assert_eq!(s.project.compositions.len(), initial_comp_count + 1);
+
+            let comp = s.project.get_composition(&new_comp_id).unwrap();
+            assert_eq!(comp.name, "Custom 1440p");
+            assert_eq!(comp.width, 2560);
+            assert_eq!(comp.height, 1440);
+            assert_eq!(comp.frame_rate, 120.0);
+            assert_eq!(comp.duration.seconds(), 15.0);
+        });
+
+        // 2. Update active composition settings with custom typed values (tested via update_project_settings)
+        state.update(cx, |s, _| {
+            s.update_project_settings("", 1280, 720, 24.0, 8.5);
+            let act = s.active_composition().unwrap();
+            assert_eq!(act.width, 1280);
+            assert_eq!(act.height, 720);
+            assert_eq!(act.frame_rate, 24.0);
+            assert_eq!(act.duration.seconds(), 8.5);
+        });
+
+        root.update(cx, |_root, cx| {
+            cx.notify();
+        });
         cx.run_until_parked();
     }
 }
