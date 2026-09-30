@@ -1509,20 +1509,23 @@ fn render_menu_dropdown(
                     }
                     {
                         let (a, s) = (app.clone(), state.clone());
-                        let half = state.read(cx).preview_quality == crate::state::PreviewQuality::Half;
+                        let current_q = state.read(cx).preview_quality;
+                        let next_q = match current_q {
+                            crate::state::PreviewQuality::Full => crate::state::PreviewQuality::Half,
+                            crate::state::PreviewQuality::Half => crate::state::PreviewQuality::Quarter,
+                            crate::state::PreviewQuality::Quarter => crate::state::PreviewQuality::Auto,
+                            crate::state::PreviewQuality::Auto => crate::state::PreviewQuality::Full,
+                        };
+                        let label = format!("Preview Quality: {} (Switch to {})", current_q.label(), next_q.label());
                         items = items.child(menu_item(
                             "menu_preview_quality".to_string(),
-                            if half { "Preview Quality: Full".to_string() } else { "Preview Quality: Half".to_string() },
+                            label,
                             None,
                             true,
                             cx,
                             move |cx| {
                                 s.update(cx, |s, cx| {
-                                    s.set_preview_quality(if half {
-                                        crate::state::PreviewQuality::Full
-                                    } else {
-                                        crate::state::PreviewQuality::Half
-                                    });
+                                    s.set_preview_quality(next_q);
                                     cx.notify();
                                 });
                                 a.update(cx, |this, cx| {
@@ -9032,19 +9035,65 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             // During preview_fast gesture (e.g. gizmo drag or ruler scrub)
             s.preview_fast = true;
             let d_fast = s.preview_divisor();
-            assert!(d_fast >= 4, "preview_divisor during fast gesture must be at least 4 (got {d_fast})");
+            assert!(d_fast >= 2, "preview_divisor during fast gesture must downsample for smoothness (got {d_fast})");
 
             // On mouse up / gesture release
             s.preview_fast = false;
             assert_eq!(s.preview_divisor(), 1, "preview_divisor must restore to full quality when gesture ends");
 
-            // During playback
+            // During playback under Full quality preference, divisor must stay 1 (no blurry downsampling!)
             s.is_playing = true;
             let d_play = s.preview_divisor();
-            assert!(d_play >= 4, "preview_divisor during playback must be at least 4 (got {d_play})");
+            assert_eq!(d_play, 1, "preview_divisor during Full quality playback must be 1 to prevent blurry clips");
 
             s.is_playing = false;
             assert_eq!(s.preview_divisor(), 1);
+
+            // Half quality preference gives divisor 2 during playback
+            s.set_preview_quality(crate::state::PreviewQuality::Half);
+            s.is_playing = true;
+            assert_eq!(s.preview_divisor(), 2);
+            s.is_playing = false;
+            assert_eq!(s.preview_divisor(), 2);
+
+            // Quarter quality gives divisor 4
+            s.set_preview_quality(crate::state::PreviewQuality::Quarter);
+            assert_eq!(s.preview_divisor(), 4);
+
+            // Restore Full
+            s.set_preview_quality(crate::state::PreviewQuality::Full);
+            assert_eq!(s.preview_divisor(), 1);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn test_playback_maintains_full_resolution_under_full_quality(cx: &mut TestAppContext) {
+        let (_root, app_view) = setup_test_window(cx);
+        cx.run_until_parked();
+
+        let state_entity = app_view.read_with(cx, |v, _| v.state().clone());
+
+        state_entity.update(cx, |s, _| {
+            s.set_preview_quality(crate::state::PreviewQuality::Full);
+            s.is_playing = true;
+
+            // Full HD composition dimensions
+            let l_w = 1920.0f32;
+            let l_h = 1080.0f32;
+            let qdiv = s.preview_divisor().max(1);
+
+            let rw = ((l_w / qdiv as f32).ceil().max(1.0) as u32).min(2048);
+            let rh = ((l_h / qdiv as f32).ceil().max(1.0) as u32).min(2048);
+
+            // Must preserve 100% full resolution on Full quality playback (not downsampled to 480x270 or 240x135)
+            assert_eq!(qdiv, 1, "Playback resolution divisor must be 1 under Full quality");
+            assert_eq!(rw, 1920, "Raster width during Full playback must be 1920");
+            assert_eq!(rh, 1080, "Raster height during Full playback must be 1080");
+
+            // Auto quality with standard composition maintains 1x
+            s.set_preview_quality(crate::state::PreviewQuality::Auto);
+            let auto_qdiv = s.preview_divisor().max(1);
+            assert_eq!(auto_qdiv, 1, "Auto quality on standard layer count maintains 1x crisp preview");
         });
     }
 

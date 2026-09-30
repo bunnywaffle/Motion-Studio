@@ -99,14 +99,16 @@ pub fn resolve_font_family(requested: &str) -> String {
     }
 }
 
-/// Viewport preview resolution. Full rasterizes at the capped box size;
-/// Half quarters pixels everywhere (faster interaction AND idle preview
-/// on weak machines). Gestures always drop to Half while held.
+/// Viewport preview resolution. Full rasterizes at the capped box size (100% native quality);
+/// Half renders at 1/2 resolution; Quarter at 1/4 resolution; Auto adapts during playback
+/// on heavy compositions while maintaining full quality when paused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PreviewQuality {
     #[default]
     Full,
     Half,
+    Quarter,
+    Auto,
 }
 
 impl PreviewQuality {
@@ -114,6 +116,8 @@ impl PreviewQuality {
         match self {
             Self::Full => "Full",
             Self::Half => "Half",
+            Self::Quarter => "Quarter",
+            Self::Auto => "Auto",
         }
     }
 
@@ -122,6 +126,8 @@ impl PreviewQuality {
         match self {
             Self::Full => 1,
             Self::Half => 2,
+            Self::Quarter => 4,
+            Self::Auto => 1,
         }
     }
 }
@@ -1331,19 +1337,26 @@ impl EditorState {
         self.preview_quality = quality;
     }
 
-    /// Effective raster divisor right now: gestures/playback use adaptive
-    /// fast proxy resolution (4x or 8x downsampled) for silky smooth 120+ FPS
-    /// interactions, otherwise the user's sticky preview quality preference applies.
+    /// Effective raster divisor right now: interactive mouse dragging gestures (e.g. gizmo/slider scrub)
+    /// use a fast 2x proxy resolution for ultra-responsive manipulation, while timeline playback
+    /// and idle preview respect the user's `preview_quality` preference (Full = 1, crisp and native).
     pub fn preview_divisor(&self) -> u32 {
-        if self.is_playing || self.preview_fast {
-            let layer_count = self.active_composition().map(|c| c.layers.len()).unwrap_or(1);
-            if layer_count > 4 {
-                8
-            } else {
-                4
-            }
+        if self.preview_fast {
+            2
         } else {
-            self.preview_quality.divisor()
+            match self.preview_quality {
+                PreviewQuality::Full => 1,
+                PreviewQuality::Half => 2,
+                PreviewQuality::Quarter => 4,
+                PreviewQuality::Auto => {
+                    if self.is_playing {
+                        let layer_count = self.active_composition().map(|c| c.layers.len()).unwrap_or(1);
+                        if layer_count > 6 { 2 } else { 1 }
+                    } else {
+                        1
+                    }
+                }
+            }
         }
     }
 

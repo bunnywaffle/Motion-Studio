@@ -2665,22 +2665,19 @@ impl Render for CompositionViewerPanel {
                     let comp_fps = comp_opt.map(|c| c.frame_rate as f32).unwrap_or(30.0);
                     let time_s = current_frame as f32 / comp_fps.max(1.0);
                     let duration_s = comp_opt.map(|c| c.duration_seconds() as f32).unwrap_or(0.0);
-                    // Gestures preview fast (probe wash); release restores
-                    // full per-pixel quality via the cache key below.
-                    let playing_now = state.is_playing || state.preview_fast;
-                    // Raster output size = AABB box, capped for speed (the
-                    // img child stretches to the shell on cap). Halved
-                    // during gestures/playback and per the View > Preview
-                    // Quality preference when idle. The cache key covers
-                    // size + quality flag, so previews never poison
-                    // full-quality entries.
+                    // Interactive dragging gestures preview fast; release and playback
+                    // maintain full per-pixel quality via the cache key below.
+                    let fast_gesture = state.preview_fast;
+                    // Raster output size = AABB box, capped for speed up to 2048 (Full HD).
+                    // Halved only during fast dragging gestures and per the View > Preview
+                    // Quality preference when set. The cache key covers size + quality flag.
                     let qdiv = state.preview_divisor().max(1);
                     let (rw, rh) = (
-                        ((l_w / qdiv as f32).ceil().max(1.0) as u32).min(1024),
-                        ((l_h / qdiv as f32).ceil().max(1.0) as u32).min(1024),
+                        ((l_w / qdiv as f32).ceil().max(1.0) as u32).min(2048),
+                        ((l_h / qdiv as f32).ceil().max(1.0) as u32).min(2048),
                     );
-                    // Decode image assets once into the shared cache.
-                    if let LayerSource::Image { asset_id } = &layer.source {
+                    // Decode image and video footage assets into the shared cache.
+                    if let LayerSource::Image { asset_id } | LayerSource::Video { asset_id, .. } = &layer.source {
                         if let Some(asset) = state.project.get_asset(asset_id) {
                             let path = asset.path.clone();
                             crate::raster::decoded_asset(&mut self.asset_cache, asset_id, &path);
@@ -2697,7 +2694,7 @@ impl Render for CompositionViewerPanel {
                         current_frame,
                         rw,
                         rh,
-                        playing_now,
+                        fast_gesture,
                         backdrop_hash,
                     );
                     let cacheable = true;
@@ -2737,7 +2734,7 @@ impl Render for CompositionViewerPanel {
                                 backdrop_buf.as_ref(),
                                 time_s,
                                 current_frame,
-                                playing_now,
+                                fast_gesture,
                                 duration_s,
                                 &self.asset_cache,
                             );
@@ -2783,8 +2780,8 @@ impl Render for CompositionViewerPanel {
                             let bgra = &entry.bgra;
                             let bgra_len = bgra.len();
 
-                            if playing_now {
-                                // Fast nearest-neighbor blit during interactive dragging / playback
+                            if fast_gesture {
+                                // Fast nearest-neighbor blit during interactive dragging gestures
                                 for cy in min_cy..max_cy {
                                     let vy = (((cy as f32 + 0.5 - l_y) / l_h) * rh as f32).clamp(0.0, (rh - 1) as f32) as u32;
                                     let row_off = (vy * rw) as usize;

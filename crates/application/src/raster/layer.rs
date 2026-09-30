@@ -49,11 +49,11 @@ pub fn decoded_asset(
     let img = image::open(path).ok()?.to_rgba8();
     // Cap decode size for preview speed (long side only, aspect kept).
     let (w, h) = (img.width(), img.height());
-    let img = if w.max(h) > 1600 {
+    let img = if w.max(h) > 2048 {
         let (nw, nh) = if w >= h {
-            (1600, (1600.0 * h as f32 / w as f32).round() as u32)
+            (2048, (2048.0 * h as f32 / w as f32).round() as u32)
         } else {
-            ((1600.0 * w as f32 / h as f32).round() as u32, 1600)
+            ((2048.0 * w as f32 / h as f32).round() as u32, 2048)
         };
         image::imageops::resize(&img, nw.max(1), nh.max(1), image::imageops::FilterType::Triangle)
     } else {
@@ -1261,9 +1261,9 @@ pub(crate) fn raster_layer_content(
     assets: &HashMap<String, Arc<RgbaImage>>,
 ) -> Option<FloatBuf> {
     match &layer.source {
-        LayerSource::Image { asset_id } => {
+        LayerSource::Image { asset_id } | LayerSource::Video { asset_id, .. } => {
             // Decoded by the caller into `assets` keyed by asset id.
-            assets.get(asset_id).map(|img| {
+            if let Some(img) = assets.get(asset_id) {
                 let (w, h) = (img.width(), img.height());
                 let mut buf = FloatBuf::clear(w.max(1), h.max(1));
                 for y in 0..h {
@@ -1277,8 +1277,10 @@ pub(crate) fn raster_layer_content(
                         };
                     }
                 }
-                buf
-            })
+                Some(buf)
+            } else {
+                raster_content(layer, base_w, base_h)
+            }
         }
         _ => raster_content(layer, base_w, base_h),
     }
