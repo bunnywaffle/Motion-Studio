@@ -299,24 +299,68 @@ pub fn apply_effect_pixels(
                         duration: ctx.duration_s,
                         resolution: (ctx.res_w, ctx.res_h),
                     };
-                    for y in 0..buf.h {
-                        for x in 0..buf.w {
-                            let idx = (y * buf.w + x) as usize;
-                            if buf.px[idx].a <= 0.0 {
-                                continue;
+                    let (eval_w, eval_h) = {
+                        let max_w = 320u32;
+                        let max_h = 180u32;
+                        if buf.w <= max_w && buf.h <= max_h {
+                            (buf.w, buf.h)
+                        } else {
+                            let sx = max_w as f32 / buf.w as f32;
+                            let sy = max_h as f32 / buf.h as f32;
+                            let s = sx.min(sy);
+                            ((buf.w as f32 * s).max(1.0) as u32, (buf.h as f32 * s).max(1.0) as u32)
+                        }
+                    };
+                    if eval_w < buf.w || eval_h < buf.h {
+                        let bx = buf.w as f32 / eval_w as f32;
+                        let by = buf.h as f32 / eval_h as f32;
+                        let mut small = FloatBuf::clear(eval_w, eval_h);
+                        for ey in 0..eval_h {
+                            for ex in 0..eval_w {
+                                let sx = (ex as f32 + 0.5) * bx;
+                                let sy = (ey as f32 + 0.5) * by;
+                                small.px[(ey * eval_w + ex) as usize] = buf.sample(sx - 0.5, sy - 0.5);
                             }
-                            let uv = (
-                                (x as f32 + 0.5) / buf.w as f32,
-                                (y as f32 + 0.5) / buf.h as f32,
-                            );
-                            let c = buf.px[idx].to_color();
-                            if let Ok([r, g, b, a]) = eval_prog(p, &env, uv, c) {
-                                buf.px[idx] = Px {
-                                    r: r.clamp(0.0, 1.0),
-                                    g: g.clamp(0.0, 1.0),
-                                    b: b.clamp(0.0, 1.0),
-                                    a: (a * c.a).clamp(0.0, 1.0),
-                                };
+                        }
+                        for ey in 0..eval_h {
+                            for ex in 0..eval_w {
+                                let idx = (ey * eval_w + ex) as usize;
+                                if small.px[idx].a <= 0.0 { continue; }
+                                let uv = ((ex as f32 + 0.5) / eval_w as f32, (ey as f32 + 0.5) / eval_h as f32);
+                                let c = small.px[idx].to_color();
+                                if let Ok([r, g, b, a]) = eval_prog(p, &env, uv, c) {
+                                    small.px[idx] = Px { r: r.clamp(0.0,1.0), g: g.clamp(0.0,1.0), b: b.clamp(0.0,1.0), a: (a * c.a).clamp(0.0,1.0) };
+                                }
+                            }
+                        }
+                        for y in 0..buf.h {
+                            for x in 0..buf.w {
+                                if buf.px[(y * buf.w + x) as usize].a <= 0.0 { continue; }
+                                let sx = (x as f32 + 0.5) / buf.w as f32 * eval_w as f32 - 0.5;
+                                let sy = (y as f32 + 0.5) / buf.h as f32 * eval_h as f32 - 0.5;
+                                buf.px[(y * buf.w + x) as usize] = small.sample(sx, sy);
+                            }
+                        }
+                    } else {
+                        for y in 0..buf.h {
+                            for x in 0..buf.w {
+                                let idx = (y * buf.w + x) as usize;
+                                if buf.px[idx].a <= 0.0 {
+                                    continue;
+                                }
+                                let uv = (
+                                    (x as f32 + 0.5) / buf.w as f32,
+                                    (y as f32 + 0.5) / buf.h as f32,
+                                );
+                                let c = buf.px[idx].to_color();
+                                if let Ok([r, g, b, a]) = eval_prog(p, &env, uv, c) {
+                                    buf.px[idx] = Px {
+                                        r: r.clamp(0.0, 1.0),
+                                        g: g.clamp(0.0, 1.0),
+                                        b: b.clamp(0.0, 1.0),
+                                        a: (a * c.a).clamp(0.0, 1.0),
+                                    };
+                                }
                             }
                         }
                     }
