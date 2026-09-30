@@ -129,23 +129,35 @@ pub(crate) fn widget_scalar(
 
 /// Boolean checkbox: kit semantic Checkbox (checked state, tooltip,
 /// keyboard + accessibility contract included). Commits through `on_toggle`.
+/// `controls` optionally prepends keyframe stopwatch/nav (effect bools).
 pub(crate) fn widget_bool<F>(
     label: &str,
     on: bool,
     test_id: String,
     tooltip: &str,
     on_toggle: F,
+    controls: Option<AnyElement>,
     cx: &App,
 ) -> AnyElement
 where
     F: Fn(bool, &mut App) + 'static,
 {
+    let label_cell = if let Some(ctl) = controls {
+        h_flex()
+            .gap_1()
+            .items_center()
+            .child(ctl)
+            .child(div().text_color(cx.theme().muted_foreground).child(label.to_string()))
+            .into_any_element()
+    } else {
+        div().text_color(cx.theme().muted_foreground).child(label.to_string()).into_any_element()
+    };
     h_flex()
         .items_center()
         .justify_between()
         .text_xs()
         .py_0p5()
-        .child(div().text_color(cx.theme().muted_foreground).child(label.to_string()))
+        .child(label_cell)
         .child(
             div()
                 .id(SharedString::from(test_id.clone()))
@@ -717,24 +729,34 @@ pub(crate) fn widget_for_decl(
             _ => div().into_any_element(),
         },
         WidgetKind::Color => match decl.value {
-            PropValue::Color(c) => panels::fx_swatch_row(
-                state,
-                layer_id,
-                eff_id,
-                &decl.field,
-                &decl.label,
-                c,
-                wheels.get(&(eff_id.to_string(), decl.field.clone())),
-                cx,
-            ),
+            PropValue::Color { value: c, animated } => h_flex()
+                .gap_1()
+                .items_center()
+                .child(panels::effect_param_keyframe_controls(
+                    state, layer_id, eff_id, &decl.field, animated, cx,
+                ))
+                .child(panels::fx_swatch_row(
+                    state,
+                    layer_id,
+                    eff_id,
+                    &decl.field,
+                    &decl.label,
+                    c,
+                    wheels.get(&(eff_id.to_string(), decl.field.clone())),
+                    cx,
+                ))
+                .into_any_element(),
             _ => div().into_any_element(),
         },
         WidgetKind::Checkbox => match decl.value {
-            PropValue::Bool(on) => {
+            PropValue::Bool { value: on, animated } => {
                 let s_t = state.clone();
                 let lid = layer_id.to_string();
                 let eid = eff_id.to_string();
                 let fld = decl.field.clone();
+                let ctl = panels::effect_param_keyframe_controls(
+                    state, layer_id, eff_id, &decl.field, animated, cx,
+                );
                 widget_bool(
                     &decl.label,
                     on,
@@ -751,6 +773,7 @@ pub(crate) fn widget_for_decl(
                             cx.notify();
                         });
                     },
+                    Some(ctl),
                     cx,
                 )
             }

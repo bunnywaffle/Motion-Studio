@@ -3416,6 +3416,7 @@ impl EditorState {
             .clone()
             .ok_or_else(|| "No layer selected".to_string())?;
 
+        let current_tc = self.clock.timecode();
         let comp = self
             .active_composition_mut()
             .ok_or_else(|| "No active composition".to_string())?;
@@ -3427,7 +3428,10 @@ impl EditorState {
             .get_effect_mut(effect_id)
             .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
         if let project::EffectType::ChromaKey { key_color: kc, .. } = &mut effect.effect_type {
-            *kc = key_color;
+            kc.set_value(key_color);
+            if kc.is_animated() {
+                kc.add_keyframe(Keyframe::new(current_tc, key_color));
+            }
             Ok(())
         } else {
             Err(format!("Effect {effect_id} is not ChromaKey"))
@@ -3447,6 +3451,7 @@ impl EditorState {
             .clone()
             .ok_or_else(|| "No layer selected".to_string())?;
 
+        let current_tc = self.clock.timecode();
         let comp = self
             .active_composition_mut()
             .ok_or_else(|| "No active composition".to_string())?;
@@ -3459,10 +3464,16 @@ impl EditorState {
             .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
         if let project::EffectType::Tint { map_black: mb, map_white: mw, .. } = &mut effect.effect_type {
             if let Some(c) = map_black {
-                *mb = c;
+                mb.set_value(c);
+                if mb.is_animated() {
+                    mb.add_keyframe(Keyframe::new(current_tc, c));
+                }
             }
             if let Some(c) = map_white {
-                *mw = c;
+                mw.set_value(c);
+                if mw.is_animated() {
+                    mw.add_keyframe(Keyframe::new(current_tc, c));
+                }
             }
             Ok(())
         } else {
@@ -3482,6 +3493,7 @@ impl EditorState {
             .clone()
             .ok_or_else(|| "No layer selected".to_string())?;
 
+        let current_tc = self.clock.timecode();
         let comp = self
             .active_composition_mut()
             .ok_or_else(|| "No active composition".to_string())?;
@@ -3493,7 +3505,10 @@ impl EditorState {
             .get_effect_mut(effect_id)
             .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
         if let project::EffectType::DropShadow { color: c, .. } = &mut effect.effect_type {
-            *c = color;
+            c.set_value(color);
+            if c.is_animated() {
+                c.add_keyframe(Keyframe::new(current_tc, color));
+            }
             Ok(())
         } else {
             Err(format!("Effect {effect_id} is not DropShadow"))
@@ -3522,7 +3537,8 @@ impl EditorState {
             .get_effect_mut(effect_id)
             .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
         if let project::EffectType::NoiseGenerator { monochrome, .. } = &mut effect.effect_type {
-            *monochrome = !*monochrome;
+            let next = !monochrome.value;
+            monochrome.set_value(next);
             Ok(())
         } else {
             Err(format!("Effect {effect_id} is not NoiseGenerator"))
@@ -4291,6 +4307,7 @@ impl EditorState {
     /// Set a shape layer fill color.
     pub fn set_layer_shape_fill(&mut self, layer_id: &str, color: Color) -> Result<(), String> {
         self.checkpoint();
+        let current_tc = self.clock.timecode();
         let comp = self
             .active_composition_mut()
             .ok_or_else(|| "No active composition".to_string())?;
@@ -4307,7 +4324,10 @@ impl EditorState {
             | LayerSource::Shape {
                 shape_type: ShapeType::Path { fill, .. },
             } => {
-                *fill = color;
+                fill.set_value(color);
+                if fill.is_animated() {
+                    fill.add_keyframe(Keyframe::new(current_tc, color));
+                }
                 Ok(())
             }
             _ => Err("Not a shape layer".to_string()),
@@ -4320,7 +4340,7 @@ impl EditorState {
     fn fill_gradient_slot_mut<'a>(
         layer: &'a mut Layer,
         key: &str,
-    ) -> Result<&'a mut Option<FillGradient>, String> {
+    ) -> Result<&'a mut Option<Property<FillGradient>>, String> {
         let lid = layer.id.clone();
         match &mut layer.source {
             LayerSource::Text {
@@ -4360,9 +4380,9 @@ impl EditorState {
                     fill_gradient, ..
                 },
                 "text_fill",
-            ) => fill_gradient.clone(),
+            ) => fill_gradient.as_ref().map(|p| p.value.clone()),
             (LayerSource::Text { stroke_gradient, .. }, "text_stroke") => {
-                stroke_gradient.clone()
+                stroke_gradient.as_ref().map(|p| p.value.clone())
             }
             (
                 LayerSource::Shape {
@@ -4372,9 +4392,9 @@ impl EditorState {
                         | ShapeType::Path { fill_gradient, .. },
                 },
                 "shape_fill",
-            ) => fill_gradient.clone(),
+            ) => fill_gradient.as_ref().map(|p| p.value.clone()),
             (LayerSource::Solid { fill_gradient, .. }, "solid_color") => {
-                fill_gradient.clone()
+                fill_gradient.as_ref().map(|p| p.value.clone())
             }
             _ => None,
         }
@@ -4389,13 +4409,30 @@ impl EditorState {
         gradient: Option<FillGradient>,
     ) -> Result<(), String> {
         self.checkpoint();
+        let current_tc = self.clock.timecode();
         let comp = self
             .active_composition_mut()
             .ok_or_else(|| "No active composition".to_string())?;
         let layer = comp
             .get_layer_mut(layer_id)
             .ok_or_else(|| format!("Layer {layer_id} not found"))?;
-        *Self::fill_gradient_slot_mut(layer, key)? = gradient;
+        let slot = Self::fill_gradient_slot_mut(layer, key)?;
+        match gradient {
+            None => {
+                *slot = None;
+            }
+            Some(g) => match slot {
+                Some(prop) => {
+                    if prop.is_animated() {
+                        prop.add_keyframe(Keyframe::new(current_tc, g.clone()));
+                    }
+                    prop.set_value(g);
+                }
+                empty => {
+                    *empty = Some(Property::new(key, g));
+                }
+            },
+        }
         Ok(())
     }
 
@@ -4408,6 +4445,7 @@ impl EditorState {
         color: Color,
     ) -> Result<usize, String> {
         self.checkpoint();
+        let current_tc = self.clock.timecode();
         let comp = self
             .active_composition_mut()
             .ok_or_else(|| "No active composition".to_string())?;
@@ -4415,8 +4453,15 @@ impl EditorState {
             .get_layer_mut(layer_id)
             .ok_or_else(|| format!("Layer {layer_id} not found"))?;
         let slot = Self::fill_gradient_slot_mut(layer, key)?;
-        let grad = slot.get_or_insert_with(|| FillGradient::two_color(Color::WHITE, Color::BLACK, 90.0));
-        Ok(grad.add_stop(offset, color))
+        let prop = slot.get_or_insert_with(|| {
+            Property::new(key, FillGradient::two_color(Color::WHITE, Color::BLACK, 90.0))
+        });
+        let at = prop.value.add_stop(offset, color);
+        if prop.is_animated() {
+            let v = prop.value.clone();
+            prop.add_keyframe(Keyframe::new(current_tc, v));
+        }
+        Ok(at)
     }
 
     /// Drag a stop to a new offset (no checkpoint: the drag gesture
@@ -4428,6 +4473,7 @@ impl EditorState {
         index: usize,
         offset: f32,
     ) -> Result<usize, String> {
+        let current_tc = self.clock.timecode();
         let comp = self
             .active_composition_mut()
             .ok_or_else(|| "No active composition".to_string())?;
@@ -4436,9 +4482,17 @@ impl EditorState {
             .ok_or_else(|| format!("Layer {layer_id} not found"))?;
         let slot = Self::fill_gradient_slot_mut(layer, key)?;
         match slot {
-            Some(grad) => grad
-                .set_stop_offset(index, offset)
-                .ok_or_else(|| format!("Gradient stop {index} out of range")),
+            Some(prop) => {
+                let at = prop
+                    .value
+                    .set_stop_offset(index, offset)
+                    .ok_or_else(|| format!("Gradient stop {index} out of range"))?;
+                if prop.is_animated() {
+                    let v = prop.value.clone();
+                    prop.add_keyframe(Keyframe::new(current_tc, v));
+                }
+                Ok(at)
+            }
             None => Err("No gradient on this fill".to_string()),
         }
     }
@@ -4452,6 +4506,7 @@ impl EditorState {
         color: Color,
     ) -> Result<(), String> {
         self.checkpoint();
+        let current_tc = self.clock.timecode();
         let comp = self
             .active_composition_mut()
             .ok_or_else(|| "No active composition".to_string())?;
@@ -4460,9 +4515,13 @@ impl EditorState {
             .ok_or_else(|| format!("Layer {layer_id} not found"))?;
         let slot = Self::fill_gradient_slot_mut(layer, key)?;
         match slot {
-            Some(grad) => match grad.stops.get_mut(index) {
+            Some(prop) => match prop.value.stops.get_mut(index) {
                 Some(stop) => {
                     stop.color = color;
+                    if prop.is_animated() {
+                        let v = prop.value.clone();
+                        prop.add_keyframe(Keyframe::new(current_tc, v));
+                    }
                     Ok(())
                 }
                 None => Err(format!("Gradient stop {index} out of range")),
@@ -4479,6 +4538,7 @@ impl EditorState {
         index: usize,
     ) -> Result<(), String> {
         self.checkpoint();
+        let current_tc = self.clock.timecode();
         let comp = self
             .active_composition_mut()
             .ok_or_else(|| "No active composition".to_string())?;
@@ -4487,13 +4547,20 @@ impl EditorState {
             .ok_or_else(|| format!("Layer {layer_id} not found"))?;
         let slot = Self::fill_gradient_slot_mut(layer, key)?;
         match slot {
-            Some(grad) => {
-                if grad.stops.len() <= 2 {
+            Some(prop) => {
+                if prop.value.stops.len() <= 2 {
                     return Err("A gradient needs at least two stops".to_string());
                 }
-                grad.remove_stop(index)
+                let out = prop
+                    .value
+                    .remove_stop(index)
                     .map(|_| ())
-                    .ok_or_else(|| format!("Gradient stop {index} out of range"))
+                    .ok_or_else(|| format!("Gradient stop {index} out of range"));
+                if prop.is_animated() {
+                    let v = prop.value.clone();
+                    prop.add_keyframe(Keyframe::new(current_tc, v));
+                }
+                out
             }
             None => Err("No gradient on this fill".to_string()),
         }
@@ -4507,6 +4574,7 @@ impl EditorState {
         angle: f32,
     ) -> Result<(), String> {
         self.checkpoint();
+        let current_tc = self.clock.timecode();
         let comp = self
             .active_composition_mut()
             .ok_or_else(|| "No active composition".to_string())?;
@@ -4515,8 +4583,12 @@ impl EditorState {
             .ok_or_else(|| format!("Layer {layer_id} not found"))?;
         let slot = Self::fill_gradient_slot_mut(layer, key)?;
         match slot {
-            Some(grad) => {
-                grad.angle = angle;
+            Some(prop) => {
+                prop.value.angle = angle;
+                if prop.is_animated() {
+                    let v = prop.value.clone();
+                    prop.add_keyframe(Keyframe::new(current_tc, v));
+                }
                 Ok(())
             }
             None => Err("No gradient on this fill".to_string()),
@@ -4526,6 +4598,7 @@ impl EditorState {
     /// Mirror all stop offsets end-for-end (one undo step).
     pub fn reverse_fill_gradient(&mut self, layer_id: &str, key: &str) -> Result<(), String> {
         self.checkpoint();
+        let current_tc = self.clock.timecode();
         let comp = self
             .active_composition_mut()
             .ok_or_else(|| "No active composition".to_string())?;
@@ -4534,8 +4607,12 @@ impl EditorState {
             .ok_or_else(|| format!("Layer {layer_id} not found"))?;
         let slot = Self::fill_gradient_slot_mut(layer, key)?;
         match slot {
-            Some(grad) => {
-                *grad = grad.reversed();
+            Some(prop) => {
+                let rev = prop.value.reversed();
+                if prop.is_animated() {
+                    prop.add_keyframe(Keyframe::new(current_tc, rev.clone()));
+                }
+                prop.set_value(rev);
                 Ok(())
             }
             None => Err("No gradient on this fill".to_string()),
@@ -4552,6 +4629,7 @@ impl EditorState {
         color: Color,
     ) -> Result<(), String> {
         self.checkpoint();
+        let current_tc = self.clock.timecode();
         let comp = self
             .active_composition_mut()
             .ok_or_else(|| "No active composition".to_string())?;
@@ -4562,6 +4640,11 @@ impl EditorState {
             .get_effect_mut(effect_id)
             .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
         if effect.set_color_value(field, color) || effect.set_stock_color(field, color) {
+            if let Some(prop) = effect.get_color_property_mut(field) {
+                if prop.is_animated() {
+                    prop.add_keyframe(Keyframe::new(current_tc, color));
+                }
+            }
             Ok(())
         } else {
             Err(format!("Color field {field} not found on effect {effect_id}"))
@@ -4602,6 +4685,7 @@ impl EditorState {
         value: bool,
     ) -> Result<(), String> {
         self.checkpoint();
+        let current_tc = self.clock.timecode();
         let comp = self
             .active_composition_mut()
             .ok_or_else(|| "No active composition".to_string())?;
@@ -4612,6 +4696,11 @@ impl EditorState {
             .get_effect_mut(effect_id)
             .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
         if effect.set_bool_value(field, value) {
+            if let Some(prop) = effect.get_bool_property_mut(field) {
+                if prop.is_animated() {
+                    prop.add_keyframe(Keyframe::new(current_tc, value));
+                }
+            }
             Ok(())
         } else {
             Err(format!("Bool field {field} not found on effect {effect_id}"))
@@ -4997,6 +5086,43 @@ impl EditorState {
     }
 
     /// Toggle stopwatch / animation status for a property path on the specified layer.
+    /// Stopwatch toggle for an optional gradient slot: clears keys when
+    /// animated, seeds a keyframe on the current value, or inserts a
+    /// default gradient + keyframe when empty.
+    fn toggle_gradient_animation(slot: &mut Option<Property<FillGradient>>, tc: TimeCode) {
+        match slot {
+            Some(prop) if prop.is_animated() => prop.clear_keyframes(),
+            Some(prop) => {
+                let v = prop.value.clone();
+                prop.add_keyframe(Keyframe::new(tc, v));
+            }
+            None => {
+                let mut prop = Property::new(
+                    "Gradient",
+                    FillGradient::two_color(Color::WHITE, Color::BLACK, 90.0),
+                );
+                prop.add_keyframe(Keyframe::new(tc, prop.value.clone()));
+                *slot = Some(prop);
+            }
+        }
+    }
+
+    /// Diamond toggle for an optional gradient slot at the playhead.
+    fn toggle_gradient_keyframe(slot: &mut Option<Property<FillGradient>>, tc: TimeCode) {
+        let prop = slot.get_or_insert_with(|| {
+            Property::new(
+                "Gradient",
+                FillGradient::two_color(Color::WHITE, Color::BLACK, 90.0),
+            )
+        });
+        let v = if prop.is_animated() {
+            prop.evaluate_at(&tc)
+        } else {
+            prop.value.clone()
+        };
+        prop.toggle_keyframe(tc, v);
+    }
+
     /// In After Effects:
     /// - If toggled ON: records an initial keyframe at the current playback time with the current value.
     /// - If toggled OFF: clears all keyframes on the property.
@@ -5101,6 +5227,54 @@ impl EditorState {
                     else { fill_color.add_keyframe(Keyframe::new(current_tc, fill_color.value)); }
                 }
             }
+            "text.stroke_color" => {
+                if let LayerSource::Text { stroke_color, .. } = &mut layer.source {
+                    if stroke_color.is_animated() { stroke_color.clear_keyframes(); }
+                    else { stroke_color.add_keyframe(Keyframe::new(current_tc, stroke_color.value)); }
+                }
+            }
+            "solid.color" => {
+                if let LayerSource::Solid { color, .. } = &mut layer.source {
+                    if color.is_animated() { color.clear_keyframes(); }
+                    else { color.add_keyframe(Keyframe::new(current_tc, color.value)); }
+                }
+            }
+            "shape.fill" => {
+                if let LayerSource::Shape { shape_type } = &mut layer.source {
+                    let fill = match shape_type {
+                        ShapeType::Rectangle { fill, .. }
+                        | ShapeType::Ellipse { fill, .. }
+                        | ShapeType::Path { fill, .. } => fill,
+                    };
+                    if fill.is_animated() { fill.clear_keyframes(); }
+                    else { let v = fill.value; fill.add_keyframe(Keyframe::new(current_tc, v)); }
+                }
+            }
+            "solid.gradient" => {
+                if let LayerSource::Solid { fill_gradient, .. } = &mut layer.source {
+                    Self::toggle_gradient_animation(fill_gradient, current_tc);
+                }
+            }
+            "shape.gradient" => {
+                if let LayerSource::Shape { shape_type } = &mut layer.source {
+                    let slot = match shape_type {
+                        ShapeType::Rectangle { fill_gradient, .. }
+                        | ShapeType::Ellipse { fill_gradient, .. }
+                        | ShapeType::Path { fill_gradient, .. } => fill_gradient,
+                    };
+                    Self::toggle_gradient_animation(slot, current_tc);
+                }
+            }
+            "text.fill_gradient" => {
+                if let LayerSource::Text { fill_gradient, .. } = &mut layer.source {
+                    Self::toggle_gradient_animation(fill_gradient, current_tc);
+                }
+            }
+            "text.stroke_gradient" => {
+                if let LayerSource::Text { stroke_gradient, .. } = &mut layer.source {
+                    Self::toggle_gradient_animation(stroke_gradient, current_tc);
+                }
+            }
             "shape.rect_width" => {
                 if let LayerSource::Shape { shape_type: project::ShapeType::Rectangle { width, .. } } = &mut layer.source {
                     if width.is_animated() { width.clear_keyframes(); }
@@ -5139,6 +5313,20 @@ impl EditorState {
                         let param_name = parts[1];
                         if let Some(fx) = layer.get_effect_mut(fx_id) {
                             if let Some(prop) = fx.get_param_property_mut(param_name) {
+                                if prop.is_animated() {
+                                    prop.clear_keyframes();
+                                } else {
+                                    let val = prop.value;
+                                    prop.add_keyframe(Keyframe::new(current_tc, val));
+                                }
+                            } else if let Some(prop) = fx.get_color_property_mut(param_name) {
+                                if prop.is_animated() {
+                                    prop.clear_keyframes();
+                                } else {
+                                    let val = prop.value;
+                                    prop.add_keyframe(Keyframe::new(current_tc, val));
+                                }
+                            } else if let Some(prop) = fx.get_bool_property_mut(param_name) {
                                 if prop.is_animated() {
                                     prop.clear_keyframes();
                                 } else {
@@ -5792,6 +5980,66 @@ impl EditorState {
                     fill_color.toggle_keyframe(current_tc, val);
                 }
             }
+            "text.stroke_color" => {
+                if let LayerSource::Text { ref mut stroke_color, .. } = layer.source {
+                    let val = if stroke_color.is_animated() {
+                        stroke_color.evaluate_at(&current_tc)
+                    } else {
+                        stroke_color.value
+                    };
+                    stroke_color.toggle_keyframe(current_tc, val);
+                }
+            }
+            "solid.color" => {
+                if let LayerSource::Solid { ref mut color, .. } = layer.source {
+                    let val = if color.is_animated() {
+                        color.evaluate_at(&current_tc)
+                    } else {
+                        color.value
+                    };
+                    color.toggle_keyframe(current_tc, val);
+                }
+            }
+            "shape.fill" => {
+                if let LayerSource::Shape { ref mut shape_type } = layer.source {
+                    let fill = match shape_type {
+                        ShapeType::Rectangle { ref mut fill, .. }
+                        | ShapeType::Ellipse { ref mut fill, .. }
+                        | ShapeType::Path { ref mut fill, .. } => fill,
+                    };
+                    let val = if fill.is_animated() {
+                        fill.evaluate_at(&current_tc)
+                    } else {
+                        fill.value
+                    };
+                    fill.toggle_keyframe(current_tc, val);
+                }
+            }
+            "solid.gradient" => {
+                if let LayerSource::Solid { ref mut fill_gradient, .. } = layer.source {
+                    Self::toggle_gradient_keyframe(fill_gradient, current_tc);
+                }
+            }
+            "shape.gradient" => {
+                if let LayerSource::Shape { ref mut shape_type } = layer.source {
+                    let slot = match shape_type {
+                        ShapeType::Rectangle { ref mut fill_gradient, .. }
+                        | ShapeType::Ellipse { ref mut fill_gradient, .. }
+                        | ShapeType::Path { ref mut fill_gradient, .. } => fill_gradient,
+                    };
+                    Self::toggle_gradient_keyframe(slot, current_tc);
+                }
+            }
+            "text.fill_gradient" => {
+                if let LayerSource::Text { ref mut fill_gradient, .. } = layer.source {
+                    Self::toggle_gradient_keyframe(fill_gradient, current_tc);
+                }
+            }
+            "text.stroke_gradient" => {
+                if let LayerSource::Text { ref mut stroke_gradient, .. } = layer.source {
+                    Self::toggle_gradient_keyframe(stroke_gradient, current_tc);
+                }
+            }
             "shape.rect_width" => {
                 if let LayerSource::Shape { shape_type: project::ShapeType::Rectangle { ref mut width, .. } } = layer.source {
                     let val = if width.is_animated() {
@@ -5850,6 +6098,20 @@ impl EditorState {
                         let param_name = parts[1];
                         if let Some(fx) = layer.get_effect_mut(fx_id) {
                             if let Some(prop) = fx.get_param_property_mut(param_name) {
+                                let val = if prop.is_animated() {
+                                    prop.evaluate_at(&current_tc)
+                                } else {
+                                    prop.value
+                                };
+                                prop.toggle_keyframe(current_tc, val);
+                            } else if let Some(prop) = fx.get_color_property_mut(param_name) {
+                                let val = if prop.is_animated() {
+                                    prop.evaluate_at(&current_tc)
+                                } else {
+                                    prop.value
+                                };
+                                prop.toggle_keyframe(current_tc, val);
+                            } else if let Some(prop) = fx.get_bool_property_mut(param_name) {
                                 let val = if prop.is_animated() {
                                     prop.evaluate_at(&current_tc)
                                 } else {
@@ -6096,6 +6358,54 @@ impl EditorState {
                     fill_color.clear_keyframes();
                 }
             }
+            "text.stroke_color" => {
+                if let LayerSource::Text { ref mut stroke_color, .. } = layer.source {
+                    stroke_color.reset();
+                    stroke_color.clear_keyframes();
+                }
+            }
+            "solid.color" => {
+                if let LayerSource::Solid { ref mut color, .. } = layer.source {
+                    color.reset();
+                    color.clear_keyframes();
+                }
+            }
+            "shape.fill" => {
+                if let LayerSource::Shape { ref mut shape_type } = layer.source {
+                    let fill = match shape_type {
+                        ShapeType::Rectangle { ref mut fill, .. }
+                        | ShapeType::Ellipse { ref mut fill, .. }
+                        | ShapeType::Path { ref mut fill, .. } => fill,
+                    };
+                    fill.reset();
+                    fill.clear_keyframes();
+                }
+            }
+            "solid.gradient" => {
+                if let LayerSource::Solid { ref mut fill_gradient, .. } = layer.source {
+                    *fill_gradient = None;
+                }
+            }
+            "shape.gradient" => {
+                if let LayerSource::Shape { ref mut shape_type } = layer.source {
+                    let slot = match shape_type {
+                        ShapeType::Rectangle { ref mut fill_gradient, .. }
+                        | ShapeType::Ellipse { ref mut fill_gradient, .. }
+                        | ShapeType::Path { ref mut fill_gradient, .. } => fill_gradient,
+                    };
+                    *slot = None;
+                }
+            }
+            "text.fill_gradient" => {
+                if let LayerSource::Text { ref mut fill_gradient, .. } = layer.source {
+                    *fill_gradient = None;
+                }
+            }
+            "text.stroke_gradient" => {
+                if let LayerSource::Text { ref mut stroke_gradient, .. } = layer.source {
+                    *stroke_gradient = None;
+                }
+            }
             "shape.rect_width" | "rect_width" | "width" => {
                 if let LayerSource::Shape { shape_type: project::ShapeType::Rectangle { ref mut width, .. } } = layer.source {
                     width.reset();
@@ -6134,6 +6444,12 @@ impl EditorState {
                         let param_name = parts[1];
                         if let Some(fx) = layer.get_effect_mut(fx_id) {
                             if let Some(prop) = fx.get_param_property_mut(param_name) {
+                                prop.reset();
+                                prop.clear_keyframes();
+                            } else if let Some(prop) = fx.get_color_property_mut(param_name) {
+                                prop.reset();
+                                prop.clear_keyframes();
+                            } else if let Some(prop) = fx.get_bool_property_mut(param_name) {
                                 prop.reset();
                                 prop.clear_keyframes();
                             }
@@ -6570,6 +6886,51 @@ impl EditorState {
                         fill_color.previous_keyframe_time(&current_tc)
                     } else { None }
                 }
+                "text.stroke_color" => {
+                    if let LayerSource::Text { ref stroke_color, .. } = layer.source {
+                        stroke_color.previous_keyframe_time(&current_tc)
+                    } else { None }
+                }
+                "solid.color" => {
+                    if let LayerSource::Solid { ref color, .. } = layer.source {
+                        color.previous_keyframe_time(&current_tc)
+                    } else { None }
+                }
+                "shape.fill" => {
+                    if let LayerSource::Shape { ref shape_type } = layer.source {
+                        let fill = match shape_type {
+                            ShapeType::Rectangle { ref fill, .. }
+                            | ShapeType::Ellipse { ref fill, .. }
+                            | ShapeType::Path { ref fill, .. } => fill,
+                        };
+                        fill.previous_keyframe_time(&current_tc)
+                    } else { None }
+                }
+                "solid.gradient" => {
+                    if let LayerSource::Solid { ref fill_gradient, .. } = layer.source {
+                        fill_gradient.as_ref().and_then(|p| p.previous_keyframe_time(&current_tc))
+                    } else { None }
+                }
+                "shape.gradient" => {
+                    if let LayerSource::Shape { ref shape_type } = layer.source {
+                        let slot = match shape_type {
+                            ShapeType::Rectangle { ref fill_gradient, .. }
+                            | ShapeType::Ellipse { ref fill_gradient, .. }
+                            | ShapeType::Path { ref fill_gradient, .. } => fill_gradient,
+                        };
+                        slot.as_ref().and_then(|p| p.previous_keyframe_time(&current_tc))
+                    } else { None }
+                }
+                "text.fill_gradient" => {
+                    if let LayerSource::Text { ref fill_gradient, .. } = layer.source {
+                        fill_gradient.as_ref().and_then(|p| p.previous_keyframe_time(&current_tc))
+                    } else { None }
+                }
+                "text.stroke_gradient" => {
+                    if let LayerSource::Text { ref stroke_gradient, .. } = layer.source {
+                        stroke_gradient.as_ref().and_then(|p| p.previous_keyframe_time(&current_tc))
+                    } else { None }
+                }
                 "shape.rect_width" => {
                     if let LayerSource::Shape { shape_type: project::ShapeType::Rectangle { ref width, .. } } = layer.source {
                         width.previous_keyframe_time(&current_tc)
@@ -6601,9 +6962,17 @@ impl EditorState {
                         if parts.len() == 2 {
                             let fx_id = parts[0];
                             let param_name = parts[1];
-                            layer.get_effect(fx_id)
-                                .and_then(|fx| fx.get_param_property(param_name))
-                                .and_then(|prop| prop.previous_keyframe_time(&current_tc))
+                            layer.get_effect(fx_id).and_then(|fx| {
+                                if let Some(prop) = fx.get_param_property(param_name) {
+                                    prop.previous_keyframe_time(&current_tc)
+                                } else if let Some(prop) = fx.get_color_property(param_name) {
+                                    prop.previous_keyframe_time(&current_tc)
+                                } else if let Some(prop) = fx.get_bool_property(param_name) {
+                                    prop.previous_keyframe_time(&current_tc)
+                                } else {
+                                    None
+                                }
+                            })
                         } else {
                             None
                         }
@@ -6688,6 +7057,51 @@ impl EditorState {
                         fill_color.next_keyframe_time(&current_tc)
                     } else { None }
                 }
+                "text.stroke_color" => {
+                    if let LayerSource::Text { ref stroke_color, .. } = layer.source {
+                        stroke_color.next_keyframe_time(&current_tc)
+                    } else { None }
+                }
+                "solid.color" => {
+                    if let LayerSource::Solid { ref color, .. } = layer.source {
+                        color.next_keyframe_time(&current_tc)
+                    } else { None }
+                }
+                "shape.fill" => {
+                    if let LayerSource::Shape { ref shape_type } = layer.source {
+                        let fill = match shape_type {
+                            ShapeType::Rectangle { ref fill, .. }
+                            | ShapeType::Ellipse { ref fill, .. }
+                            | ShapeType::Path { ref fill, .. } => fill,
+                        };
+                        fill.next_keyframe_time(&current_tc)
+                    } else { None }
+                }
+                "solid.gradient" => {
+                    if let LayerSource::Solid { ref fill_gradient, .. } = layer.source {
+                        fill_gradient.as_ref().and_then(|p| p.next_keyframe_time(&current_tc))
+                    } else { None }
+                }
+                "shape.gradient" => {
+                    if let LayerSource::Shape { ref shape_type } = layer.source {
+                        let slot = match shape_type {
+                            ShapeType::Rectangle { ref fill_gradient, .. }
+                            | ShapeType::Ellipse { ref fill_gradient, .. }
+                            | ShapeType::Path { ref fill_gradient, .. } => fill_gradient,
+                        };
+                        slot.as_ref().and_then(|p| p.next_keyframe_time(&current_tc))
+                    } else { None }
+                }
+                "text.fill_gradient" => {
+                    if let LayerSource::Text { ref fill_gradient, .. } = layer.source {
+                        fill_gradient.as_ref().and_then(|p| p.next_keyframe_time(&current_tc))
+                    } else { None }
+                }
+                "text.stroke_gradient" => {
+                    if let LayerSource::Text { ref stroke_gradient, .. } = layer.source {
+                        stroke_gradient.as_ref().and_then(|p| p.next_keyframe_time(&current_tc))
+                    } else { None }
+                }
                 "shape.rect_width" => {
                     if let LayerSource::Shape { shape_type: project::ShapeType::Rectangle { ref width, .. } } = layer.source {
                         width.next_keyframe_time(&current_tc)
@@ -6719,9 +7133,17 @@ impl EditorState {
                         if parts.len() == 2 {
                             let fx_id = parts[0];
                             let param_name = parts[1];
-                            layer.get_effect(fx_id)
-                                .and_then(|fx| fx.get_param_property(param_name))
-                                .and_then(|prop| prop.next_keyframe_time(&current_tc))
+                            layer.get_effect(fx_id).and_then(|fx| {
+                                if let Some(prop) = fx.get_param_property(param_name) {
+                                    prop.next_keyframe_time(&current_tc)
+                                } else if let Some(prop) = fx.get_color_property(param_name) {
+                                    prop.next_keyframe_time(&current_tc)
+                                } else if let Some(prop) = fx.get_bool_property(param_name) {
+                                    prop.next_keyframe_time(&current_tc)
+                                } else {
+                                    None
+                                }
+                            })
                         } else {
                             None
                         }
@@ -7295,7 +7717,7 @@ impl EditorState {
                 width: Property::new("Width", width),
                 height: Property::new("Height", height),
                 corner_radius: Property::new("Corner Radius", 0.0),
-                fill,
+                fill: Property::new("Fill", fill),
                 fill_gradient: None,
             },
             in_pt,
@@ -7354,7 +7776,7 @@ impl EditorState {
             ShapeType::Ellipse {
                 radius_x: Property::new("Radius X", radius_x),
                 radius_y: Property::new("Radius Y", radius_y),
-                fill,
+                fill: Property::new("Fill", fill),
                 fill_gradient: None,
             },
             in_pt,
@@ -7586,7 +8008,7 @@ impl EditorState {
             "Path",
             ShapeType::Path {
                 path_data: format!("M {:.1} {:.1}", point.x, point.y),
-                fill,
+                fill: Property::new("Fill", fill),
                 fill_gradient: None,
             },
             in_pt,
@@ -7918,6 +8340,7 @@ impl EditorState {
     /// Set the solid color on a Solid layer.
     pub fn set_layer_solid_color(&mut self, layer_id: &str, color: Color) -> Result<(), String> {
         self.checkpoint();
+        let current_tc = self.clock.timecode();
         let comp = self
             .active_composition_mut()
             .ok_or_else(|| "No active composition".to_string())?;
@@ -7927,7 +8350,10 @@ impl EditorState {
 
         match &mut layer.source {
             LayerSource::Solid { color: c, .. } => {
-                *c = color;
+                c.set_value(color);
+                if c.is_animated() {
+                    c.add_keyframe(Keyframe::new(current_tc, color));
+                }
                 Ok(())
             }
             _ => Err(format!("Layer {layer_id} is not a Solid layer")),
@@ -8318,11 +8744,15 @@ impl EditorState {
     /// Set stroke color on a Text layer.
     pub fn set_layer_stroke_color(&mut self, layer_id: &str, color: Color) -> Result<(), String> {
         self.checkpoint();
+        let current_tc = self.clock.timecode();
         let comp = self.active_composition_mut().ok_or_else(|| "No active composition".to_string())?;
         let layer = comp.get_layer_mut(layer_id).ok_or_else(|| format!("Layer {layer_id} not found"))?;
         match &mut layer.source {
             LayerSource::Text { stroke_color, .. } => {
-                *stroke_color = color;
+                stroke_color.set_value(color);
+                if stroke_color.is_animated() {
+                    stroke_color.add_keyframe(Keyframe::new(current_tc, color));
+                }
                 Ok(())
             }
             _ => Err(format!("Layer {layer_id} is not a Text layer")),

@@ -264,3 +264,140 @@ impl<T> DerefMut for Property<T> {
         &mut self.value
     }
 }
+
+/// Deserialize a [`Property`] from either its full struct form or a bare
+/// value (back-compat for project files saved before a field became
+/// animatable). Bare values keep their value with a blank name.
+pub fn de_property_or_value<'de, D, T>(deserializer: D) -> Result<Property<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de> + Clone + Default,
+{
+    #[derive(serde::Deserialize)]
+    #[serde(
+        untagged,
+        bound(deserialize = "T: serde::Deserialize<'de> + Clone + Default")
+    )]
+    enum PropOrVal<T> {
+        Prop(Property<T>),
+        Val(T),
+    }
+    Ok(match PropOrVal::deserialize(deserializer)? {
+        PropOrVal::Prop(p) => p,
+        PropOrVal::Val(v) => Property::new(String::new(), v),
+    })
+}
+
+/// Deserialize an `Option<Property>` from null, a bare value, or a full
+/// property struct (back-compat for fields that became animatable).
+pub fn de_opt_property_or_value<'de, D, T>(
+    deserializer: D,
+) -> Result<Option<Property<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de> + Clone + Default,
+{
+    #[derive(serde::Deserialize)]
+    #[serde(
+        untagged,
+        bound(deserialize = "T: serde::Deserialize<'de> + Clone + Default")
+    )]
+    enum OptPropOrVal<T> {
+        None,
+        Prop(Property<T>),
+        Val(T),
+    }
+    // Untagged tries in order: None matches null.
+    Ok(match OptPropOrVal::deserialize(deserializer)? {
+        OptPropOrVal::None => None,
+        OptPropOrVal::Prop(p) => Some(p),
+        OptPropOrVal::Val(v) => Some(Property::new(String::new(), v)),
+    })
+}
+
+/// Deserialize a `Vec<Property<T>>` from either full property structs or
+/// bare values (back-compat for slots saved before they became animatable).
+pub fn de_vec_property_or_value<'de, D, T>(
+    deserializer: D,
+) -> Result<Vec<Property<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de> + Clone + Default,
+{
+    #[derive(serde::Deserialize)]
+    #[serde(
+        untagged,
+        bound(deserialize = "T: serde::Deserialize<'de> + Clone + Default")
+    )]
+    enum VecPropOrVal<T> {
+        Props(Vec<Property<T>>),
+        Vals(Vec<T>),
+    }
+    Ok(match VecPropOrVal::deserialize(deserializer)? {
+        VecPropOrVal::Props(p) => p,
+        VecPropOrVal::Vals(v) => v
+            .into_iter()
+            .map(|t| Property::new(String::new(), t))
+            .collect(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::color::Color;
+
+    #[test]
+    fn bare_value_migrates_to_property() {
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        struct Probe {
+            #[serde(deserialize_with = "crate::property::de_property_or_value")]
+            #[serde(default)]
+            color: Property<Color>,
+            #[serde(
+                default,
+                skip_serializing_if = "Option::is_none",
+                deserialize_with = "crate::property::de_opt_property_or_value"
+            )]
+            maybe: Option<Property<Color>>,
+        }
+        // Bare legacy values.
+        let p: Probe = serde_json::from_str(
+            r#"{"color": {"r": 1.0, "g": 0.0, "b": 0.0, "a": 1.0}}"#,
+        )
+        .unwrap();
+        assert_eq!(p.color.value, Color::RED);
+        assert_eq!(p.maybe, None);
+        // Full property form survives with keyframes.
+        let p: Probe = serde_json::from_str(
+            r#"{"color": {"name": "C", "value": {"r": 0.0, "g": 1.0, "b": 0.0, "a": 1.0}, "default_value": {"r": 0.0, "g": 1.0, "b": 0.0, "a": 1.0}, "animated": true, "keyframes": []}, "maybe": null}"#,
+        )
+        .unwrap();
+        assert!(p.color.is_animated());
+        assert_eq!(p.maybe, None);
+    }
+
+    #[test]
+    fn bare_vec_values_migrate_to_properties() {
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        struct VecProbe {
+            #[serde(deserialize_with = "crate::property::de_vec_property_or_value")]
+            #[serde(default)]
+            colors: Vec<Property<Color>>,
+        }
+        // Bare legacy slot colors.
+        let p: VecProbe = serde_json::from_str(
+            r#"{"colors": [{"r": 1.0, "g": 0.0, "b": 0.0, "a": 1.0}]}"#,
+        )
+        .unwrap();
+        assert_eq!(p.colors.len(), 1);
+        assert_eq!(p.colors[0].value, Color::RED);
+        // Full property form survives.
+        let p: VecProbe = serde_json::from_str(
+            r#"{"colors": [{"name": "color", "value": {"r": 0.0, "g": 0.0, "b": 1.0, "a": 1.0}, "default_value": {"r": 0.0, "g": 0.0, "b": 1.0, "a": 1.0}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(p.colors[0].value.b, 1.0);
+        assert_eq!(p.colors[0].name, "color");
+    }
+}

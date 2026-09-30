@@ -133,8 +133,10 @@ pub enum EffectType {
         contrast: Property<f32>,
     },
     Tint {
-        map_black: Color,
-        map_white: Color,
+        #[serde(deserialize_with = "crate::property::de_property_or_value", default)]
+        map_black: Property<Color>,
+        #[serde(deserialize_with = "crate::property::de_property_or_value", default)]
+        map_white: Property<Color>,
         amount: Property<f32>,
     },
     Invert {
@@ -145,7 +147,8 @@ pub enum EffectType {
         angle: Property<f32>,
         softness: Property<f32>,
         opacity: Property<f32>,
-        color: Color,
+        #[serde(deserialize_with = "crate::property::de_property_or_value", default)]
+        color: Property<Color>,
     },
     GlslShader {
         code: String,
@@ -170,7 +173,8 @@ pub enum EffectType {
         max_vertical: Property<f32>,
     },
     ChromaKey {
-        key_color: Color,
+        #[serde(deserialize_with = "crate::property::de_property_or_value", default)]
+        key_color: Property<Color>,
         tolerance: Property<f32>,
         feather: Property<f32>,
     },
@@ -179,27 +183,34 @@ pub enum EffectType {
         feather: Property<f32>,
     },
     SwapColor {
-        from_color: Color,
-        to_color: Color,
+        #[serde(deserialize_with = "crate::property::de_property_or_value", default)]
+        from_color: Property<Color>,
+        #[serde(deserialize_with = "crate::property::de_property_or_value", default)]
+        to_color: Property<Color>,
         tolerance: Property<f32>,
         feather: Property<f32>,
     },
     NoiseGenerator {
         amount: Property<f32>,
-        monochrome: bool,
+        #[serde(deserialize_with = "crate::property::de_property_or_value", default)]
+        monochrome: Property<bool>,
     },
     /// Procedural checkerboard generator (spatial: needs pixel position,
     /// so [`crate::Effect::nudge_param`] handles scalars while rasterizers
     /// and the viewport SVG preview resolve the pattern).
     Checkerboard {
         size: Property<f32>,
-        color_a: Color,
-        color_b: Color,
+        #[serde(deserialize_with = "crate::property::de_property_or_value", default)]
+        color_a: Property<Color>,
+        #[serde(deserialize_with = "crate::property::de_property_or_value", default)]
+        color_b: Property<Color>,
     },
     /// Two-color linear gradient generator (spatial).
     GradientRamp {
-        color_a: Color,
-        color_b: Color,
+        #[serde(deserialize_with = "crate::property::de_property_or_value", default)]
+        color_a: Property<Color>,
+        #[serde(deserialize_with = "crate::property::de_property_or_value", default)]
+        color_b: Property<Color>,
         angle: Property<f32>,
         /// Extra stops beyond the endpoints (empty = pure two-color ramp).
         /// When non-empty these win for rendering; `color_a`/`color_b`
@@ -215,7 +226,8 @@ pub enum EffectType {
     /// Text stroke outline (resolved by text renderers / viewport SVG).
     TextOutline {
         width: Property<f32>,
-        color: Color,
+        #[serde(deserialize_with = "crate::property::de_property_or_value", default)]
+        color: Property<Color>,
     },
     /// Text bevel lighting (resolved by text renderers).
     TextBevel {
@@ -236,8 +248,8 @@ pub enum EffectType {
         tiles_y: Property<f32>,
         #[serde(default)]
         mode: TileMode,
-        #[serde(default)]
-        mirror: bool,
+        #[serde(deserialize_with = "crate::property::de_property_or_value", default)]
+        mirror: Property<bool>,
         #[serde(default = "default_tile_offset")]
         offset_x: Property<f32>,
         #[serde(default = "default_tile_offset")]
@@ -294,13 +306,13 @@ pub enum EffectType {
     /// Modular stock plug-in (see `crate::stock::StockPlugin`): scalar
     /// params are built from the plug-in descriptor, so every stock effect
     /// is keyframable with zero per-effect plumbing. `colors` holds the
-    /// non-animatable color slots in `stock_color_slots` order.
+    /// animatable color slots in `stock_color_slots` order.
     Stock {
         plugin: StockPlugin,
         #[serde(default)]
         params: Vec<Property<f32>>,
-        #[serde(default)]
-        colors: Vec<Color>,
+        #[serde(default, deserialize_with = "crate::property::de_vec_property_or_value")]
+        colors: Vec<Property<Color>>,
     },
 }
 
@@ -356,8 +368,8 @@ impl EffectType {
     /// Construct a Tint effect type.
     pub fn tint(map_black: Color, map_white: Color, amount: f32) -> Self {
         Self::Tint {
-            map_black,
-            map_white,
+            map_black: Property::new("Map Black", map_black),
+            map_white: Property::new("Map White", map_white),
             amount: Property::new("Amount to Tint", amount.clamp(0.0, 100.0)),
         }
     }
@@ -382,7 +394,7 @@ impl EffectType {
             angle: Property::new("Angle", angle),
             softness: Property::new("Softness", softness.max(0.0)),
             opacity: Property::new("Opacity", opacity.clamp(0.0, 100.0)),
-            color,
+            color: Property::new("Shadow Color", color),
         }
     }
 
@@ -408,7 +420,7 @@ impl EffectType {
     /// Construct a Chroma Key effect type.
     pub fn chroma_key(key_color: Color, tolerance: f32, feather: f32) -> Self {
         Self::ChromaKey {
-            key_color,
+            key_color: Property::new("Key Color", key_color),
             tolerance: Property::new("Tolerance", tolerance.clamp(0.0, 100.0)),
             feather: Property::new("Feather", feather.clamp(0.0, 100.0)),
         }
@@ -427,8 +439,8 @@ impl EffectType {
     /// `from_color` to `to_color` with tolerance + feather falloff).
     pub fn swap_color(from_color: Color, to_color: Color, tolerance: f32, feather: f32) -> Self {
         Self::SwapColor {
-            from_color,
-            to_color,
+            from_color: Property::new("From Color", from_color),
+            to_color: Property::new("To Color", to_color),
             tolerance: Property::new("Tolerance", tolerance.clamp(0.0, 100.0)),
             feather: Property::new("Feather", feather.clamp(0.0, 100.0)),
         }
@@ -450,7 +462,7 @@ impl EffectType {
     pub fn noise_generator(amount: f32, monochrome: bool) -> Self {
         Self::NoiseGenerator {
             amount: Property::new("Amount", amount.clamp(0.0, 100.0)),
-            monochrome,
+            monochrome: Property::new("Monochrome", monochrome),
         }
     }
 
@@ -458,16 +470,16 @@ impl EffectType {
     pub fn checkerboard(size: f32, color_a: Color, color_b: Color) -> Self {
         Self::Checkerboard {
             size: Property::new("Size", size.clamp(2.0, 512.0)),
-            color_a,
-            color_b,
+            color_a: Property::new("Color A", color_a),
+            color_b: Property::new("Color B", color_b),
         }
     }
 
     /// Construct a Gradient Ramp generator effect type.
     pub fn gradient_ramp(color_a: Color, color_b: Color, angle: f32) -> Self {
         Self::GradientRamp {
-            color_a,
-            color_b,
+            color_a: Property::new("Color A", color_a),
+            color_b: Property::new("Color B", color_b),
             angle: Property::new("Angle", angle),
             stops: Vec::new(),
         }
@@ -488,8 +500,8 @@ impl EffectType {
                     Some(sorted)
                 } else {
                     Some(vec![
-                        GradientStop::new(0.0, *color_a),
-                        GradientStop::new(1.0, *color_b),
+                        GradientStop::new(0.0, color_a.value),
+                        GradientStop::new(1.0, color_b.value),
                     ])
                 }
             }
@@ -506,8 +518,8 @@ impl EffectType {
                 if stops.len() >= 2 {
                     let grad = FillGradient { stops, angle: 0.0 };
                     let sorted = grad.sorted_stops();
-                    *color_a = sorted[0].color;
-                    *color_b = sorted[sorted.len() - 1].color;
+                    color_a.set_value(sorted[0].color);
+                    color_b.set_value(sorted[sorted.len() - 1].color);
                     *slot = sorted.into_iter().cloned().collect();
                 } else {
                     slot.clear();
@@ -561,7 +573,7 @@ impl EffectType {
     pub fn text_outline(width: f32, color: Color) -> Self {
         Self::TextOutline {
             width: Property::new("Width", width.clamp(0.0, 50.0)),
-            color,
+            color: Property::new("Color", color),
         }
     }
 
@@ -587,7 +599,7 @@ impl EffectType {
             tiles_x: Property::new("Tiles X", tiles_x.clamp(1.0, 32.0)),
             tiles_y: Property::new("Tiles Y", tiles_y.clamp(1.0, 32.0)),
             mode: TileMode::Grid,
-            mirror: false,
+            mirror: Property::new("Mirror", false),
             offset_x: default_tile_offset(),
             offset_y: default_tile_offset(),
             cell: TileCell::Square,
@@ -701,10 +713,10 @@ impl EffectType {
     }
 
     /// Build stock color slots from the plug-in descriptor.
-    pub fn stock_colors(plugin: StockPlugin) -> Vec<Color> {
+    pub fn stock_colors(plugin: StockPlugin) -> Vec<Property<Color>> {
         crate::stock::stock_color_slots(plugin)
             .iter()
-            .map(|slot| stock_default_color(plugin, slot))
+            .map(|slot| Property::new(*slot, stock_default_color(plugin, slot)))
             .collect()
     }
 }
@@ -1052,10 +1064,10 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
     pub fn set_color_value(&mut self, field: &str, next: Color) -> bool {        match &mut self.effect_type {
             EffectType::Tint { map_black, map_white, .. } => {
                 if field.eq_ignore_ascii_case("map_black") || field.eq_ignore_ascii_case("black") {
-                    *map_black = next;
+                    map_black.set_value(next);
                     true
                 } else if field.eq_ignore_ascii_case("map_white") || field.eq_ignore_ascii_case("white") {
-                    *map_white = next;
+                    map_white.set_value(next);
                     true
                 } else {
                     false
@@ -1063,7 +1075,7 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
             }
             EffectType::DropShadow { color, .. } => {
                 if field.eq_ignore_ascii_case("color") {
-                    *color = next;
+                    color.set_value(next);
                     true
                 } else {
                     false
@@ -1071,7 +1083,7 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
             }
             EffectType::ChromaKey { key_color, .. } => {
                 if field.eq_ignore_ascii_case("key_color") || field.eq_ignore_ascii_case("color") {
-                    *key_color = next;
+                    key_color.set_value(next);
                     true
                 } else {
                     false
@@ -1079,20 +1091,20 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
             }
             EffectType::SwapColor { from_color, to_color, .. } => {
                 if field.eq_ignore_ascii_case("from_color") || field.eq_ignore_ascii_case("from") {
-                    *from_color = next;
+                    from_color.set_value(next);
                     true
                 } else if field.eq_ignore_ascii_case("to_color") || field.eq_ignore_ascii_case("to") {
-                    *to_color = next;
+                    to_color.set_value(next);
                     true
                 } else {
                     false
                 }
             }            EffectType::Checkerboard { color_a, color_b, .. } => {
                 if field.eq_ignore_ascii_case("color_a") || field.eq_ignore_ascii_case("a") {
-                    *color_a = next;
+                    color_a.set_value(next);
                     true
                 } else if field.eq_ignore_ascii_case("color_b") || field.eq_ignore_ascii_case("b") {
-                    *color_b = next;
+                    color_b.set_value(next);
                     true
                 } else {
                     false
@@ -1100,11 +1112,11 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
             }
             EffectType::GradientRamp { color_a, color_b, stops, .. } => {
                 if field.eq_ignore_ascii_case("color_a") || field.eq_ignore_ascii_case("a") {
-                    *color_a = next;
+                    color_a.set_value(next);
                     EffectType::sync_ramp_endpoint(stops, true, next);
                     true
                 } else if field.eq_ignore_ascii_case("color_b") || field.eq_ignore_ascii_case("b") {
-                    *color_b = next;
+                    color_b.set_value(next);
                     EffectType::sync_ramp_endpoint(stops, false, next);
                     true
                 } else {
@@ -1113,10 +1125,172 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
             }
             EffectType::TextOutline { color, .. }
                 if field.eq_ignore_ascii_case("color") => {
-                    *color = next;
+                    color.set_value(next);
                     true
                 }
             _ => false,
+        }
+    }
+
+    /// Mutable access to a named color property (same fields as
+    /// [`Self::set_color_value`]) for animation toggles and playhead commits.
+    pub fn get_color_property_mut(&mut self, field: &str) -> Option<&mut Property<Color>> {
+        match &mut self.effect_type {
+            EffectType::Tint { map_black, map_white, .. } => {
+                if field.eq_ignore_ascii_case("map_black") || field.eq_ignore_ascii_case("black") {
+                    Some(map_black)
+                } else if field.eq_ignore_ascii_case("map_white") || field.eq_ignore_ascii_case("white") {
+                    Some(map_white)
+                } else {
+                    None
+                }
+            }
+            EffectType::DropShadow { color, .. } => {
+                if field.eq_ignore_ascii_case("color") { Some(color) } else { None }
+            }
+            EffectType::ChromaKey { key_color, .. } => {
+                if field.eq_ignore_ascii_case("key_color") || field.eq_ignore_ascii_case("color") {
+                    Some(key_color)
+                } else {
+                    None
+                }
+            }
+            EffectType::SwapColor { from_color, to_color, .. } => {
+                if field.eq_ignore_ascii_case("from_color") || field.eq_ignore_ascii_case("from") {
+                    Some(from_color)
+                } else if field.eq_ignore_ascii_case("to_color") || field.eq_ignore_ascii_case("to") {
+                    Some(to_color)
+                } else {
+                    None
+                }
+            }
+            EffectType::Checkerboard { color_a, color_b, .. } => {
+                if field.eq_ignore_ascii_case("color_a") || field.eq_ignore_ascii_case("a") {
+                    Some(color_a)
+                } else if field.eq_ignore_ascii_case("color_b") || field.eq_ignore_ascii_case("b") {
+                    Some(color_b)
+                } else {
+                    None
+                }
+            }
+            EffectType::GradientRamp { color_a, color_b, .. } => {
+                if field.eq_ignore_ascii_case("color_a") || field.eq_ignore_ascii_case("a") {
+                    Some(color_a)
+                } else if field.eq_ignore_ascii_case("color_b") || field.eq_ignore_ascii_case("b") {
+                    Some(color_b)
+                } else {
+                    None
+                }
+            }
+            EffectType::TextOutline { color, .. }
+                if field.eq_ignore_ascii_case("color") =>
+            {
+                Some(color)
+            }
+            EffectType::Stock { plugin, colors, .. } => {
+                let idx = crate::stock::stock_color_slots(*plugin)
+                    .iter()
+                    .position(|s| s.eq_ignore_ascii_case(field))?;
+                colors.get_mut(idx)
+            }
+            _ => None,
+        }
+    }
+
+    /// Read access to a named color property (same fields as
+    /// [`Self::get_color_property_mut`]) for keyframe-state lookups.
+    pub fn get_color_property(&self, field: &str) -> Option<&Property<Color>> {
+        match &self.effect_type {
+            EffectType::Tint { map_black, map_white, .. } => {
+                if field.eq_ignore_ascii_case("map_black") || field.eq_ignore_ascii_case("black") {
+                    Some(map_black)
+                } else if field.eq_ignore_ascii_case("map_white") || field.eq_ignore_ascii_case("white") {
+                    Some(map_white)
+                } else {
+                    None
+                }
+            }
+            EffectType::DropShadow { color, .. } => {
+                if field.eq_ignore_ascii_case("color") { Some(color) } else { None }
+            }
+            EffectType::ChromaKey { key_color, .. } => {
+                if field.eq_ignore_ascii_case("key_color") || field.eq_ignore_ascii_case("color") {
+                    Some(key_color)
+                } else {
+                    None
+                }
+            }
+            EffectType::SwapColor { from_color, to_color, .. } => {
+                if field.eq_ignore_ascii_case("from_color") || field.eq_ignore_ascii_case("from") {
+                    Some(from_color)
+                } else if field.eq_ignore_ascii_case("to_color") || field.eq_ignore_ascii_case("to") {
+                    Some(to_color)
+                } else {
+                    None
+                }
+            }
+            EffectType::Checkerboard { color_a, color_b, .. } => {
+                if field.eq_ignore_ascii_case("color_a") || field.eq_ignore_ascii_case("a") {
+                    Some(color_a)
+                } else if field.eq_ignore_ascii_case("color_b") || field.eq_ignore_ascii_case("b") {
+                    Some(color_b)
+                } else {
+                    None
+                }
+            }
+            EffectType::GradientRamp { color_a, color_b, .. } => {
+                if field.eq_ignore_ascii_case("color_a") || field.eq_ignore_ascii_case("a") {
+                    Some(color_a)
+                } else if field.eq_ignore_ascii_case("color_b") || field.eq_ignore_ascii_case("b") {
+                    Some(color_b)
+                } else {
+                    None
+                }
+            }
+            EffectType::TextOutline { color, .. }
+                if field.eq_ignore_ascii_case("color") =>
+            {
+                Some(color)
+            }
+            EffectType::Stock { plugin, colors, .. } => {
+                let idx = crate::stock::stock_color_slots(*plugin)
+                    .iter()
+                    .position(|s| s.eq_ignore_ascii_case(field))?;
+                colors.get(idx)
+            }
+            _ => None,
+        }
+    }
+
+    /// Read access to a named boolean property (`monochrome`, `mirror`)
+    /// for keyframe-state lookups.
+    pub fn get_bool_property(&self, field: &str) -> Option<&Property<bool>> {
+        match &self.effect_type {
+            EffectType::NoiseGenerator { monochrome, .. }
+                if field.eq_ignore_ascii_case("monochrome") =>
+            {
+                Some(monochrome)
+            }
+            EffectType::Tiler { mirror, .. } if field.eq_ignore_ascii_case("mirror") => {
+                Some(mirror)
+            }
+            _ => None,
+        }
+    }
+
+    /// Mutable access to a named boolean property (`monochrome`, `mirror`)
+    /// for animation toggles and playhead commits.
+    pub fn get_bool_property_mut(&mut self, field: &str) -> Option<&mut Property<bool>> {
+        match &mut self.effect_type {
+            EffectType::NoiseGenerator { monochrome, .. }
+                if field.eq_ignore_ascii_case("monochrome") =>
+            {
+                Some(monochrome)
+            }
+            EffectType::Tiler { mirror, .. } if field.eq_ignore_ascii_case("mirror") => {
+                Some(mirror)
+            }
+            _ => None,
         }
     }
 
@@ -1162,8 +1336,14 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
     /// fields or effects without that flag.
     pub fn set_bool_value(&mut self, field: &str, next: bool) -> bool {
         match &mut self.effect_type {
+            EffectType::NoiseGenerator { monochrome, .. }
+                if field.eq_ignore_ascii_case("monochrome") =>
+            {
+                monochrome.set_value(next);
+                true
+            }
             EffectType::Tiler { mirror, .. } if field.eq_ignore_ascii_case("mirror") => {
-                *mirror = next;
+                mirror.set_value(next);
                 true
             }
             _ => false,
@@ -2030,7 +2210,7 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
         }
     }
 
-    /// Names of the non-animatable color slots on this effect, if any.
+    /// Names of the animatable color slots on this effect, if any.
     pub fn color_slots(&self) -> Vec<&'static str> {
         match &self.effect_type {
             EffectType::Stock { plugin, colors, .. } => {
@@ -2051,7 +2231,7 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 let idx = crate::stock::stock_color_slots(*plugin)
                     .iter()
                     .position(|s| s.eq_ignore_ascii_case(slot))?;
-                colors.get(idx).copied()
+                colors.get(idx).map(|p| p.value)
             }
             _ => None,
         }
@@ -2064,7 +2244,7 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 let slots = crate::stock::stock_color_slots(*plugin);
                 match slots.iter().position(|s| s.eq_ignore_ascii_case(slot)) {
                     Some(idx) if idx < colors.len() => {
-                        colors[idx] = next;
+                        colors[idx].set_value(next);
                         true
                     }
                     _ => false,
@@ -2133,8 +2313,8 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 scalar("contrast", "Contrast", WidgetKind::Slider, ParamMeta::slider(-100.0, 100.0, 5.0, 1, "", 100.0), contrast),
             ],
             EffectType::Tint { map_black, map_white, amount } => vec![
-                PropDecl::color("map_black", "Map Black", *map_black),
-                PropDecl::color("map_white", "Map White", *map_white),
+                PropDecl::color("map_black", "Map Black", map_black.value, map_black.is_animated()),
+                PropDecl::color("map_white", "Map White", map_white.value, map_white.is_animated()),
                 scalar("amount", "Amount", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 10.0, 0, " %", 100.0), amount),
             ],
             EffectType::Invert { amount } => vec![scalar(
@@ -2149,7 +2329,7 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 scalar("angle", "Angle", WidgetKind::Angle, ParamMeta::slider(0.0, 360.0, 15.0, 1, "°", 360.0), angle),
                 scalar("softness", "Softness", WidgetKind::Slider, px1(0.0, 100.0, 2.0, 50.0), softness),
                 scalar("opacity", "Opacity", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 10.0, 0, " %", 100.0), opacity),
-                PropDecl::color("color", "Color", *color),
+                PropDecl::color("color", "Color", color.value, color.is_animated()),
             ],
             EffectType::GlslShader { param1, param2, param3, param4, .. } => vec![
                 scalar("param1", "P1 (Speed)", WidgetKind::Slider, ParamMeta::slider(-100.0, 100.0, 0.5, 2, "", 10.0), param1),
@@ -2163,7 +2343,7 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 scalar("max_vertical", "Max Vertical", WidgetKind::Slider, px1(-500.0, 500.0, 5.0, 100.0), max_vertical),
             ],
             EffectType::ChromaKey { key_color, tolerance, feather } => vec![
-                PropDecl::color("key_color", "Key Color", *key_color),
+                PropDecl::color("key_color", "Key Color", key_color.value, key_color.is_animated()),
                 scalar("tolerance", "Tolerance", WidgetKind::Slider, ParamMeta::slider(0.0, 100.0, 5.0, 1, "", 100.0), tolerance),
                 scalar("feather", "Feather", WidgetKind::Slider, ParamMeta::slider(0.0, 100.0, 2.0, 1, "", 100.0), feather),
             ],
@@ -2172,23 +2352,23 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 scalar("feather", "Feather", WidgetKind::Slider, ParamMeta::slider(0.0, 100.0, 2.0, 1, "", 100.0), feather),
             ],
             EffectType::SwapColor { from_color, to_color, tolerance, feather } => vec![
-                PropDecl::color("from_color", "From Color", *from_color),
-                PropDecl::color("to_color", "To Color", *to_color),
+                PropDecl::color("from_color", "From Color", from_color.value, from_color.is_animated()),
+                PropDecl::color("to_color", "To Color", to_color.value, to_color.is_animated()),
                 scalar("tolerance", "Tolerance", WidgetKind::Slider, ParamMeta::slider(0.0, 100.0, 5.0, 1, "", 100.0), tolerance),
                 scalar("feather", "Feather", WidgetKind::Slider, ParamMeta::slider(0.0, 100.0, 2.0, 1, "", 100.0), feather),
             ],
             EffectType::NoiseGenerator { amount, monochrome } => vec![
                 scalar("amount", "Amount", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 1, "%", 100.0), amount),
-                PropDecl::boolean("monochrome", "Monochrome", *monochrome),
+                PropDecl::boolean("monochrome", "Monochrome", monochrome.value, monochrome.is_animated()),
             ],
             EffectType::Checkerboard { size, color_a, color_b } => vec![
-                PropDecl::color("color_a", "Color A", *color_a),
-                PropDecl::color("color_b", "Color B", *color_b),
+                PropDecl::color("color_a", "Color A", color_a.value, color_a.is_animated()),
+                PropDecl::color("color_b", "Color B", color_b.value, color_b.is_animated()),
                 scalar("size", "Size", WidgetKind::Slider, ParamMeta::slider(2.0, 512.0, 4.0, 0, "px", 100.0), size),
             ],
             EffectType::GradientRamp { color_a, color_b, angle, .. } => vec![
-                PropDecl::color("color_a", "Start", *color_a),
-                PropDecl::color("color_b", "End", *color_b),
+                PropDecl::color("color_a", "Start", color_a.value, color_a.is_animated()),
+                PropDecl::color("color_b", "End", color_b.value, color_b.is_animated()),
                 scalar("angle", "Angle", WidgetKind::Angle, ParamMeta::slider(0.0, 360.0, 5.0, 0, "°", 100.0), angle),
             ],
             EffectType::Perspective { skew_x, skew_y } => vec![
@@ -2196,7 +2376,7 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 scalar("skew_y", "Skew Y", WidgetKind::Angle, ParamMeta::slider(-60.0, 60.0, 1.0, 1, "°", 100.0), skew_y),
             ],
             EffectType::TextOutline { width, color } => vec![
-                PropDecl::color("color", "Color", *color),
+                PropDecl::color("color", "Color", color.value, color.is_animated()),
                 scalar("width", "Width", WidgetKind::Slider, px1(0.0, 64.0, 1.0, 100.0), width),
             ],
             EffectType::TextBevel { strength, softness } => vec![
@@ -2223,7 +2403,7 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                         TileCell::ALL.iter().map(|c| c.label().to_string()).collect(),
                         cell.index(),
                     ),
-                    PropDecl::boolean("mirror", "Mirror Tiles", *mirror),
+                    PropDecl::boolean("mirror", "Mirror Tiles", mirror.value, mirror.is_animated()),
                     scalar("offset_x", "Offset X", WidgetKind::Slider, ParamMeta::slider(0.0, 1.0, 0.01, 2, "", 100.0), offset_x),
                     scalar("offset_y", "Offset Y", WidgetKind::Slider, ParamMeta::slider(0.0, 1.0, 0.01, 2, "", 100.0), offset_y),
                     scalar("seed", "Random Seed", WidgetKind::Slider, ParamMeta::slider(0.0, 100.0, 1.0, 0, "", 100.0), seed),
@@ -2299,8 +2479,8 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     ));
                 }
                 for slot in self.color_slots() {
-                    if let Some(col) = self.stock_color(slot) {
-                        out.push(PropDecl::color(slot, slot, col));
+                    if let Some(prop) = self.get_color_property(slot) {
+                        out.push(PropDecl::color(slot, slot, prop.value, prop.is_animated()));
                     }
                 }
                 out
@@ -2359,31 +2539,67 @@ mod tests {
         assert_eq!(stock.stock_color("color"), Some(red()));
     }
 
+    #[test]
+    fn stock_colors_are_keyframable_properties() {
+        use crate::keyframe::Keyframe;
+        use crate::timecode::TimeCode;
+        let mut fx = Effect::stock("s", StockPlugin::Solid);
+        let prop = fx.get_color_property_mut("color").expect("stock color slot");
+        prop.add_keyframe(Keyframe::new(TimeCode::from_frames(0, 30.0), Color::BLACK));
+        prop.add_keyframe(Keyframe::new(TimeCode::from_frames(30, 30.0), Color::WHITE));
+        assert!(fx.get_color_property("color").unwrap().is_animated());
+        let mid = fx
+            .get_color_property("color")
+            .unwrap()
+            .evaluate_at(&TimeCode::from_frames(15, 30.0));
+        assert!((mid.r - 0.5).abs() < 1e-5, "{mid:?}");
+    }
+
+    #[test]
+    fn bare_stock_colors_migrate_to_properties() {
+        // Pre-keyframe stock files store bare slot colors.
+        let fx: Effect = serde_json::from_str(
+            r#"{"id": "s", "name": "Solid", "effect_type": {"type": "stock", "plugin": "solid", "params": [], "colors": [{"r": 1.0, "g": 0.0, "b": 0.0, "a": 1.0}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(fx.stock_color("color"), Some(red()));
+    }
+
+    #[test]
+    fn bool_props_toggle_through_shared_accessors() {
+        let mut fx = Effect::noise_generator("n", 50.0, false);
+        assert!(!fx.get_bool_property("monochrome").unwrap().value);
+        fx.get_bool_property_mut("monochrome").unwrap().set_value(true);
+        assert!(fx.get_bool_property("monochrome").unwrap().value);
+        assert!(fx.set_bool_value("monochrome", false));
+        assert!(fx.get_bool_property("mirror").is_none());
+    }
+
     fn fx_color_of(fx: &Effect, field: &str) -> Option<Color> {
         match &fx.effect_type {
             EffectType::Tint { map_black, map_white, .. } => match field {
-                "map_black" => Some(*map_black),
-                "map_white" => Some(*map_white),
+                "map_black" => Some(map_black.value),
+                "map_white" => Some(map_white.value),
                 _ => None,
             },
-            EffectType::DropShadow { color, .. } => Some(*color),
-            EffectType::ChromaKey { key_color, .. } => Some(*key_color),
+            EffectType::DropShadow { color, .. } => Some(color.value),
+            EffectType::ChromaKey { key_color, .. } => Some(key_color.value),
             EffectType::SwapColor { from_color, to_color, .. } => match field {
-                "from_color" => Some(*from_color),
-                "to_color" => Some(*to_color),
+                "from_color" => Some(from_color.value),
+                "to_color" => Some(to_color.value),
                 _ => None,
             },
             EffectType::Checkerboard { color_a, color_b, .. } => match field {
-                "color_a" => Some(*color_a),
-                "color_b" => Some(*color_b),
+                "color_a" => Some(color_a.value),
+                "color_b" => Some(color_b.value),
                 _ => None,
             },
             EffectType::GradientRamp { color_a, color_b, .. } => match field {
-                "color_a" => Some(*color_a),
-                "color_b" => Some(*color_b),
+                "color_a" => Some(color_a.value),
+                "color_b" => Some(color_b.value),
                 _ => None,
             },
-            EffectType::TextOutline { color, .. } => Some(*color),
+            EffectType::TextOutline { color, .. } => Some(color.value),
             _ => None,
         }
     }

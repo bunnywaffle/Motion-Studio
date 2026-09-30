@@ -4821,8 +4821,8 @@ mod tests {
             assert_eq!(eff.stock_color("color_a"), None);
             match &eff.effect_type {
                 EffectType::GradientRamp { color_a, color_b, .. } => {
-                    assert_eq!(*color_a, project::Color::RED);
-                    assert_eq!(*color_b, project::Color::BLUE);
+                    assert_eq!(color_a.value, project::Color::RED);
+                    assert_eq!(color_b.value, project::Color::BLUE);
                 }
                 other => panic!("expected ramp, got {other:?}"),
             }
@@ -4841,7 +4841,7 @@ mod tests {
                 .get_effect(&noise)
                 .unwrap()
                 .effect_type,
-            EffectType::NoiseGenerator { monochrome: true, .. }
+            EffectType::NoiseGenerator { monochrome, .. } if monochrome.value
         ));
     }
 
@@ -4969,7 +4969,7 @@ mod tests {
             let eff = layer.get_effect(&noise).unwrap();
             matches!(
                 &eff.effect_type,
-                project::EffectType::NoiseGenerator { monochrome: true, .. }
+                project::EffectType::NoiseGenerator { monochrome, .. } if monochrome.value
             )
         }));
     }
@@ -5237,10 +5237,10 @@ mod tests {
         .expect("update_window failed");
         assert!(app_view.read_with(cx, |view, cx| {
             matches!(
-                view.state().read(cx).active_composition().unwrap()
+                &view.state().read(cx).active_composition().unwrap()
                     .get_layer("layer_accent").unwrap()
                     .get_effect(&tiler).unwrap().effect_type,
-                project::EffectType::Tiler { mirror: true, .. }
+                project::EffectType::Tiler { mirror, .. } if mirror.value
             )
         }));
     }
@@ -6850,12 +6850,12 @@ mod tests {
         let l = comp.get_layer(&layer_id).unwrap();
         for eff in &l.effects {
             match &eff.effect_type {
-                EffectType::ChromaKey { key_color, .. } => assert_eq!(*key_color, custom_green),
+                EffectType::ChromaKey { key_color, .. } => assert_eq!(key_color.value, custom_green),
                 EffectType::Tint { map_black, map_white, .. } => {
-                    assert_eq!(*map_black, navy);
-                    assert_eq!(*map_white, gold);
+                    assert_eq!(map_black.value, navy);
+                    assert_eq!(map_white.value, gold);
                 }
-                EffectType::DropShadow { color, .. } => assert_eq!(*color, dark_purple),
+                EffectType::DropShadow { color, .. } => assert_eq!(color.value, dark_purple),
                 _ => {}
             }
         }
@@ -7324,7 +7324,7 @@ mod tests {
         let sid = state.add_rectangle_shape_layer(100.0, 100.0, None).unwrap();
         let sl = state.active_composition().unwrap().get_layer(&sid).unwrap();
         if let project::LayerSource::Shape { shape_type: project::ShapeType::Rectangle { fill, .. } } = &sl.source {
-            assert_eq!(*fill, project::Color::from_hex("#10B981").unwrap());
+            assert_eq!(fill.value, project::Color::from_hex("#10B981").unwrap());
         } else {
             panic!("expected rect");
         }

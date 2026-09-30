@@ -1548,7 +1548,7 @@ impl Render for ProjectPanel {
                 } else {
                     for solid in solids {
                         let (w, h, col) = match &solid.source {
-                            LayerSource::Solid { width, height, color, .. } => (*width, *height, *color),
+                            LayerSource::Solid { width, height, color, .. } => (*width, *height, color.value),
                             _ => (1920, 1080, Color::WHITE),
                         };
 
@@ -6160,6 +6160,105 @@ fn property_keyframe_controls(
                             )
                         } else { (false, false, false) }
                     }
+                    "text.stroke_color" => {
+                        if let LayerSource::Text { ref stroke_color, .. } = layer.source {
+                            (
+                                stroke_color.has_keyframe_at(&current_tc),
+                                stroke_color.previous_keyframe_time(&current_tc).is_some(),
+                                stroke_color.next_keyframe_time(&current_tc).is_some(),
+                            )
+                        } else {
+                            (false, false, false)
+                        }
+                    }
+                    "solid.color" => {
+                        if let LayerSource::Solid { ref color, .. } = layer.source {
+                            (
+                                color.has_keyframe_at(&current_tc),
+                                color.previous_keyframe_time(&current_tc).is_some(),
+                                color.next_keyframe_time(&current_tc).is_some(),
+                            )
+                        } else {
+                            (false, false, false)
+                        }
+                    }
+                    "shape.fill" => {
+                        if let LayerSource::Shape { ref shape_type } = layer.source {
+                            let fill = match shape_type {
+                                project::ShapeType::Rectangle { ref fill, .. }
+                                | project::ShapeType::Ellipse { ref fill, .. }
+                                | project::ShapeType::Path { ref fill, .. } => fill,
+                            };
+                            (
+                                fill.has_keyframe_at(&current_tc),
+                                fill.previous_keyframe_time(&current_tc).is_some(),
+                                fill.next_keyframe_time(&current_tc).is_some(),
+                            )
+                        } else {
+                            (false, false, false)
+                        }
+                    }
+                    "solid.gradient" => {
+                        if let LayerSource::Solid { ref fill_gradient, .. } = layer.source {
+                            match fill_gradient {
+                                Some(p) => (
+                                    p.has_keyframe_at(&current_tc),
+                                    p.previous_keyframe_time(&current_tc).is_some(),
+                                    p.next_keyframe_time(&current_tc).is_some(),
+                                ),
+                                None => (false, false, false),
+                            }
+                        } else {
+                            (false, false, false)
+                        }
+                    }
+                    "shape.gradient" => {
+                        if let LayerSource::Shape { ref shape_type } = layer.source {
+                            let slot = match shape_type {
+                                project::ShapeType::Rectangle { ref fill_gradient, .. }
+                                | project::ShapeType::Ellipse { ref fill_gradient, .. }
+                                | project::ShapeType::Path { ref fill_gradient, .. } => fill_gradient,
+                            };
+                            match slot {
+                                Some(p) => (
+                                    p.has_keyframe_at(&current_tc),
+                                    p.previous_keyframe_time(&current_tc).is_some(),
+                                    p.next_keyframe_time(&current_tc).is_some(),
+                                ),
+                                None => (false, false, false),
+                            }
+                        } else {
+                            (false, false, false)
+                        }
+                    }
+                    "text.fill_gradient" => {
+                        if let LayerSource::Text { ref fill_gradient, .. } = layer.source {
+                            match fill_gradient {
+                                Some(p) => (
+                                    p.has_keyframe_at(&current_tc),
+                                    p.previous_keyframe_time(&current_tc).is_some(),
+                                    p.next_keyframe_time(&current_tc).is_some(),
+                                ),
+                                None => (false, false, false),
+                            }
+                        } else {
+                            (false, false, false)
+                        }
+                    }
+                    "text.stroke_gradient" => {
+                        if let LayerSource::Text { ref stroke_gradient, .. } = layer.source {
+                            match stroke_gradient {
+                                Some(p) => (
+                                    p.has_keyframe_at(&current_tc),
+                                    p.previous_keyframe_time(&current_tc).is_some(),
+                                    p.next_keyframe_time(&current_tc).is_some(),
+                                ),
+                                None => (false, false, false),
+                            }
+                        } else {
+                            (false, false, false)
+                        }
+                    }
                     _ => {
                         if let Some(rest) = prop_path.strip_prefix("effect:") {
                             let parts: Vec<&str> = rest.splitn(2, ':').collect();
@@ -6168,6 +6267,18 @@ fn property_keyframe_controls(
                                 let param_name = parts[1];
                                 if let Some(fx) = layer.get_effect(fx_id) {
                                     if let Some(prop) = fx.get_param_property(param_name) {
+                                        (
+                                            prop.has_keyframe_at(&current_tc),
+                                            prop.previous_keyframe_time(&current_tc).is_some(),
+                                            prop.next_keyframe_time(&current_tc).is_some(),
+                                        )
+                                    } else if let Some(prop) = fx.get_color_property(param_name) {
+                                        (
+                                            prop.has_keyframe_at(&current_tc),
+                                            prop.previous_keyframe_time(&current_tc).is_some(),
+                                            prop.next_keyframe_time(&current_tc).is_some(),
+                                        )
+                                    } else if let Some(prop) = fx.get_bool_property(param_name) {
                                         (
                                             prop.has_keyframe_at(&current_tc),
                                             prop.previous_keyframe_time(&current_tc).is_some(),
@@ -6296,6 +6407,18 @@ pub(crate) fn effect_param_keyframe_controls(
             if let Some(layer) = comp.get_layer(layer_id) {
                 if let Some(fx) = layer.get_effect(eff_id) {
                     if let Some(prop) = fx.get_param_property(param_name) {
+                        (
+                            prop.has_keyframe_at(&current_tc),
+                            prop.previous_keyframe_time(&current_tc).is_some(),
+                            prop.next_keyframe_time(&current_tc).is_some(),
+                        )
+                    } else if let Some(prop) = fx.get_color_property(param_name) {
+                        (
+                            prop.has_keyframe_at(&current_tc),
+                            prop.previous_keyframe_time(&current_tc).is_some(),
+                            prop.next_keyframe_time(&current_tc).is_some(),
+                        )
+                    } else if let Some(prop) = fx.get_bool_property(param_name) {
                         (
                             prop.has_keyframe_at(&current_tc),
                             prop.previous_keyframe_time(&current_tc).is_some(),
@@ -8120,8 +8243,8 @@ fn render_applied_effects(
                     }
                 }
                 EffectType::Tint { map_black, map_white, .. } => {
-                    let mb = *map_black;
-                    let mw = *map_white;
+                    let mb = map_black.value;
+                    let mw = map_white.value;
                     let mb_hex = format!("#{:02X}{:02X}{:02X}", (mb.r * 255.0) as u8, (mb.g * 255.0) as u8, (mb.b * 255.0) as u8);
                     let mw_hex = format!("#{:02X}{:02X}{:02X}", (mw.r * 255.0) as u8, (mw.g * 255.0) as u8, (mw.b * 255.0) as u8);
                     let s_tb = state.clone();
@@ -8268,7 +8391,7 @@ fn render_applied_effects(
                     }
                 }
                 EffectType::DropShadow { color, .. } => {
-                    let sc = *color;
+                    let sc = color.value;
                     let sc_hex = format!("#{:02X}{:02X}{:02X}", (sc.r * 255.0) as u8, (sc.g * 255.0) as u8, (sc.b * 255.0) as u8);
                     let s_sc = state.clone();
                     let id_sc = eff_id.clone();
@@ -8508,6 +8631,7 @@ fn render_applied_effects(
                                             cx.notify();
                                         });
                                     },
+                                    None,
                                     cx,
                                 )
                             }
@@ -8809,7 +8933,7 @@ fn render_applied_effects(
                 EffectType::ChromaKey { key_color, .. } => {
                     let s_ck = state.clone();
                     let id_ck = eff_id.clone();
-                    let kc = *key_color;
+                    let kc = key_color.value;
                     let ck_hex = format!("#{:02X}{:02X}{:02X}", (kc.r * 255.0) as u8, (kc.g * 255.0) as u8, (kc.b * 255.0) as u8);
 
                     let chroma_presets = [
@@ -9204,14 +9328,14 @@ impl Render for PropertiesPanel {
                 for eff in &layer.effects {
                     match &eff.effect_type {
                         EffectType::ChromaKey { key_color, .. } => {
-                            chroma_col = Some(*key_color);
+                            chroma_col = Some(key_color.value);
                         }
                         EffectType::Tint { map_black, map_white, .. } => {
-                            tint_b = Some(*map_black);
-                            tint_w = Some(*map_white);
+                            tint_b = Some(map_black.value);
+                            tint_w = Some(map_white.value);
                         }
                         EffectType::DropShadow { color, .. } => {
-                            shadow_col = Some(*color);
+                            shadow_col = Some(color.value);
                         }
                         _ => {}
                     }
@@ -9296,7 +9420,7 @@ impl Render for PropertiesPanel {
                 }
                 LayerSource::Solid { color, .. }
                     if !is_open => {
-                        let c = *color;
+                        let c = color.value;
                         let hsla: Hsla = Rgba { r: c.r, g: c.g, b: c.b, a: c.a }.into();
                         let picker_ent = inspector_color.read(cx).state.clone();
                         picker_ent.update(cx, |p, cx| {
@@ -10267,7 +10391,7 @@ impl Render for PropertiesPanel {
                         // --- Source-Specific Properties Section ---
                         match &layer.source {
                             LayerSource::Solid { color, width, height, .. } => {
-                                let c = *color;
+                                let c = color.value;
                                 let w = *width;
                                 let h = *height;
                                 let lid_c = layer.id.clone();
@@ -10335,6 +10459,7 @@ impl Render for PropertiesPanel {
                                                 h_flex()
                                                     .gap_2()
                                                     .items_center()
+                                                    .child(property_stopwatch(&self.state, &layer.id, "solid.color", color.is_animated(), cx))
                                                     .child(div().text_color(ae::dim()).child("Color:"))
                                                     .child(
                                                         render_color_swatch(
@@ -10484,7 +10609,7 @@ impl Render for PropertiesPanel {
                                 let cur_align = *align;
                                 let cur_caps = *all_caps;
                                 let cur_stroke_w = stroke_width.value;
-                                let cur_stroke = *stroke_color;
+                                let cur_stroke = stroke_color.value;
                                 let _cur_baseline = baseline_shift.value;
                                 let cur_box = box_width.value;
                                 let cur_box_h = box_height.value;
@@ -10844,6 +10969,8 @@ impl Render for PropertiesPanel {
                                 let swatches_row = h_flex()
                                     .gap_3()
                                     .items_center()
+                                    .child(property_stopwatch(&self.state, &layer.id, "text.fill_color", fill_color.is_animated(), cx))
+                                    .child(property_stopwatch(&self.state, &layer.id, "text.stroke_color", stroke_color.is_animated(), cx))
                                     .child(
                                         render_color_swatch(
                                             "text_fill_swatch",
@@ -11285,7 +11412,7 @@ impl Render for PropertiesPanel {
                                         let w = width.value;
                                         let h = height.value;
                                         let cr = corner_radius.value;
-                                        let fill_col = *fill;
+                                        let fill_col = fill.value;
                                         let s_fill = self.state.clone();
                                         let lid_fill = layer.id.clone();
                                         let mut fill_row = h_flex().gap_1().items_center();
@@ -11342,7 +11469,13 @@ impl Render for PropertiesPanel {
                                                     .items_center()
                                                     .justify_between()
                                                     .text_xs()
-                                                    .child(div().text_color(cx.theme().muted_foreground).child("Fill"))
+                                                    .child(
+                                                        h_flex()
+                                                            .gap_1()
+                                                            .items_center()
+                                                            .child(property_stopwatch(&self.state, &layer.id, "shape.fill", fill.is_animated(), cx))
+                                                            .child(div().text_color(cx.theme().muted_foreground).child("Fill"))
+                                                    )
                                                     .child(
                                                         h_flex()
                                                             .gap_2()
@@ -11449,7 +11582,7 @@ impl Render for PropertiesPanel {
                                     ShapeType::Ellipse { radius_x, radius_y, fill, .. } => {
                                         let rx = radius_x.value;
                                         let ry = radius_y.value;
-                                        let fill_col = *fill;
+                                        let fill_col = fill.value;
                                         let s_fill = self.state.clone();
                                         let lid_fill = layer.id.clone();
                                         let mut fill_row = h_flex().gap_1().items_center();
@@ -11506,7 +11639,13 @@ impl Render for PropertiesPanel {
                                                     .items_center()
                                                     .justify_between()
                                                     .text_xs()
-                                                    .child(div().text_color(cx.theme().muted_foreground).child("Fill"))
+                                                    .child(
+                                                        h_flex()
+                                                            .gap_1()
+                                                            .items_center()
+                                                            .child(property_stopwatch(&self.state, &layer.id, "shape.fill", fill.is_animated(), cx))
+                                                            .child(div().text_color(cx.theme().muted_foreground).child("Fill"))
+                                                    )
                                                     .child(
                                                         h_flex()
                                                             .gap_2()
@@ -16237,8 +16376,20 @@ impl Render for TimelinePanel {
                                     // data as the Properties panel — no
                                     // per-effect UI in the timeline either).
                                     let mut param_entries: Vec<(String, String, f32, f32)> = Vec::new();
+                                    // Color/bool params get label + nav + lane rows (no numeric scrub).
+                                    let mut swatch_entries: Vec<(String, String, Vec<f64>)> = Vec::new();
                                     for decl in effect.declarations() {
                                         if !decl.is_scalar() {
+                                            let kf_times: Vec<f64> = effect
+                                                .get_color_property(&decl.field)
+                                                .map(|p| p.keyframes().iter().map(|k| k.time_seconds()).collect())
+                                                .or_else(|| {
+                                                    effect.get_bool_property(&decl.field).map(|p| {
+                                                        p.keyframes().iter().map(|k| k.time_seconds()).collect()
+                                                    })
+                                                })
+                                                .unwrap_or_default();
+                                            swatch_entries.push((decl.field.clone(), decl.label.clone(), kf_times));
                                             continue;
                                         }
                                         if let Some(prop) = effect.get_param_property(&decl.field) {
@@ -16298,6 +16449,60 @@ impl Render for TimelinePanel {
                                                 .items_center()
                                                 .child(param_left)
                                                 .child(param_lane),
+                                        );
+                                    }
+
+                                    for (p_slug, p_label, kf_times) in swatch_entries {
+                                        let fx_prop_path = format!("effect:{}:{p_slug}", effect.id);
+
+                                        let is_anim = effect
+                                            .get_color_property(&p_slug)
+                                            .map(|p| p.is_animated())
+                                            .or_else(|| effect.get_bool_property(&p_slug).map(|p| p.is_animated()))
+                                            .unwrap_or(false);
+                                        let has_kf = effect
+                                            .get_color_property(&p_slug)
+                                            .map(|p| p.has_keyframe_at(&current_tc))
+                                            .or_else(|| effect.get_bool_property(&p_slug).map(|p| p.has_keyframe_at(&current_tc)))
+                                            .unwrap_or(false);
+                                        let prev_kf = effect
+                                            .get_color_property(&p_slug)
+                                            .and_then(|p| p.previous_keyframe_time(&current_tc))
+                                            .or_else(|| effect.get_bool_property(&p_slug).and_then(|p| p.previous_keyframe_time(&current_tc)))
+                                            .is_some();
+                                        let next_kf = effect
+                                            .get_color_property(&p_slug)
+                                            .and_then(|p| p.next_keyframe_time(&current_tc))
+                                            .or_else(|| effect.get_bool_property(&p_slug).and_then(|p| p.next_keyframe_time(&current_tc)))
+                                            .is_some();
+
+                                        let swatch_left = h_flex()
+                                            .w(px(380.))
+                                            .h(px(24.))
+                                            .pl(px(44.))
+                                            .pr_2()
+                                            .border_r_1()
+                                            .border_color(cx.theme().border)
+                                            .items_center()
+                                            .text_xs()
+                                            .child(
+                                                h_flex()
+                                                    .gap_1()
+                                                    .items_center()
+                                                    .child(timeline_stopwatch_nav(&self.state, &layer.id, &fx_prop_path, is_anim, has_kf, prev_kf, next_kf, cx))
+                                                    .child(div().w(px(100.)).truncate().text_color(cx.theme().foreground).child(p_label)),
+                                            );
+
+                                        let swatch_lane = timeline_keyframe_lane(&layer.id, &fx_prop_path, &kf_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, cx);
+
+                                        timeline_rows.push(
+                                            h_flex()
+                                                .h(px(24.))
+                                                .border_b_1()
+                                                .border_color(cx.theme().border)
+                                                .items_center()
+                                                .child(swatch_left)
+                                                .child(swatch_lane),
                                         );
                                     }
                                 }

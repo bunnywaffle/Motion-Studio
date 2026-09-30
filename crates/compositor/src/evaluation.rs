@@ -1687,8 +1687,8 @@ impl LayerStackEvaluator {
                             map_white,
                             amount,
                         } => EvaluatedEffectType::Tint {
-                            map_black: *map_black,
-                            map_white: *map_white,
+                            map_black: map_black.evaluate_at(time),
+                            map_white: map_white.evaluate_at(time),
                             amount: eval_eff_prop("amount", amount.evaluate_at(time)),
                         },
                         EffectType::Invert { amount } => EvaluatedEffectType::Invert {
@@ -1705,7 +1705,7 @@ impl LayerStackEvaluator {
                             angle: eval_eff_prop("angle", angle.evaluate_at(time)),
                             softness: eval_eff_prop("softness", softness.evaluate_at(time)),
                             opacity: eval_eff_prop("opacity", opacity.evaluate_at(time)),
-                            color: *color,
+                            color: color.evaluate_at(time),
                         },
                         EffectType::GlslShader {
                             code,
@@ -1732,7 +1732,7 @@ impl LayerStackEvaluator {
                             tolerance,
                             feather,
                         } => EvaluatedEffectType::ChromaKey {
-                            key_color: *key_color,
+                            key_color: key_color.evaluate_at(time),
                             tolerance: tolerance.evaluate_at(time),
                             feather: feather.evaluate_at(time),
                         },
@@ -1744,8 +1744,8 @@ impl LayerStackEvaluator {
                         }
                         EffectType::SwapColor { from_color, to_color, tolerance, feather } => {
                             EvaluatedEffectType::SwapColor {
-                                from_color: *from_color,
-                                to_color: *to_color,
+                                from_color: from_color.evaluate_at(time),
+                                to_color: to_color.evaluate_at(time),
                                 tolerance: tolerance.evaluate_at(time),
                                 feather: feather.evaluate_at(time),
                             }
@@ -1755,7 +1755,7 @@ impl LayerStackEvaluator {
                             monochrome,
                         } => EvaluatedEffectType::NoiseGenerator {
                             amount: amount.evaluate_at(time),
-                            monochrome: *monochrome,
+                            monochrome: monochrome.evaluate_at(time),
                         },
                         EffectType::ShaderLab { source, params, values, .. } => {
                             use std::collections::hash_map::DefaultHasher;
@@ -1787,8 +1787,8 @@ impl LayerStackEvaluator {
                         EffectType::Checkerboard { size, color_a, color_b } => {
                             EvaluatedEffectType::Checkerboard {
                                 size: size.evaluate_at(time),
-                                color_a: *color_a,
-                                color_b: *color_b,
+                                color_a: color_a.evaluate_at(time),
+                                color_b: color_b.evaluate_at(time),
                             }
                         }
                         EffectType::GradientRamp { color_a, color_b, angle, stops } => {
@@ -1803,8 +1803,8 @@ impl LayerStackEvaluator {
                                 sorted
                             } else {
                                 vec![
-                                    GradientStop::new(0.0, *color_a),
-                                    GradientStop::new(1.0, *color_b),
+                                    GradientStop::new(0.0, color_a.evaluate_at(time)),
+                                    GradientStop::new(1.0, color_b.evaluate_at(time)),
                                 ]
                             };
                             EvaluatedEffectType::GradientRamp {
@@ -1820,7 +1820,7 @@ impl LayerStackEvaluator {
                         EffectType::TextOutline { width, color } => {
                             EvaluatedEffectType::TextOutline {
                                 width: width.evaluate_at(time),
-                                color: *color,
+                                color: color.evaluate_at(time),
                             }
                         }
                         EffectType::TextBevel { strength, softness } => {
@@ -1840,7 +1840,7 @@ impl LayerStackEvaluator {
                                 tiles_x: tiles_x.evaluate_at(time),
                                 tiles_y: tiles_y.evaluate_at(time),
                                 mode: *mode,
-                                mirror: *mirror,
+                                mirror: mirror.evaluate_at(time),
                                 offset_x: offset_x.evaluate_at(time),
                                 offset_y: offset_y.evaluate_at(time),
                                 cell: *cell,
@@ -1896,7 +1896,7 @@ impl LayerStackEvaluator {
                             EvaluatedEffectType::Stock {
                                 plugin: *plugin,
                                 params: params.iter().map(|p| p.evaluate_at(time)).collect(),
-                                colors: colors.clone(),
+                                colors: colors.iter().map(|p| p.evaluate_at(time)).collect(),
                             }
                         }
                     };
@@ -1909,11 +1909,15 @@ impl LayerStackEvaluator {
                 }
             }
 
+            // Resolve keyframed fills/gradients into the snapshot so the
+            // rasterizer reads animated colors from plain `.value`s.
+            let mut source = node.source.clone();
+            source.resolve_at(time);
             evaluated_layers.push(EvaluatedLayer {
                 id: node.id.clone(),
                 name: node.name.clone(),
                 layer_index: node.layer_index,
-                source: node.source.clone(),
+                source,
                 blend_mode: node.blend_mode,
                 is_active,
                 is_visible,

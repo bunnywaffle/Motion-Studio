@@ -168,8 +168,8 @@ pub struct PropDecl {
 pub enum PropValue {
     Float { value: f32, animated: bool },
     Int { value: i32 },
-    Bool(bool),
-    Color(Color),
+    Bool { value: bool, animated: bool },
+    Color { value: Color, animated: bool },
     Text(String),
     EnumSel { index: usize },
 }
@@ -198,23 +198,23 @@ impl PropDecl {
         }
     }
 
-    pub fn color(field: &str, label: &str, value: Color) -> Self {
+    pub fn color(field: &str, label: &str, value: Color, animated: bool) -> Self {
         Self {
             field: field.to_string(),
             label: label.to_string(),
             widget: WidgetKind::Color,
             meta: ParamMeta::slider(0.0, 1.0, 0.01, 2, "", 100.0),
-            value: PropValue::Color(value),
+            value: PropValue::Color { value, animated },
         }
     }
 
-    pub fn boolean(field: &str, label: &str, value: bool) -> Self {
+    pub fn boolean(field: &str, label: &str, value: bool, animated: bool) -> Self {
         Self {
             field: field.to_string(),
             label: label.to_string(),
             widget: WidgetKind::Checkbox,
             meta: ParamMeta::slider(0.0, 1.0, 1.0, 0, "", 100.0),
-            value: PropValue::Bool(value),
+            value: PropValue::Bool { value, animated },
         }
     }
 
@@ -244,6 +244,14 @@ mod tests {
         Property::new("P", v)
     }
 
+    fn c(v: Color) -> Property<Color> {
+        Property::new("C", v)
+    }
+
+    fn b(v: bool) -> Property<bool> {
+        Property::new("B", v)
+    }
+
     fn fx(t: EffectType) -> Effect {
         Effect::new("e", "E", t)
     }
@@ -255,22 +263,22 @@ mod tests {
         let cases: Vec<Effect> = vec![
             fx(EffectType::GaussianBlur { radius: p(5.0) }),
             fx(EffectType::BrightnessContrast { brightness: p(0.0), contrast: p(0.0) }),
-            fx(EffectType::Tint { map_black: Color::BLACK, map_white: Color::WHITE, amount: p(100.0) }),
+            fx(EffectType::Tint { map_black: c(Color::BLACK), map_white: c(Color::WHITE), amount: p(100.0) }),
             fx(EffectType::Invert { amount: p(100.0) }),
-            fx(EffectType::DropShadow { distance: p(5.0), angle: p(45.0), softness: p(5.0), opacity: p(80.0), color: Color::BLACK }),
+            fx(EffectType::DropShadow { distance: p(5.0), angle: p(45.0), softness: p(5.0), opacity: p(80.0), color: c(Color::BLACK) }),
             fx(EffectType::GlslShader { code: String::new(), param1: p(0.0), param2: p(0.0), param3: p(0.0), param4: p(0.0) }),
             fx(EffectType::DisplacementMap { max_horizontal: p(0.0), max_vertical: p(0.0) }),
-            fx(EffectType::ChromaKey { key_color: Color::GREEN, tolerance: p(30.0), feather: p(10.0) }),
+            fx(EffectType::ChromaKey { key_color: c(Color::GREEN), tolerance: p(30.0), feather: p(10.0) }),
             fx(EffectType::LumaKey { threshold: p(50.0), feather: p(5.0) }),
-            fx(EffectType::SwapColor { from_color: Color::GREEN, to_color: Color::RED, tolerance: p(30.0), feather: p(10.0) }),
-            fx(EffectType::NoiseGenerator { amount: p(50.0), monochrome: false }),
-            fx(EffectType::Checkerboard { size: p(32.0), color_a: Color::BLACK, color_b: Color::WHITE }),
-            fx(EffectType::GradientRamp { color_a: Color::BLACK, color_b: Color::WHITE, angle: p(90.0), stops: Vec::new() }),
+            fx(EffectType::SwapColor { from_color: c(Color::GREEN), to_color: c(Color::RED), tolerance: p(30.0), feather: p(10.0) }),
+            fx(EffectType::NoiseGenerator { amount: p(50.0), monochrome: b(false) }),
+            fx(EffectType::Checkerboard { size: p(32.0), color_a: c(Color::BLACK), color_b: c(Color::WHITE) }),
+            fx(EffectType::GradientRamp { color_a: c(Color::BLACK), color_b: c(Color::WHITE), angle: p(90.0), stops: Vec::new() }),
             fx(EffectType::Perspective { skew_x: p(0.0), skew_y: p(0.0) }),
-            fx(EffectType::TextOutline { width: p(3.0), color: Color::BLACK }),
+            fx(EffectType::TextOutline { width: p(3.0), color: c(Color::BLACK) }),
             fx(EffectType::TextBevel { strength: p(50.0), softness: p(10.0) }),
             fx(EffectType::Bloom { intensity: p(50.0), radius: p(5.0) }),
-            fx(EffectType::Tiler { tiles_x: p(4.0), tiles_y: p(4.0), mode: TileMode::Grid, mirror: false, offset_x: p(0.0), offset_y: p(0.0), cell: TileCell::Square, seed: p(1.0), amount: p(0.0) }),
+            fx(EffectType::Tiler { tiles_x: p(4.0), tiles_y: p(4.0), mode: TileMode::Grid, mirror: b(false), offset_x: p(0.0), offset_y: p(0.0), cell: TileCell::Square, seed: p(1.0), amount: p(0.0) }),
             fx(EffectType::Warp { amount: p(50.0), scale: p(1.0) }),
             fx(EffectType::Exposure { exposure: p(1.5) }),
             fx(EffectType::Vibrance { vibrance: p(20.0) }),

@@ -18,11 +18,11 @@ const fn default_speed_one() -> f64 {
     1.0
 }
 
-fn default_shape_fill() -> Color {
-    Color::WHITE
+fn default_shape_fill_prop() -> Property<Color> {
+    Property::new("Fill", Color::WHITE)
 }
 
-fn default_no_gradient() -> Option<FillGradient> {
+fn default_no_gradient() -> Option<Property<FillGradient>> {
     None
 }
 
@@ -57,6 +57,31 @@ pub struct FillGradient {
 impl Default for FillGradient {
     fn default() -> Self {
         Self::two_color(Color::WHITE, Color::BLACK, 90.0)
+    }
+}
+
+impl crate::keyframe::Interpolate for FillGradient {
+    /// Morph stops pairwise when topologies match (same count: lerp
+    /// offsets, colors, and angle); otherwise hold the current value
+    /// (topology jumps interpolate as a step, like discrete values).
+    fn lerp(&self, other: &Self, t: f32) -> Self {
+        if self.stops.len() != other.stops.len() {
+            return self.clone();
+        }
+        Self {
+            stops: self
+                .stops
+                .iter()
+                .zip(other.stops.iter())
+                .map(|(a, b)| {
+                    GradientStop::new(
+                        a.offset + (b.offset - a.offset) * t,
+                        a.color.lerp(&b.color, t),
+                    )
+                })
+                .collect(),
+            angle: self.angle + (other.angle - self.angle) * t,
+        }
     }
 }
 
@@ -199,28 +224,28 @@ pub enum ShapeType {
         width: Property<f32>,
         height: Property<f32>,
         corner_radius: Property<f32>,
-        #[serde(default = "default_shape_fill")]
-        fill: Color,
+        #[serde(default = "default_shape_fill_prop", deserialize_with = "crate::property::de_property_or_value")]
+        fill: Property<Color>,
         /// Linear fill gradient (None = solid `fill`).
-        #[serde(default = "default_no_gradient", skip_serializing_if = "Option::is_none")]
-        fill_gradient: Option<FillGradient>,
+        #[serde(default = "default_no_gradient", skip_serializing_if = "Option::is_none", deserialize_with = "crate::property::de_opt_property_or_value")]
+        fill_gradient: Option<Property<FillGradient>>,
     },
     Ellipse {
         radius_x: Property<f32>,
         radius_y: Property<f32>,
-        #[serde(default = "default_shape_fill")]
-        fill: Color,
+        #[serde(default = "default_shape_fill_prop", deserialize_with = "crate::property::de_property_or_value")]
+        fill: Property<Color>,
         /// Linear fill gradient (None = solid `fill`).
-        #[serde(default = "default_no_gradient", skip_serializing_if = "Option::is_none")]
-        fill_gradient: Option<FillGradient>,
+        #[serde(default = "default_no_gradient", skip_serializing_if = "Option::is_none", deserialize_with = "crate::property::de_opt_property_or_value")]
+        fill_gradient: Option<Property<FillGradient>>,
     },
     Path {
         path_data: String,
-        #[serde(default = "default_shape_fill")]
-        fill: Color,
+        #[serde(default = "default_shape_fill_prop", deserialize_with = "crate::property::de_property_or_value")]
+        fill: Property<Color>,
         /// Linear fill gradient (None = solid `fill`).
-        #[serde(default = "default_no_gradient", skip_serializing_if = "Option::is_none")]
-        fill_gradient: Option<FillGradient>,
+        #[serde(default = "default_no_gradient", skip_serializing_if = "Option::is_none", deserialize_with = "crate::property::de_opt_property_or_value")]
+        fill_gradient: Option<Property<FillGradient>>,
     },
 }
 
@@ -230,12 +255,13 @@ pub enum ShapeType {
 #[allow(clippy::large_enum_variant)]
 pub enum LayerSource {
     Solid {
-        color: Color,
+        #[serde(deserialize_with = "crate::property::de_property_or_value", default)]
+        color: Property<Color>,
         width: u32,
         height: u32,
         /// Linear fill gradient (None = solid `color`).
-        #[serde(default = "default_no_gradient", skip_serializing_if = "Option::is_none")]
-        fill_gradient: Option<FillGradient>,
+        #[serde(default = "default_no_gradient", skip_serializing_if = "Option::is_none", deserialize_with = "crate::property::de_opt_property_or_value")]
+        fill_gradient: Option<Property<FillGradient>>,
     },
     Image {
         asset_id: String,
@@ -250,8 +276,8 @@ pub enum LayerSource {
         font_size: Property<f32>,
         fill_color: Property<Color>,
         /// Linear fill gradient (None = solid `fill_color`).
-        #[serde(default = "default_no_gradient", skip_serializing_if = "Option::is_none")]
-        fill_gradient: Option<FillGradient>,
+        #[serde(default = "default_no_gradient", skip_serializing_if = "Option::is_none", deserialize_with = "crate::property::de_opt_property_or_value")]
+        fill_gradient: Option<Property<FillGradient>>,
         /// Font weight 100..900 (400 normal, 700 bold).
         #[serde(default = "default_font_weight")]
         weight: u16,
@@ -272,11 +298,11 @@ pub enum LayerSource {
         /// Outline width in px (0 = off).
         #[serde(default)]
         stroke_width: Property<f32>,
-        #[serde(default = "default_stroke_color")]
-        stroke_color: Color,
+        #[serde(deserialize_with = "crate::property::de_property_or_value", default)]
+        stroke_color: Property<Color>,
         /// Linear stroke gradient (None = solid `stroke_color`).
-        #[serde(default = "default_no_gradient", skip_serializing_if = "Option::is_none")]
-        stroke_gradient: Option<FillGradient>,
+        #[serde(default = "default_no_gradient", skip_serializing_if = "Option::is_none", deserialize_with = "crate::property::de_opt_property_or_value")]
+        stroke_gradient: Option<Property<FillGradient>>,
         /// Vertical glyph offset in px.
         #[serde(default)]
         baseline_shift: Property<f32>,
@@ -318,6 +344,50 @@ pub enum LayerSource {
 }
 
 impl LayerSource {
+    /// Resolve animatable color/gradient fills to their values at `time`
+    /// (writes the evaluated result back into each live value; keyframe
+    /// tracks are preserved). Render snapshots call this so rasterizers
+    /// can read plain `.value`s and still honor keyframed fills.
+    pub fn resolve_at(&mut self, time: &TimeCode) {
+        fn resolve_opt(slot: &mut Option<Property<FillGradient>>, time: &TimeCode) {
+            if let Some(prop) = slot {
+                let v = prop.evaluate_at(time);
+                prop.set_value(v);
+            }
+        }
+        match self {
+            Self::Solid { color, fill_gradient, .. } => {
+                let v = color.evaluate_at(time);
+                color.set_value(v);
+                resolve_opt(fill_gradient, time);
+            }
+            Self::Text {
+                fill_color,
+                fill_gradient,
+                stroke_color,
+                stroke_gradient,
+                ..
+            } => {
+                let v = fill_color.evaluate_at(time);
+                fill_color.set_value(v);
+                resolve_opt(fill_gradient, time);
+                let v = stroke_color.evaluate_at(time);
+                stroke_color.set_value(v);
+                resolve_opt(stroke_gradient, time);
+            }
+            Self::Shape { shape_type } => match shape_type {
+                ShapeType::Rectangle { fill, fill_gradient, .. }
+                | ShapeType::Ellipse { fill, fill_gradient, .. }
+                | ShapeType::Path { fill, fill_gradient, .. } => {
+                    let v = fill.evaluate_at(time);
+                    fill.set_value(v);
+                    resolve_opt(fill_gradient, time);
+                }
+            },
+            _ => {}
+        }
+    }
+
     /// Return the canonical type name of the layer source.
     pub const fn type_name(&self) -> &'static str {
         match self {
@@ -497,7 +567,7 @@ impl Layer {
             id,
             name,
             LayerSource::Solid {
-                color,
+                color: Property::new("Color", color),
                 width,
                 height,
                 fill_gradient: None,
@@ -593,7 +663,7 @@ impl Layer {
                 align: TextAlign::default(),
                 all_caps: false,
                 stroke_width: Property::new("Stroke Width", 0.0),
-                stroke_color: default_stroke_color(),
+                stroke_color: Property::new("Stroke Color", default_stroke_color()),
                 stroke_gradient: None,
                 baseline_shift: Property::new("Baseline Shift", 0.0),
                 box_width: Property::new("Box Width", 0.0),
@@ -779,7 +849,7 @@ impl Layer {
             return color;
         }
         match &self.source {
-            LayerSource::Solid { color, .. } => *color,
+            LayerSource::Solid { color, .. } => color.value,
             LayerSource::Image { .. } => Color::rgb(0.93, 0.45, 0.65), // Pink / Lavender
             LayerSource::Video { .. } => Color::rgb(0.24, 0.51, 0.96), // AE Royal Blue
             LayerSource::Text { .. } => Color::rgb(0.96, 0.58, 0.19),  // AE Orange
@@ -1033,5 +1103,60 @@ mod tests {
             angle: 0.0,
         };
         assert!(close(g.sample(0.0), Color::RED));
+    }
+
+    #[test]
+    fn fill_gradient_lerp_morphs_matching_topology() {
+        use crate::keyframe::Interpolate;
+        let a = FillGradient::two_color(Color::BLACK, Color::WHITE, 0.0);
+        let b = FillGradient::two_color(Color::WHITE, Color::BLACK, 90.0);
+        let mid = a.lerp(&b, 0.5);
+        assert!((mid.angle - 45.0).abs() < 1e-5, "{mid:?}");
+        let s0 = mid.sample(0.0);
+        assert!((s0.r - 0.5).abs() < 1e-5, "{s0:?}");
+    }
+
+    #[test]
+    fn fill_gradient_lerp_holds_on_topology_mismatch() {
+        use crate::keyframe::Interpolate;
+        let a = FillGradient::two_color(Color::BLACK, Color::WHITE, 0.0);
+        let mut b = a.clone();
+        b.add_stop(0.5, Color::RED);
+        let held = a.lerp(&b, 0.5);
+        assert_eq!(held.stops.len(), 2);
+        assert!(close(held.sample(0.0), Color::BLACK));
+    }
+
+    #[test]
+    fn resolve_at_writes_evaluated_fills() {
+        use crate::keyframe::Keyframe;
+        use crate::timecode::TimeCode;
+        let mut src = LayerSource::Solid {
+            color: Property::new("Color", Color::BLACK),
+            width: 16,
+            height: 16,
+            fill_gradient: None,
+        };
+        if let LayerSource::Solid { color, .. } = &mut src {
+            color.add_keyframe(Keyframe::new(TimeCode::from_frames(0, 30.0), Color::BLACK));
+            color.add_keyframe(Keyframe::new(TimeCode::from_frames(30, 30.0), Color::WHITE));
+        }
+        src.resolve_at(&TimeCode::from_frames(0, 30.0));
+        assert!(matches!(&src, LayerSource::Solid { color, .. } if close(color.value, Color::BLACK)));
+        src.resolve_at(&TimeCode::from_frames(30, 30.0));
+        assert!(matches!(&src, LayerSource::Solid { color, .. } if close(color.value, Color::WHITE)));
+        // Keyframe tracks survive resolution.
+        assert!(matches!(&src, LayerSource::Solid { color, .. } if color.keyframe_count() == 2));
+    }
+
+    #[test]
+    fn bare_legacy_colors_migrate_to_properties() {
+        // Pre-keyframe project files store bare colors; the untagged
+        // helpers must lift them into Property tracks.
+        let src: LayerSource = serde_json::from_str(
+            r#"{"type": "solid", "color": {"r": 1.0, "g": 0.0, "b": 0.0, "a": 1.0}, "width": 8, "height": 8}"#,
+        )
+        .unwrap();
+        assert!(matches!(&src, LayerSource::Solid { color, .. } if color.value == Color::RED));
     }
 }

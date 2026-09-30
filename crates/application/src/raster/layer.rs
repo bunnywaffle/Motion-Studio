@@ -87,7 +87,7 @@ pub fn raster_content(
                     }
                 }
                 None => {
-                    let p = Px::from_color(*color);
+                    let p = Px::from_color(color.value);
                     for px in buf.px.iter_mut() {
                         *px = p;
                     }
@@ -103,13 +103,13 @@ pub fn raster_content(
                     // Corner radius is stored unscaled; content is unscaled.
                     match fill_gradient {
                         Some(gradient) => fill_rect_gradient(&mut buf, w, h, corner_radius.value, gradient),
-                        None => fill_rect(&mut buf, w, h, corner_radius.value, Px::from_color(*fill)),
+                        None => fill_rect(&mut buf, w, h, corner_radius.value, Px::from_color(fill.value)),
                     }
                 }
                 ShapeType::Ellipse { fill, fill_gradient, .. } => {
                     match fill_gradient {
                         Some(gradient) => fill_ellipse_gradient(&mut buf, w / 2.0, h / 2.0, gradient),
-                        None => fill_ellipse(&mut buf, w / 2.0, h / 2.0, Px::from_color(*fill)),
+                        None => fill_ellipse(&mut buf, w / 2.0, h / 2.0, Px::from_color(fill.value)),
                     }
                 }
                 ShapeType::Path { path_data, fill, fill_gradient, .. } => {
@@ -123,14 +123,14 @@ pub fn raster_content(
                             fill_path(
                                 &mut buf,
                                 path_data,
-                                Px::from_color(*fill),
+                                Px::from_color(fill.value),
                                 origin,
                             );
                             stroke_path(
                                 &mut buf,
                                 path_data,
                                 2.0,
-                                Px::from_color(*fill),
+                                Px::from_color(fill.value),
                                 origin,
                             );
                         }
@@ -161,7 +161,7 @@ pub fn raster_content(
         } => {
             // Effective outline: TextOutline effect wins over native stroke.
             let mut sw = stroke_width.value.max(0.0);
-            let mut sc = *stroke_color;
+            let mut sc = stroke_color.value;
             let mut outline_override = false;
             for eff in &layer.effects {
                 if !eff.enabled {
@@ -191,7 +191,7 @@ pub fn raster_content(
                 family: font_family,
                 size: font_size.value,
                 fill: Px::from_color(fill_color.value),
-                fill_gradient: fill_gradient.clone(),
+                fill_gradient: fill_gradient.as_ref().map(|p| p.value.clone()),
                 weight: *weight,
                 italic: *italic,
                 tracking: tracking.value,
@@ -202,7 +202,7 @@ pub fn raster_content(
                 stroke_col: Px::from_color(sc),
                 // An overriding outline effect replaces the native stroke
                 // (and its gradient) with a flat color.
-                stroke_gradient: if outline_override { None } else { stroke_gradient.clone() },
+                stroke_gradient: if outline_override { None } else { stroke_gradient.as_ref().map(|p| p.value.clone()) },
                 baseline_shift: baseline_shift.value,
                 box_w: box_width.value,
                 bevel,
@@ -307,7 +307,7 @@ pub fn layer_cache_key(
     match &layer.source {
         LayerSource::Solid { color, width, height, fill_gradient, .. } => {
             0u8.hash(&mut h);
-            color_hash(color, &mut h);
+            color_hash(&color.value, &mut h);
             width.hash(&mut h);
             height.hash(&mut h);
             gradient_hash(fill_gradient, &mut h);
@@ -353,7 +353,7 @@ pub fn layer_cache_key(
             (*align as u8).hash(&mut h);
             all_caps.hash(&mut h);
             stroke_width.value.to_bits().hash(&mut h);
-            color_hash(stroke_color, &mut h);
+            color_hash(&stroke_color.value, &mut h);
             gradient_hash(stroke_gradient, &mut h);
             baseline_shift.value.to_bits().hash(&mut h);
             box_width.value.to_bits().hash(&mut h);
@@ -376,20 +376,20 @@ pub fn layer_cache_key(
                 width.value.to_bits().hash(&mut h);
                 height.value.to_bits().hash(&mut h);
                 corner_radius.value.to_bits().hash(&mut h);
-                color_hash(fill, &mut h);
+                color_hash(&fill.value, &mut h);
                 gradient_hash(fill_gradient, &mut h);
             }
             ShapeType::Ellipse { radius_x, radius_y, fill, fill_gradient, .. } => {
                 5u8.hash(&mut h);
                 radius_x.value.to_bits().hash(&mut h);
                 radius_y.value.to_bits().hash(&mut h);
-                color_hash(fill, &mut h);
+                color_hash(&fill.value, &mut h);
                 gradient_hash(fill_gradient, &mut h);
             }
             ShapeType::Path { path_data, fill, fill_gradient, .. } => {
                 6u8.hash(&mut h);
                 path_data.hash(&mut h);
-                color_hash(fill, &mut h);
+                color_hash(&fill.value, &mut h);
                 gradient_hash(fill_gradient, &mut h);
             }
         },
@@ -444,12 +444,12 @@ fn color_hash(c: &Color, h: &mut DefaultHasher) {
     c.a.to_bits().hash(h);
 }
 
-fn gradient_hash(g: &Option<project::FillGradient>, h: &mut DefaultHasher) {
+fn gradient_hash(g: &Option<project::Property<project::FillGradient>>, h: &mut DefaultHasher) {
     match g {
         Some(grad) => {
             1u8.hash(h);
-            grad.angle.to_bits().hash(h);
-            for stop in &grad.stops {
+            grad.value.angle.to_bits().hash(h);
+            for stop in &grad.value.stops {
                 stop.offset.to_bits().hash(h);
                 color_hash(&stop.color, h);
             }
@@ -722,10 +722,10 @@ pub fn rasterize_layer(
             if is_axis_aligned && layer.blend_mode == BlendMode::Normal {
                 let op = layer.effective_opacity.clamp(0.0, 1.0);
                 let p = Px {
-                    r: color.r * op,
-                    g: color.g * op,
-                    b: color.b * op,
-                    a: color.a * op,
+                    r: color.value.r * op,
+                    g: color.value.g * op,
+                    b: color.value.b * op,
+                    a: color.value.a * op,
                 };
                 for px in out.px.iter_mut() {
                     *px = p;
@@ -747,10 +747,10 @@ pub fn rasterize_layer(
                 if is_axis_aligned && layer.blend_mode == BlendMode::Normal {
                     let op = layer.effective_opacity.clamp(0.0, 1.0);
                     let p = Px {
-                        r: fill.r * op,
-                        g: fill.g * op,
-                        b: fill.b * op,
-                        a: fill.a * op,
+                        r: fill.value.r * op,
+                        g: fill.value.g * op,
+                        b: fill.value.b * op,
+                        a: fill.value.a * op,
                     };
                     for px in out.px.iter_mut() {
                         *px = p;
@@ -1479,7 +1479,7 @@ mod tests {
             "Pen",
             project::ShapeType::Path {
                 path_data: "M -100.0 -50.0 L 100.0 60.0".to_string(),
-                fill: Color::WHITE,
+                fill: project::Property::new("Fill", Color::WHITE),
                 fill_gradient: None,
             },
             tc,
@@ -1560,7 +1560,7 @@ mod tests {
                 width: project::Property::new("W", 200.0),
                 height: project::Property::new("H", 100.0),
                 corner_radius: project::Property::new("R", 0.0),
-                fill: Color::rgb(1.0, 0.0, 0.0), fill_gradient: None,
+                fill: project::Property::new("Fill", Color::rgb(1.0, 0.0, 0.0)), fill_gradient: None,
             },
             tc,
             out,

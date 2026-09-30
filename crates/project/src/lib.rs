@@ -49,7 +49,9 @@ pub use ofx::{ofx_in_category, ofx_lookup, OfxCategory, OfxEffectDescriptor, Ofx
 pub use path::{Path, PathBooleanOp, PathPoint, PathPointKind};
 pub use trace::{AutoTraceOptions, TraceChannel, TraceRange, TracedContour};
 pub use project::{Project, ProjectSettings, CURRENT_FORMAT_VERSION};
-pub use property::Property;
+pub use property::{
+    de_opt_property_or_value, de_property_or_value, de_vec_property_or_value, Property,
+};
 pub use shader::{
     parse_shader_meta, parse_shader_params, ShaderParam, ShaderParamType, ShaderParamValue,
 };
@@ -129,7 +131,7 @@ mod tests {
                 width: Property::new("Width", 200.0),
                 height: Property::new("Height", 100.0),
                 corner_radius: Property::new("Corner Radius", 8.0),
-                fill: Color::WHITE,
+                fill: Property::new("Fill", Color::WHITE),
                 fill_gradient: None,
             },
             TimeCode::from_frames(0, 30.0),
@@ -533,7 +535,7 @@ mod tests {
             ShapeType::Ellipse {
                 radius_x: Property::new("Radius X", 50.0),
                 radius_y: Property::new("Radius Y", 50.0),
-                fill: Color::WHITE,
+                fill: Property::new("Fill", Color::WHITE),
                 fill_gradient: None,
             },
             tc0,
@@ -836,7 +838,7 @@ mod tests {
         let shape = Layer::shape(
             "shp",
             "Shape",
-            ShapeType::Path { path_data: "M 0 0 L 10 10".to_string(), fill: Color::WHITE, fill_gradient: None },
+            ShapeType::Path { path_data: "M 0 0 L 10 10".to_string(), fill: Property::new("Fill", Color::WHITE), fill_gradient: None },
             tc0,
             tc100,
         );
@@ -982,7 +984,7 @@ mod tests {
                 width: Property::new("Width", 400.0),
                 height: Property::new("Height", 200.0),
                 corner_radius: Property::new("Corner Radius", 16.0),
-                fill: Color::WHITE,
+                fill: Property::new("Fill", Color::WHITE),
                 fill_gradient: None,
             },
             tc0,
@@ -996,7 +998,7 @@ mod tests {
             ShapeType::Ellipse {
                 radius_x: Property::new("Radius X", 100.0),
                 radius_y: Property::new("Radius Y", 150.0),
-                fill: Color::WHITE,
+                fill: Property::new("Fill", Color::WHITE),
                 fill_gradient: None,
             },
             tc0,
@@ -1009,7 +1011,7 @@ mod tests {
             "Path Layer",
             ShapeType::Path {
                 path_data: "M 0 0 C 10 20, 30 40, 50 50 Z".to_string(),
-                fill: Color::WHITE,
+                fill: Property::new("Fill", Color::WHITE),
                 fill_gradient: None,
             },
             tc0,
