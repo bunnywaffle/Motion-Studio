@@ -3383,6 +3383,90 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
     }
 
     #[gpui_kit::test]
+    fn test_project_tabs_filter_and_grid_view(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            Theme::change(ThemeMode::Dark, None, cx);
+        });
+
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
+            window.activate_window();
+            window.set_window_title("Motion Compositor");
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+
+        let _app_view = app_view_entity.expect("AppView created");
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            // Tab bar: All first, then one tab per kind.
+            for tab in ["project_tab_all", "project_tab_media", "project_tab_solids", "project_tab_generators", "project_tab_comps"] {
+                assert!(window.find(tab).visible(), "{tab}");
+            }
+            // All tab shows the background solid row (scroll into view).
+            for _ in 0..8 {
+                window.scroll(
+                    "project_assets",
+                    gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(-400.))),
+                    cx,
+                );
+                window.render_frame(cx);
+                if window.try_find("project_solid_item_layer_bg").map(|e| e.visible()).unwrap_or(false) {
+                    break;
+                }
+            }
+            assert!(window.find("project_solid_item_layer_bg").visible());
+            // Generators tab: empty state (no procedural layers seeded).
+            window.click("project_tab_generators", cx);
+            window.render_frame(cx);
+            // The earlier scroll-down leaves a stale offset: scroll back up.
+            for _ in 0..8 {
+                window.scroll(
+                    "project_assets",
+                    gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(400.))),
+                    cx,
+                );
+                window.render_frame(cx);
+                if window.try_find("project_generators_empty").is_some() {
+                    break;
+                }
+            }
+            assert!(window.find("project_generators_empty").visible());
+            assert!(window.try_find("project_solid_item_layer_bg").is_none());
+            // Media tab hides solids too.
+            window.click("project_tab_media", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("project_solid_item_layer_bg").is_none());
+            // Back to All, then grid view keeps the same items mounted.
+            window.click("project_tab_all", cx);
+            window.click("project_view_grid", cx);
+            window.render_frame(cx);
+            for _ in 0..8 {
+                window.scroll(
+                    "project_assets",
+                    gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(-400.))),
+                    cx,
+                );
+                window.render_frame(cx);
+                if window.try_find("project_solid_item_layer_bg").map(|e| e.visible()).unwrap_or(false) {
+                    break;
+                }
+            }
+            assert!(window.find("project_solid_item_layer_bg").visible());
+            // And back to list.
+            window.click("project_view_list", cx);
+            window.render_frame(cx);
+            assert!(window.find("project_solid_item_layer_bg").visible());
+        })
+        .expect("update_window failed");
+    }
+
+    #[gpui_kit::test]
     fn test_dock_toggle_and_resize(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         cx.update(|cx| {

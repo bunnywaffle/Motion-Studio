@@ -223,6 +223,7 @@ pub enum ProjectContextMenuTarget {
     BinBackground,
     Asset(String),
     Solid(String),
+    Generator(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -231,6 +232,38 @@ pub enum ProjectFilterType {
     Compositions,
     Footage,
     Solids,
+    Generators,
+}
+
+impl ProjectFilterType {
+    /// Tab id slug (`project_tab_{slug}`).
+    const fn slug(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Compositions => "comps",
+            Self::Footage => "media",
+            Self::Solids => "solids",
+            Self::Generators => "generators",
+        }
+    }
+
+    /// Tab label.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Compositions => "Comps",
+            Self::Footage => "Media",
+            Self::Solids => "Solids",
+            Self::Generators => "Generators",
+        }
+    }
+}
+
+/// Project bin presentation: rows or thumbnail cards.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectViewMode {
+    List,
+    Grid,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -296,6 +329,8 @@ pub struct ProjectPanel {
     pub menu_pos: Option<Point<Pixels>>,
     pub filter: ProjectFilterType,
     pub sort_mode: ProjectSortMode,
+    /// List rows vs thumbnail grid cards.
+    pub view_mode: ProjectViewMode,
     /// "New Composition" dialog state (After Effects-style).
     pub show_new_comp: bool,
     pub nc_name: String,
@@ -344,6 +379,7 @@ impl ProjectPanel {
             menu_pos: None,
             filter: ProjectFilterType::All,
             sort_mode: ProjectSortMode::Name,
+            view_mode: ProjectViewMode::List,
             show_new_comp: false,
             nc_name: "Comp 1".to_string(),
             nc_w: 1920,
@@ -1140,6 +1176,174 @@ impl Focusable for ProjectPanel {
     }
 }
 
+/// Wrap bin items into a thumbnail grid (grid view mode).
+fn project_grid_wrap(items: Vec<AnyElement>) -> AnyElement {
+    h_flex()
+        .flex_wrap()
+        .gap_2()
+        .p_1()
+        .children(items)
+        .into_any_element()
+}
+
+/// Compact thumbnail card for a media asset (grid view mode): same
+/// actions as the list row (add to comp, delete, right-click menu).
+fn project_asset_card(
+    asset: &project::Asset,
+    state: &Entity<EditorState>,
+    panel: &Entity<ProjectPanel>,
+    cx: &App,
+) -> AnyElement {
+    let (type_str, icon) = match &asset.asset_type {
+        project::AssetType::Image => ("PNG/JPG", IconName::Image),
+        project::AssetType::Video => ("VIDEO", IconName::Film),
+        project::AssetType::Audio => ("AUDIO", IconName::Music),
+        project::AssetType::Vector => ("SVG", IconName::Folder),
+        project::AssetType::Font => ("FONT", IconName::Type),
+        project::AssetType::Other(_) => ("MEDIA", IconName::Layers),
+    };
+    let display_name = asset
+        .path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&asset.name)
+        .to_string();
+    let thumb: AnyElement = match &asset.asset_type {
+        project::AssetType::Image => gpui::img(asset.path.clone())
+            .w(px(56.))
+            .h(px(56.))
+            .rounded_sm()
+            .into_any_element(),
+        _ => div()
+            .w(px(56.))
+            .h(px(56.))
+            .rounded_sm()
+            .bg(cx.theme().muted)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(icon_box(icon))
+            .into_any_element(),
+    };
+    let aid_add = asset.id.clone();
+    let aid_del = asset.id.clone();
+    let aid_rclick = asset.id.clone();
+    let s_add = state.clone();
+    let s_del = state.clone();
+    v_flex()
+        .id(SharedString::from(format!("project_asset_item_{}", asset.id)))
+        .test_support()
+        .w(px(104.))
+        .p_2()
+        .gap_1()
+        .rounded_md()
+        .text_xs()
+        .items_center()
+        .bg(cx.theme().secondary)
+        .border_1()
+        .border_color(cx.theme().border)
+        .text_color(cx.theme().foreground)
+        .hover(|s| s.bg(cx.theme().muted))
+        .on_mouse_down(MouseButton::Right, {
+            let p = panel.clone();
+            move |event, _window, cx| {
+                let pos = event.position;
+                p.update(cx, |this, cx| {
+                    this.open_context_menu(ProjectContextMenuTarget::Asset(aid_rclick.clone()), pos);
+                    cx.notify();
+                });
+            }
+        })
+        .child(thumb)
+        .child(div().font_semibold().truncate().w_full().text_center().child(display_name))
+        .child(div().text_color(cx.theme().muted_foreground).child(type_str))
+        .child(
+            h_flex()
+                .gap_1()
+                .items_center()
+                .child(
+                    div()
+                        .cursor_pointer()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(cx.theme().primary)
+                        .text_color(cx.theme().primary_foreground)
+                        .hover(|s| s.opacity(0.85))
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            s_add.update(cx, |s, cx| {
+                                let _ = s.add_asset_layer(&aid_add);
+                                cx.notify();
+                            });
+                        })
+                        .child("+ Comp"),
+                )
+                .child(
+                    div()
+                        .cursor_pointer()
+                        .p_1()
+                        .rounded_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .hover(|s| s.bg(rgb(0xef4444)).text_color(rgb(0xffffff)))
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            s_del.update(cx, |s, cx| {
+                                let _ = s.delete_asset(&aid_del);
+                                cx.notify();
+                            });
+                        })
+                        .child(icon_box(IconName::Trash)),
+                ),
+        )
+        .into_any_element()
+}
+
+/// Compact swatch card for a solid layer (grid view mode).
+fn project_solid_card(
+    layer: &project::Layer,
+    panel: &Entity<ProjectPanel>,
+    cx: &App,
+) -> AnyElement {
+    let (w, h, col) = match &layer.source {
+        LayerSource::Solid { width, height, color, .. } => (*width, *height, color.value),
+        _ => (1920, 1080, Color::WHITE),
+    };
+    let p_rclick = panel.clone();
+    let sid_rclick = layer.id.clone();
+    v_flex()
+        .id(SharedString::from(format!("project_solid_item_{}", layer.id)))
+        .test_support()
+        .w(px(104.))
+        .p_2()
+        .gap_1()
+        .rounded_md()
+        .text_xs()
+        .items_center()
+        .bg(cx.theme().secondary)
+        .border_1()
+        .border_color(cx.theme().border)
+        .text_color(cx.theme().foreground)
+        .hover(|s| s.bg(cx.theme().muted))
+        .on_mouse_down(MouseButton::Right, move |event, _window, cx| {
+            let pos = event.position;
+            p_rclick.update(cx, |this, cx| {
+                this.open_context_menu(ProjectContextMenuTarget::Solid(sid_rclick.clone()), pos);
+                cx.notify();
+            });
+        })
+        .child(
+            div()
+                .w(px(56.))
+                .h(px(56.))
+                .rounded_sm()
+                .border_1()
+                .border_color(cx.theme().border)
+                .bg(Rgba { r: col.r, g: col.g, b: col.b, a: col.a }),
+        )
+        .child(div().font_semibold().truncate().w_full().text_center().child(layer.name.clone()))
+        .child(div().text_color(cx.theme().muted_foreground).child(format!("{w}x{h}")))
+        .into_any_element()
+}
+
 impl Render for ProjectPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
@@ -1156,74 +1360,131 @@ impl Render for ProjectPanel {
             .unwrap_or(0);
         let assets_count = state.project.assets.len();
         let comps_count = if comp_opt.is_some() { 1 } else { 0 };
-        let total_count = comps_count + assets_count + solids_count;
+
+        let grid_mode = self.view_mode == ProjectViewMode::Grid;
 
         let p_self = cx.entity().clone();
-        let make_pill = |filter: ProjectFilterType, label: &'static str, count: usize| {
+        let generators_count = comp_opt
+            .map(|c| {
+                c.layers
+                    .iter()
+                    .filter(|l| matches!(&l.source, LayerSource::Procedural { .. }))
+                    .count()
+            })
+            .unwrap_or(0);
+        let total_count = comps_count + assets_count + solids_count + generators_count;
+        // AE-style tab bar: All first (everything in the bin), then one
+        // tab per item kind. Active tab gets the accent underline.
+        let make_tab = |filter: ProjectFilterType, count: usize| {
             let is_active = active_filter == filter;
             let p = p_self.clone();
             div()
+                .id(SharedString::from(format!("project_tab_{}", filter.slug())))
+                .test_support()
                 .cursor_pointer()
                 .px_2()
-                .py_0p5()
-                .rounded_full()
+                .py_1()
                 .text_xs()
                 .font_medium()
                 .flex()
                 .items_center()
                 .gap_1()
-                .bg(if is_active { cx.theme().accent } else { cx.theme().muted })
-                .text_color(if is_active { cx.theme().accent_foreground } else { cx.theme().muted_foreground })
-                .hover(|s| s.opacity(0.85))
+                .border_b_2()
+                .border_color(if is_active {
+                    cx.theme().accent
+                } else {
+                    cx.theme().accent.opacity(0.0)
+                })
+                .text_color(if is_active { cx.theme().foreground } else { cx.theme().muted_foreground })
+                .hover(|s| s.text_color(cx.theme().foreground))
                 .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                     p.update(cx, |this, cx| {
                         this.filter = filter;
                         cx.notify();
                     });
                 })
-                .child(label)
+                .child(filter.label())
                 .child(
                     div()
-                        .px_1p5()
+                        .px_1()
                         .rounded_full()
                         .text_xs()
-                        .bg(if is_active { cx.theme().primary } else { cx.theme().secondary })
-                        .text_color(if is_active { cx.theme().primary_foreground } else { cx.theme().foreground })
+                        .bg(cx.theme().muted)
+                        .text_color(cx.theme().muted_foreground)
                         .child(format!("{count}")),
                 )
         };
 
         let p_sort = p_self.clone();
+        let p_view = p_self.clone();
         let sort_label = self.sort_mode.label();
+        let view_btn = |mode: ProjectViewMode, label: &'static str, id: &'static str| {
+            let is_active = self.view_mode == mode;
+            let p = p_view.clone();
+            div()
+                .id(SharedString::from(id))
+                .test_support()
+                .cursor_pointer()
+                .px_2()
+                .py_0p5()
+                .rounded_sm()
+                .text_xs()
+                .font_medium()
+                .bg(if is_active { cx.theme().accent } else { cx.theme().muted })
+                .text_color(if is_active { cx.theme().accent_foreground } else { cx.theme().muted_foreground })
+                .hover(|s| s.opacity(0.85))
+                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    p.update(cx, |this, cx| {
+                        this.view_mode = mode;
+                        cx.notify();
+                    });
+                })
+                .child(label)
+        };
         let filter_row = h_flex()
-            .px_3()
-            .py_1p5()
+            .px_2()
             .border_b_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().background)
-            .gap_1p5()
+            .gap_1()
             .items_center()
-            .child(make_pill(ProjectFilterType::All, "All", total_count))
-            .child(make_pill(ProjectFilterType::Compositions, "Comps", comps_count))
-            .child(make_pill(ProjectFilterType::Footage, "Media", assets_count))
-            .child(make_pill(ProjectFilterType::Solids, "Solids", solids_count))
+            .justify_between()
+            .flex_wrap()
             .child(
-                div()
-                    .cursor_pointer()
-                    .px_2()
-                    .py_0p5()
-                    .rounded_full()
-                    .text_xs()
-                    .bg(cx.theme().secondary)
-                    .text_color(cx.theme().muted_foreground)
-                    .hover(|s| s.opacity(0.85))
-                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                        p_sort.update(cx, |this, cx| {
-                            this.sort_mode = this.sort_mode.next();
-                            cx.notify();
-                        });
-                    })
-                    .child(format!("Sort: {sort_label}")),
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .flex_wrap()
+                    .child(make_tab(ProjectFilterType::All, total_count))
+                    .child(make_tab(ProjectFilterType::Footage, assets_count))
+                    .child(make_tab(ProjectFilterType::Solids, solids_count))
+                    .child(make_tab(ProjectFilterType::Generators, generators_count))
+                    .child(make_tab(ProjectFilterType::Compositions, comps_count)),
+            )
+            .child(
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .child(
+                        div()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_0p5()
+                            .rounded_sm()
+                            .text_xs()
+                            .bg(cx.theme().secondary)
+                            .text_color(cx.theme().muted_foreground)
+                            .hover(|s| s.opacity(0.85))
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                p_sort.update(cx, |this, cx| {
+                                    this.sort_mode = this.sort_mode.next();
+                                    cx.notify();
+                                });
+                            })
+                            .child(format!("Sort: {sort_label}")),
+                    )
+                    .child(view_btn(ProjectViewMode::List, "List", "project_view_list"))
+                    .child(view_btn(ProjectViewMode::Grid, "Grid", "project_view_grid")),
             );
 
         let mut bin_items: Vec<AnyElement> = Vec::new();
@@ -1299,6 +1560,8 @@ impl Render for ProjectPanel {
                 if state.project.assets.is_empty() {
                     bin_items.push(
                         div()
+                            .id("project_media_empty")
+                            .test_support()
                             .px_3()
                             .py_3()
                             .border_1()
@@ -1330,6 +1593,7 @@ impl Render for ProjectPanel {
                                 .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
                         }),
                     }
+                    let mut grid_cards: Vec<AnyElement> = Vec::new();
                     for asset in ordered {
                         let (type_str, icon) = match &asset.asset_type {
                             project::AssetType::Image => ("PNG/JPG", IconName::Image),
@@ -1353,6 +1617,16 @@ impl Render for ProjectPanel {
                         let s_add = self.state.clone();
                         let p_asset_rclick = cx.entity().clone();
                         let aid_rclick = asset.id.clone();
+
+                        if grid_mode {
+                            grid_cards.push(project_asset_card(
+                                asset,
+                                &self.state,
+                                &cx.entity().clone(),
+                                cx,
+                            ));
+                            continue;
+                        }
 
                         bin_items.push(
                             h_flex()
@@ -1453,6 +1727,9 @@ impl Render for ProjectPanel {
                                 .into_any_element(),
                         );
                     }
+                    if grid_mode && !grid_cards.is_empty() {
+                        bin_items.push(project_grid_wrap(grid_cards));
+                    }
                 }
             }
 
@@ -1500,6 +1777,8 @@ impl Render for ProjectPanel {
                 if solids.is_empty() {
                     bin_items.push(
                         div()
+                            .id("project_solids_empty")
+                            .test_support()
                             .px_2()
                             .py_2()
                             .text_xs()
@@ -1508,7 +1787,16 @@ impl Render for ProjectPanel {
                             .into_any_element(),
                     );
                 } else {
+                    let mut solid_cards: Vec<AnyElement> = Vec::new();
                     for solid in solids {
+                        if grid_mode {
+                            solid_cards.push(project_solid_card(
+                                solid,
+                                &cx.entity().clone(),
+                                cx,
+                            ));
+                            continue;
+                        }
                         let (w, h, col) = match &solid.source {
                             LayerSource::Solid { width, height, color, .. } => (*width, *height, color.value),
                             _ => (1920, 1080, Color::WHITE),
@@ -1558,9 +1846,181 @@ impl Render for ProjectPanel {
                             );
                         bin_items.push(row.into_any_element());
                     }
+                    if grid_mode && !solid_cards.is_empty() {
+                        bin_items.push(project_grid_wrap(solid_cards));
+                    }
                 }
             }
-        }
+
+            // --- Section 4: Generators Bin (procedural layers) ---
+                if active_filter == ProjectFilterType::All
+                    || active_filter == ProjectFilterType::Generators
+                {
+                    let mut generators: Vec<_> = comp
+                        .layers
+                        .iter()
+                        .filter(|l| matches!(&l.source, LayerSource::Procedural { .. }))
+                        .collect();
+                    if self.sort_mode == ProjectSortMode::Name {
+                        generators.sort_by_key(|a| a.name.to_lowercase());
+                    }
+
+                    bin_items.push(
+                        ae::section_header("GENERATORS", Some(generators.len())).into_any_element(),
+                    );
+
+                    if generators.is_empty() {
+                        bin_items.push(
+                            div()
+                                .id("project_generators_empty")
+                                .test_support()
+                                .px_2()
+                                .py_2()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("No generator layers. Add one from the Effects browser.")
+                                .into_any_element(),
+                        );
+                    } else {
+                        let mut generator_cards: Vec<AnyElement> = Vec::new();
+                        for gen in generators {
+                            let gen_type = match &gen.source {
+                                LayerSource::Procedural { generator_type, .. } => {
+                                    generator_type.clone()
+                                }
+                                _ => String::new(),
+                            };
+                            if grid_mode {
+                                let p_gen_rclick = cx.entity().clone();
+                                let gid_rclick = gen.id.clone();
+                                generator_cards.push(
+                                    v_flex()
+                                        .id(SharedString::from(format!(
+                                            "project_generator_item_{}",
+                                            gen.id
+                                        )))
+                                        .test_support()
+                                        .w(px(104.))
+                                        .p_2()
+                                        .gap_1()
+                                        .rounded_md()
+                                        .text_xs()
+                                        .items_center()
+                                        .bg(cx.theme().secondary)
+                                        .border_1()
+                                        .border_color(cx.theme().border)
+                                        .text_color(cx.theme().foreground)
+                                        .hover(|s| s.bg(cx.theme().muted))
+                                        .on_mouse_down(
+                                            MouseButton::Right,
+                                            move |event, _window, cx| {
+                                                let pos = event.position;
+                                                p_gen_rclick.update(cx, |this, cx| {
+                                                    this.open_context_menu(
+                                                        ProjectContextMenuTarget::Generator(
+                                                            gid_rclick.clone(),
+                                                        ),
+                                                        pos,
+                                                    );
+                                                    cx.notify();
+                                                });
+                                            },
+                                        )
+                                        .child(
+                                            div()
+                                                .w(px(56.))
+                                                .h(px(56.))
+                                                .rounded_sm()
+                                                .bg(cx.theme().muted)
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .child(icon_box(IconName::Sparkles)),
+                                        )
+                                        .child(
+                                            div()
+                                                .font_semibold()
+                                                .truncate()
+                                                .w_full()
+                                                .text_center()
+                                                .child(gen.name.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .truncate()
+                                                .w_full()
+                                                .text_center()
+                                                .child(gen_type),
+                                        )
+                                        .into_any_element(),
+                                );
+                                continue;
+                            }
+                            let p_gen_rclick = cx.entity().clone();
+                            let gid_rclick = gen.id.clone();
+                            let row = h_flex()
+                                .id(SharedString::from(format!(
+                                    "project_generator_item_{}",
+                                    gen.id
+                                )))
+                                .test_support()
+                                .px_2()
+                                .py_1p5()
+                                .rounded_md()
+                                .text_xs()
+                                .items_center()
+                                .justify_between()
+                                .bg(cx.theme().secondary)
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .text_color(cx.theme().foreground)
+                                .hover(|s| s.bg(cx.theme().muted))
+                                .on_mouse_down(MouseButton::Right, move |event, _window, cx| {
+                                    let pos = event.position;
+                                    p_gen_rclick.update(cx, |this, cx| {
+                                        this.open_context_menu(
+                                            ProjectContextMenuTarget::Generator(gid_rclick.clone()),
+                                            pos,
+                                        );
+                                        cx.notify();
+                                    });
+                                })
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .items_center()
+                                        .child(
+                                            div()
+                                                .w(px(28.))
+                                                .h(px(28.))
+                                                .rounded_sm()
+                                                .bg(cx.theme().muted)
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .child(icon_box(IconName::Sparkles)),
+                                        )
+                                        .child(
+                                            v_flex()
+                                                .child(div().font_semibold().child(gen.name.clone()))
+                                                .child(
+                                                    div()
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .child(gen_type),
+                                                ),
+                                        ),
+                                );
+                            generator_cards.push(row.into_any_element());
+                        }
+                        if grid_mode {
+                            bin_items.push(project_grid_wrap(generator_cards));
+                        } else {
+                            bin_items.extend(generator_cards);
+                        }
+                    }
+                }
+            }
 
         let sample_state = self.state.clone();
 
@@ -2107,6 +2567,59 @@ impl Render for ProjectPanel {
                                         });
                                     })
                                     .child("Delete All Keyframes"),
+                            );
+                    }
+                    ProjectContextMenuTarget::Generator(gen_id) => {
+                        let gid = gen_id.clone();
+                        let s_del = s_menu.clone();
+                        let p_del = p_close.clone();
+                        let gid_dup = gen_id.clone();
+                        let s_dup = s_menu.clone();
+                        let p_dup = p_close.clone();
+                        menu_items = menu_items
+                            .child(
+                                div()
+                                    .id("proj_ctx_dup_generator")
+                                    .test_support()
+                                    .cursor_pointer()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .text_xs()
+                                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        s_dup.update(cx, |s, cx| {
+                                            let _ = s.duplicate_layer(&gid_dup);
+                                            cx.notify();
+                                        });
+                                        p_dup.update(cx, |this, cx| {
+                                            this.close_context_menu();
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child("Duplicate Generator"),
+                            )
+                            .child(
+                                div()
+                                    .id("proj_ctx_del_generator")
+                                    .test_support()
+                                    .cursor_pointer()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .text_xs()
+                                    .hover(|s| s.bg(rgb(0xef4444)).text_color(rgb(0xffffff)))
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        s_del.update(cx, |s, cx| {
+                                            let _ = s.remove_layer_by_id(&gid);
+                                            cx.notify();
+                                        });
+                                        p_del.update(cx, |this, cx| {
+                                            this.close_context_menu();
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child("Delete Generator"),
                             );
                     }
                 }
