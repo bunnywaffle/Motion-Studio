@@ -13307,14 +13307,59 @@ fn timeline_keyframe_lane(
     playhead_percent: f32,
     panel_entity: &Entity<TimelinePanel>,
     _state: &Entity<EditorState>,
+    sel_keys: &[(String, String, f64)],
+    tl_marquee: Option<TlMarquee>,
+    tl_geom: (f32, f32),
     cx: &App,
-) -> Div {
+) -> impl IntoElement {
+    let p_lane_geom = panel_entity.clone();
+    let p_lane_down = panel_entity.clone();
+    let lid_lane = layer_id.to_string();
+    let path_lane = prop_path.to_string();
+    let tol = 0.5 / fps.max(1.0);
+    let is_member = |t: f64| {
+        sel_keys
+            .iter()
+            .any(|s| s.0 == layer_id && s.1 == prop_path && (s.2 - t).abs() <= tol)
+    };
     let mut lane = div()
+        .id(SharedString::from(format!(
+            "tl_lane_{}_{}",
+            layer_id,
+            prop_path.replace('.', "_")
+        )))
+        .test_support()
         .flex_1()
         .h(px(24.))
         .relative()
         .border_b_1()
-        .border_color(cx.theme().border.opacity(0.3));
+        .border_color(cx.theme().border.opacity(0.3))
+        .on_prepaint(move |bounds, _window, cx| {
+            p_lane_geom.update(cx, |this, _cx| {
+                this.tl_lane_x = bounds.origin.x / px(1.0);
+                this.tl_lane_w = bounds.size.width / px(1.0);
+            });
+        })
+        .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+            // Diamonds bubble through here: a live keyframe drag means a
+            // diamond won the press — never marquee on top of it.
+            if p_lane_down.read(cx).keyframe_drag.is_some() {
+                return;
+            }
+            let mx = event.position.x / px(1.0);
+            let add = event.modifiers.shift;
+            p_lane_down.update(cx, |this, cx| {
+                this.tl_marquee = Some(TlMarquee {
+                    layer_id: lid_lane.clone(),
+                    path: path_lane.clone(),
+                    duration: total_duration_secs,
+                    x0: mx,
+                    x1: mx,
+                    add,
+                });
+                cx.notify();
+            });
+        });
 
     lane = lane.child(
         div()
@@ -13329,6 +13374,7 @@ fn timeline_keyframe_lane(
     for &t in keyframe_times {
         let percent = (t / total_duration_secs.max(0.001) * 100.0).clamp(0.0, 100.0) as f32;
         let is_at_playhead = (t - current_time_secs).abs() < (0.5 / fps);
+        let selected = is_member(t);
         let p_drag = panel_entity.clone();
         let lid_drag = layer_id.to_string();
         let path_drag = prop_path.to_string();
@@ -13349,7 +13395,9 @@ fn timeline_keyframe_lane(
                 .justify_center()
                 .text_xs()
                 .font_bold()
-                .text_color(if is_at_playhead {
+                .text_color(if selected {
+                    rgb(0xffffff)
+                } else if is_at_playhead {
                     rgb(0xf59e0b)
                 } else {
                     rgb(0x38bdf8)
@@ -13357,20 +13405,75 @@ fn timeline_keyframe_lane(
                 .hover(|s| s.text_color(rgb(0xffffff)))
                 .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
                     let mx = event.position.x / px(1.0);
+                    let add = event.modifiers.shift;
                     p_drag.update(cx, |this, cx| {
-                        this.keyframe_drag = Some(TimelineKeyframeDrag {
-                            layer_id: lid_drag.clone(),
-                            prop_path: path_drag.clone(),
-                            original_time_s: t,
-                            current_time_s: t,
-                            initial_mouse_x: mx,
-                            moved: false,
-                        });
+                        let one = (lid_drag.clone(), path_drag.clone(), t);
+                        let member = |s: &(String, String, f64)| {
+                            s.0 == one.0 && s.1 == one.1 && (s.2 - t).abs() <= tol
+                        };
+                        let mut sel = this.graph_sel_keys.clone();
+                        // Shift toggles without dragging; plain press keeps
+                        // a member set (multi-move armed) or selects one.
+                        let mut start_drag = true;
+                        if add {
+                            if let Some(pos) = sel.iter().position(&member) {
+                                sel.remove(pos);
+                                start_drag = false;
+                            } else {
+                                sel.push(one.clone());
+                            }
+                        } else if !sel.iter().any(&member) {
+                            sel = vec![one.clone()];
+                        }
+                        let followers = sel
+                            .iter()
+                            .filter(|s| !member(s))
+                            .map(|s| (s.0.clone(), s.1.clone(), s.2, s.2))
+                            .collect();
+                        this.graph_sel_keys = sel;
+                        if start_drag {
+                            this.keyframe_drag = Some(TimelineKeyframeDrag {
+                                layer_id: lid_drag.clone(),
+                                prop_path: path_drag.clone(),
+                                original_time_s: t,
+                                current_time_s: t,
+                                initial_mouse_x: mx,
+                                moved: false,
+                                followers,
+                            });
+                        }
                         cx.notify();
                     });
                 })
                 .child("◆"),
         );
+    }
+
+    // Row marquee overlay (fractions of the cached lane geometry).
+    if let Some(mq) = tl_marquee {
+        if mq.layer_id == layer_id && mq.path == prop_path {
+            let (lane_x, lane_w) = tl_geom;
+            let fx0 = ((mq.x0 - lane_x) / lane_w.max(1.0)).clamp(0.0, 1.0);
+            let fx1 = ((mq.x1 - lane_x) / lane_w.max(1.0)).clamp(0.0, 1.0);
+            let (a, b) = if fx0 <= fx1 { (fx0, fx1) } else { (fx1, fx0) };
+            lane = lane.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "tl_lane_marquee_{}_{}",
+                        layer_id,
+                        prop_path.replace('.', "_")
+                    )))
+                    .test_support()
+                    .absolute()
+                    .top(px(2.))
+                    .bottom(px(2.))
+                    .left(relative(a))
+                    .right(relative(1.0 - b))
+                    .border_1()
+                    .border_color(ae::amber())
+                    .bg(Rgba { r: 1.0, g: 0.62, b: 0.04, a: 0.08 }),
+            );
+        }
     }
 
     lane = lane.child(
@@ -13614,6 +13717,8 @@ pub struct TimelinePanel {
     pub ruler_width: f32,
     pub graph_plot_origin_x: f32,
     pub graph_plot_width: f32,
+    pub graph_plot_origin_y: f32,
+    pub graph_plot_height: f32,
     /// Drag state for layer strip interactions (After Effects-style)
     pub drag_action: Option<TimelineDragAction>,
     pub drag_last_x: f32,
@@ -13625,9 +13730,17 @@ pub struct TimelinePanel {
     pub scrub_factor: f32,
     /// Active spline/graph keyframe drag (time + value).
     pub graph_drag: Option<GraphKeyDrag>,
-    /// Selected spline key (`layer_id`, `path`, key time): the bottom-bar
-    /// easing row acts on this key. Set on key grab; sticky afterwards.
-    pub graph_sel_key: Option<(String, String, f64)>,
+    /// Selected spline/timeline keys (`layer_id`, `path`, key time, AE
+    /// marquee style). The bottom-bar easing row acts on the last one.
+    /// Set on key grab / marquee; sticky afterwards; Escape clears.
+    pub graph_sel_keys: Vec<(String, String, f64)>,
+    /// Cached lane origin/width (window px, silent prepaint).
+    pub tl_lane_x: f32,
+    pub tl_lane_w: f32,
+    /// Active graph-plot marquee (window px + view snapshot at press).
+    pub graph_marquee: Option<GraphMarquee>,
+    /// Active timeline-lane marquee (single prop row, window px).
+    pub tl_marquee: Option<TlMarquee>,
     /// Active tangent-handle drag (Bezier curve editing).
     pub graph_tan_drag: Option<GraphTangentDrag>,
     /// Graph Editor value axis (Value / Speed tabs).
@@ -13660,6 +13773,9 @@ pub struct TimelineKeyframeDrag {
     pub current_time_s: f64,
     pub initial_mouse_x: f32,
     pub moved: bool,
+    /// Marquee companions: (layer, path, grab time, current time), moved
+    /// by the same time delta as the leader.
+    pub followers: Vec<(String, String, f64, f64)>,
 }
 
 /// Describes what kind of drag the user is performing on the timeline layer strip.
@@ -13705,6 +13821,34 @@ pub struct GraphKeyDrag {
     /// True once the pointer actually moved (a press without movement is a
     /// click: the mousedown checkpoint is undone so clicks leave no undo).
     pub moved: bool,
+    /// Marquee companions: (layer, path, current time), moved by the same
+    /// per-move delta as the leader.
+    pub followers: Vec<(String, String, f64)>,
+}
+
+/// Graph-plot marquee in progress (plot fractions + the view rect the
+/// press rendered with, so hit-testing matches what the user saw).
+#[derive(Clone, Debug)]
+pub struct GraphMarquee {
+    pub fx0: f32,
+    pub fy0: f32,
+    pub fx1: f32,
+    pub fy1: f32,
+    pub view: GraphViewRect,
+    /// Shift held at press: add to the selection instead of replacing.
+    pub add: bool,
+}
+
+/// Timeline-lane marquee in progress (one prop row; y excursion clamped).
+#[derive(Clone, Debug)]
+pub struct TlMarquee {
+    pub layer_id: String,
+    pub path: String,
+    pub duration: f64,
+    pub x0: f32,
+    pub x1: f32,
+    /// Shift held at press: add to the selection instead of replacing.
+    pub add: bool,
 }
 
 /// Active drag of one graph tangent handle (Bezier curve editing).
@@ -13744,10 +13888,12 @@ pub struct GraphUi {
     pub hidden: HashSet<String>,
     pub view: Option<GraphViewRect>,
     pub drag: Option<GraphKeyDrag>,
-    /// Selected spline key (`layer_id`, `path`, key time) for the
-    /// bottom-bar easing row. Threaded through (not read off the panel
-    /// entity) because render may not re-enter its own entity.
-    pub sel_key: Option<(String, String, f64)>,
+    /// Selected spline keys for the bottom-bar easing row (acts on the
+    /// last). Threaded through (not read off the panel entity) because
+    /// render may not re-enter its own entity.
+    pub sel_keys: Vec<(String, String, f64)>,
+    /// Active plot marquee (fractions + view snapshot) for the overlay.
+    pub marquee: Option<GraphMarquee>,
 }
 
 /// Resolved spline selection for the easing bar: (label, path, interp,
@@ -13877,6 +14023,75 @@ fn graph_unit(path: &str) -> &'static str {    let base = match path.rsplit_once
 
 /// Graph Editor plot height (shared by layout, tooltip, and drag math).
 const GRAPH_PLOT_H: f32 = 180.0;
+
+/// Resolve a finished graph marquee to key refs: visible series only
+/// (legend eye + isolate + focus respected). Time is always boxed; value
+/// is boxed on the Value tab and ignored on the Speed tab (speeds live in
+/// a different unit space than the box).
+#[allow(clippy::too_many_arguments)]
+fn marquee_pick_graph_keys(
+    series: &[GraphSeries],
+    layer_id: &str,
+    hidden: &HashSet<String>,
+    isolate: bool,
+    focus_path: &str,
+    speed_tab: bool,
+    mq: &GraphMarquee,
+) -> Vec<(String, String, f64)> {
+    let is_focused = |path: &str| -> bool {
+        path == focus_path
+            || (!focus_path.is_empty()
+                && !focus_path.ends_with(".x")
+                && !focus_path.ends_with(".y")
+                && (path == format!("{focus_path}.x") || path == format!("{focus_path}.y")))
+    };
+    let (fx_lo, fx_hi) = if mq.fx0 <= mq.fx1 { (mq.fx0, mq.fx1) } else { (mq.fx1, mq.fx0) };
+    let (fy_lo, fy_hi) = if mq.fy0 <= mq.fy1 { (mq.fy0, mq.fy1) } else { (mq.fy1, mq.fy0) };
+    let tspan = (mq.view.t1 - mq.view.t0).max(1e-5);
+    let vspan = (mq.view.v1 - mq.view.v0).max(1e-5);
+    let mut out = Vec::new();
+    for se in series {
+        if hidden.contains(&format!("{layer_id}:{}", se.path)) {
+            continue;
+        }
+        if isolate && !is_focused(&se.path) {
+            continue;
+        }
+        for k in &se.keys {
+            let fx = ((k.t - mq.view.t0) / tspan) as f32;
+            if fx < fx_lo - 1e-6 || fx > fx_hi + 1e-6 {
+                continue;
+            }
+            if !speed_tab {
+                let fy = 1.0 - (k.v - mq.view.v0) / vspan;
+                if fy < fy_lo - 1e-6 || fy > fy_hi + 1e-6 {
+                    continue;
+                }
+            }
+            out.push((layer_id.to_string(), se.path.clone(), k.t));
+        }
+    }
+    out
+}
+
+/// Live value of the graph key nearest `at_s` (leader + multi-drag
+/// followers share this lookup).
+fn graph_key_live_value(s: &EditorState, layer_id: &str, path: &str, at_s: f64) -> Option<f32> {
+    s.graph_series(layer_id)
+        .iter()
+        .find(|se| se.path == path)
+        .and_then(|se| {
+            se.keys
+                .iter()
+                .min_by(|a, b| {
+                    (a.t - at_s)
+                        .abs()
+                        .partial_cmp(&(b.t - at_s).abs())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|k| k.v)
+        })
+}
 ///
 /// Shows one normalized curve per animated scalar property of the selected
 /// layer (`graph_series`), sampled via `evaluate_graph_param`. Keyframes are
@@ -14514,7 +14729,7 @@ fn render_graph_view(
     // the focused key at the playhead, gets Linear / Ease In / Ease Out /
     // Hold buttons that act on that key only. No selection: key readout.
     let sel_ease_bar: AnyElement = {
-        let stored = gui.sel_key.clone();
+        let stored = gui.sel_keys.last().cloned();
         let at_playhead = || -> Option<SelEaseKey> {
             let i = focus_idx?;
             if lid_graph.is_empty() {
@@ -14602,7 +14817,13 @@ fn render_graph_view(
     };
 
     // Graph canvas: min-height plot area that grows with the panel (AE graph pane).
-    let mut plot = div().flex_1().min_h(px(GRAPH_PLOT_H)).relative().bg(rgb(0x141414));
+    let mut plot = div()
+        .id("graph_plot")
+        .test_support()
+        .flex_1()
+        .min_h(px(GRAPH_PLOT_H))
+        .relative()
+        .bg(rgb(0x141414));
 
     // Grid: horizontal quarters + per-second verticals across the VIEW.
     if show_grid {
@@ -14639,32 +14860,64 @@ fn render_graph_view(
     }
 
     // Background seek on plot area (below curves/keys so keys stay clickable).
-    // Mapped across the VIEW so Fit Sel seeks precisely.
+    // Mapped across the VIEW so Fit Sel seeks precisely. A press that turns
+    // into a drag becomes a marquee instead (key handlers run first, so a
+    // press on a key never starts one — see the graph_drag guard).
     let p_plot_prep = panel_entity.clone();
     let p_plot_down = panel_entity.clone();
     let s_seek = state.clone();
     let v_t0 = view.t0;
     let v_tspan = tspan;
+    let mq_view = view;
     plot = plot
         .cursor_col_resize()
         .on_prepaint(move |bounds, _window, cx| {
             let ox = bounds.origin.x / px(1.0);
+            let oy = bounds.origin.y / px(1.0);
             let w = bounds.size.width / px(1.0);
+            let h = bounds.size.height / px(1.0);
             p_plot_prep.update(cx, |this, _cx| {
                 this.graph_plot_origin_x = ox;
+                this.graph_plot_origin_y = oy;
                 this.graph_plot_width = w;
+                this.graph_plot_height = h;
             });
         })
         .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
             let mx = event.position.x / px(1.0);
-            let (ox, w) = {
+            let my = event.position.y / px(1.0);
+            let (ox, oy, w, h, key_won) = {
                 let p = p_plot_down.read(cx);
-                (p.graph_plot_origin_x, p.graph_plot_width)
+                (
+                    p.graph_plot_origin_x,
+                    p.graph_plot_origin_y,
+                    p.graph_plot_width,
+                    p.graph_plot_height,
+                    p.graph_drag.is_some(),
+                )
             };
+            // Press seeks immediately (unchanged); a drag reframes it as a
+            // marquee on first move.
             let frac = ((mx - ox) / w.max(1.0)).clamp(0.0, 1.0) as f64;
             let target = v_t0 + frac * v_tspan;
             s_seek.update(cx, |s, cx| {
                 s.seek(target);
+                cx.notify();
+            });
+            if key_won {
+                return;
+            }
+            let fx = ((mx - ox) / w.max(1.0)).clamp(0.0, 1.0);
+            let fy = ((my - oy) / h.max(1.0)).clamp(0.0, 1.0);
+            p_plot_down.update(cx, |this, cx| {
+                this.graph_marquee = Some(GraphMarquee {
+                    fx0: fx,
+                    fy0: fy,
+                    fx1: fx,
+                    fy1: fy,
+                    view: mq_view,
+                    add: event.modifiers.shift,
+                });
                 cx.notify();
             });
         });
@@ -14722,6 +14975,26 @@ fn render_graph_view(
                 .bg(rgb(0xef4444)),
         );
 
+    // Marquee rect (AE rubber band): fractions render directly, so the box
+    // always matches the selection math below regardless of plot size.
+    if let Some(mq) = gui.marquee.clone() {
+        let (fx0, fx1) = if mq.fx0 <= mq.fx1 { (mq.fx0, mq.fx1) } else { (mq.fx1, mq.fx0) };
+        let (fy0, fy1) = if mq.fy0 <= mq.fy1 { (mq.fy0, mq.fy1) } else { (mq.fy1, mq.fy0) };
+        plot = plot.child(
+            div()
+                .id("graph_marquee")
+                .test_support()
+                .absolute()
+                .left(relative(fx0.clamp(0.0, 1.0)))
+                .right(relative((1.0 - fx1).clamp(0.0, 1.0)))
+                .top(relative(fy0.clamp(0.0, 1.0)))
+                .bottom(relative((1.0 - fy1).clamp(0.0, 1.0)))
+                .border_1()
+                .border_color(ae::amber())
+                .bg(Rgba { r: 1.0, g: 0.62, b: 0.04, a: 0.08 }),
+        );
+    }
+
     // Keyframes: click-drag moves time + value (Value tab), right-click
     // cycles interpolation. Selected keys (dragged or at playhead) render
     // white. The Speed tab is view-only.
@@ -14739,7 +15012,10 @@ fn render_graph_view(
                     .map(|gd| gd.layer_id == lid_graph && gd.path == se.path && (gd.at_s - k.t).abs() <= half_frame2)
                     .unwrap_or(false);
                 let at_playhead = (k.t - current_time).abs() <= half_frame2;
-                let selected = dragging_this || at_playhead;
+                let in_selection = gui.sel_keys.iter().any(|s| {
+                    s.0 == lid_graph && s.1 == se.path && (s.2 - k.t).abs() <= half_frame2
+                });
+                let selected = dragging_this || at_playhead || in_selection;
                 let (glyph, glyph_col): (&str, Rgba) = if selected {
                     ("◆", rgb(0xffffff))
                 } else {
@@ -14811,13 +15087,39 @@ fn render_graph_view(
                         .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
                             let cxp = event.position.x / px(1.0);
                             let cyp = event.position.y / px(1.0);
+                            let add = event.modifiers.shift;
                             s_down_ck.update(cx, |s, cx| {
                                 s.checkpoint();
                                 s.preview_fast = true;
                                 cx.notify();
                             });
                             p_down.update(cx, |this, cx| {
-                                this.graph_drag = Some(GraphKeyDrag {
+                                let one = (lid_k.clone(), path_k.clone(), at_s);
+                                let is_member = |s: &(String, String, f64)| {
+                                    s.0 == one.0 && s.1 == one.1 && (s.2 - at_s).abs() <= half_frame2
+                                };
+                                let mut sel = this.graph_sel_keys.clone();
+                                // Shift toggles membership without dragging;
+                                // plain press keeps a member set (multi-move
+                                // armed) or selects just this key.
+                                let mut start_drag = true;
+                                if add {
+                                    if let Some(pos) = sel.iter().position(&is_member) {
+                                        sel.remove(pos);
+                                        start_drag = false;
+                                    } else {
+                                        sel.push(one.clone());
+                                    }
+                                } else if !sel.iter().any(&is_member) {
+                                    sel = vec![one.clone()];
+                                }
+                                let followers = sel
+                                    .iter()
+                                    .filter(|s| !is_member(s))
+                                    .map(|s| (s.0.clone(), s.1.clone(), s.2))
+                                    .collect();
+                                this.graph_sel_keys = sel;
+                                this.graph_drag = start_drag.then(|| GraphKeyDrag {
                                     layer_id: lid_k.clone(),
                                     path: path_k.clone(),
                                     at_s,
@@ -14828,11 +15130,8 @@ fn render_graph_view(
                                     duration,
                                     span: tspan,
                                     moved: false,
+                                    followers,
                                 });
-                                // Stick the selection for the bottom-bar
-                                // easing row (survives mouse-up).
-                                this.graph_sel_key =
-                                    Some((lid_k.clone(), path_k.clone(), at_s));
                                 cx.notify();
                             });
                         })
@@ -15158,6 +15457,10 @@ impl TimelinePanel {
             ruler_width: 1000.0,
             graph_plot_origin_x: 0.0,
             graph_plot_width: 1000.0,
+            graph_plot_origin_y: 0.0,
+            graph_plot_height: 180.0,
+            tl_lane_x: 0.0,
+            tl_lane_w: 1000.0,
             drag_action: None,
             drag_last_x: 0.0,
             scrub_layer: None,
@@ -15166,7 +15469,9 @@ impl TimelinePanel {
             scrub_moved: false,
             scrub_factor: 1.0,
             graph_drag: None,
-            graph_sel_key: None,
+            graph_sel_keys: Vec::new(),
+            graph_marquee: None,
+            tl_marquee: None,
             graph_tan_drag: None,
             easing_dropdown_open: false,
             animation_dropdown_open: false,
@@ -16123,7 +16428,7 @@ impl Render for TimelinePanel {
                                     .child(timeline_scrub(SharedString::from(format!("tl_scrub_{}_anchor_x", layer.id)), "X", format!("{:.0}", ap.x), layer.id.clone(), "anchor_x".to_string(), 1.0, 1.0, &self.state, &panel_entity, cx))
                                     .child(timeline_scrub(SharedString::from(format!("tl_scrub_{}_anchor_y", layer.id)), "Y", format!("{:.0}", ap.y), layer.id.clone(), "anchor_y".to_string(), 1.0, 1.0, &self.state, &panel_entity, cx)),
                             );
-                        let ap_lane = timeline_keyframe_lane(&layer.id, "transform.anchor_point", &ap_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, cx);
+                        let ap_lane = timeline_keyframe_lane(&layer.id, "transform.anchor_point", &ap_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, &self.graph_sel_keys, self.tl_marquee.clone(), (self.tl_lane_x, self.tl_lane_w), cx);
                         timeline_rows.push(h_flex().h(px(24.)).items_center().child(ap_left).child(ap_lane));
 
                         // 2. Position
@@ -16170,7 +16475,7 @@ impl Render for TimelinePanel {
                                     .child(timeline_scrub(SharedString::from(format!("tl_scrub_{}_pos_x", layer.id)), "X", format!("{:.0}", pos.x), layer.id.clone(), "pos_x".to_string(), 1.0, 1.0, &self.state, &panel_entity, cx))
                                     .child(timeline_scrub(SharedString::from(format!("tl_scrub_{}_pos_y", layer.id)), "Y", format!("{:.0}", pos.y), layer.id.clone(), "pos_y".to_string(), 1.0, 1.0, &self.state, &panel_entity, cx)),
                             );
-                        let pos_lane = timeline_keyframe_lane(&layer.id, "transform.position", &pos_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, cx);
+                        let pos_lane = timeline_keyframe_lane(&layer.id, "transform.position", &pos_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, &self.graph_sel_keys, self.tl_marquee.clone(), (self.tl_lane_x, self.tl_lane_w), cx);
                         timeline_rows.push(h_flex().h(px(24.)).items_center().child(pos_left).child(pos_lane));
 
                         // 3. Scale
@@ -16217,7 +16522,7 @@ impl Render for TimelinePanel {
                                     .child(timeline_scrub(SharedString::from(format!("tl_scrub_{}_scale_x", layer.id)), "X", format!("{:.0}%", sc.x), layer.id.clone(), "scale_x".to_string(), 0.5, 1.0, &self.state, &panel_entity, cx))
                                     .child(timeline_scrub(SharedString::from(format!("tl_scrub_{}_scale_y", layer.id)), "Y", format!("{:.0}%", sc.y), layer.id.clone(), "scale_y".to_string(), 0.5, 1.0, &self.state, &panel_entity, cx)),
                             );
-                        let sc_lane = timeline_keyframe_lane(&layer.id, "transform.scale", &sc_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, cx);
+                        let sc_lane = timeline_keyframe_lane(&layer.id, "transform.scale", &sc_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, &self.graph_sel_keys, self.tl_marquee.clone(), (self.tl_lane_x, self.tl_lane_w), cx);
                         timeline_rows.push(h_flex().h(px(24.)).items_center().child(sc_left).child(sc_lane));
 
                         // 4. Rotation
@@ -16261,7 +16566,7 @@ impl Render for TimelinePanel {
                             .child(
                                 timeline_scrub(SharedString::from(format!("tl_scrub_{}_rotation", layer.id)), "Angle", format!("{:.1}°", rot), layer.id.clone(), "rotation".to_string(), 0.25, 1.0, &self.state, &panel_entity, cx),
                             );
-                        let rot_lane = timeline_keyframe_lane(&layer.id, "transform.rotation", &rot_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, cx);
+                        let rot_lane = timeline_keyframe_lane(&layer.id, "transform.rotation", &rot_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, &self.graph_sel_keys, self.tl_marquee.clone(), (self.tl_lane_x, self.tl_lane_w), cx);
                         timeline_rows.push(h_flex().h(px(24.)).items_center().child(rot_left).child(rot_lane));
 
                         // 5. Opacity
@@ -16305,7 +16610,7 @@ impl Render for TimelinePanel {
                             .child(
                                 timeline_scrub(SharedString::from(format!("tl_scrub_{}_opacity", layer.id)), "Op", format!("{:.0}%", op), layer.id.clone(), "opacity".to_string(), 0.25, 1.0, &self.state, &panel_entity, cx),
                             );
-                        let op_lane = timeline_keyframe_lane(&layer.id, "opacity", &op_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, cx);
+                        let op_lane = timeline_keyframe_lane(&layer.id, "opacity", &op_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, &self.graph_sel_keys, self.tl_marquee.clone(), (self.tl_lane_x, self.tl_lane_w), cx);
                         timeline_rows.push(h_flex().h(px(24.)).items_center().child(op_left).child(op_lane));
                     }
 
@@ -16555,7 +16860,7 @@ impl Render for TimelinePanel {
                                                 timeline_scrub(SharedString::from(format!("tl_scrub_{}_{}_{}", layer.id, effect.id, p_slug)), "Val", format!("{:.1}", p_val), layer.id.clone(), fx_key, fx_drag, p_step, &self.state, &panel_entity, cx),
                                             );
 
-                                        let param_lane = timeline_keyframe_lane(&layer.id, &fx_prop_path, &kf_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, cx);
+                                        let param_lane = timeline_keyframe_lane(&layer.id, &fx_prop_path, &kf_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, &self.graph_sel_keys, self.tl_marquee.clone(), (self.tl_lane_x, self.tl_lane_w), cx);
 
                                         timeline_rows.push(
                                             h_flex()
@@ -16609,7 +16914,7 @@ impl Render for TimelinePanel {
                                                     .child(div().w(px(100.)).truncate().text_color(cx.theme().foreground).child(p_label)),
                                             );
 
-                                        let swatch_lane = timeline_keyframe_lane(&layer.id, &fx_prop_path, &kf_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, cx);
+                                        let swatch_lane = timeline_keyframe_lane(&layer.id, &fx_prop_path, &kf_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, &self.graph_sel_keys, self.tl_marquee.clone(), (self.tl_lane_x, self.tl_lane_w), cx);
 
                                         timeline_rows.push(
                                             h_flex()
@@ -16934,7 +17239,7 @@ impl Render for TimelinePanel {
                                                 .child(format!("{} pts{}", mask.path.value.points.len(), if mask.path.value.closed { " (closed)" } else { "" }))
                                         );
 
-                                    let path_lane = timeline_keyframe_lane(&layer.id, &path_prop_path, &path_kf_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, cx);
+                                    let path_lane = timeline_keyframe_lane(&layer.id, &path_prop_path, &path_kf_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, &self.graph_sel_keys, self.tl_marquee.clone(), (self.tl_lane_x, self.tl_lane_w), cx);
 
                                     timeline_rows.push(
                                         h_flex()
@@ -16978,7 +17283,7 @@ impl Render for TimelinePanel {
                                             .child(
                                                 timeline_scrub(SharedString::from(format!("tl_scrub_{}_{}_feather", layer.id, mask.id)), "px", format!("{:.1}", feather_val), layer.id.clone(), f_key, 0.5, 1.0, &self.state, &panel_entity, cx),
                                             );
-                                        let feather_lane = timeline_keyframe_lane(&layer.id, &f_prop_path, &f_kf_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, cx);
+                                        let feather_lane = timeline_keyframe_lane(&layer.id, &f_prop_path, &f_kf_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, &self.graph_sel_keys, self.tl_marquee.clone(), (self.tl_lane_x, self.tl_lane_w), cx);
 
                                         timeline_rows.push(h_flex().h(px(24.)).border_b_1().border_color(cx.theme().border).items_center().child(feather_left).child(feather_lane));
 
@@ -17012,7 +17317,7 @@ impl Render for TimelinePanel {
                                             .child(
                                                 timeline_scrub(SharedString::from(format!("tl_scrub_{}_{}_opacity", layer.id, mask.id)), "%", format!("{:.0}%", opacity_val), layer.id.clone(), o_key, 0.5, 1.0, &self.state, &panel_entity, cx),
                                             );
-                                        let opacity_lane = timeline_keyframe_lane(&layer.id, &o_prop_path, &o_kf_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, cx);
+                                        let opacity_lane = timeline_keyframe_lane(&layer.id, &o_prop_path, &o_kf_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, &self.graph_sel_keys, self.tl_marquee.clone(), (self.tl_lane_x, self.tl_lane_w), cx);
 
                                         timeline_rows.push(h_flex().h(px(24.)).border_b_1().border_color(cx.theme().border).items_center().child(opacity_left).child(opacity_lane));
 
@@ -17046,7 +17351,7 @@ impl Render for TimelinePanel {
                                             .child(
                                                 timeline_scrub(SharedString::from(format!("tl_scrub_{}_{}_expansion", layer.id, mask.id)), "px", format!("{:.1}", exp_val), layer.id.clone(), e_key, 0.5, 1.0, &self.state, &panel_entity, cx),
                                             );
-                                        let exp_lane = timeline_keyframe_lane(&layer.id, &e_prop_path, &e_kf_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, cx);
+                                        let exp_lane = timeline_keyframe_lane(&layer.id, &e_prop_path, &e_kf_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, &self.graph_sel_keys, self.tl_marquee.clone(), (self.tl_lane_x, self.tl_lane_w), cx);
 
                                         timeline_rows.push(h_flex().h(px(24.)).border_b_1().border_color(cx.theme().border).items_center().child(exp_left).child(exp_lane));
                                     }
@@ -17159,43 +17464,80 @@ impl Render for TimelinePanel {
                         let vspan = (gd.v_max - gd.v_min).max(1e-5);
                         let dv = -dy / graph_h * vspan;
                         // Current value of the dragged key.
-                        let cur_v = {
-                            let s = s_root_move.read(cx);
-                            s.graph_series(&gd.layer_id)
-                                .iter()
-                                .find(|se| se.path == gd.path)
-                                .and_then(|se| {
-                                    se.keys
-                                        .iter()
-                                        .min_by(|a, b| {
-                                            (a.t - gd.at_s)
-                                                .abs()
-                                                .partial_cmp(&(b.t - gd.at_s).abs())
-                                                .unwrap_or(std::cmp::Ordering::Equal)
-                                        })
-                                        .map(|k| k.v)
-                                })
-                                .unwrap_or(0.0)
-                        };
+                        let cur_v = graph_key_live_value(
+                            s_root_move.read(cx),
+                            &gd.layer_id,
+                            &gd.path,
+                            gd.at_s,
+                        )
+                        .unwrap_or(0.0);
                         let new_t = (gd.at_s + dt as f64).clamp(0.0, gd.duration);
                         let new_v = (cur_v + dv).clamp(gd.v_min, gd.v_max);
                         let lid = gd.layer_id.clone();
                         let path = gd.path.clone();
                         let at_s = gd.at_s;
+                        // Applied per-move delta, shared with marquee
+                        // followers (same time scale; the view value span
+                        // is shared, so one dv fits all).
+                        let dt_step = new_t - at_s;
+                        let dv_step = new_v - cur_v;
+                        let mut followers = gd.followers.clone();
                         s_root_move.update(cx, |s, cx| {
                             s.preview_fast = true;
                             s.move_graph_keyframe_live(&lid, &path, at_s, new_t, new_v);
+                            for (flid, fpath, fcur) in followers.iter_mut() {
+                                let fv = graph_key_live_value(s, flid, fpath, *fcur)
+                                    .unwrap_or(0.0);
+                                let nt = (*fcur + dt_step).clamp(0.0, gd.duration);
+                                let nv = (fv + dv_step).clamp(gd.v_min, gd.v_max);
+                                s.move_graph_keyframe_live(flid, fpath, *fcur, nt, nv);
+                                *fcur = nt;
+                            }
                             cx.notify();
                         });
                         gd.at_s = new_t;
                         gd.last_x = cur_x;
                         gd.last_y = cur_y;
                         gd.moved = true;
+                        gd.followers = followers;
                         p_root_move.update(cx, |this, cx| {
                             this.graph_drag = Some(gd);
                             cx.notify();
                         });
                     }
+                    return;
+                }
+                // Graph marquee resize (spline mode only).
+                if p_root_move.read(cx).graph_marquee.is_some() {
+                    let (ox, oy, w, h) = {
+                        let p = p_root_move.read(cx);
+                        (
+                            p.graph_plot_origin_x,
+                            p.graph_plot_origin_y,
+                            p.graph_plot_width,
+                            p.graph_plot_height,
+                        )
+                    };
+                    let fx = ((event.position.x / px(1.0) - ox) / w.max(1.0)).clamp(0.0, 1.0);
+                    let fy = ((event.position.y / px(1.0) - oy) / h.max(1.0)).clamp(0.0, 1.0);
+                    p_root_move.update(cx, |this, cx| {
+                        if let Some(mq) = this.graph_marquee.as_mut() {
+                            mq.fx1 = fx;
+                            mq.fy1 = fy;
+                        }
+                        cx.notify();
+                    });
+                    return;
+                }
+                // Timeline-lane marquee resize (lanes mode only).
+                if p_root_move.read(cx).tl_marquee.is_some() {
+                    let cur_x = event.position.x / px(1.0);
+                    p_root_move.update(cx, |this, cx| {
+                        if let Some(mq) = this.tl_marquee.as_mut() {
+                            mq.x1 = cur_x;
+                        }
+                        cx.notify();
+                    });
                     return;
                 }
                 if let Some(mut kd) = p_root_move.read(cx).keyframe_drag.clone() {
@@ -17208,14 +17550,24 @@ impl Render for TimelinePanel {
                         let target_time_s = (kd.original_time_s + delta_time_s).clamp(0.0, total_duration_secs);
                         if (target_time_s - kd.current_time_s).abs() > 0.0001 {
                             let from_t = kd.current_time_s;
+                            let mut followers = kd.followers.clone();
                             s_root_move.update(cx, |s, cx| {
                                 if s.move_layer_keyframe_time(&kd.layer_id, &kd.prop_path, from_t, target_time_s) {
                                     let tc = TimeCode::from_seconds(target_time_s, fps);
                                     s.clock.seek(tc);
                                 }
+                                // Marquee companions ride the same delta.
+                                for (flid, fpath, forig, fcur) in followers.iter_mut() {
+                                    let ftarget = (*forig + delta_time_s).clamp(0.0, total_duration_secs);
+                                    if (ftarget - *fcur).abs() > 0.0001 {
+                                        s.move_layer_keyframe_time(flid, fpath, *fcur, ftarget);
+                                        *fcur = ftarget;
+                                    }
+                                }
                                 cx.notify();
                             });
                             kd.current_time_s = target_time_s;
+                            kd.followers = followers;
                             p_root_move.update(cx, |this, cx| {
                                 this.keyframe_drag = Some(kd);
                                 cx.notify();
@@ -17316,6 +17668,86 @@ impl Render for TimelinePanel {
                 }
             })
             .on_mouse_up(MouseButton::Left, move |_event, window, cx| {
+                // Finalize graph marquee → selection (before the drag
+                // clears below; a press without drag selects nothing).
+                if let Some(mq) = p_root_up.read(cx).graph_marquee.clone() {
+                    let (hidden, isolate, speed_tab) = {
+                        let p = p_root_up.read(cx);
+                        (
+                            p.graph_hidden.clone(),
+                            p.graph_isolate,
+                            p.graph_tab == GraphTab::Speed,
+                        )
+                    };
+                    let (sel_lid, focus_path) = {
+                        let s = s_root_up.read(cx);
+                        (s.selected_layer_id.clone(), s.spline_prop_path.clone())
+                    };
+                    let mut picked = Vec::new();
+                    if let Some(lid) = sel_lid {
+                        let s = s_root_up.read(cx);
+                        picked = marquee_pick_graph_keys(
+                            &s.graph_series(&lid),
+                            &lid,
+                            &hidden,
+                            isolate,
+                            &focus_path,
+                            speed_tab,
+                            &mq,
+                        );
+                    }
+                    p_root_up.update(cx, |this, cx| {
+                        if mq.add {
+                            for key in picked {
+                                if !this.graph_sel_keys.iter().any(|s| {
+                                    s.0 == key.0 && s.1 == key.1 && (s.2 - key.2).abs() <= 1e-9
+                                }) {
+                                    this.graph_sel_keys.push(key);
+                                }
+                            }
+                        } else {
+                            this.graph_sel_keys = picked;
+                        }
+                        this.graph_marquee = None;
+                        cx.notify();
+                    });
+                }
+                // Finalize lane marquee → selection on that prop row.
+                if let Some(mq) = p_root_up.read(cx).tl_marquee.clone() {
+                    let (lane_x, lane_w) = {
+                        let p = p_root_up.read(cx);
+                        (p.tl_lane_x, p.tl_lane_w)
+                    };
+                    let fx0 = ((mq.x0 - lane_x) / lane_w.max(1.0)).clamp(0.0, 1.0);
+                    let fx1 = ((mq.x1 - lane_x) / lane_w.max(1.0)).clamp(0.0, 1.0);
+                    let (a, b) = if fx0 <= fx1 { (fx0, fx1) } else { (fx1, fx0) };
+                    let t_lo = a as f64 * mq.duration;
+                    let t_hi = b as f64 * mq.duration;
+                    let mut picked = Vec::new();
+                    {
+                        let s = s_root_up.read(cx);
+                        for t in s.graph_key_times(&mq.layer_id, &mq.path) {
+                            if t + 1e-9 >= t_lo && t - 1e-9 <= t_hi {
+                                picked.push((mq.layer_id.clone(), mq.path.clone(), t));
+                            }
+                        }
+                    }
+                    p_root_up.update(cx, |this, cx| {
+                        if mq.add {
+                            for key in picked {
+                                if !this.graph_sel_keys.iter().any(|s| {
+                                    s.0 == key.0 && s.1 == key.1 && (s.2 - key.2).abs() <= 1e-9
+                                }) {
+                                    this.graph_sel_keys.push(key);
+                                }
+                            }
+                        } else {
+                            this.graph_sel_keys = picked;
+                        }
+                        this.tl_marquee = None;
+                        cx.notify();
+                    });
+                }
                 if let Some(kd) = p_root_up.read(cx).keyframe_drag.clone() {
                     if !kd.moved {
                         let target_tc = TimeCode::from_seconds(kd.original_time_s, fps);
@@ -17768,7 +18200,8 @@ impl Render for TimelinePanel {
                         hidden: self.graph_hidden.clone(),
                         view: self.graph_view,
                         drag: self.graph_drag.clone(),
-                        sel_key: self.graph_sel_key.clone(),
+                        sel_keys: self.graph_sel_keys.clone(),
+                        marquee: self.graph_marquee.clone(),
                     };
                     h_flex()
                         .flex_1()

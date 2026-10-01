@@ -5617,6 +5617,58 @@ impl EditorState {
     /// Delete the keyframe near an absolute time.
     pub fn remove_graph_keyframe(&mut self, layer_id: &str, path: &str, at_s: f64) -> bool {
         self.checkpoint();
+        self.remove_graph_keyframe_inner(layer_id, path, at_s)
+    }
+
+    /// Delete a marquee selection in one undo step. Returns keys removed.
+    pub fn remove_graph_keys(&mut self, keys: &[(String, String, f64)]) -> usize {
+        if keys.is_empty() {
+            return 0;
+        }
+        self.checkpoint();
+        let mut removed = 0;
+        for (layer_id, path, at_s) in keys {
+            if self.remove_graph_keyframe_inner(layer_id, path, *at_s) {
+                removed += 1;
+            }
+        }
+        removed
+    }
+
+    /// Keyframe times for one graph path (marquee hit-testing in lanes).
+    /// A Vec2 base without component unions both axes (lane rows show the
+    /// union); component paths stay exact.
+    pub fn graph_key_times(&self, layer_id: &str, path: &str) -> Vec<f64> {
+        let comp = match self.active_composition() {
+            Some(c) => c,
+            None => return Vec::new(),
+        };
+        let layer = match comp.get_layer(layer_id) {
+            Some(l) => l,
+            None => return Vec::new(),
+        };
+        let (base, comp_sfx) = match split_graph_path(path) {
+            Some(v) => v,
+            None => return Vec::new(),
+        };
+        if comp_sfx.is_none()
+            && matches!(
+                base,
+                "transform.anchor_point" | "transform.position" | "transform.scale"
+            )
+        {
+            let mut ts = self.graph_key_times(layer_id, &format!("{base}.x"));
+            ts.extend(self.graph_key_times(layer_id, &format!("{base}.y")));
+            ts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            ts.dedup();
+            return ts;
+        }
+        graph_prop_read(layer, path)
+            .map(|(keys, _)| keys.iter().map(|k| k.t).collect())
+            .unwrap_or_default()
+    }
+
+    fn remove_graph_keyframe_inner(&mut self, layer_id: &str, path: &str, at_s: f64) -> bool {
         let fps = match self.active_composition() {
             Some(c) => c.frame_rate,
             None => return false,

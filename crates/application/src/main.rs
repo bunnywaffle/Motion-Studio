@@ -3101,6 +3101,14 @@ impl Render for AppView {
                         s.set_active_mask_edit(None);
                         cx.notify();
                     });
+                    // Esc clears the spline/timeline key selection.
+                    let panels = app_key.read(cx).panels().clone();
+                    panels.timeline.update(cx, |tl, cx| {
+                        if !tl.graph_sel_keys.is_empty() {
+                            tl.graph_sel_keys.clear();
+                            cx.notify();
+                        }
+                    });
                     return;
                 }
                 if key == "space" || key == " " {
@@ -3112,14 +3120,32 @@ impl Render for AppView {
                     }
                 } else if key == "delete" || key == "backspace" {
                     if !typing_in_input {
-                        state_key.update(cx, |s, cx| {
-                            if let Some((lid, mid)) = s.active_mask_edit.take() {
-                                let _ = s.remove_layer_mask(&lid, &mid);
-                            } else {
-                                let _ = s.delete_selected_layer();
-                            }
-                            cx.notify();
-                        });
+                        // Spline marquee selection deletes keys first (AE).
+                        let sel_keys = {
+                            let panels = app_key.read(cx).panels().clone();
+                            panels.timeline.read(cx).graph_sel_keys.clone()
+                        };
+                        let spline_open = state_key.read(cx).spline_editor_open;
+                        if spline_open && !sel_keys.is_empty() {
+                            state_key.update(cx, |s, cx| {
+                                s.remove_graph_keys(&sel_keys);
+                                cx.notify();
+                            });
+                            let panels = app_key.read(cx).panels().clone();
+                            panels.timeline.update(cx, |tl, cx| {
+                                tl.graph_sel_keys.clear();
+                                cx.notify();
+                            });
+                        } else {
+                            state_key.update(cx, |s, cx| {
+                                if let Some((lid, mid)) = s.active_mask_edit.take() {
+                                    let _ = s.remove_layer_mask(&lid, &mid);
+                                } else {
+                                    let _ = s.delete_selected_layer();
+                                }
+                                cx.notify();
+                            });
+                        }
                     }
                 } else if key == "home" {
                     state_key.update(cx, |s, cx| {
@@ -5058,6 +5084,213 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         assert!(in_tan.is_none() && out_tan.is_none());
         // Unknown key time resolves false.
         assert!(!state.set_graph_key_easing("layer_accent", "transform.position.x", 99.0, KeyEase::Linear));
+    }
+
+    #[test]
+    fn test_remove_graph_keys_deletes_selection_at_once() {
+        use crate::state::EditorState;
+
+        let mut state = EditorState::new();
+        // Fixture: accent position keys at 0s/2s/4s.
+        let before = state.graph_key_times("layer_accent", "transform.position.x");
+        assert!(before.len() >= 3);
+        let doomed: Vec<(String, String, f64)> = before
+            .iter()
+            .take(2)
+            .map(|t| ("layer_accent".to_string(), "transform.position.x".to_string(), *t))
+            .collect();
+        assert_eq!(state.remove_graph_keys(&doomed), 2);
+        let after = state.graph_key_times("layer_accent", "transform.position.x");
+        assert_eq!(after.len(), before.len() - 2);
+        assert_eq!(state.remove_graph_keys(&[]), 0);
+    }
+
+    #[gpui_kit::test]
+    fn test_graph_marquee_selects_and_delete_clears_keys(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+        use gpui_kit::point;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        // Accent position.x has keys at 0s/2s/4s: open Graph on it.
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.select_layer(Some("layer_accent".to_string()));
+                if !s.spline_editor_open {
+                    s.toggle_spline_editor();
+                }
+                cx.notify();
+            });
+        });
+        // Drag a full-plot marquee: selects every visible key in range.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let bounds = window.find("graph_plot").bounds();
+            let w = bounds.size.width / px(1.0);
+            let h = bounds.size.height / px(1.0);
+            let from = bounds.origin + point(px(w * 0.02), px(h * 0.02));
+            let to = bounds.origin + point(px(w * 0.98), px(h * 0.98));
+            window.drag(from, to, cx);
+            window.render_frame(cx);
+        })
+        .expect("update_window failed");
+        let sel = app_view.read_with(cx, |view, cx| {
+            view.panels().timeline.read(cx).graph_sel_keys.clone()
+        });
+        assert!(sel.len() >= 3, "marquee must catch the accent keys: {sel:?}");
+        assert!(sel.iter().any(|s| s.1 == "transform.position.x" && (s.2 - 2.0).abs() < 0.05));
+        // Delete removes exactly the selection (layer survives). Position
+        // keys are shared Vec2 structs: removing x@2 also takes y@2, so
+        // only the out-of-marquee 0s key remains.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.press("delete", cx);
+        })
+        .expect("update_window failed");
+        cx.run_until_parked();
+        assert!(app_view.read_with(cx, |view, cx| {
+            view.panels().timeline.read(cx).graph_sel_keys.is_empty()
+        }));
+        assert!(app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            s.active_composition().unwrap().get_layer("layer_accent").is_some()
+                && s.graph_key_times("layer_accent", "transform.position.x") == vec![0.0]
+        }));
+    }
+
+    #[gpui_kit::test]
+    fn test_graph_marquee_multi_drag_moves_selection(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+        use gpui_kit::point;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        // Accent position.x has keys at 0s/2s/4s: open Graph on it.
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.select_layer(Some("layer_accent".to_string()));
+                if !s.spline_editor_open {
+                    s.toggle_spline_editor();
+                }
+                cx.notify();
+            });
+        });
+        let times_of = |app_view: &Entity<AppView>, cx: &TestAppContext| {
+            app_view.read_with(cx, |view, cx| {
+                view.state().read(cx).graph_key_times("layer_accent", "transform.position.x")
+            })
+        };
+        assert_eq!(times_of(&app_view, cx).len(), 3);
+        // Full-plot marquee selects everything, then a rightward drag of
+        // one diamond carries the whole selection later in time.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let bounds = window.find("graph_plot").bounds();
+            let w = bounds.size.width / px(1.0);
+            let h = bounds.size.height / px(1.0);
+            window.drag(
+                bounds.origin + point(px(w * 0.02), px(h * 0.02)),
+                bounds.origin + point(px(w * 0.98), px(h * 0.98)),
+                cx,
+            );
+            window.render_frame(cx);
+            let snap = window.find("graph_key_layer_accent_transform_position_x_2000");
+            let from = snap.bounds().center();
+            window.drag(from, from + point(px(60.0), px(0.0)), cx);
+            window.render_frame(cx);
+        })
+        .expect("update_window failed");
+        let after = times_of(&app_view, cx);
+        assert_eq!(after.len(), 3, "multi-drag must not add/remove keys");
+        // Marquee caught the 2s + 4s keys (0s sits outside the 2% margin):
+        // both ride the drag later, the 0s key stays put.
+        assert!(
+            after.iter().any(|t| (*t - 0.0).abs() < 1e-6),
+            "unselected 0s key untouched: {after:?}"
+        );
+        assert!(
+            after.iter().any(|t| (*t - 2.43).abs() < 0.1),
+            "dragged 2s key moved: {after:?}"
+        );
+        assert!(
+            after.iter().any(|t| (*t - 4.43).abs() < 0.1),
+            "selected 4s follower moved: {after:?}"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn test_lane_marquee_selects_prop_range_and_escape_clears(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+        use gpui_kit::point;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        // Lanes mode, accent expanded with Transform twirled down.
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.select_layer(Some("layer_accent".to_string()));
+                cx.notify();
+            });
+            view.panels().timeline.update(cx, |tl, cx| {
+                tl.toggle_layer_expanded("layer_accent");
+                tl.toggle_group_expanded("layer_accent:transform");
+                cx.notify();
+            });
+        });
+        // Drag across the position lane: catches the 2s + 4s keys only.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let bounds = window.find("tl_lane_layer_accent_transform_position").bounds();
+            let w = bounds.size.width / px(1.0);
+            let h = bounds.size.height / px(1.0);
+            let from = bounds.origin + point(px(w * 0.3), px(h * 0.5));
+            let to = bounds.origin + point(px(w * 0.9), px(h * 0.5));
+            window.drag(from, to, cx);
+            window.render_frame(cx);
+        })
+        .expect("update_window failed");
+        let sel = app_view.read_with(cx, |view, cx| {
+            view.panels().timeline.read(cx).graph_sel_keys.clone()
+        });
+        assert_eq!(sel.len(), 2, "lane range must catch 2s + 4s: {sel:?}");
+        assert!(sel.iter().all(|s| s.0 == "layer_accent" && s.1 == "transform.position"));
+        // Escape clears without touching keys.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.press("escape", cx);
+        })
+        .expect("update_window failed");
+        cx.run_until_parked();
+        assert!(app_view.read_with(cx, |view, cx| {
+            view.panels().timeline.read(cx).graph_sel_keys.is_empty()
+        }));
+        assert_eq!(
+            app_view.read_with(cx, |view, cx| {
+                view.state().read(cx).graph_key_times("layer_accent", "transform.position.x").len()
+            }),
+            3
+        );
     }
 
     #[gpui_kit::test]
