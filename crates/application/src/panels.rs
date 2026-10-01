@@ -14893,9 +14893,16 @@ fn render_graph_view(
                     p.graph_plot_origin_y,
                     p.graph_plot_width,
                     p.graph_plot_height,
-                    p.graph_drag.is_some(),
+                    // Key AND tangent handles bubble through here: either
+                    // winning the press means hands off (no seek, no
+                    // marquee) or handle grabs jump the playhead and the
+                    // release clobbers the selection.
+                    p.graph_drag.is_some() || p.graph_tan_drag.is_some(),
                 )
             };
+            if key_won {
+                return;
+            }
             // Press seeks immediately (unchanged); a drag reframes it as a
             // marquee on first move.
             let frac = ((mx - ox) / w.max(1.0)).clamp(0.0, 1.0) as f64;
@@ -14904,9 +14911,6 @@ fn render_graph_view(
                 s.seek(target);
                 cx.notify();
             });
-            if key_won {
-                return;
-            }
             let fx = ((mx - ox) / w.max(1.0)).clamp(0.0, 1.0);
             let fy = ((my - oy) / h.max(1.0)).clamp(0.0, 1.0);
             p_plot_down.update(cx, |this, cx| {
@@ -15367,11 +15371,15 @@ fn render_graph_view(
         .text_color(ae::text())
         .child(header)
         .child(
-            // Legend: capped height so it never pushes the curve strip out of view
+            // Legend: capped but scrollable, so long prop lists never
+            // push the curve strip out of view — and never clip a row
+            // mid-height the way a hard overflow_hidden cut does.
             v_flex()
+                .id("graph_legend_scroll")
+                .test_support()
                 .w_full()
-                .max_h(px(64.))
-                .overflow_hidden()
+                .max_h(px(120.))
+                .overflow_y_scroll()
                 .flex_none()
                 .child(legend)
         )

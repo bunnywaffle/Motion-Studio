@@ -5526,6 +5526,50 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
     }
 
     #[gpui_kit::test]
+    fn test_tangent_handle_press_ignores_plot_background(cx: &mut TestAppContext) {
+        // Grabbing a tangent handle must not seek the playhead or arm a
+        // marquee: the handle bubbles through the plot background handler,
+        // which used to treat every press as seek + marquee start.
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.select_layer(Some("layer_accent".to_string()));
+                if !s.spline_editor_open {
+                    s.toggle_spline_editor();
+                }
+                cx.notify();
+            });
+        });
+        let t0 = app_view.read_with(cx, |view, cx| view.state().read(cx).clock.position_seconds());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let snap = window.find("graph_tan_layer_accent_transform_position_x_2000_out");
+            assert!(snap.visible());
+            window.click("graph_tan_layer_accent_transform_position_x_2000_out", cx);
+            window.render_frame(cx);
+        })
+        .expect("update_window failed");
+        cx.run_until_parked();
+        assert!(app_view.read_with(cx, |view, cx| {
+            (view.state().read(cx).clock.position_seconds() - t0).abs() < 1e-9
+        }), "handle press must not seek");
+        assert!(app_view.read_with(cx, |view, cx| {
+            let tl = view.panels().timeline.read(cx);
+            tl.graph_marquee.is_none() && tl.graph_sel_keys.is_empty()
+        }), "handle press must not marquee or select");
+    }
+
+    #[gpui_kit::test]
     fn test_kit_components_drive_commands(cx: &mut TestAppContext) {
         use gpui_kit::test::TestWindowExt;
 
