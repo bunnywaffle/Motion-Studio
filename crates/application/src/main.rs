@@ -133,10 +133,6 @@ impl AppView {
             .panel_view(panel_handle(panels.properties.clone()), cx)
             .panel_view(panel_handle(panels.effects.clone()), cx);
 
-        // Bottom dock: Timeline
-        let bottom_layout =
-            DockLayout::tabs().panel_view(panel_handle(panels.timeline.clone()), cx);
-
         dock_area.update(cx, |dock, cx| {
             dock.set_dock(DockPlacement::Left, left_layout, window, cx);
             dock.set_dock_size(DockPlacement::Left, px(280.), window, cx);
@@ -145,9 +141,6 @@ impl AppView {
 
             dock.set_dock(DockPlacement::Right, right_layout, window, cx);
             dock.set_dock_size(DockPlacement::Right, px(300.), window, cx);
-
-            dock.set_dock(DockPlacement::Bottom, bottom_layout, window, cx);
-            dock.set_dock_size(DockPlacement::Bottom, px(260.), window, cx);
         });
 
         let focus_handle = cx.focus_handle();
@@ -1710,24 +1703,18 @@ impl Render for AppView {
         if self.docks_sized_for != Some((vw, vh)) {
             self.docks_sized_for = Some((vw, vh));
             let vw_f = vw as f32;
-            let vh_f = vh as f32;
+            let _vh_f = vh as f32;
             let left = px(vw_f * 0.22).max(px(200.)).min(px(320.));
             let right = px(vw_f * 0.23).max(px(220.)).min(px(340.));
-            let bottom = px(vh_f * 0.32).max(px(180.)).min(px(320.));
             self.dock_area.update(cx, |dock, cx| {
                 dock.set_dock_size(DockPlacement::Left, left, &mut *window, cx);
                 dock.set_dock_size(DockPlacement::Right, right, &mut *window, cx);
-                dock.set_dock_size(DockPlacement::Bottom, bottom, &mut *window, cx);
             });
         }
 
-        let is_full = self.state.read(cx).timeline_full_width;
-        let dock_open = self.dock_area.read(cx).is_dock_open(DockPlacement::Bottom);
-        if is_full && dock_open {
-            self.dock_area.update(cx, |dock, cx| {
-                dock.toggle_dock(DockPlacement::Bottom, window, cx);
-            });
-        } else if !is_full && !dock_open {
+        // Timeline is rendered as a full-width strip outside the dock area (see main_workspace below).
+        // Always keep the bottom dock closed to avoid double-rendering.
+        if self.dock_area.read(cx).is_dock_open(DockPlacement::Bottom) {
             self.dock_area.update(cx, |dock, cx| {
                 dock.toggle_dock(DockPlacement::Bottom, window, cx);
             });
@@ -2914,44 +2901,36 @@ impl Render for AppView {
                 .into_any_element(),
             );
         }
-        let main_workspace = if is_full {
-            v_flex()
-                .flex_1()
-                .size_full()
-                .overflow_hidden()
-                .child(div().flex_1().size_full().child(self.dock_area.clone()))
-                .child(
-                    div()
-                        .w_full()
-                        .h(px(260.))
-                        .border_t_1()
-                        .border_color(cx.theme().border)
-                        .child(self.panels.timeline.clone()),
-                )
-                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                    // Clicking the workspace dismisses open menus.
-                    close_key.update(cx, |this, cx| {
-                        if this.open_menu.take().is_some() {
-                            cx.notify();
-                        }
-                    });
-                })
-                .into_any_element()
+        // The spline/graph editor needs headroom its chrome (header +
+        // legend + ruler + 180px plot + easing row) doesn't fit in the
+        // 260px lanes strip, so it gets a taller strip instead of clipping.
+        let strip_h = if self.state.read(cx).spline_editor_open {
+            px(400.)
         } else {
-            div()
-                .flex_1()
-                .size_full()
-                .child(self.dock_area.clone())
-                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                    // Clicking the workspace dismisses open menus.
-                    close_key.update(cx, |this, cx| {
-                        if this.open_menu.take().is_some() {
-                            cx.notify();
-                        }
-                    });
-                })
-                .into_any_element()
+            px(260.)
         };
+        let main_workspace = v_flex()
+            .flex_1()
+            .size_full()
+            .overflow_hidden()
+            .child(div().flex_1().size_full().child(self.dock_area.clone()))
+            .child(
+                div()
+                    .w_full()
+                    .h(strip_h)
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .child(self.panels.timeline.clone()),
+            )
+            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                // Clicking the workspace dismisses open menus.
+                close_key.update(cx, |this, cx| {
+                    if this.open_menu.take().is_some() {
+                        cx.notify();
+                    }
+                });
+            })
+            .into_any_element();
 
         div()
             .id("app_view")
@@ -3301,36 +3280,35 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         app_view.read_with(cx, |view, cx| {
             let dock_entity = view.dock_area();
             dock_entity.read_with(cx, |dock, cx| {
-                // Verify all four dock regions exist
+                // Left/Center/Right docks exist; the timeline is a
+                // full-width strip below the dock area, so no Bottom dock.
                 assert!(dock.has_dock(DockPlacement::Left));
                 assert!(dock.has_dock(DockPlacement::Right));
-                assert!(dock.has_dock(DockPlacement::Bottom));
+                assert!(!dock.has_dock(DockPlacement::Bottom));
 
                 // Verify the dock trees are present
                 assert!(dock.layout(DockPlacement::Left).is_some());
                 assert!(dock.layout(DockPlacement::Center).is_some());
                 assert!(dock.layout(DockPlacement::Right).is_some());
-                assert!(dock.layout(DockPlacement::Bottom).is_some());
+                assert!(dock.layout(DockPlacement::Bottom).is_none());
 
                 // Verify docks are open
                 assert!(dock.is_dock_open(DockPlacement::Left));
                 assert!(dock.is_dock_open(DockPlacement::Right));
-                assert!(dock.is_dock_open(DockPlacement::Bottom));
+                assert!(!dock.is_dock_open(DockPlacement::Bottom));
 
                 // Verify docks are non-empty
                 assert!(!dock.is_empty(DockPlacement::Left, cx));
                 assert!(!dock.is_empty(DockPlacement::Center, cx));
                 assert!(!dock.is_empty(DockPlacement::Right, cx));
-                assert!(!dock.is_empty(DockPlacement::Bottom, cx));
 
                 // Verify configured dock sizes (responsive: fitted to the
                 // window within sane rails, not fixed px).
                 let left = dock.dock_size(DockPlacement::Left).expect("left size");
                 let right = dock.dock_size(DockPlacement::Right).expect("right size");
-                let bottom = dock.dock_size(DockPlacement::Bottom).expect("bottom size");
+                assert!(dock.dock_size(DockPlacement::Bottom).is_none());
                 assert!((200.0..=320.0).contains(&(left / px(1.0))), "left {left:?}");
                 assert!((220.0..=340.0).contains(&(right / px(1.0))), "right {right:?}");
-                assert!((180.0..=320.0).contains(&(bottom / px(1.0))), "bottom {bottom:?}");
             });
         });
     }
@@ -3369,9 +3347,11 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
                 let effects_view = dock.panel(effects_id).expect("effects panel attached");
                 assert_eq!(effects_view.panel_name(cx), "effects");
 
-                // 5. Timeline panel attached to Bottom dock
-                let timeline_view = dock.panel(timeline_id).expect("timeline panel attached");
-                assert_eq!(timeline_view.panel_name(cx), "timeline");
+                // 5. Timeline panel lives outside the dock area (full-width
+                // strip below it), so it is not attached to any dock...
+                assert!(dock.panel(timeline_id).is_none());
+                // ...but the panel entity is still owned by the view.
+                let _ = view.panels().timeline.clone();
             });
         });
     }
@@ -4516,10 +4496,12 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
                     break;
                 }
             }
-            assert!(window.find("effect_item_brightness_contrast").visible());
-            assert!(window.find("effect_item_levels").visible());
-            assert!(window.find("effect_item_chroma_key").visible());
-            assert!(window.find("effect_item_luma_key").visible());
+            // Rows below the fold stay mounted but report invisible while
+            // culled from paint: assert presence, not visibility.
+            assert!(window.try_find("effect_item_brightness_contrast").is_some());
+            assert!(window.try_find("effect_item_levels").is_some());
+            assert!(window.try_find("effect_item_chroma_key").is_some());
+            assert!(window.try_find("effect_item_luma_key").is_some());
             for _ in 0..8 {
                 window.scroll(
                     "effects_categories",
@@ -4536,7 +4518,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
                 }
             }
             assert!(window.find("effect_category_text").visible());
-            assert!(window.find("effect_item_text_outline").visible());
+            assert!(window.try_find("effect_item_text_outline").is_some());
 
             // 2. Add effect to selected layer
             let state_entity = app_view.read(cx).state().clone();
@@ -5258,8 +5240,21 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         });
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            // Card starts collapsed: expand first.
-            window.click(SharedString::from(format!("effect_disclosure_{noise}")), cx);
+            // Card starts collapsed: scroll into view (the full-width
+            // timeline strip leaves a shorter inspector), then expand.
+            let disc = SharedString::from(format!("effect_disclosure_{noise}"));
+            for _ in 0..8 {
+                window.scroll(
+                    "properties_inspector",
+                    gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(-400.))),
+                    cx,
+                );
+                window.render_frame(cx);
+                if window.try_find(disc.clone()).map(|e| e.visible()).unwrap_or(false) {
+                    break;
+                }
+            }
+            window.click(disc, cx);
             window.render_frame(cx);
             let id = SharedString::from(format!("fx_bool_monochrome_{noise}"));
             assert!(window.find(id.clone()).visible());
@@ -7838,6 +7833,18 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             window.render_frame(cx);
             let card_id = SharedString::from(format!("applied_effect_{blur_id}"));
             let disc_id = SharedString::from(format!("effect_disclosure_{blur_id}"));
+            // Scroll the shorter inspector until the card is on-screen.
+            for _ in 0..8 {
+                window.scroll(
+                    "properties_inspector",
+                    gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(-400.))),
+                    cx,
+                );
+                window.render_frame(cx);
+                if window.try_find(card_id.clone()).map(|e| e.visible()).unwrap_or(false) {
+                    break;
+                }
+            }
             assert!(window.find(card_id.clone()).visible());
             assert!(window.find(disc_id.clone()).visible());
             // Card starts collapsed: parameter not mounted until expanded.

@@ -13858,7 +13858,7 @@ fn graph_unit(path: &str) -> &'static str {    let base = match path.rsplit_once
 }
 
 /// Graph Editor plot height (shared by layout, tooltip, and drag math).
-const GRAPH_PLOT_H: f32 = 150.0;
+const GRAPH_PLOT_H: f32 = 180.0;
 ///
 /// Shows one normalized curve per animated scalar property of the selected
 /// layer (`graph_series`), sampled via `evaluate_graph_param`. Keyframes are
@@ -14506,8 +14506,8 @@ fn render_graph_view(
         _ => String::new(),
     };
 
-    // Graph canvas: fixed height plot area (AE graph pane).
-    let mut plot = div().flex_1().h(px(GRAPH_PLOT_H)).relative().bg(rgb(0x141414));
+    // Graph canvas: min-height plot area that grows with the panel (AE graph pane).
+    let mut plot = div().flex_1().min_h(px(GRAPH_PLOT_H)).relative().bg(rgb(0x141414));
 
     // Grid: horizontal quarters + per-second verticals across the VIEW.
     if show_grid {
@@ -14905,7 +14905,7 @@ fn render_graph_view(
     let (axis_lo, axis_hi) = if speed_tab { (s_min, s_max) } else { (view.v0, view.v1) };
     let mut axis = v_flex()
         .w(px(64.))
-        .h(px(GRAPH_PLOT_H))
+        .min_h(px(GRAPH_PLOT_H))
         .flex_none()
         .justify_between()
         .py_1()
@@ -14963,11 +14963,20 @@ fn render_graph_view(
         .id("spline_graph_scroll")
         .test_support()
         .flex_1()
+        .min_h_0()
         .overflow_hidden()
         .bg(ae::bg())
         .text_color(ae::text())
         .child(header)
-        .child(legend)
+        .child(
+            // Legend: capped height so it never pushes the curve strip out of view
+            v_flex()
+                .w_full()
+                .max_h(px(64.))
+                .overflow_hidden()
+                .flex_none()
+                .child(legend)
+        )
         .child(
             v_flex()
                 .flex_1()
@@ -17593,9 +17602,16 @@ impl Render for TimelinePanel {
                             .on_prepaint(move |bounds, _window, cx| {
                                 let ox = bounds.origin.x / px(1.0);
                                 let w = bounds.size.width / px(1.0);
-                                p_ruler_prep.update(cx, |this, _cx| {
+                                p_ruler_prep.update(cx, |this, cx| {
+                                    // 2px deadband: only notify when width actually changes
+                                    // (prevents redundant layout passes every playback frame)
+                                    let changed = (this.ruler_origin_x - ox).abs() > 2.0
+                                        || (this.ruler_width - w).abs() > 2.0;
                                     this.ruler_origin_x = ox;
                                     this.ruler_width = w;
+                                    if changed {
+                                        cx.notify();
+                                    }
                                 });
                             })
                             .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
