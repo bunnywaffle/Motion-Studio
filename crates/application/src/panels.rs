@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::state::{AnimationPreset, EditorState, EditorTool, EasingPreset, GraphSeries};
+use crate::state::{AnimationPreset, EditorState, EditorTool, EasingPreset, GraphSeries, KeyEase};
 use project::shader::{presets as shader_presets, ShaderParamValue};
 use project::{BlendMode, Color, EffectType, LayerSource, ShapeType, TimeCode, TrackMatteMode, Vec2};
 
@@ -13625,6 +13625,9 @@ pub struct TimelinePanel {
     pub scrub_factor: f32,
     /// Active spline/graph keyframe drag (time + value).
     pub graph_drag: Option<GraphKeyDrag>,
+    /// Selected spline key (`layer_id`, `path`, key time): the bottom-bar
+    /// easing row acts on this key. Set on key grab; sticky afterwards.
+    pub graph_sel_key: Option<(String, String, f64)>,
     /// Active tangent-handle drag (Bezier curve editing).
     pub graph_tan_drag: Option<GraphTangentDrag>,
     /// Graph Editor value axis (Value / Speed tabs).
@@ -13741,7 +13744,22 @@ pub struct GraphUi {
     pub hidden: HashSet<String>,
     pub view: Option<GraphViewRect>,
     pub drag: Option<GraphKeyDrag>,
+    /// Selected spline key (`layer_id`, `path`, key time) for the
+    /// bottom-bar easing row. Threaded through (not read off the panel
+    /// entity) because render may not re-enter its own entity.
+    pub sel_key: Option<(String, String, f64)>,
 }
+
+/// Resolved spline selection for the easing bar: (label, path, interp,
+/// in-tangent, out-tangent, key time).
+type SelEaseKey = (
+    String,
+    String,
+    project::KeyframeInterpolation,
+    Option<(f32, f32)>,
+    Option<(f32, f32)>,
+    f64,
+);
 
 /// Explicit graph viewport (AE Fit View / Fit Sel). `None` = auto-fit the
 /// full composition range + padded value range.
@@ -13977,30 +13995,18 @@ fn render_graph_view(
             .text_xs()
             .child(label.to_string())
     };
+    // Single compact toolbar row (AE graph bar): tabs, fit, readout,
+    // grid/keys. No wrap, no title label — the legend below names the
+    // graphed series.
     let header = h_flex()
         .px_2()
         .py_1()
         .gap_2()
         .items_center()
-        .flex_wrap()
         .border_b_1()
         .border_color(ae::border())
         .bg(ae::panel())
         .text_xs()
-        .child(
-            h_flex()
-                .gap_1p5()
-                .items_center()
-                .child(div().font_semibold().text_color(ae::text()).child("Graphed Properties"))
-                .child(
-                    div()
-                        .px_1p5()
-                        .rounded_sm()
-                        .bg(ae::control())
-                        .text_color(ae::dim())
-                        .child(format!("{} Active", visible_idx.len())),
-                ),
-        )
         .child(
             div()
                 .id("graph_isolate_toggle")
@@ -14112,6 +14118,7 @@ fn render_graph_view(
                         .id("graph_readout")
                         .test_support()
                         .font_medium()
+                        .truncate()
                         .text_color(ae::timecode())
                         .child(format!("{focus_label}  Value: {focus_val:.1} {focus_unit}  Speed: {focus_speed:.1} {focus_unit}/s")),
                 ),
@@ -14200,9 +14207,9 @@ fn render_graph_view(
             .child("★ Presets ▾")
     );
 
-    // --- Legend column: layer blocks with per-series eye, value, key ---
-    // (AE Graphed Properties pane). One block per layer carrying curves;
-    // the selected layer always gets a block.
+    // --- Legend column: per-series eye, value, key for the SELECTED layer
+    // (AE Graphed Properties pane). Other layers' curves stay out of the
+    // way; select a layer to graph it.
     let legend = {
         let s = state.read(cx);
         let half_frame = 0.5 / fps.max(1.0);
@@ -14210,13 +14217,8 @@ fn render_graph_view(
             Some(comp) => comp
                 .layers
                 .iter()
-                .map(|l| {
-                    (
-                        l.id.clone(),
-                        l.name.clone(),
-                        Some(&l.id) == lid_opt.as_ref(),
-                    )
-                })
+                .filter(|l| Some(&l.id) == lid_opt.as_ref())
+                .map(|l| (l.id.clone(), l.name.clone(), true))
                 .collect(),
             None => Vec::new(),
         };
@@ -14346,11 +14348,13 @@ fn render_graph_view(
     }
 
     // View rect: stored (Fit Sel) or auto-fit full range + padded values.
-    // Range series = focused visible series when any is focused, else all
-    // visible ones (Isolate/hidden respected).
-    let range_idx: Vec<usize> = {
-        let focused: Vec<usize> = visible_idx.iter().copied().filter(|&i| is_focused(&series[i].path)).collect();
-        if focused.is_empty() { visible_idx.clone() } else { focused }
+    // Range follows the focused series (first visible fallback), so value
+    // changes always fill the plot: sharing one range across differently
+    // scaled props (opacity 0-100 vs rotation 0-360) would flatten the
+    // small ones into a centered line. Axis + Fit Sel already follow focus.
+    let range_idx: Vec<usize> = match focus_idx {
+        Some(i) => vec![i],
+        None => visible_idx.clone(),
     };
     const SAMPLES: usize = 120;
     // Sampled values per visible series, across the FULL duration (view
@@ -14504,6 +14508,97 @@ fn render_graph_view(
             }
         }
         _ => String::new(),
+    };
+
+    // Compact per-key easing (AE key interp row): the grabbed key, else
+    // the focused key at the playhead, gets Linear / Ease In / Ease Out /
+    // Hold buttons that act on that key only. No selection: key readout.
+    let sel_ease_bar: AnyElement = {
+        let stored = gui.sel_key.clone();
+        let at_playhead = || -> Option<SelEaseKey> {
+            let i = focus_idx?;
+            if lid_graph.is_empty() {
+                return None;
+            }
+            let se = &series[i];
+            let k = se.keys.iter().find(|k| (k.t - current_time).abs() <= half_frame2)?;
+            Some((se.label.clone(), se.path.clone(), k.interp, k.in_tan, k.out_tan, k.t))
+        };
+        let resolved = match stored {
+            Some((lid, path, at_s)) if lid == lid_graph => series
+                .iter()
+                .find(|se| se.path == path)
+                .and_then(|se| {
+                    se.keys
+                        .iter()
+                        .find(|k| (k.t - at_s).abs() <= half_frame2)
+                        .map(|k| (se.label.clone(), path.clone(), k.interp, k.in_tan, k.out_tan, k.t))
+                })
+                .or_else(at_playhead),
+            _ => at_playhead(),
+        };
+        match resolved {
+            Some((label, path, interp, in_tan, out_tan, at_s)) => {
+                use project::KeyframeInterpolation::{Bezier, Hold, Linear};
+                let is_active = |ease: KeyEase| match (ease, interp) {
+                    (KeyEase::Linear, Linear) | (KeyEase::Hold, Hold) => true,
+                    (KeyEase::EaseIn, Bezier) => {
+                        out_tan == Some((0.42, 0.0)) && in_tan == Some((1.0, 1.0))
+                    }
+                    (KeyEase::EaseOut, Bezier) => {
+                        out_tan == Some((0.0, 0.0)) && in_tan == Some((0.58, 1.0))
+                    }
+                    _ => false,
+                };
+                let path_tag = path.replace(['.', ':'], "_");
+                let ms = (at_s * 1000.0).round() as i64;
+                let mut row = h_flex().gap_1().items_center().child(
+                    div()
+                        .text_xs()
+                        .font_medium()
+                        .text_color(ae::amber())
+                        .child(format!("◆ {label}")),
+                );
+                for ease in [KeyEase::Linear, KeyEase::EaseIn, KeyEase::EaseOut, KeyEase::Hold] {
+                    let s_e = state.clone();
+                    let lid_e = lid_graph.clone();
+                    let path_e = path.clone();
+                    let on = is_active(ease);
+                    row = row.child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "graph_ease_{}_{}_{}_{}",
+                                ease.slug(),
+                                lid_graph,
+                                path_tag,
+                                ms
+                            )))
+                            .test_support()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_0p5()
+                            .rounded_sm()
+                            .bg(if on { ae::accent() } else { ae::control() })
+                            .text_color(if on { rgb(0xffffff) } else { ae::text() })
+                            .hover(|s| s.bg(ae::hover()))
+                            .text_xs()
+                            .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                                s_e.update(cx, |s, cx| {
+                                    s.set_graph_key_easing(&lid_e, &path_e, at_s, ease);
+                                    cx.notify();
+                                });
+                            })
+                            .child(ease.label()),
+                    );
+                }
+                row.into_any_element()
+            }
+            None => div()
+                .text_xs()
+                .text_color(ae::dim())
+                .child(key_info.clone())
+                .into_any_element(),
+        }
     };
 
     // Graph canvas: min-height plot area that grows with the panel (AE graph pane).
@@ -14734,6 +14829,10 @@ fn render_graph_view(
                                     span: tspan,
                                     moved: false,
                                 });
+                                // Stick the selection for the bottom-bar
+                                // easing row (survives mouse-up).
+                                this.graph_sel_key =
+                                    Some((lid_k.clone(), path_k.clone(), at_s));
                                 cx.notify();
                             });
                         })
@@ -14793,19 +14892,19 @@ fn render_graph_view(
                     // Dotted leader key → handle.
                     for s in 1..7 {
                         let f = s as f32 / 7.0;
-                        plot = plot.child(
-                            div()
-                                .absolute()
-                                .left(relative(kx + (hx_r - kx) * f))
-                                .top(relative(1.0 - (ky + (hy_r - ky) * f)))
-                                .w(px(2.))
-                                .h(px(2.))
-                                .ml(px(-1.))
-                                .mt(px(-1.))
-                                .rounded_full()
-                                .bg(ae::amber())
-                                .opacity(0.5),
-                        );
+                    plot = plot.child(
+                        div()
+                            .absolute()
+                            .left(relative(kx + (hx_r - kx) * f))
+                            .top(relative(1.0 - (ky + (hy_r - ky) * f)))
+                            .w(px(3.))
+                            .h(px(3.))
+                            .ml(px(-1.))
+                            .mt(px(-1.))
+                            .rounded_full()
+                            .bg(ae::amber())
+                            .opacity(0.85),
+                    );
                     }
                     let p_tan = panel_entity.clone();
                     let s_tan = state.clone();
@@ -14826,14 +14925,14 @@ fn render_graph_view(
                             .absolute()
                             .left(relative(hx_r))
                             .top(relative(1.0 - hy_r))
-                            .ml(px(-5.))
-                            .mt(px(-5.))
-                            .w(px(10.))
-                            .h(px(10.))
+                            .ml(px(-7.))
+                            .mt(px(-7.))
+                            .w(px(14.))
+                            .h(px(14.))
                             .rounded_sm()
-                            .border_1()
+                            .border_2()
                             .border_color(ae::amber())
-                            .bg(rgb(0x141414))
+                            .bg(Rgba { r: 1.0, g: 0.62, b: 0.04, a: 0.35 })
                             .cursor_pointer()
                             .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
                                 let cxp = event.position.x / px(1.0);
@@ -15020,12 +15119,7 @@ fn render_graph_view(
                                         })
                                         .child(format!("◆ Key {focus_label} @ playhead")),
                                 )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(ae::amber())
-                                        .child(key_info),
-                                )
+                                .child(sel_ease_bar)
                                 .child(
                                     div()
                                         .text_xs()
@@ -15072,6 +15166,7 @@ impl TimelinePanel {
             scrub_moved: false,
             scrub_factor: 1.0,
             graph_drag: None,
+            graph_sel_key: None,
             graph_tan_drag: None,
             easing_dropdown_open: false,
             animation_dropdown_open: false,
@@ -17673,6 +17768,7 @@ impl Render for TimelinePanel {
                         hidden: self.graph_hidden.clone(),
                         view: self.graph_view,
                         drag: self.graph_drag.clone(),
+                        sel_key: self.graph_sel_key.clone(),
                     };
                     h_flex()
                         .flex_1()

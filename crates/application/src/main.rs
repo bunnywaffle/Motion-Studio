@@ -5020,6 +5020,104 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
     }
 
     #[test]
+    fn test_set_graph_key_easing_writes_interp_and_tangents() {
+        use crate::state::{EditorState, KeyEase};
+        use project::KeyframeInterpolation;
+
+        let mut state = EditorState::new();
+        // Fixture: accent position.x keys at 0s/2s/4s.
+        let at_s = 2.0;
+        let read_key = |s: &EditorState| {
+            let layer = s.active_composition().unwrap().get_layer("layer_accent").unwrap();
+            let kf = layer
+                .transform
+                .position
+                .keyframes()
+                .iter()
+                .find(|k| (k.time_seconds() - at_s).abs() < 1e-6)
+                .unwrap()
+                .clone();
+            (kf.interpolation, kf.in_tangent, kf.out_tangent)
+        };
+        assert!(state.set_graph_key_easing("layer_accent", "transform.position.x", at_s, KeyEase::EaseIn));
+        let (interp, in_tan, out_tan) = read_key(&state);
+        assert_eq!(interp, KeyframeInterpolation::Bezier);
+        assert_eq!(out_tan.unwrap(), project::KeyframeTangent::new(0.42, 0.0));
+        assert_eq!(in_tan.unwrap(), project::KeyframeTangent::new(1.0, 1.0));
+        assert!(state.set_graph_key_easing("layer_accent", "transform.position.x", at_s, KeyEase::EaseOut));
+        let (interp, in_tan, out_tan) = read_key(&state);
+        assert_eq!(interp, KeyframeInterpolation::Bezier);
+        assert_eq!(out_tan.unwrap(), project::KeyframeTangent::new(0.0, 0.0));
+        assert_eq!(in_tan.unwrap(), project::KeyframeTangent::new(0.58, 1.0));
+        assert!(state.set_graph_key_easing("layer_accent", "transform.position.x", at_s, KeyEase::Linear));
+        let (interp, _, _) = read_key(&state);
+        assert_eq!(interp, KeyframeInterpolation::Linear);
+        assert!(state.set_graph_key_easing("layer_accent", "transform.position.x", at_s, KeyEase::Hold));
+        let (interp, in_tan, out_tan) = read_key(&state);
+        assert_eq!(interp, KeyframeInterpolation::Hold);
+        assert!(in_tan.is_none() && out_tan.is_none());
+        // Unknown key time resolves false.
+        assert!(!state.set_graph_key_easing("layer_accent", "transform.position.x", 99.0, KeyEase::Linear));
+    }
+
+    #[gpui_kit::test]
+    fn test_graph_key_selection_shows_compact_easing_bar(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        // Accent position.x has keys at 0s/2s/4s: open Graph on it.
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.select_layer(Some("layer_accent".to_string()));
+                if !s.spline_editor_open {
+                    s.toggle_spline_editor();
+                }
+                cx.notify();
+            });
+        });
+        // No selection yet: no easing buttons mounted.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("graph_ease_linear_layer_accent_transform_position_x_2000").is_none());
+        })
+        .expect("update_window failed");
+        // Grab the key: selection sticks, compact bar appears.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("graph_key_layer_accent_transform_position_x_2000", cx);
+            window.render_frame(cx);
+            assert!(window.find("graph_ease_linear_layer_accent_transform_position_x_2000").visible());
+            assert!(window.find("graph_ease_ease_in_layer_accent_transform_position_x_2000").visible());
+            assert!(window.find("graph_ease_ease_out_layer_accent_transform_position_x_2000").visible());
+            assert!(window.find("graph_ease_hold_layer_accent_transform_position_x_2000").visible());
+            // Ease In writes Bezier + ease-in tangents on that key.
+            window.click("graph_ease_ease_in_layer_accent_transform_position_x_2000", cx);
+        })
+        .expect("update_window failed");
+        assert!(app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            let layer = s.active_composition().unwrap().get_layer("layer_accent").unwrap();
+            let kf = layer
+                .transform
+                .position
+                .keyframes()
+                .iter()
+                .find(|k| (k.time_seconds() - 2.0).abs() < 1e-6)
+                .unwrap();
+            kf.interpolation == project::KeyframeInterpolation::Bezier
+                && kf.out_tangent == Some(project::KeyframeTangent::new(0.42, 0.0))
+        }));
+    }
+
+    #[test]
     fn test_widget_state_commits() {
         use crate::state::EditorState;
         use project::{EffectType, ShaderParam, ShaderParamType, ShaderParamValue};

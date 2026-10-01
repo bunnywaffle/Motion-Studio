@@ -687,6 +687,91 @@ fn with_graph_scalar<R>(
     graph_prop_mut(layer, path).map(f)
 }
 
+/// Compact per-key easing for the spline bottom bar (AE key interp row).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyEase {
+    Linear,
+    EaseIn,
+    EaseOut,
+    Hold,
+}
+
+impl KeyEase {
+    /// Slug for stable test ids (`graph_ease_{slug}_…`).
+    pub const fn slug(self) -> &'static str {
+        match self {
+            KeyEase::Linear => "linear",
+            KeyEase::EaseIn => "ease_in",
+            KeyEase::EaseOut => "ease_out",
+            KeyEase::Hold => "hold",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            KeyEase::Linear => "Linear",
+            KeyEase::EaseIn => "Ease In",
+            KeyEase::EaseOut => "Ease Out",
+            KeyEase::Hold => "Hold",
+        }
+    }
+}
+
+/// Find the keyframe nearest `at_s` (within `tol`) for mutation.
+fn find_keyframe_mut<T>(
+    kfs: &mut [project::Keyframe<T>],
+    at_s: f64,
+    tol: f64,
+) -> Option<&mut project::Keyframe<T>> {
+    kfs.iter_mut().find(|k| (k.time_seconds() - at_s).abs() <= tol)
+}
+
+/// Route a graph path to its keyframe track and run `edit` on the key
+/// nearest `at_s`. One routing table for the cycle/set paths (same
+/// coverage as the old `cycle_graph_key_interp` match).
+fn edit_graph_keyframe(
+    layer: &mut Layer,
+    path: &str,
+    at_s: f64,
+    tol: f64,
+    mut edit: impl FnMut(
+        &mut KeyframeInterpolation,
+        &mut Option<KeyframeTangent>,
+        &mut Option<KeyframeTangent>,
+    ),
+) -> bool {
+    let (base, _) = match split_graph_path(path) {
+        Some(v) => v,
+        None => return false,
+    };
+    match base {
+        "transform.anchor_point" | "transform.position" | "transform.scale" => {
+            let prop = match base {
+                "transform.anchor_point" => &mut layer.transform.anchor_point,
+                "transform.position" => &mut layer.transform.position,
+                _ => &mut layer.transform.scale,
+            };
+            match find_keyframe_mut(prop.keyframes_mut(), at_s, tol) {
+                Some(kf) => {
+                    edit(&mut kf.interpolation, &mut kf.in_tangent, &mut kf.out_tangent);
+                    true
+                }
+                None => false,
+            }
+        }
+        _ => with_graph_scalar(layer, path, |p| {
+            match find_keyframe_mut(p.keyframes_mut(), at_s, tol) {
+                Some(kf) => {
+                    edit(&mut kf.interpolation, &mut kf.in_tangent, &mut kf.out_tangent);
+                    true
+                }
+                None => false,
+            }
+        })
+        .unwrap_or(false),
+    }
+}
+
 impl EditorState {
     /// Return all installed system fonts across Windows, macOS, and Linux.
     pub fn available_system_fonts() -> &'static [String] {
@@ -5586,65 +5671,62 @@ impl EditorState {
             None => return false,
         };
         let tol = 0.5 / fps.max(1.0);
-        let cycle = |interp: &mut KeyframeInterpolation| {
+        edit_graph_keyframe(layer, path, at_s, tol, |interp, _, _| {
             *interp = match interp {
                 KeyframeInterpolation::Linear => KeyframeInterpolation::Bezier,
                 KeyframeInterpolation::Bezier => KeyframeInterpolation::Hold,
                 KeyframeInterpolation::Hold => KeyframeInterpolation::Linear,
             };
-        };
-        let (base, _) = match split_graph_path(path) {
-            Some(v) => v,
+        })
+    }
+
+    /// Set one graph key's interpolation from the spline bottom bar
+    /// (Linear / Ease In / Ease Out / Hold apply to the selected key only).
+    pub fn set_graph_key_easing(
+        &mut self,
+        layer_id: &str,
+        path: &str,
+        at_s: f64,
+        ease: KeyEase,
+    ) -> bool {
+        self.checkpoint();
+        let fps = match self.active_composition() {
+            Some(c) => c.frame_rate,
             None => return false,
         };
-        match base {
-            "transform.anchor_point" => {
-                let kfs = layer.transform.anchor_point.keyframes_mut();
-                let kf = match kfs.iter_mut().find(|k| (k.time_seconds() - at_s).abs() <= tol) {
-                    Some(k) => k,
-                    None => return false,
-                };
-                cycle(&mut kf.interpolation);
-                true
-            }
-            "transform.position" => {
-                let kfs = layer.transform.position.keyframes_mut();
-                let kf = match kfs.iter_mut().find(|k| (k.time_seconds() - at_s).abs() <= tol) {
-                    Some(k) => k,
-                    None => return false,
-                };
-                cycle(&mut kf.interpolation);
-                true
-            }
-            "transform.scale" => {
-                let kfs = layer.transform.scale.keyframes_mut();
-                let kf = match kfs.iter_mut().find(|k| (k.time_seconds() - at_s).abs() <= tol) {
-                    Some(k) => k,
-                    None => return false,
-                };
-                cycle(&mut kf.interpolation);
-                true
-            }
-            _ => {
-                let mut done = false;
-                match with_graph_scalar(layer, path, |p| {
-                    if let Some(kf) = p
-                        .keyframes_mut()
-                        .iter_mut()
-                        .find(|k| (k.time_seconds() - at_s).abs() <= tol)
-                    {
-                        cycle(&mut kf.interpolation);
-                        done = true;
-                    }
-                }) {
-
-                    Some(_) => done,
-
-                    None => false,
-
+        let comp = match self.active_composition_mut() {
+            Some(c) => c,
+            None => return false,
+        };
+        let layer = match comp.get_layer_mut(layer_id) {
+            Some(l) => l,
+            None => return false,
+        };
+        let tol = 0.5 / fps.max(1.0);
+        edit_graph_keyframe(layer, path, at_s, tol, |interp, in_tan, out_tan| {
+            match ease {
+                KeyEase::Linear => {
+                    *interp = KeyframeInterpolation::Linear;
+                    *out_tan = Some(KeyframeTangent::linear_out());
+                    *in_tan = Some(KeyframeTangent::linear_in());
+                }
+                KeyEase::EaseIn => {
+                    *interp = KeyframeInterpolation::Bezier;
+                    *out_tan = Some(KeyframeTangent::ease_in_out());
+                    *in_tan = Some(KeyframeTangent::ease_in_in());
+                }
+                KeyEase::EaseOut => {
+                    *interp = KeyframeInterpolation::Bezier;
+                    *out_tan = Some(KeyframeTangent::ease_out_out());
+                    *in_tan = Some(KeyframeTangent::ease_out_in());
+                }
+                KeyEase::Hold => {
+                    *interp = KeyframeInterpolation::Hold;
+                    *in_tan = None;
+                    *out_tan = None;
                 }
             }
-        }
+        })
     }
 
     /// Set bezier tangents on a keyframe (forces Bezier interpolation).
