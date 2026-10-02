@@ -3225,6 +3225,18 @@ impl Render for AppView {
 }
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--render-preview" || a == "--export-demo-frame") {
+        let out_path = args.get(2).map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from("docs/images/composition_preview.png"));
+        if let Some(parent) = out_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let state = EditorState::new();
+        state.export_frame_as_png(&out_path).expect("export frame as png");
+        println!("Exported composition preview to {}", out_path.display());
+        return;
+    }
+
     let app = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
     app.run(|cx| {
         gpui_kit::init(cx);

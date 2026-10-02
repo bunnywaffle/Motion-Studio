@@ -2,6 +2,13 @@
 
 A native, cross-platform motion graphics, visual effects, and 2D compositing desktop application built in Rust with GPUI Kit and wgpu.
 
+![Keyframe Graph Editor & Timeline](docs/images/graph_editor.png)
+
+<p align="center">
+  <img src="docs/images/typography_inspector.png" alt="Properties & Typography Inspector" width="48%" />
+  <img src="docs/images/composition_preview.png" alt="Full Resolution Composition Render" width="48%" />
+</p>
+
 ## Overview
 
 Motion Effect is designed for:
