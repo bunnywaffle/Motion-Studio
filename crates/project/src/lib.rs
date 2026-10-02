@@ -40,7 +40,7 @@ pub use keyframe::{
     evaluate_cubic_bezier, evaluate_keyframe_track, interpolate_keyframes, Extrapolation,
     Interpolate, Keyframe, KeyframeInterpolation, KeyframeTangent,
 };
-pub use layer::{FillGradient, GradientStop, Layer, LayerSource, PropertyLink, ShapeType, TextAlign};
+pub use layer::{FillGradient, GradientStop, GradientType, Layer, LayerSource, PropertyLink, ShapeType, TextAlign};
 pub use marker::Marker;
 pub use mask::{Mask, MaskMode, MaskShapeKind};
 pub use matte::TrackMatteMode;

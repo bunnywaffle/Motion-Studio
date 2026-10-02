@@ -3,7 +3,7 @@ use gpui_kit::component::input::InputState;
 use gpui_kit::{Entity, Subscription};
 use project::{
     Asset, AutoTraceOptions, BlendMode, Color, Composition, Effect, EffectType, FillGradient,
-    Keyframe, KeyframeInterpolation, KeyframeTangent, Layer, LayerSource,
+    GradientType, Keyframe, KeyframeInterpolation, KeyframeTangent, Layer, LayerSource,
     Mask, MaskShapeKind, Path, PathPointKind, PlaybackClock, Project, Property, ShapeType,
     TimeCode, TraceRange, TrackMatteMode, Vec2,
 };
@@ -4799,6 +4799,35 @@ impl EditorState {
         }
     }
 
+    /// Set the gradient projection type (Linear, Radial, Angular).
+    pub fn set_fill_gradient_type(
+        &mut self,
+        layer_id: &str,
+        key: &str,
+        g_type: GradientType,
+    ) -> Result<(), String> {
+        self.checkpoint();
+        let current_tc = self.clock.timecode();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let slot = Self::fill_gradient_slot_mut(layer, key)?;
+        match slot {
+            Some(prop) => {
+                prop.value.gradient_type = g_type;
+                if prop.is_animated() {
+                    let v = prop.value.clone();
+                    prop.add_keyframe(Keyframe::new(current_tc, v));
+                }
+                Ok(())
+            }
+            None => Err("No gradient on this fill".to_string()),
+        }
+    }
+
     /// Mirror all stop offsets end-for-end (one undo step).
     pub fn reverse_fill_gradient(&mut self, layer_id: &str, key: &str) -> Result<(), String> {
         self.checkpoint();
@@ -4958,6 +4987,51 @@ impl EditorState {
         }
     }
 
+    /// Query the gradient ramp type for an effect.
+    pub fn effect_gradient_type(
+        &self,
+        layer_id: &str,
+        effect_id: &str,
+    ) -> Result<GradientType, String> {
+        let comp = self
+            .active_composition()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let effect = layer
+            .get_effect(effect_id)
+            .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
+        effect
+            .effect_type
+            .gradient_ramp_type()
+            .ok_or_else(|| format!("Effect {effect_id} has no gradient"))
+    }
+
+    /// Set the gradient ramp type for an effect.
+    pub fn set_effect_gradient_type(
+        &mut self,
+        layer_id: &str,
+        effect_id: &str,
+        g_type: GradientType,
+    ) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let effect = layer
+            .get_effect_mut(effect_id)
+            .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
+        if effect.effect_type.set_gradient_ramp_type(g_type) {
+            Ok(())
+        } else {
+            Err(format!("Effect {effect_id} has no gradient"))
+        }
+    }
+
     /// Append a ramp stop; returns its sorted index (one undo step).
     pub fn add_effect_gradient_stop(
         &mut self,
@@ -4967,7 +5041,7 @@ impl EditorState {
         color: Color,
     ) -> Result<usize, String> {
         let mut stops = self.effect_gradient_stops(layer_id, effect_id)?;
-        let mut grad = FillGradient { stops: std::mem::take(&mut stops), angle: 0.0 };
+        let mut grad = FillGradient { stops: std::mem::take(&mut stops), angle: 0.0, gradient_type: GradientType::Linear };
         let at = grad.add_stop(offset, color);
         self.set_effect_gradient_stops(layer_id, effect_id, grad.stops)?;
         Ok(at)
@@ -4983,7 +5057,7 @@ impl EditorState {
         offset: f32,
     ) -> Result<usize, String> {
         let mut stops = self.effect_gradient_stops(layer_id, effect_id)?;
-        let mut grad = FillGradient { stops: std::mem::take(&mut stops), angle: 0.0 };
+        let mut grad = FillGradient { stops: std::mem::take(&mut stops), angle: 0.0, gradient_type: GradientType::Linear };
         let at = grad
             .set_stop_offset(index, offset)
             .ok_or_else(|| format!("Gradient stop {index} out of range"))?;
@@ -5046,7 +5120,7 @@ impl EditorState {
         effect_id: &str,
     ) -> Result<(), String> {
         let stops = self.effect_gradient_stops(layer_id, effect_id)?;
-        let grad = FillGradient { stops, angle: 0.0 };
+        let grad = FillGradient { stops, angle: 0.0, gradient_type: GradientType::Linear };
         self.set_effect_gradient_stops(layer_id, effect_id, grad.reversed().stops)
     }
 

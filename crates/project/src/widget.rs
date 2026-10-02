@@ -273,7 +273,7 @@ mod tests {
             fx(EffectType::SwapColor { from_color: c(Color::GREEN), to_color: c(Color::RED), tolerance: p(30.0), feather: p(10.0) }),
             fx(EffectType::NoiseGenerator { amount: p(50.0), monochrome: b(false) }),
             fx(EffectType::Checkerboard { size: p(32.0), color_a: c(Color::BLACK), color_b: c(Color::WHITE) }),
-            fx(EffectType::GradientRamp { color_a: c(Color::BLACK), color_b: c(Color::WHITE), angle: p(90.0), stops: Vec::new() }),
+            fx(EffectType::GradientRamp { color_a: c(Color::BLACK), color_b: c(Color::WHITE), angle: p(90.0), stops: Vec::new(), gradient_type: crate::layer::GradientType::Linear }),
             fx(EffectType::Perspective { skew_x: p(0.0), skew_y: p(0.0) }),
             fx(EffectType::TextOutline { width: p(3.0), color: c(Color::BLACK) }),
             fx(EffectType::TextBevel { strength: p(50.0), softness: p(10.0) }),

@@ -297,6 +297,7 @@ mod tests {
                     project::GradientStop::new(1.0, Color::WHITE),
                 ],
                 angle: 0.0,
+                gradient_type: project::GradientType::Linear,
             },
         };
         let ctx = RasterFx { time_s: 0.0, frame: 0, res_w: 32.0, res_h: 1.0, duration_s: 0.0, playing: false };

@@ -43,15 +43,41 @@ impl GradientStop {
     }
 }
 
-/// Multi-stop linear fill gradient (After Effects-style fill): two or more
-/// color stops interpolated along an axis rotated `angle` degrees
-/// (0 = left-to-right, 90 = top-to-bottom).
+/// Gradient projection pattern across the bounding box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GradientType {
+    /// Linear sweep along the angle axis.
+    #[default]
+    Linear,
+    /// Concentric rings from center outward.
+    Radial,
+    /// Sweep around the center point.
+    Angular,
+}
+
+impl GradientType {
+    pub const ALL: [Self; 3] = [Self::Linear, Self::Radial, Self::Angular];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Linear => "Linear",
+            Self::Radial => "Radial",
+            Self::Angular => "Angular",
+        }
+    }
+}
+
+/// Multi-stop fill gradient (After Effects-style fill): two or more
+/// color stops interpolated along an axis or radial distance.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FillGradient {
     #[serde(default)]
     pub stops: Vec<GradientStop>,
     #[serde(default)]
     pub angle: f32,
+    #[serde(default)]
+    pub gradient_type: GradientType,
 }
 
 impl Default for FillGradient {
@@ -81,6 +107,7 @@ impl crate::keyframe::Interpolate for FillGradient {
                 })
                 .collect(),
             angle: self.angle + (other.angle - self.angle) * t,
+            gradient_type: if t < 0.5 { self.gradient_type } else { other.gradient_type },
         }
     }
 }
@@ -91,6 +118,16 @@ impl FillGradient {
         Self {
             stops: vec![GradientStop::new(0.0, a), GradientStop::new(1.0, b)],
             angle,
+            gradient_type: GradientType::Linear,
+        }
+    }
+
+    /// Two-stop gradient with explicit type.
+    pub fn new(a: Color, b: Color, angle: f32, gradient_type: GradientType) -> Self {
+        Self {
+            stops: vec![GradientStop::new(0.0, a), GradientStop::new(1.0, b)],
+            angle,
+            gradient_type,
         }
     }
 
@@ -178,6 +215,7 @@ impl FillGradient {
                 .map(|s| GradientStop::new(1.0 - s.offset, s.color))
                 .collect(),
             angle: self.angle,
+            gradient_type: self.gradient_type,
         }
     }
 }
@@ -1136,6 +1174,7 @@ mod tests {
                 GradientStop::new(1.0, Color::WHITE),
             ],
             angle: 90.0,
+            gradient_type: GradientType::Linear,
         };
         assert!(close(g.sample(0.5), Color::RED));
         let q = g.sample(0.25);
@@ -1167,11 +1206,12 @@ mod tests {
 
     #[test]
     fn fill_gradient_empty_and_single_fall_back() {
-        let g = FillGradient { stops: vec![], angle: 0.0 };
+        let g = FillGradient { stops: vec![], angle: 0.0, gradient_type: GradientType::Linear };
         assert!(close(g.sample(0.3), Color::BLACK));
         let g = FillGradient {
             stops: vec![GradientStop::new(0.7, Color::RED)],
             angle: 0.0,
+            gradient_type: GradientType::Linear,
         };
         assert!(close(g.sample(0.0), Color::RED));
     }

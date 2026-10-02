@@ -1791,7 +1791,7 @@ impl LayerStackEvaluator {
                                 color_b: color_b.evaluate_at(time),
                             }
                         }
-                        EffectType::GradientRamp { color_a, color_b, angle, stops } => {
+                        EffectType::GradientRamp { color_a, color_b, angle, stops, gradient_type } => {
                             let angle = angle.evaluate_at(time);
                             let stops = if stops.len() >= 2 {
                                 let mut sorted = stops.clone();
@@ -1808,7 +1808,7 @@ impl LayerStackEvaluator {
                                 ]
                             };
                             EvaluatedEffectType::GradientRamp {
-                                gradient: FillGradient { stops, angle },
+                                gradient: FillGradient { stops, angle, gradient_type: *gradient_type },
                             }
                         }
                         EffectType::Perspective { skew_x, skew_y } => {

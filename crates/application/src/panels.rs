@@ -3386,6 +3386,18 @@ impl Render for CompositionViewerPanel {
                         .h(px(l_h))
                         .cursor_pointer()
                         .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            // If a mask drag, gizmo drag, or active mask edit is in progress, or tool is Pen/Shape,
+                            // NEVER switch the selection to an underlying layer!
+                            let skip = p_drag_layer.read(cx).mask_drag.is_some()
+                                || p_drag_layer.read(cx).gizmo_drag.is_some()
+                                || p_drag_layer.read(cx).mask_edit_point.is_some()
+                                || sel_state.read(cx).active_tool == EditorTool::Pen
+                                || sel_state.read(cx).active_tool == EditorTool::ShapeRect
+                                || sel_state.read(cx).active_tool == EditorTool::ShapeEllipse
+                                || sel_state.read(cx).active_mask_edit.is_some();
+                            if skip {
+                                return;
+                            }
                             // Mark press-on-layer FIRST (bubbles to the
                             // canvas frame, which gates drag start on it).
                             // Drag state itself starts there so empty-space
@@ -3747,11 +3759,15 @@ impl Render for CompositionViewerPanel {
                                 }).into_any_element());
                         }
 
-                        // --- Mask Path Editor overlay: sampled curves for
-                        // every mask, draggable nodes + tangent handles for
+                        // --- Mask Path Editor overlay: continuous vector curves for
+                        // every mask, draggable nodes + tangent handles with leader lines for
                         // the active edit target. Shared Path model drives
                         // masks, pen shapes, motion and text paths alike.
                         {
+                            let mut overlay_curves: Vec<OverlayCurve> = Vec::new();
+                            let mut overlay_leaders: Vec<OverlayLeader> = Vec::new();
+                            let mut overlay_dots: Vec<AnyElement> = Vec::new();
+
                             let edit_target: Option<(String, String)> =
                                 giz_state.read(cx).active_mask_edit.clone();
                             for mask in &layer.masks {
@@ -3773,53 +3789,22 @@ impl Render for CompositionViewerPanel {
                                 } else {
                                     Rgba { r: 1.0, g: 0.85, b: 0.25, a: 0.45 * dim }
                                 };
-                                // Sampled curve dots (bounded count). Only a
-                                // closed 3+ point path cuts in the rasterizer
-                                // — drawing an outline otherwise promises a
-                                // cut that never renders (nodes/handles below
-                                // still draw so the path stays editable).
-                                let can_cut = mask.path.closed && mask.path.points.len() >= 3;
-                                let flat = mask.path.flatten(0.75);
-                                if can_cut && !flat.is_empty() {
-                                    let step = (flat.len() / 120).max(1);
-                                    for p in flat.iter().step_by(step) {
+                                // Continuous vector curve outline
+                                let flat = mask.path.flatten(0.5);
+                                if flat.len() >= 2 {
+                                    let mut pts = Vec::with_capacity(flat.len() + 1);
+                                    for p in &flat {
                                         let (cxp, cyp) = m2c(*p);
-                                        gizmo_els.push(
-                                            div()
-                                                .absolute()
-                                                .left(px(cxp - 1.5))
-                                                .top(px(cyp - 1.5))
-                                                .w(px(3.))
-                                                .h(px(3.))
-                                                .rounded_full()
-                                                .bg(curve_col)
-                                                .into_any_element(),
-                                        );
+                                        pts.push(gpui::point(gpui::px(cxp), gpui::px(cyp)));
                                     }
-                                } else if can_cut && mask.path.points.len() >= 2 {
-                                    let pts = &mask.path.points;
-                                    for i in 0..pts.len() - 1 {
-                                        let (x0, y0) = m2c(pts[i].pos);
-                                        let (x1, y1) = m2c(pts[i + 1].pos);
-                                        let dist = ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt();
-                                        let steps = (dist / 4.0).ceil().max(1.0) as usize;
-                                        for s in 0..=steps {
-                                            let t = s as f32 / steps as f32;
-                                            let lx = x0 + t * (x1 - x0);
-                                            let ly = y0 + t * (y1 - y0);
-                                            gizmo_els.push(
-                                                div()
-                                                    .absolute()
-                                                    .left(px(lx - 1.0))
-                                                    .top(px(ly - 1.0))
-                                                    .w(px(2.0))
-                                                    .h(px(2.0))
-                                                    .rounded_full()
-                                                    .bg(curve_col)
-                                                    .into_any_element(),
-                                            );
-                                        }
+                                    if mask.path.closed && pts.len() >= 3 {
+                                        pts.push(pts[0]);
                                     }
+                                    overlay_curves.push(OverlayCurve {
+                                        points: pts,
+                                        color: curve_col,
+                                        thickness: if is_active { 2.0 } else { 1.5 },
+                                    });
                                 }
                                 // Nodes (+ handles for the selected node).
                                 for (idx, node) in mask.path.points.iter().enumerate() {
@@ -3844,7 +3829,7 @@ impl Render for CompositionViewerPanel {
                                     } else {
                                         Rgba { r: 1.0, g: 1.0, b: 1.0, a: 0.9 * dim + 0.1 }
                                     };
-                                    gizmo_els.push(
+                                    overlay_dots.push(
                                         gizmo_dot(
                                             format!("mask_node_{}_{}", mid, idx),
                                             nx,
@@ -3914,6 +3899,14 @@ impl Render for CompositionViewerPanel {
                                         for (is_in, tip) in [(true, node.in_abs()), (false, node.out_abs())] {
                                             let (hx, hy) = m2c(tip);
                                             let tip_w = full.transform_point(tip);
+                                            if (hx - nx).abs() > 0.5 || (hy - ny).abs() > 0.5 {
+                                                overlay_leaders.push(OverlayLeader {
+                                                    p0: gpui::point(gpui::px(nx), gpui::px(ny)),
+                                                    p1: gpui::point(gpui::px(hx), gpui::px(hy)),
+                                                    color: Rgba { r: 0.35, g: 0.85, b: 1.0, a: 0.8 },
+                                                    thickness: 1.5,
+                                                });
+                                            }
                                             let p_hh = giz_panel.clone();
                                             let s_hh = giz_state.clone();
                                             let lid_hh = giz_lid.clone();
@@ -3921,7 +3914,7 @@ impl Render for CompositionViewerPanel {
                                             let (hh_frame, hh_fit, hh_cw, hh_ch) =
                                                 (giz_frame, giz_fit, giz_cw, giz_ch);
                                             let _ = (hh_frame, hh_fit, hh_cw, hh_ch);
-                                            gizmo_els.push(
+                                            overlay_dots.push(
                                                 gizmo_dot(
                                                     format!(
                                                         "mask_handle_{}_{}_{}",
@@ -3931,11 +3924,12 @@ impl Render for CompositionViewerPanel {
                                                     ),
                                                     hx,
                                                     hy,
-                                                    9.0,
+                                                    11.0,
                                                     Rgba { r: 0.35, g: 0.85, b: 1.0, a: 1.0 },
                                                     white,
                                                     true,
                                                 )
+                                                .hover(|s| s.bg(Rgba { r: 0.6, g: 0.95, b: 1.0, a: 1.0 }))
                                                 .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
                                                     let (mx, my) = (event.position.x / px(1.0), event.position.y / px(1.0));
                                                     s_hh.update(cx, |s, cx| {
@@ -3970,75 +3964,100 @@ impl Render for CompositionViewerPanel {
                                     }
                                 }
                             }
-                        }
 
-                        // --- Pen/shape path overlay: sampled spline curves
-                        // (+ nodes) for the selected layer's own paths, so
-                        // pen work is always visible, not just masks.
-                        {
-                            let mut pen_paths: Vec<project::Path> = Vec::new();
-                            match &layer.source {
-                                LayerSource::Shape {
-                                    shape_type: ShapeType::Path { path_data, .. },
-                                } => {
-                                    pen_paths.push(project::Path::from_svg(path_data));
+                            // --- Pen/shape path overlay: continuous spline curves
+                            // (+ nodes) for the selected layer's own paths, so
+                            // pen work is always visible, not just masks.
+                            {
+                                let mut pen_paths: Vec<project::Path> = Vec::new();
+                                match &layer.source {
+                                    LayerSource::Shape {
+                                        shape_type: ShapeType::Path { path_data, .. },
+                                    } => {
+                                        pen_paths.push(project::Path::from_svg(path_data));
+                                    }
+                                    LayerSource::Text { text_path: Some(tp), .. } => {
+                                        pen_paths.push(tp.clone());
+                                    }
+                                    _ => {}
                                 }
-                                LayerSource::Text { text_path: Some(tp), .. } => {
-                                    pen_paths.push(tp.clone());
+                                let pen_col = Rgba { r: 0.4, g: 0.8, b: 1.0, a: 0.95 };
+                                for path in &pen_paths {
+                                    let flat = path.flatten(0.5);
+                                    if flat.len() >= 2 {
+                                        let mut pts = Vec::with_capacity(flat.len() + 1);
+                                        for p in &flat {
+                                            let w = layer.local_to_world_point(*p);
+                                            let cxp = (w.x + giz_cw / 2.0) * giz_fit;
+                                            let cyp = (w.y + giz_ch / 2.0) * giz_fit;
+                                            pts.push(gpui::point(gpui::px(cxp), gpui::px(cyp)));
+                                        }
+                                        if path.closed && pts.len() >= 3 {
+                                            pts.push(pts[0]);
+                                        }
+                                        overlay_curves.push(OverlayCurve {
+                                            points: pts,
+                                            color: pen_col,
+                                            thickness: 2.0,
+                                        });
+                                    }
+                                    for node in path.points.iter() {
+                                        let w = layer.local_to_world_point(node.pos);
+                                        let cxp = (w.x + giz_cw / 2.0) * giz_fit;
+                                        let cyp = (w.y + giz_ch / 2.0) * giz_fit;
+                                        overlay_dots.push(
+                                            gizmo_dot(
+                                                format!("pen_node_{}_{}_{}", giz_lid, cxp.round() as i32, cyp.round() as i32),
+                                                cxp,
+                                                cyp,
+                                                8.0,
+                                                Rgba { r: 0.4, g: 0.8, b: 1.0, a: 1.0 },
+                                                white,
+                                                true,
+                                            )
+                                            .into_any_element(),
+                                        );
+                                    }
                                 }
-                                _ => {}
                             }
-                            // Evaluated mask paths already draw above; pen
-                            // paths draw here in blueprint blue.
-                            let pen_col = Rgba { r: 0.4, g: 0.8, b: 1.0, a: 0.95 };
-                            let mut pen_els = div()
-                                .id("pen_curve_overlay")
-                                .test_support()
-                                .absolute()
-                                .top_0()
-                                .left_0()
-                                .right_0()
-                                .bottom_0();
-                            for path in &pen_paths {
-                                let flat = path.flatten(0.75);
-                                let step = (flat.len() / 120).max(1);
-                                for p in flat.iter().step_by(step) {
-                                    let w = layer.local_to_world_point(*p);
-                                    let cxp = (w.x + giz_cw / 2.0) * giz_fit;
-                                    let cyp = (w.y + giz_ch / 2.0) * giz_fit;
-                                    pen_els = pen_els.child(
-                                        div()
+
+                            // Render smooth continuous vector curves and handle leader lines in canvas
+                            if !overlay_curves.is_empty() || !overlay_leaders.is_empty() {
+                                let curves = overlay_curves;
+                                let leaders = overlay_leaders;
+                                gizmo_els.push(
+                                    div()
+                                        .id("pen_curve_overlay")
+                                        .test_support()
+                                        .absolute()
+                                        .size_full()
+                                        .child(
+                                            gpui::canvas(
+                                                move |_bounds, _window, _cx| {},
+                                                move |_bounds, _, window, _cx| {
+                                                    for curve in &curves {
+                                                        if curve.points.len() >= 2 {
+                                                            let mut path = gpui::Path::new(curve.points[0]);
+                                                            for seg in curve.points.windows(2) {
+                                                                draw_line_segment(&mut path, seg[0], seg[1], curve.thickness);
+                                                            }
+                                                            window.paint_path(path, curve.color);
+                                                        }
+                                                    }
+                                                    for leader in &leaders {
+                                                        let mut path = gpui::Path::new(leader.p0);
+                                                        draw_line_segment(&mut path, leader.p0, leader.p1, leader.thickness);
+                                                        window.paint_path(path, leader.color);
+                                                    }
+                                                },
+                                            )
                                             .absolute()
-                                            .left(px(cxp - 1.5))
-                                            .top(px(cyp - 1.5))
-                                            .w(px(3.))
-                                            .h(px(3.))
-                                            .rounded_full()
-                                            .bg(pen_col),
-                                    );
-                                }
-                                for node in path.points.iter() {
-                                    let w = layer.local_to_world_point(node.pos);
-                                    let cxp = (w.x + giz_cw / 2.0) * giz_fit;
-                                    let cyp = (w.y + giz_ch / 2.0) * giz_fit;
-                                    pen_els = pen_els.child(
-                                        gizmo_dot(
-                                            format!("pen_node_{}_{}_{}", giz_lid, cxp.round() as i32, cyp.round() as i32),
-                                            cxp,
-                                            cyp,
-                                            8.0,
-                                            Rgba { r: 0.4, g: 0.8, b: 1.0, a: 1.0 },
-                                            white,
-                                            true,
-                                        ),
-                                    );
-                                }
+                                            .size_full(),
+                                        )
+                                        .into_any_element(),
+                                );
                             }
-                            // Empty containers still hit-test, so only mount
-                            // when there is actually a curve to show.
-                            if !pen_paths.is_empty() {
-                                gizmo_els.push(pen_els.into_any_element());
-                            }
+                            gizmo_els.extend(overlay_dots);
                         }
                     }
 
@@ -4595,9 +4614,9 @@ impl Render for CompositionViewerPanel {
                                         let comp_pw = comp_w;
                                         let comp_ph = comp_h;
                                         move |event, _window, cx| {
-                                            // Gizmo handles set their own drag first (they
-                                            // bubble through here); never start a canvas op.
-                                            if p_drag.read(cx).gizmo_drag.is_some() {
+                                            // Gizmo handles or mask handles set their own drag first (they
+                                            // bubble through here); never start a canvas op or re-pick.
+                                            if p_drag.read(cx).gizmo_drag.is_some() || p_drag.read(cx).mask_drag.is_some() {
                                                 p_drag.update(cx, |this, cx| {
                                                     this.down_on_layer = false;
                                                     this.empty_down = None;
@@ -4619,8 +4638,14 @@ impl Render for CompositionViewerPanel {
                                             // hit-test order has sent presses to
                                             // covered layers (e.g. background)
                                             // instead of the visible top one.
-                                            // The pick wins for the Move tool.
-                                            if active_tool == EditorTool::Move {
+                                            // The pick wins for the Move tool ONLY when NOT actively
+                                            // editing a mask/curve on the selected layer.
+                                            let is_mask_or_pen = s_tool.read(cx).active_mask_edit.is_some()
+                                                || p_drag.read(cx).mask_edit_point.is_some()
+                                                || active_tool == EditorTool::Pen
+                                                || active_tool == EditorTool::ShapeRect
+                                                || active_tool == EditorTool::ShapeEllipse;
+                                            if active_tool == EditorTool::Move && !is_mask_or_pen {
                                                 if let Some(picked) = p_drag.read(cx).pick_top_at(comp_x, comp_y) {
                                                     on_layer = true;
                                                     s_tool.update(cx, |s, cx| {
@@ -14686,6 +14711,21 @@ struct GraphHandleData {
     ky: f32,
     hx: f32,
     hy: f32,
+}
+
+#[derive(Clone)]
+struct OverlayCurve {
+    points: Vec<gpui::Point<gpui::Pixels>>,
+    color: Rgba,
+    thickness: f32,
+}
+
+#[derive(Clone)]
+struct OverlayLeader {
+    p0: gpui::Point<gpui::Pixels>,
+    p1: gpui::Point<gpui::Pixels>,
+    color: Rgba,
+    thickness: f32,
 }
 
 struct GraphHandleDescriptor {

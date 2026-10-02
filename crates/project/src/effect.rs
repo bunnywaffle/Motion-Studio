@@ -1,5 +1,5 @@
 use crate::color::Color;
-use crate::layer::{FillGradient, GradientStop};
+use crate::layer::{FillGradient, GradientStop, GradientType};
 use crate::property::Property;
 use crate::shader::{parse_shader_params, ShaderParam, ShaderParamValue};
 use crate::stock::{stock_default_color, StockPlugin};
@@ -217,6 +217,8 @@ pub enum EffectType {
         /// mirror the sorted endpoints for export/compat.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         stops: Vec<GradientStop>,
+        #[serde(default)]
+        gradient_type: GradientType,
     },
     /// Fake-3D skew filter in degrees (spatial).
     Perspective {
@@ -482,6 +484,37 @@ impl EffectType {
             color_b: Property::new("Color B", color_b),
             angle: Property::new("Angle", angle),
             stops: Vec::new(),
+            gradient_type: GradientType::Linear,
+        }
+    }
+
+    /// Construct a Gradient Ramp generator effect with explicit gradient type.
+    pub fn gradient_ramp_with_type(color_a: Color, color_b: Color, angle: f32, gradient_type: GradientType) -> Self {
+        Self::GradientRamp {
+            color_a: Property::new("Color A", color_a),
+            color_b: Property::new("Color B", color_b),
+            angle: Property::new("Angle", angle),
+            stops: Vec::new(),
+            gradient_type,
+        }
+    }
+
+    /// Gradient ramp type if this is a Gradient Ramp effect.
+    pub fn gradient_ramp_type(&self) -> Option<GradientType> {
+        match self {
+            Self::GradientRamp { gradient_type, .. } => Some(*gradient_type),
+            _ => None,
+        }
+    }
+
+    /// Set the gradient ramp type.
+    pub fn set_gradient_ramp_type(&mut self, g_type: GradientType) -> bool {
+        match self {
+            Self::GradientRamp { gradient_type, .. } => {
+                *gradient_type = g_type;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -516,7 +549,7 @@ impl EffectType {
         match self {
             Self::GradientRamp { color_a, color_b, stops: slot, .. } => {
                 if stops.len() >= 2 {
-                    let grad = FillGradient { stops, angle: 0.0 };
+                    let grad = FillGradient { stops, angle: 0.0, gradient_type: GradientType::Linear };
                     let sorted = grad.sorted_stops();
                     color_a.set_value(sorted[0].color);
                     color_b.set_value(sorted[sorted.len() - 1].color);

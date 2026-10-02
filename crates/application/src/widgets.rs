@@ -20,7 +20,7 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::searchable_list::SearchableVec;
 use gpui_kit::component::combobox::{Combobox, ComboboxState};
 use gpui_kit::*;
-use project::{Color, FillGradient, GradientStop, PropDecl};
+use project::{Color, FillGradient, GradientStop, GradientType, PropDecl};
 use std::collections::HashMap;
 
 /// Which commit path a scalar row uses.
@@ -326,7 +326,7 @@ pub(crate) fn gradient_editor(
     let sel_color = stops.get(sel).map(|s| s.color).unwrap_or(Color::WHITE);
 
     // N-stop preview bar (GPUI has no gradient fills): sample the stops.
-    let probe = FillGradient { stops: stops.clone(), angle: 0.0 };
+    let probe = FillGradient { stops: stops.clone(), angle: 0.0, gradient_type: project::GradientType::Linear };
     let mut bar = h_flex()
         .flex_1()
         .h(px(22.))
@@ -373,7 +373,7 @@ pub(crate) fn gradient_editor(
                     .copied()
                     .unwrap_or((mx, 100.0));
                 let t = ((mx - ox) / w.max(1.0)).clamp(0.0, 1.0);
-                let probe = FillGradient { stops: stops_add.clone(), angle: 0.0 };
+                let probe = FillGradient { stops: stops_add.clone(), angle: 0.0, gradient_type: project::GradientType::Linear };
                 let color = probe.sample(t);
                 let target_do = target_add.clone();
                 let at = s_add.update(cx, |s, _| match &target_do {
@@ -476,7 +476,49 @@ pub(crate) fn gradient_editor(
                 }),
         );
     }
-    let mut col = v_flex().gap_1().child(wrap);
+    let cur_type = match &target {
+        panels::GradientTarget::Effect { layer_id, eff_id } => {
+            state.read(cx).effect_gradient_type(layer_id, eff_id).unwrap_or_default()
+        }
+        panels::GradientTarget::Fill { layer_id, key } => {
+            state.read(cx).layer_fill_gradient(layer_id, key).map(|g| g.gradient_type).unwrap_or_default()
+        }
+    };
+    let mut type_row = h_flex().gap_1().items_center().text_xs().mb_1();
+    type_row = type_row.child(div().text_color(cx.theme().muted_foreground).child("Type:"));
+    for g_type in GradientType::ALL {
+        let is_active = g_type == cur_type;
+        let s_typ = state.clone();
+        let target_typ = target.clone();
+        let label = g_type.label();
+        type_row = type_row.child(
+            div()
+                .id(SharedString::from(format!("grad_type_{prefix}_{label}")))
+                .test_support()
+                .cursor_pointer()
+                .px_2()
+                .py_0p5()
+                .rounded_sm()
+                .bg(if is_active { cx.theme().accent } else { cx.theme().muted })
+                .text_color(if is_active { cx.theme().accent_foreground } else { cx.theme().foreground })
+                .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                .child(label)
+                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    let res = s_typ.update(cx, |s, _| match &target_typ {
+                        panels::GradientTarget::Effect { layer_id, eff_id } => {
+                            s.set_effect_gradient_type(layer_id, eff_id, g_type)
+                        }
+                        panels::GradientTarget::Fill { layer_id, key } => {
+                            s.set_fill_gradient_type(layer_id, key, g_type)
+                        }
+                    });
+                    if res.is_ok() {
+                        s_typ.update(cx, |_, cx| cx.notify());
+                    }
+                }),
+        );
+    }
+    let mut col = v_flex().gap_1().child(type_row).child(wrap);
     // Selected stop: chip + hex + caller-built color editor.
     {
         let hex = format!(

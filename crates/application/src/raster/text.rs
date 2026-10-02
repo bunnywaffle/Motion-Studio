@@ -2,7 +2,7 @@ use project::TextAlign;
 use super::affine::{Aff, aff_mul};
 use super::buffer::FloatBuf;
 use super::layer::blit_affine;
-use super::pixel::{gradient_axis, sample_fill_gradient, Px};
+use super::pixel::{gradient_axis, sample_fill_gradient, GradientAxis, Px};
 use project::{BlendMode, FillGradient, Path};
 use std::sync::{Mutex, OnceLock};
 
@@ -263,7 +263,7 @@ fn draw_mask_gradient(
     ox: i32,
     oy: i32,
     gradient: &FillGradient,
-    axis: (f32, f32, f32, f32),
+    axis: GradientAxis,
 ) {
     for row in 0..g.h as i32 {
         for column in 0..g.w as i32 {

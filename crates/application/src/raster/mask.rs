@@ -16,92 +16,71 @@ use project::{MaskMode, Path};
 /// Even-odd scanline fill of a closed polygon into `coverage` (writes 1.0;
 /// caller clears first). Coordinates are buffer px.
 pub(crate) fn fill_even_odd(coverage: &mut [f32], w: u32, h: u32, poly: &[project::Vec2]) {
-    if poly.len() < 3 {
+    if poly.len() < 3 || w == 0 || h == 0 {
         return;
     }
-    // Edge table. `y_top_f` is the actual float Y at the top vertex; we
-    // compute x-intercepts relative to it so fractional Y starts don't
-    // introduce a sub-pixel shift that leaves blank scanline gaps.
     struct Edge {
-        y_min: i32,   // first scanline this edge covers (floor of y_top_f)
-        y_max: i32,   // last scanline + 1 (ceil of y_bot_f)
-        y_top_f: f32, // exact float Y at the top vertex
-        x_top: f32,   // exact float X at y_top_f
-        dx: f32,      // Δx / Δy (scan direction)
+        y_top: f32,
+        y_bot: f32,
+        x_top: f32,
+        dx: f32,
     }
-    let mut edges: Vec<Edge> = Vec::new();
+    let mut edges: Vec<Edge> = Vec::with_capacity(poly.len());
+    let mut min_y = f32::INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
     for i in 0..poly.len() {
         let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+        min_y = min_y.min(a.y);
+        max_y = max_y.max(a.y);
         let dy = b.y - a.y;
-        if dy.abs() < 1e-9 {
+        if dy.abs() < 1e-6 {
             continue; // horizontal — skip
         }
         let (top, bot) = if a.y < b.y { (a, b) } else { (b, a) };
         edges.push(Edge {
-            y_min: top.y.floor() as i32,
-            y_max: bot.y.ceil() as i32,
-            y_top_f: top.y,
+            y_top: top.y,
+            y_bot: bot.y,
             x_top: top.x,
-            dx: (bot.x - top.x) / (bot.y - top.y).max(1e-9),
+            dx: (bot.x - top.x) / (bot.y - top.y),
         });
     }
     if edges.is_empty() {
         return;
     }
-    let hi = h as i32;
-    let y_lo = edges.iter().map(|e| e.y_min).min().unwrap().max(0);
-    let y_hi = edges.iter().map(|e| e.y_max).max().unwrap().min(hi);
-    let mut active: Vec<usize> = Vec::new();
+    let y_lo = (min_y - 0.5).floor().max(0.0) as i32;
+    let y_hi = ((max_y + 0.5).ceil() as i32).min(h as i32);
+    let mut x_intercepts: Vec<f32> = Vec::new();
     for y in y_lo..y_hi {
-        active.clear();
-        for (i, e) in edges.iter().enumerate() {
-            // Include edge when the scanline centre (y + 0.5) falls inside
-            // the edge's Y span. The `< e.y_max` ensures we don't cross
-            // the bottom vertex more than once.
-            if y >= e.y_min && y < e.y_max {
-                active.push(i);
+        let y_scan = y as f32 + 0.5;
+        x_intercepts.clear();
+        for e in &edges {
+            // Half-open interval [y_top, y_bot) at scanline center y_scan:
+            // ensures exact parity and prevents stray edge extrapolations
+            // that cause horizontal tearing streaks on curved paths/ellipses.
+            if e.y_top <= y_scan && y_scan < e.y_bot {
+                let x = e.x_top + (y_scan - e.y_top) * e.dx;
+                x_intercepts.push(x);
             }
         }
-        if active.len() < 2 {
+        if x_intercepts.len() < 2 {
             continue;
         }
-        // X intercept at the scanline sample row (y + 0.5).
-        // Use the float y_top_f (not the integer y_min) so a fractional
-        // vertex start doesn't shift the intercept by up to ±0.5 px.
-        let x_at = |i: usize| -> f32 {
-            edges[i].x_top + (y as f32 + 0.5 - edges[i].y_top_f) * edges[i].dx
-        };
-        active.sort_by(|&a, &b| x_at(a).partial_cmp(&x_at(b)).unwrap_or(std::cmp::Ordering::Equal));
-        let row = &mut coverage[(y as u32 * w) as usize..((y as u32 + 1) * w) as usize];
+        x_intercepts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let row_start = (y as u32 * w) as usize;
+        let row = &mut coverage[row_start..row_start + w as usize];
         let mut k = 0;
-        while k + 1 < active.len() {
-            let xa = x_at(active[k]);
-            let xb = x_at(active[k + 1]);
-            // Fill the span with sub-pixel-accurate endpoints: a pixel at
-            // integer coordinate `x` covers [x, x+1). We cover a pixel
-            // fully when the span reaches past its centre (x + 0.5).
-            let x0 = (xa + 0.5).floor().max(0.0) as i32;
-            let x1 = ((xb - 0.5).ceil() as i32).min(w as i32 - 1);
-            // Partial coverage on the left-edge pixel (anti-alias)
-            if xa >= 0.0 && xa < w as f32 {
-                let lx = xa.floor() as i32;
-                if lx < w as i32 {
-                    let frac = 1.0 - (xa - lx as f32).clamp(0.0, 1.0);
-                    row[lx.max(0) as usize] = row[lx.max(0) as usize].max(frac);
-                }
-            }
-            // Fully covered interior pixels
-            if x1 >= x0 {
-                for x in x0..=x1 {
-                    row[x as usize] = 1.0;
-                }
-            }
-            // Partial coverage on the right-edge pixel (anti-alias)
-            if xb > 0.0 && xb <= w as f32 {
-                let rx = (xb - 1.0).max(0.0).floor() as i32;
-                if rx < w as i32 && rx >= x1 {
-                    let frac = (xb - rx as f32).clamp(0.0, 1.0);
-                    row[rx as usize] = row[rx as usize].max(frac);
+        while k + 1 < x_intercepts.len() {
+            let xa = x_intercepts[k].min(x_intercepts[k + 1]).max(0.0);
+            let xb = x_intercepts[k].max(x_intercepts[k + 1]).min(w as f32);
+            if xb > xa {
+                let start_x = xa.floor() as usize;
+                let end_x = (xb.ceil() as usize).min(w as usize);
+                for (offset, cur) in row[start_x..end_x].iter_mut().enumerate() {
+                    let x = start_x + offset;
+                    let px_left = x as f32;
+                    let px_right = px_left + 1.0;
+                    let cov = (xb.min(px_right) - xa.max(px_left)).clamp(0.0, 1.0);
+                    *cur = (*cur + cov).min(1.0);
                 }
             }
             k += 2;
@@ -360,6 +339,27 @@ mod tests {
         assert_eq!(cov[31 * 32 + 31], 0.0);
         let filled: usize = cov.iter().filter(|&&c| c > 0.5).count();
         assert!((filled as i32 - 256).abs() < 40, "{filled}");
+    }
+
+    #[test]
+    fn ellipse_coverage_has_no_horizontal_streak_artifacts() {
+        let cov = mask_coverage(64, 64, &Path::ellipse(32.0, 32.0, 16.0, 12.0), &EvaluatedTransform::IDENTITY);
+        assert_eq!(cov.len(), 64 * 64);
+        // Center covered
+        assert!(cov[32 * 64 + 32] > 0.99);
+        // All outer pixels MUST have zero coverage (no horizontal streaks across the buffer)
+        for y in 0..64 {
+            assert_eq!(cov[y * 64], 0.0, "streak at ({y}, 0)");
+            assert_eq!(cov[y * 64 + 1], 0.0, "streak at ({y}, 1)");
+            assert_eq!(cov[y * 64 + 62], 0.0, "streak at ({y}, 62)");
+            assert_eq!(cov[y * 64 + 63], 0.0, "streak at ({y}, 63)");
+        }
+        for y in 0..10 {
+            for x in 0..64 {
+                assert_eq!(cov[y * 64 + x], 0.0, "streak at row {y}, col {x}");
+                assert_eq!(cov[(63 - y) * 64 + x], 0.0, "streak at row {}, col {x}", 63 - y);
+            }
+        }
     }
 
     #[test]

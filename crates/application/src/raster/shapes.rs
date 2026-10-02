@@ -1,5 +1,5 @@
 use super::buffer::FloatBuf;
-use super::pixel::{gradient_axis, sample_fill_gradient, Px};
+use super::pixel::{gradient_axis, sample_fill_gradient, GradientAxis, Px};
 use project::FillGradient;
 
 // Shape SDF fills (local px, straight alpha)
@@ -300,7 +300,7 @@ fn dot_gradient(
     y: f32,
     r: f32,
     gradient: &FillGradient,
-    axis: (f32, f32, f32, f32),
+    axis: GradientAxis,
 ) {
     let r2 = r * r;
     for oy in (-r.ceil() as i32)..=(r.ceil() as i32) {
@@ -330,7 +330,7 @@ fn stroke_segment_gradient(
     b: (f32, f32),
     nib: f32,
     gradient: &FillGradient,
-    axis: (f32, f32, f32, f32),
+    axis: GradientAxis,
 ) {
     let dx = b.0 - a.0;
     let dy = b.1 - a.1;

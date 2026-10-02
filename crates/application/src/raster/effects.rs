@@ -1,7 +1,7 @@
 use compositor::EvaluatedEffectType;
 use project::Color;
 use super::buffer::FloatBuf;
-use super::pixel::{gradient_axis, gradient_t, Px};
+use super::pixel::{gradient_axis, sample_fill_gradient, Px};
 use super::stock::apply_stock;
 
 // Effect application on pixmaps
@@ -60,7 +60,7 @@ pub fn apply_effect_pixels(
                     }
                     let lx = x as f32 / w * base_w;
                     let ly = y as f32 / h * base_h;
-                    let c = gradient.sample(gradient_t(lx, ly, axis));
+                    let c = sample_fill_gradient(gradient, lx, ly, axis);
                     buf.put(
                         x as i32,
                         y as i32,

@@ -269,11 +269,20 @@ fn blend_color_nsep(mode: BlendMode, dst: [f32; 3], src: [f32; 3]) -> [f32; 3] {
     [r[0].clamp(0.0, 1.0), r[1].clamp(0.0, 1.0), r[2].clamp(0.0, 1.0)]
 }
 
-/// Linear-gradient axis over a `(base_w, base_h)` box at `angle_deg`
-/// degrees (0 = left-to-right, 90 = top-to-bottom, matching the Gradient
-/// Ramp effect): unit direction plus the corner-projection range, so
-/// `t = ((x * dx + y * dy) - mn) / span` sweeps 0..1 corner to corner.
-pub fn gradient_axis(base_w: f32, base_h: f32, angle_deg: f32) -> (f32, f32, f32, f32) {
+/// Gradient axis and bounding metrics for spatial gradient evaluation.
+#[derive(Clone, Copy, Debug)]
+pub struct GradientAxis {
+    pub base_w: f32,
+    pub base_h: f32,
+    pub dx: f32,
+    pub dy: f32,
+    pub mn: f32,
+    pub span: f32,
+}
+
+/// Compute the gradient projection axis over a `(base_w, base_h)` box at
+/// `angle_deg` degrees (0 = left-to-right, 90 = top-to-bottom).
+pub fn gradient_axis(base_w: f32, base_h: f32, angle_deg: f32) -> GradientAxis {
     let rad = angle_deg.to_radians();
     let (dx, dy) = (rad.cos(), rad.sin());
     let corners = [(0.0f32, 0.0f32), (base_w, 0.0), (0.0, base_h), (base_w, base_h)];
@@ -284,19 +293,46 @@ pub fn gradient_axis(base_w: f32, base_h: f32, angle_deg: f32) -> (f32, f32, f32
         mn = mn.min(t);
         mx = mx.max(t);
     }
-    (dx, dy, mn, (mx - mn).max(1e-3))
+    GradientAxis {
+        base_w,
+        base_h,
+        dx,
+        dy,
+        mn,
+        span: (mx - mn).max(1e-3),
+    }
 }
 
-/// Normalized gradient position of box-local `(x, y)` on an axis from
-/// [`gradient_axis`].
-pub fn gradient_t(x: f32, y: f32, axis: (f32, f32, f32, f32)) -> f32 {
-    let (dx, dy, mn, span) = axis;
-    ((x * dx + y * dy) - mn) / span
+/// Normalized gradient position of box-local `(x, y)` supporting Linear,
+/// Radial, and Angular projection types.
+pub fn gradient_t(gradient: &FillGradient, x: f32, y: f32, axis: GradientAxis) -> f32 {
+    match gradient.gradient_type {
+        project::GradientType::Linear => {
+            ((x * axis.dx + y * axis.dy) - axis.mn) / axis.span
+        }
+        project::GradientType::Radial => {
+            let cx = axis.base_w * 0.5;
+            let cy = axis.base_h * 0.5;
+            let rx = (axis.base_w * 0.5).max(1e-3);
+            let ry = (axis.base_h * 0.5).max(1e-3);
+            let nx = (x - cx) / rx;
+            let ny = (y - cy) / ry;
+            (nx * nx + ny * ny).sqrt()
+        }
+        project::GradientType::Angular => {
+            let cx = axis.base_w * 0.5;
+            let cy = axis.base_h * 0.5;
+            let angle_rad = gradient.angle.to_radians();
+            let angle = (y - cy).atan2(x - cx) - angle_rad;
+            let two_pi = std::f32::consts::TAU;
+            ((angle % two_pi + two_pi) % two_pi) / two_pi
+        }
+    }
 }
 
 /// Sample a fill gradient at box-local `(x, y)` as a straight color.
-pub fn sample_fill_gradient(gradient: &FillGradient, x: f32, y: f32, axis: (f32, f32, f32, f32)) -> Color {
-    gradient.sample(gradient_t(x, y, axis))
+pub fn sample_fill_gradient(gradient: &FillGradient, x: f32, y: f32, axis: GradientAxis) -> Color {
+    gradient.sample(gradient_t(gradient, x, y, axis))
 }
 
 #[cfg(test)]

@@ -448,6 +448,7 @@ fn gradient_hash(g: &Option<project::Property<project::FillGradient>>, h: &mut D
     match g {
         Some(grad) => {
             1u8.hash(h);
+            (grad.value.gradient_type as u8).hash(h);
             grad.value.angle.to_bits().hash(h);
             for stop in &grad.value.stops {
                 stop.offset.to_bits().hash(h);
@@ -554,6 +555,7 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
             color_hash(color_b, h);
         }
         EvaluatedEffectType::GradientRamp { gradient } => {
+            (gradient.gradient_type as u8).hash(h);
             gradient.angle.to_bits().hash(h);
             for stop in &gradient.stops {
                 stop.offset.to_bits().hash(h);
