@@ -13814,7 +13814,7 @@ fn timeline_keyframe_lane(
     layer_id: &str,
     prop_path: &str,
     keyframe_times: &[f64],
-    total_duration_secs: f64,
+    visible_span: (f64, f64),
     current_time_secs: f64,
     fps: f64,
     playhead_percent: f32,
@@ -13825,6 +13825,7 @@ fn timeline_keyframe_lane(
     tl_geom: (f32, f32),
     cx: &App,
 ) -> impl IntoElement {
+    let (t_start, visible_duration) = visible_span;
     let p_lane_geom = panel_entity.clone();
     let p_lane_down = panel_entity.clone();
     let lid_lane = layer_id.to_string();
@@ -13845,6 +13846,7 @@ fn timeline_keyframe_lane(
         .flex_1()
         .h(px(24.))
         .relative()
+        .overflow_hidden()
         .border_b_1()
         .border_color(cx.theme().border.opacity(0.3))
         .on_prepaint(move |bounds, _window, cx| {
@@ -13865,7 +13867,8 @@ fn timeline_keyframe_lane(
                 this.tl_marquee = Some(TlMarquee {
                     layer_id: lid_lane.clone(),
                     path: path_lane.clone(),
-                    duration: total_duration_secs,
+                    t_start,
+                    duration: visible_duration,
                     x0: mx,
                     x1: mx,
                     add,
@@ -13885,7 +13888,10 @@ fn timeline_keyframe_lane(
     );
 
     for &t in keyframe_times {
-        let percent = (t / total_duration_secs.max(0.001) * 100.0).clamp(0.0, 100.0) as f32;
+        let percent = (((t - t_start) / visible_duration.max(0.001)) * 100.0) as f32;
+        if percent < -5.0 || percent > 105.0 {
+            continue;
+        }
         let is_at_playhead = (t - current_time_secs).abs() < (0.5 / fps);
         let selected = is_member(t);
         let p_drag = panel_entity.clone();
@@ -14279,6 +14285,10 @@ pub struct TimelinePanel {
     pub reorder_start_y: f32,
     /// Active timeline keyframe drag (interactive moving of keyframe along timeline).
     pub keyframe_drag: Option<TimelineKeyframeDrag>,
+    /// Timeline zoom factor (1.0 = fit whole comp, 2.0 = 200%, etc.).
+    pub timeline_zoom: f32,
+    /// Timeline view window start time in seconds (for panning when zoomed in).
+    pub timeline_view_t0: f64,
 }
 
 /// Active drag of a keyframe along the timeline time ruler.
@@ -14361,6 +14371,7 @@ pub struct GraphMarquee {
 pub struct TlMarquee {
     pub layer_id: String,
     pub path: String,
+    pub t_start: f64,
     pub duration: f64,
     pub x0: f32,
     pub x1: f32,
@@ -16053,7 +16064,64 @@ impl TimelinePanel {
             reorder_hover: None,
             reorder_start_y: 0.0,
             keyframe_drag: None,
+            timeline_zoom: 1.0,
+            timeline_view_t0: 0.0,
         }
+    }
+
+    /// Visible time span (start_time_s, visible_duration_s) for the timeline lanes and ruler.
+    pub fn visible_time_span(&self, total_duration: f64) -> (f64, f64) {
+        let zoom = (self.timeline_zoom as f64).clamp(1.0, 32.0);
+        let visible_duration = (total_duration / zoom).min(total_duration).max(0.05);
+        let max_start = (total_duration - visible_duration).max(0.0);
+        let start = self.timeline_view_t0.clamp(0.0, max_start);
+        (start, visible_duration)
+    }
+
+    /// Zoom in on the timeline centered on the current playhead.
+    pub fn zoom_in(&mut self, current_time: f64, total_duration: f64) {
+        let new_zoom = (self.timeline_zoom * 1.5).min(16.0);
+        self.set_zoom(new_zoom, current_time, total_duration);
+    }
+
+    /// Zoom out on the timeline centered on the current playhead.
+    pub fn zoom_out(&mut self, current_time: f64, total_duration: f64) {
+        let new_zoom = (self.timeline_zoom / 1.5).max(1.0);
+        self.set_zoom(new_zoom, current_time, total_duration);
+    }
+
+    /// Reset zoom back to 100% (fit full composition duration).
+    pub fn zoom_reset(&mut self) {
+        self.timeline_zoom = 1.0;
+        self.timeline_view_t0 = 0.0;
+    }
+
+    /// Set explicit zoom factor centered on current_time.
+    pub fn set_zoom(&mut self, new_zoom: f32, current_time: f64, total_duration: f64) {
+        self.timeline_zoom = new_zoom.clamp(1.0, 16.0);
+        if self.timeline_zoom <= 1.001 {
+            self.timeline_zoom = 1.0;
+            self.timeline_view_t0 = 0.0;
+        } else {
+            let visible_duration = total_duration / self.timeline_zoom as f64;
+            let max_start = (total_duration - visible_duration).max(0.0);
+            self.timeline_view_t0 = (current_time - visible_duration * 0.5).clamp(0.0, max_start);
+        }
+    }
+
+    /// Pan timeline view window to the left.
+    pub fn pan_left(&mut self, total_duration: f64) {
+        let (_, vis_dur) = self.visible_time_span(total_duration);
+        let step = vis_dur * 0.25;
+        self.timeline_view_t0 = (self.timeline_view_t0 - step).max(0.0);
+    }
+
+    /// Pan timeline view window to the right.
+    pub fn pan_right(&mut self, total_duration: f64) {
+        let (start, vis_dur) = self.visible_time_span(total_duration);
+        let max_start = (total_duration - vis_dur).max(0.0);
+        let step = vis_dur * 0.25;
+        self.timeline_view_t0 = (start + step).min(max_start);
     }
 
     pub fn open_context_menu(&mut self, target: ContextMenuTarget, pos: Point<Pixels>) {
@@ -16432,6 +16500,18 @@ impl Render for TimelinePanel {
         let fps = comp_opt.map(|c| c.frame_rate).unwrap_or(30.0);
         let total_duration_secs = comp_opt.map(|c| c.duration_seconds()).unwrap_or(5.0);
         let current_time_secs = state.clock.position_seconds();
+        let (t_start, visible_duration) = self.visible_time_span(total_duration_secs);
+        let mut t_start = t_start;
+        if self.timeline_zoom > 1.0 {
+            let max_start = (total_duration_secs - visible_duration).max(0.0);
+            if current_time_secs < t_start {
+                t_start = (current_time_secs - visible_duration * 0.1).clamp(0.0, max_start);
+                self.timeline_view_t0 = t_start;
+            } else if current_time_secs > t_start + visible_duration {
+                t_start = (current_time_secs - visible_duration * 0.9).clamp(0.0, max_start);
+                self.timeline_view_t0 = t_start;
+            }
+        }
 
         let s_start = self.state.clone();
         let s_step_prev = self.state.clone();
@@ -16443,7 +16523,11 @@ impl Render for TimelinePanel {
         let in_str = "00:00:00:00";
         let out_str = comp_opt.map(|c| format!("{}", c.duration)).unwrap_or_else(|| "00:00:05:00".to_string());
 
-        let playhead_percent = (current_frame as f32 / total_frames.max(1) as f32 * 100.0).clamp(0.0, 100.0);
+        let playhead_percent = if visible_duration > 0.0 {
+            (((current_time_secs - t_start) / visible_duration) * 100.0).clamp(-10.0, 110.0) as f32
+        } else {
+            0.0
+        };
         let panel_entity = cx.entity().clone();
 
         let mut timeline_rows: Vec<Div> = Vec::new();
@@ -16467,10 +16551,12 @@ impl Render for TimelinePanel {
                 let p_twirl = panel_entity.clone();
                 let lid_twirl = layer.id.clone();
 
-                let in_ratio = (layer.in_point.frames() as f32 / total_frames.max(1) as f32).clamp(0.0, 1.0);
-                let out_ratio = (layer.out_point.frames() as f32 / total_frames.max(1) as f32).clamp(0.0, 1.0);
-                let span_w = ((out_ratio - in_ratio) * 100.0).max(5.0);
-                let span_left = in_ratio * 100.0;
+                let in_sec = layer.in_point.seconds();
+                let out_sec = layer.out_point.seconds();
+                let in_ratio = (((in_sec - t_start) / visible_duration) * 100.0) as f32;
+                let out_ratio = (((out_sec - t_start) / visible_duration) * 100.0) as f32;
+                let span_w = (out_ratio - in_ratio).max(2.0);
+                let span_left = in_ratio;
 
                 // --- 1. Main Layer Row ---
                 let mut left_col = h_flex()
@@ -16723,6 +16809,7 @@ impl Render for TimelinePanel {
                     .flex_1()
                     .h(px(26.))
                     .relative()
+                    .overflow_hidden()
                     .child(
                         // Layer span bar
                         h_flex()
@@ -16996,7 +17083,7 @@ impl Render for TimelinePanel {
                                     .child(timeline_scrub(SharedString::from(format!("tl_scrub_{}_anchor_x", layer.id)), "X", format!("{:.0}", ap.x), layer.id.clone(), "anchor_x".to_string(), 1.0, 1.0, &self.state, &panel_entity, cx))
                                     .child(timeline_scrub(SharedString::from(format!("tl_scrub_{}_anchor_y", layer.id)), "Y", format!("{:.0}", ap.y), layer.id.clone(), "anchor_y".to_string(), 1.0, 1.0, &self.state, &panel_entity, cx)),
                             );
-                        let ap_lane = timeline_keyframe_lane(&layer.id, "transform.anchor_point", &ap_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, &self.graph_sel_keys, self.tl_marquee.clone(), (self.tl_lane_x, self.tl_lane_w), cx);
+                        let ap_lane = timeline_keyframe_lane(&layer.id, "transform.anchor_point", &ap_times, (t_start, visible_duration), current_time_secs, fps, playhead_percent, &panel_entity, &self.state, &self.graph_sel_keys, self.tl_marquee.clone(), (self.tl_lane_x, self.tl_lane_w), cx);
                         timeline_rows.push(h_flex().h(px(24.)).items_center().child(ap_left).child(ap_lane));
 
                         // 2. Position
@@ -17043,7 +17130,7 @@ impl Render for TimelinePanel {
                                     .child(timeline_scrub(SharedString::from(format!("tl_scrub_{}_pos_x", layer.id)), "X", format!("{:.0}", pos.x), layer.id.clone(), "pos_x".to_string(), 1.0, 1.0, &self.state, &panel_entity, cx))
                                     .child(timeline_scrub(SharedString::from(format!("tl_scrub_{}_pos_y", layer.id)), "Y", format!("{:.0}", pos.y), layer.id.clone(), "pos_y".to_string(), 1.0, 1.0, &self.state, &panel_entity, cx)),
                             );
-                        let pos_lane = timeline_keyframe_lane(&layer.id, "transform.position", &pos_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, &self.graph_sel_keys, self.tl_marquee.clone(), (self.tl_lane_x, self.tl_lane_w), cx);
+                        let pos_lane = timeline_keyframe_lane(&layer.id, "transform.position", &pos_times, (t_start, visible_duration), current_time_secs, fps, playhead_percent, &panel_entity, &self.state, &self.graph_sel_keys, self.tl_marquee.clone(), (self.tl_lane_x, self.tl_lane_w), cx);
                         timeline_rows.push(h_flex().h(px(24.)).items_center().child(pos_left).child(pos_lane));
 
                         // 3. Scale
@@ -17090,7 +17177,7 @@ impl Render for TimelinePanel {
                                     .child(timeline_scrub(SharedString::from(format!("tl_scrub_{}_scale_x", layer.id)), "X", format!("{:.0}%", sc.x), layer.id.clone(), "scale_x".to_string(), 0.5, 1.0, &self.state, &panel_entity, cx))
                                     .child(timeline_scrub(SharedString::from(format!("tl_scrub_{}_scale_y", layer.id)), "Y", format!("{:.0}%", sc.y), layer.id.clone(), "scale_y".to_string(), 0.5, 1.0, &self.state, &panel_entity, cx)),
                             );
-                        let sc_lane = timeline_keyframe_lane(&layer.id, "transform.scale", &sc_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, &self.graph_sel_keys, self.tl_marquee.clone(), (self.tl_lane_x, self.tl_lane_w), cx);
+                        let sc_lane = timeline_keyframe_lane(&layer.id, "transform.scale", &sc_times, (t_start, visible_duration), current_time_secs, fps, playhead_percent, &panel_entity, &self.state, &self.graph_sel_keys, self.tl_marquee.clone(), (self.tl_lane_x, self.tl_lane_w), cx);
                         timeline_rows.push(h_flex().h(px(24.)).items_center().child(sc_left).child(sc_lane));
 
                         // 4. Rotation
@@ -17134,7 +17221,7 @@ impl Render for TimelinePanel {
                             .child(
                                 timeline_scrub(SharedString::from(format!("tl_scrub_{}_rotation", layer.id)), "Angle", format!("{:.1}°", rot), layer.id.clone(), "rotation".to_string(), 0.25, 1.0, &self.state, &panel_entity, cx),
                             );
-                        let rot_lane = timeline_keyframe_lane(&layer.id, "transform.rotation", &rot_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, &self.graph_sel_keys, self.tl_marquee.clone(), (self.tl_lane_x, self.tl_lane_w), cx);
+                        let rot_lane = timeline_keyframe_lane(&layer.id, "transform.rotation", &rot_times, (t_start, visible_duration), current_time_secs, fps, playhead_percent, &panel_entity, &self.state, &self.graph_sel_keys, self.tl_marquee.clone(), (self.tl_lane_x, self.tl_lane_w), cx);
                         timeline_rows.push(h_flex().h(px(24.)).items_center().child(rot_left).child(rot_lane));
 
                         // 5. Opacity
@@ -17178,7 +17265,7 @@ impl Render for TimelinePanel {
                             .child(
                                 timeline_scrub(SharedString::from(format!("tl_scrub_{}_opacity", layer.id)), "Op", format!("{:.0}%", op), layer.id.clone(), "opacity".to_string(), 0.25, 1.0, &self.state, &panel_entity, cx),
                             );
-                        let op_lane = timeline_keyframe_lane(&layer.id, "opacity", &op_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, &self.graph_sel_keys, self.tl_marquee.clone(), (self.tl_lane_x, self.tl_lane_w), cx);
+                        let op_lane = timeline_keyframe_lane(&layer.id, "opacity", &op_times, (t_start, visible_duration), current_time_secs, fps, playhead_percent, &panel_entity, &self.state, &self.graph_sel_keys, self.tl_marquee.clone(), (self.tl_lane_x, self.tl_lane_w), cx);
                         timeline_rows.push(h_flex().h(px(24.)).items_center().child(op_left).child(op_lane));
                     }
 
@@ -17428,7 +17515,7 @@ impl Render for TimelinePanel {
                                                 timeline_scrub(SharedString::from(format!("tl_scrub_{}_{}_{}", layer.id, effect.id, p_slug)), "Val", format!("{:.1}", p_val), layer.id.clone(), fx_key, fx_drag, p_step, &self.state, &panel_entity, cx),
                                             );
 
-                                        let param_lane = timeline_keyframe_lane(&layer.id, &fx_prop_path, &kf_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, &self.graph_sel_keys, self.tl_marquee.clone(), (self.tl_lane_x, self.tl_lane_w), cx);
+                                        let param_lane = timeline_keyframe_lane(&layer.id, &fx_prop_path, &kf_times, (t_start, visible_duration), current_time_secs, fps, playhead_percent, &panel_entity, &self.state, &self.graph_sel_keys, self.tl_marquee.clone(), (self.tl_lane_x, self.tl_lane_w), cx);
 
                                         timeline_rows.push(
                                             h_flex()
@@ -17482,7 +17569,7 @@ impl Render for TimelinePanel {
                                                     .child(div().w(px(100.)).truncate().text_color(cx.theme().foreground).child(p_label)),
                                             );
 
-                                        let swatch_lane = timeline_keyframe_lane(&layer.id, &fx_prop_path, &kf_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, &self.graph_sel_keys, self.tl_marquee.clone(), (self.tl_lane_x, self.tl_lane_w), cx);
+                                        let swatch_lane = timeline_keyframe_lane(&layer.id, &fx_prop_path, &kf_times, (t_start, visible_duration), current_time_secs, fps, playhead_percent, &panel_entity, &self.state, &self.graph_sel_keys, self.tl_marquee.clone(), (self.tl_lane_x, self.tl_lane_w), cx);
 
                                         timeline_rows.push(
                                             h_flex()
@@ -17807,7 +17894,7 @@ impl Render for TimelinePanel {
                                                 .child(format!("{} pts{}", mask.path.value.points.len(), if mask.path.value.closed { " (closed)" } else { "" }))
                                         );
 
-                                    let path_lane = timeline_keyframe_lane(&layer.id, &path_prop_path, &path_kf_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, &self.graph_sel_keys, self.tl_marquee.clone(), (self.tl_lane_x, self.tl_lane_w), cx);
+                                    let path_lane = timeline_keyframe_lane(&layer.id, &path_prop_path, &path_kf_times, (t_start, visible_duration), current_time_secs, fps, playhead_percent, &panel_entity, &self.state, &self.graph_sel_keys, self.tl_marquee.clone(), (self.tl_lane_x, self.tl_lane_w), cx);
 
                                     timeline_rows.push(
                                         h_flex()
@@ -17851,7 +17938,7 @@ impl Render for TimelinePanel {
                                             .child(
                                                 timeline_scrub(SharedString::from(format!("tl_scrub_{}_{}_feather", layer.id, mask.id)), "px", format!("{:.1}", feather_val), layer.id.clone(), f_key, 0.5, 1.0, &self.state, &panel_entity, cx),
                                             );
-                                        let feather_lane = timeline_keyframe_lane(&layer.id, &f_prop_path, &f_kf_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, &self.graph_sel_keys, self.tl_marquee.clone(), (self.tl_lane_x, self.tl_lane_w), cx);
+                                        let feather_lane = timeline_keyframe_lane(&layer.id, &f_prop_path, &f_kf_times, (t_start, visible_duration), current_time_secs, fps, playhead_percent, &panel_entity, &self.state, &self.graph_sel_keys, self.tl_marquee.clone(), (self.tl_lane_x, self.tl_lane_w), cx);
 
                                         timeline_rows.push(h_flex().h(px(24.)).border_b_1().border_color(cx.theme().border).items_center().child(feather_left).child(feather_lane));
 
@@ -17885,7 +17972,7 @@ impl Render for TimelinePanel {
                                             .child(
                                                 timeline_scrub(SharedString::from(format!("tl_scrub_{}_{}_opacity", layer.id, mask.id)), "%", format!("{:.0}%", opacity_val), layer.id.clone(), o_key, 0.5, 1.0, &self.state, &panel_entity, cx),
                                             );
-                                        let opacity_lane = timeline_keyframe_lane(&layer.id, &o_prop_path, &o_kf_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, &self.graph_sel_keys, self.tl_marquee.clone(), (self.tl_lane_x, self.tl_lane_w), cx);
+                                        let opacity_lane = timeline_keyframe_lane(&layer.id, &o_prop_path, &o_kf_times, (t_start, visible_duration), current_time_secs, fps, playhead_percent, &panel_entity, &self.state, &self.graph_sel_keys, self.tl_marquee.clone(), (self.tl_lane_x, self.tl_lane_w), cx);
 
                                         timeline_rows.push(h_flex().h(px(24.)).border_b_1().border_color(cx.theme().border).items_center().child(opacity_left).child(opacity_lane));
 
@@ -17919,7 +18006,7 @@ impl Render for TimelinePanel {
                                             .child(
                                                 timeline_scrub(SharedString::from(format!("tl_scrub_{}_{}_expansion", layer.id, mask.id)), "px", format!("{:.1}", exp_val), layer.id.clone(), e_key, 0.5, 1.0, &self.state, &panel_entity, cx),
                                             );
-                                        let exp_lane = timeline_keyframe_lane(&layer.id, &e_prop_path, &e_kf_times, total_duration_secs, current_time_secs, fps, playhead_percent, &panel_entity, &self.state, &self.graph_sel_keys, self.tl_marquee.clone(), (self.tl_lane_x, self.tl_lane_w), cx);
+                                        let exp_lane = timeline_keyframe_lane(&layer.id, &e_prop_path, &e_kf_times, (t_start, visible_duration), current_time_secs, fps, playhead_percent, &panel_entity, &self.state, &self.graph_sel_keys, self.tl_marquee.clone(), (self.tl_lane_x, self.tl_lane_w), cx);
 
                                         timeline_rows.push(h_flex().h(px(24.)).border_b_1().border_color(cx.theme().border).items_center().child(exp_left).child(exp_lane));
                                     }
@@ -17952,12 +18039,13 @@ impl Render for TimelinePanel {
             .on_mouse_move(move |event, window, cx| {
                 if p_root_move.read(cx).is_scrubbing_ruler {
                     let cur_x = event.position.x / px(1.0);
-                    let (ox, rw) = {
+                    let (ox, rw, t_start, vis_dur) = {
                         let p = p_root_move.read(cx);
-                        (p.ruler_origin_x, p.ruler_width)
+                        let (s, d) = p.visible_time_span(total_duration_secs);
+                        (p.ruler_origin_x, p.ruler_width, s, d)
                     };
                     let frac = ((cur_x - ox) / rw.max(1.0)).clamp(0.0, 1.0) as f64;
-                    let target_time = frac * total_duration_secs;
+                    let target_time = (t_start + frac * vis_dur).clamp(0.0, total_duration_secs);
                     let fps = s_root_move.read(cx).active_composition().map(|c| c.frame_rate).unwrap_or(30.0);
                     let target_frame = (target_time * fps).round() as i64;
                     let changed = p_root_move.update(cx, |this, _| {
@@ -18128,7 +18216,8 @@ impl Render for TimelinePanel {
                     let delta_px = cur_x - kd.initial_mouse_x;
                     if delta_px.abs() > 2.0 || kd.moved {
                         kd.moved = true;
-                        let delta_time_s = (delta_px / track_width) as f64 * total_duration_secs;
+                        let (_, vis_dur) = p_root_move.read(cx).visible_time_span(total_duration_secs);
+                        let delta_time_s = (delta_px / track_width) as f64 * vis_dur;
                         let target_time_s = (kd.original_time_s + delta_time_s).clamp(0.0, total_duration_secs);
                         if (target_time_s - kd.current_time_s).abs() > 0.0001 {
                             let from_t = kd.current_time_s;
@@ -18161,7 +18250,9 @@ impl Render for TimelinePanel {
                 let action = p_root_move.read(cx).drag_action.clone();
                 if let Some(action) = action {
                     let track_width = (window.bounds().size.width / px(1.0) - 380.0).max(200.0);
-                    let pixels_per_frame = (track_width / total_frames.max(1) as f32).max(0.5);
+                    let (_, vis_dur) = p_root_move.read(cx).visible_time_span(total_duration_secs);
+                    let visible_frames = (vis_dur * fps).max(1.0) as f32;
+                    let pixels_per_frame = (track_width / visible_frames).max(0.5);
                     let cur_x = event.position.x / px(1.0);
                     match action {
                         TimelineDragAction::SlipLayer { layer_id, initial_mouse_x, initial_in_frame, initial_out_frame } => {
@@ -18303,8 +18394,8 @@ impl Render for TimelinePanel {
                     let fx0 = ((mq.x0 - lane_x) / lane_w.max(1.0)).clamp(0.0, 1.0);
                     let fx1 = ((mq.x1 - lane_x) / lane_w.max(1.0)).clamp(0.0, 1.0);
                     let (a, b) = if fx0 <= fx1 { (fx0, fx1) } else { (fx1, fx0) };
-                    let t_lo = a as f64 * mq.duration;
-                    let t_hi = b as f64 * mq.duration;
+                    let t_lo = mq.t_start + a as f64 * mq.duration;
+                    let t_hi = mq.t_start + b as f64 * mq.duration;
                     let mut picked = Vec::new();
                     {
                         let s = s_root_up.read(cx);
@@ -18670,14 +18761,156 @@ impl Render for TimelinePanel {
                                     ),
                             ),
                     )
-                    // Duration & In/Out
+                    // Duration & In/Out + Zoom Controls
                     .child(
                         h_flex()
-                            .gap_2()
+                            .justify_between()
+                            .items_center()
+                            .px_2()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child(div().child(format!("In: {in_str}")))
-                            .child(div().child(format!("Out: {out_str}"))),
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(div().child(format!("In: {in_str}")))
+                                    .child(div().child(format!("Out: {out_str}"))),
+                            )
+                            .child({
+                                let p_zin = panel_entity.clone();
+                                let p_zout = panel_entity.clone();
+                                let p_zres = panel_entity.clone();
+                                let p_zfit = panel_entity.clone();
+                                let p_pan_l = panel_entity.clone();
+                                let p_pan_r = panel_entity.clone();
+                                let cur_z = self.timeline_zoom;
+                                let cur_t = current_time_secs;
+                                let dur = total_duration_secs;
+                                let mut z_row = h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Zoom:"))
+                                    .child(
+                                        div()
+                                            .id("tl_zoom_out")
+                                            .test_support()
+                                            .cursor_pointer()
+                                            .px_1p5()
+                                            .py_0p5()
+                                            .rounded_sm()
+                                            .bg(cx.theme().muted)
+                                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                            .text_xs()
+                                            .font_bold()
+                                            .child("-")
+                                            .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                                                p_zout.update(cx, |this, cx| {
+                                                    this.zoom_out(cur_t, dur);
+                                                    cx.notify();
+                                                });
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("tl_zoom_reset")
+                                            .test_support()
+                                            .cursor_pointer()
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_sm()
+                                            .bg(cx.theme().muted)
+                                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                            .text_xs()
+                                            .child(format!("{:.0}%", cur_z * 100.0))
+                                            .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                                                p_zres.update(cx, |this, cx| {
+                                                    this.zoom_reset();
+                                                    cx.notify();
+                                                });
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("tl_zoom_in")
+                                            .test_support()
+                                            .cursor_pointer()
+                                            .px_1p5()
+                                            .py_0p5()
+                                            .rounded_sm()
+                                            .bg(cx.theme().muted)
+                                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                            .text_xs()
+                                            .font_bold()
+                                            .child("+")
+                                            .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                                                p_zin.update(cx, |this, cx| {
+                                                    this.zoom_in(cur_t, dur);
+                                                    cx.notify();
+                                                });
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("tl_zoom_fit")
+                                            .test_support()
+                                            .cursor_pointer()
+                                            .px_1p5()
+                                            .py_0p5()
+                                            .rounded_sm()
+                                            .bg(if (cur_z - 1.0).abs() < 0.01 { cx.theme().primary } else { cx.theme().muted })
+                                            .text_color(if (cur_z - 1.0).abs() < 0.01 { cx.theme().primary_foreground } else { cx.theme().foreground })
+                                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                            .text_xs()
+                                            .child("Fit")
+                                            .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                                                p_zfit.update(cx, |this, cx| {
+                                                    this.zoom_reset();
+                                                    cx.notify();
+                                                });
+                                            }),
+                                    );
+                                if cur_z > 1.05 {
+                                    z_row = z_row
+                                        .child(
+                                            div()
+                                                .id("tl_pan_left")
+                                                .test_support()
+                                                .cursor_pointer()
+                                                .px_1p5()
+                                                .py_0p5()
+                                                .rounded_sm()
+                                                .bg(cx.theme().muted)
+                                                .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                                .text_xs()
+                                                .child("◀")
+                                                .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                                                    p_pan_l.update(cx, |this, cx| {
+                                                        this.pan_left(dur);
+                                                        cx.notify();
+                                                    });
+                                                }),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("tl_pan_right")
+                                                .test_support()
+                                                .cursor_pointer()
+                                                .px_1p5()
+                                                .py_0p5()
+                                                .rounded_sm()
+                                                .bg(cx.theme().muted)
+                                                .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                                .text_xs()
+                                                .child("▶")
+                                                .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                                                    p_pan_r.update(cx, |this, cx| {
+                                                        this.pan_right(dur);
+                                                        cx.notify();
+                                                    });
+                                                }),
+                                        );
+                                }
+                                z_row
+                            }),
                     ),
             )
             // Time Ruler
@@ -18707,6 +18940,7 @@ impl Render for TimelinePanel {
                             .flex_1()
                             .relative()
                             .h_full()
+                            .overflow_hidden()
                             .cursor_col_resize()
                             .on_prepaint(move |bounds, _window, cx| {
                                 let ox = bounds.origin.x / px(1.0);
@@ -18728,7 +18962,7 @@ impl Render for TimelinePanel {
                                 p_ruler_down.update(cx, |this, cx| {
                                     this.is_scrubbing_ruler = true;
                                     let frac = ((mx - this.ruler_origin_x) / this.ruler_width.max(1.0)).clamp(0.0, 1.0) as f64;
-                                    let target_time = frac * total_duration_secs;
+                                    let target_time = (t_start + frac * visible_duration).clamp(0.0, total_duration_secs);
                                     let fps = s_ruler_down.read(cx).active_composition().map(|c| c.frame_rate).unwrap_or(30.0);
                                     let target_frame = (target_time * fps).round() as i64;
                                     this.last_scrub_frame = Some(target_frame);
@@ -18741,30 +18975,27 @@ impl Render for TimelinePanel {
                                 });
                             });
 
-                        ruler_track = ruler_track
-                            .child(
-                                h_flex()
-                                    .size_full()
-                                    .justify_between()
-                                    .px_3()
-                                    .items_center()
-                                    .child(div().child("00:00s"))
-                                    .child(div().child("00:01s"))
-                                    .child(div().child("00:02s"))
-                                    .child(div().child("00:03s"))
-                                    .child(div().child("00:04s"))
-                                    .child(div().child("00:05s")),
-                            )
-                            .child(
-                                // Playhead marker on ruler
-                                div()
-                                    .absolute()
-                                    .top_0()
-                                    .bottom_0()
-                                    .w(px(2.))
-                                    .bg(rgb(0xef4444))
-                                    .left(relative(playhead_percent / 100.0)),
-                            );
+                        {
+                            let num_ticks = 5;
+                            let mut ticks_row = h_flex().size_full().justify_between().px_3().items_center();
+                            for i in 0..=num_ticks {
+                                let t = t_start + (visible_duration * (i as f64 / num_ticks as f64));
+                                let tc = TimeCode::from_seconds(t, fps);
+                                ticks_row = ticks_row.child(div().child(format!("{tc}")));
+                            }
+                            ruler_track = ruler_track
+                                .child(ticks_row)
+                                .child(
+                                    // Playhead marker on ruler
+                                    div()
+                                        .absolute()
+                                        .top_0()
+                                        .bottom_0()
+                                        .w(px(2.))
+                                        .bg(rgb(0xef4444))
+                                        .left(relative(playhead_percent / 100.0)),
+                                );
+                        }
 
                         ruler_track
                     }),

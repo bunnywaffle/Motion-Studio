@@ -1533,6 +1533,20 @@ impl EditorState {
         }
     }
 
+    /// Synchronize the playback clock to the current active composition's
+    /// frame rate and duration, preserving the current playback time position.
+    pub fn sync_clock_to_active_composition(&mut self) {
+        if let Some(comp) = self.active_composition() {
+            let pos_seconds = self.clock.position_seconds();
+            let was_playing = self.is_playing;
+            self.clock = PlaybackClock::from_composition(comp);
+            self.clock.seek_seconds(pos_seconds);
+            if was_playing {
+                self.clock.play();
+            }
+        }
+    }
+
     /// Seek to continuous `target_time` in seconds, returning true only if the quantized
     /// visual frame changed. Avoids redundant composition re-evaluations during ruler scrubbing.
     pub fn scrub_frame_quantized(&mut self, target_time: f64) -> bool {
@@ -1661,6 +1675,7 @@ impl EditorState {
             .map_err(|e| format!("Failed to add composition: {e:?}"))?;
         self.active_comp_id = id.clone();
         self.selected_layer_id = None;
+        self.sync_clock_to_active_composition();
         Ok(id)
     }
 
@@ -7759,6 +7774,7 @@ impl EditorState {
             let frames = (duration_secs * comp.frame_rate).round() as i64;
             comp.duration = project::TimeCode::from_frames(frames, comp.frame_rate);
         }
+        self.sync_clock_to_active_composition();
     }
 
     /// Create a new composition in the project and set it as active (Project Manager).
@@ -7784,6 +7800,7 @@ impl EditorState {
         let _ = self.project.add_composition(comp);
         self.active_comp_id = id.clone();
         self.selected_layer_id = None;
+        self.sync_clock_to_active_composition();
         id
     }
 
@@ -7792,6 +7809,7 @@ impl EditorState {
         if self.project.compositions.iter().any(|c| c.id == comp_id) {
             self.active_comp_id = comp_id.to_string();
             self.selected_layer_id = None;
+            self.sync_clock_to_active_composition();
         }
     }
 
@@ -7806,6 +7824,7 @@ impl EditorState {
             if let Some(first) = self.project.compositions.first() {
                 self.active_comp_id = first.id.clone();
                 self.selected_layer_id = None;
+                self.sync_clock_to_active_composition();
             }
         }
         Ok(())

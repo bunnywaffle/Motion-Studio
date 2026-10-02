@@ -10451,4 +10451,101 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         });
         cx.run_until_parked();
     }
+
+    #[gpui_kit::test]
+    fn test_high_fps_clock_sync_and_playhead_scrub(cx: &mut TestAppContext) {
+        use crate::panels::TimelinePanel;
+        use crate::state::EditorState;
+
+        cx.update(gpui_kit::init);
+        let state = cx.new(|_| EditorState::new());
+        let timeline_panel = cx.new(|cx| TimelinePanel::new(state.clone(), cx));
+
+        // 1. Initial 30 fps state
+        state.update(cx, |s, _| {
+            assert_eq!(s.active_composition().unwrap().frame_rate, 30.0);
+            assert_eq!(s.clock.frame_rate().as_f64(), 30.0);
+        });
+
+        // 2. Change composition to 60 fps
+        state.update(cx, |s, _| {
+            s.update_project_settings("60fps Comp", 1920, 1080, 60.0, 10.0);
+            assert_eq!(s.active_composition().unwrap().frame_rate, 60.0);
+            // Clock must synchronize to 60 fps
+            assert_eq!(s.clock.frame_rate().as_f64(), 60.0);
+            assert_eq!(s.clock.comp_duration().frames(), 600);
+
+            // Seek to 5.0 seconds (50% of 10s comp)
+            s.seek(5.0);
+            assert_eq!(s.clock.current_frame(), 300);
+            assert!((s.clock.position_seconds() - 5.0).abs() < 1e-4);
+        });
+
+        // 3. Verify TimelinePanel visible span and playhead percentage
+        timeline_panel.read_with(cx, |p, _| {
+            let (start, span) = p.visible_time_span(10.0);
+            assert_eq!(start, 0.0);
+            assert_eq!(span, 10.0);
+        });
+
+        // 4. Change composition to 120 fps
+        state.update(cx, |s, _| {
+            s.update_project_settings("120fps Comp", 1920, 1080, 120.0, 5.0);
+            assert_eq!(s.clock.frame_rate().as_f64(), 120.0);
+            assert_eq!(s.clock.comp_duration().frames(), 600);
+
+            s.seek(2.5); // 50% of 5s comp
+            assert_eq!(s.clock.current_frame(), 300);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn test_timeline_zoom_and_pan(cx: &mut TestAppContext) {
+        use crate::panels::TimelinePanel;
+        use crate::state::EditorState;
+
+        cx.update(gpui_kit::init);
+        let state = cx.new(|_| EditorState::new());
+        let timeline_panel = cx.new(|cx| TimelinePanel::new(state.clone(), cx));
+
+        // 1. Initial 1.0x zoom
+        timeline_panel.read_with(cx, |p, _| {
+            assert_eq!(p.timeline_zoom, 1.0);
+            let (start, span) = p.visible_time_span(10.0);
+            assert_eq!(start, 0.0);
+            assert_eq!(span, 10.0);
+        });
+
+        // 2. Zoom in centered on playhead at 5.0s
+        timeline_panel.update(cx, |p, _| {
+            p.zoom_in(5.0, 10.0);
+            assert!(p.timeline_zoom > 1.0);
+            let (start, span) = p.visible_time_span(10.0);
+            assert!(span < 10.0);
+            // View should be centered around 5.0s
+            let center = start + span * 0.5;
+            assert!((center - 5.0).abs() < 0.5);
+        });
+
+        // 3. Pan left and right
+        timeline_panel.update(cx, |p, _| {
+            let (orig_start, _) = p.visible_time_span(10.0);
+            p.pan_left(10.0);
+            let (new_start, _) = p.visible_time_span(10.0);
+            assert!(new_start <= orig_start);
+
+            p.pan_right(10.0);
+            let (right_start, _) = p.visible_time_span(10.0);
+            assert!(right_start >= new_start);
+        });
+
+        // 4. Zoom reset
+        timeline_panel.update(cx, |p, _| {
+            p.zoom_reset();
+            assert_eq!(p.timeline_zoom, 1.0);
+            let (start, span) = p.visible_time_span(10.0);
+            assert_eq!(start, 0.0);
+            assert_eq!(span, 10.0);
+        });
+    }
 }
