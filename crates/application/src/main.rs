@@ -5610,6 +5610,130 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
     }
 
     #[gpui_kit::test]
+    fn test_tangent_handle_vertical_drag_reshapes_value(cx: &mut TestAppContext) {
+        // Up/down drags reshape the value influence (hy), not just time.
+        use gpui_kit::test::TestWindowExt;
+        use gpui_kit::point;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.select_layer(Some("layer_accent".to_string()));
+                if !s.spline_editor_open {
+                    s.toggle_spline_editor();
+                }
+                cx.notify();
+            });
+        });
+        // Handle tip value before: k.v + hy * seg_v (segment descends
+        // 200 -> -200, so hy itself is segment-relative).
+        let before_tip: f32 = app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            let k = s
+                .active_composition()
+                .unwrap()
+                .get_layer("layer_accent")
+                .unwrap()
+                .transform
+                .position
+                .keyframes()
+                .iter()
+                .find(|k| (k.time.seconds() - 2.0).abs() < 1e-6)
+                .unwrap();
+            k.value.x + k.out_tangent.unwrap().y * -400.0
+        });
+        // Drag the out-handle up: value influence must grow.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let snap = window.find("graph_tan_layer_accent_transform_position_x_2000_out");
+            assert!(snap.visible());
+            let from = snap.bounds().center();
+            window.drag(from, from + point(px(0.0), px(-40.0)), cx);
+        })
+        .expect("update_window failed");
+        app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            let k = s
+                .active_composition()
+                .unwrap()
+                .get_layer("layer_accent")
+                .unwrap()
+                .transform
+                .position
+                .keyframes()
+                .iter()
+                .find(|k| (k.time.seconds() - 2.0).abs() < 1e-6)
+                .unwrap()
+                .clone();
+            let out = k.out_tangent.unwrap();
+            let tip = k.value.x + out.y * -400.0;
+            assert!(
+                tip > before_tip + 10.0,
+                "upward handle drag raises the handle tip: {before_tip} -> {tip}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_dropdown_anchor_sits_above_button() {
+        // Popup origins are computed from the button position (the old
+        // code pinned both popups to a fixed window corner).
+        use crate::panels::dropdown_above;
+        // Button near the bottom bar: popup opens directly above it.
+        assert_eq!(dropdown_above(1280.0, Some((500.0, 850.0))), (500.0, 442.0));
+        // Clamped inside narrow windows and short heights.
+        assert_eq!(dropdown_above(300.0, Some((290.0, 850.0))), (84.0, 442.0));
+        assert_eq!(dropdown_above(1280.0, Some((500.0, 100.0))), (500.0, 8.0));
+    }
+
+    #[gpui_kit::test]
+    fn test_easing_buttons_cache_popup_anchors(cx: &mut TestAppContext) {
+        // The bottom-bar buttons report their origins every frame, which
+        // is what the popups anchor to (deferred overlays don't register
+        // in test snapshots, so pin the inputs instead of the popup).
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.select_layer(Some("layer_accent".to_string()));
+                if !s.spline_editor_open {
+                    s.toggle_spline_editor();
+                }
+                cx.notify();
+            });
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+        })
+        .expect("update_window failed");
+        cx.run_until_parked();
+        assert!(app_view.read_with(cx, |view, cx| {
+            let tl = view.panels().timeline.read(cx);
+            // Bottom-bar buttons sit low in a 900px window; popups open
+            // ~400px above them.
+            tl.ease_btn_pos.is_some_and(|(_, y)| y > 500.0)
+                && tl.anim_btn_pos.is_some_and(|(_, y)| y > 500.0)
+        }));
+    }
+
+    #[gpui_kit::test]
     fn test_tangent_handle_press_ignores_plot_background(cx: &mut TestAppContext) {
         // Grabbing a tangent handle must not seek the playhead or arm a
         // marquee: the handle bubbles through the plot background handler,

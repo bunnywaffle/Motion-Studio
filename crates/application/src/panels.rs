@@ -14210,6 +14210,10 @@ pub struct ContextMenuState {
 pub struct TimelinePanel {
     pub easing_dropdown_open: bool,
     pub animation_dropdown_open: bool,
+    /// Cached button origins (window px) so the dropdown popups open
+    /// directly above their buttons.
+    pub ease_btn_pos: Option<(f32, f32)>,
+    pub anim_btn_pos: Option<(f32, f32)>,
 
     focus_handle: FocusHandle,
     state: Entity<EditorState>,
@@ -14409,8 +14413,18 @@ pub struct GraphUi {
     pub marquee: Option<GraphMarquee>,
 }
 
+/// Popup origin (top-left, window px) for a fixed 200x400 dropdown
+/// opening directly above its bottom-bar button.
+pub(crate) fn dropdown_above(win_w: f32, btn: Option<(f32, f32)>) -> (f32, f32) {
+    let (bx, by) = btn.unwrap_or((win_w - 216.0, 480.0));
+    (
+        bx.min(win_w - 216.0).max(8.0),
+        (by - 408.0).max(8.0),
+    )
+}
+
 /// Resolved spline selection for the easing bar: (label, path, interp,
-/// in-tangent, out-tangent, key time).
+// in-tangent, out-tangent, key time).
 type SelEaseKey = (
     String,
     String,
@@ -14890,7 +14904,10 @@ fn render_graph_view(
                 .child("Keys"),
         );
 
-    // Easing preset button
+    // Easing preset buttons. Their origins are cached so the dropdown
+    // popups open directly above them (not at a fixed window corner).
+    let p_ease_btn = panel_entity.clone();
+    let p_anim_btn = panel_entity.clone();
     let easing_row = h_flex().gap_1().items_center().child(
         div()
             .cursor_pointer()
@@ -14901,6 +14918,13 @@ fn render_graph_view(
             .hover(|s| s.bg(ae::hover()))
             .text_color(ae::text())
             .text_xs()
+            .on_prepaint(move |bounds, _window, cx| {
+                let ox = bounds.origin.x / px(1.0);
+                let oy = bounds.origin.y / px(1.0);
+                p_ease_btn.update(cx, |this, _cx| {
+                    this.ease_btn_pos = Some((ox, oy));
+                });
+            })
             .on_mouse_down(MouseButton::Left, {
                 let panel = panel_entity.clone();
                 move |_e, _w, cx| {
@@ -14922,6 +14946,13 @@ fn render_graph_view(
             .hover(|s| s.bg(ae::hover()))
             .text_color(ae::text())
             .text_xs()
+            .on_prepaint(move |bounds, _window, cx| {
+                let ox = bounds.origin.x / px(1.0);
+                let oy = bounds.origin.y / px(1.0);
+                p_anim_btn.update(cx, |this, _cx| {
+                    this.anim_btn_pos = Some((ox, oy));
+                });
+            })
             .on_mouse_down(MouseButton::Left, {
                 let panel = panel_entity.clone();
                 move |_e, _w, cx| {
@@ -15439,13 +15470,19 @@ fn render_graph_view(
             });
         });
 
-    // Curves as dense dots (120 per series reads as a line).
+    // Curves as continuous SVG polylines (one per visible series): real
+    // stroked lines like every other graph editor, not dot chains. The
+    // 0..1000 viewBox stretches over the plot box, so lines stay sharp at
+    // any panel size.
     let speed_tab = tab == GraphTab::Speed;
     for (vi, &si) in visible_idx.iter().enumerate() {
         let se = &series[si];
-        let col = Rgba { r: se.color.0, g: se.color.1, b: se.color.2, a: 0.95 };
         let dimmed = !is_focused(&se.path);
         let vals = if speed_tab { &speed_per_series[vi] } else { &values_per_series[vi] };
+        if vals.len() < 2 {
+            continue;
+        }
+        let mut pts = String::with_capacity(vals.len() * 12);
         for (i, v) in vals.iter().enumerate() {
             let t = i as f64 / (SAMPLES - 1) as f64 * duration;
             let (x, y) = if speed_tab {
@@ -15453,20 +15490,28 @@ fn render_graph_view(
             } else {
                 (x_of(t), y_of(*v))
             };
-            plot = plot.child(
-                div()
-                    .absolute()
-                    .left(relative(x))
-                    .top(relative(1.0 - y))
-                    .w(px(2.))
-                    .h(px(2.))
-                    .ml(px(-1.))
-                    .mt(px(-1.))
-                    .rounded_full()
-                    .bg(col)
-                    .opacity(if dimmed { 0.3 } else { 1.0 }),
-            );
+            use std::fmt::Write as _;
+            let _ = write!(pts, "{:.1},{:.1} ", x * 1000.0, (1.0 - y) * 1000.0);
         }
+        let (r, g, b) = (
+            (se.color.0.clamp(0.0, 1.0) * 255.0) as u8,
+            (se.color.1.clamp(0.0, 1.0) * 255.0) as u8,
+            (se.color.2.clamp(0.0, 1.0) * 255.0) as u8,
+        );
+        let svg_data = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1000 1000\" preserveAspectRatio=\"none\">\
+             <polyline points=\"{pts}\" fill=\"none\" stroke=\"#{r:02X}{g:02X}{b:02X}\" \
+             stroke-width=\"4\" stroke-linejoin=\"round\" stroke-linecap=\"round\"/></svg>"
+        );
+        plot = plot.child(
+            gpui::svg()
+                .data(svg_data.as_bytes())
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .opacity(if dimmed { 0.3 } else { 1.0 }),
+        );
     }
 
     // Playhead (red line + square handle, AE style).
@@ -15996,6 +16041,8 @@ impl TimelinePanel {
             graph_tan_drag: None,
             easing_dropdown_open: false,
             animation_dropdown_open: false,
+            ease_btn_pos: None,
+            anim_btn_pos: None,
             graph_tab: GraphTab::Value,
             graph_isolate: false,
             graph_show_grid: true,
@@ -17938,12 +17985,21 @@ impl Render for TimelinePanel {
                     let dx = cur_x - td.last_x;
                     let dy = cur_y - td.last_y;
                     if dx != 0.0 || dy != 0.0 {
-                        let track_w = (window.bounds().size.width / px(1.0) - 560.0).max(200.0);
+                        // Measured plot geometry (cached every frame), not
+                        // window-size guesses: guesses drift with panel
+                        // width and Fit Sel zoom until handles crawl.
+                        let (plot_w, plot_h) = {
+                            let p = p_root_move.read(cx);
+                            (
+                                p.graph_plot_width.max(50.0),
+                                p.graph_plot_height.max(50.0),
+                            )
+                        };
                         let seg_frac = (td.seg_t / td.span.max(1e-6)).max(1e-6);
-                        let nhx = td.hx + ((dx / track_w) as f64 / seg_frac) as f32;
+                        let nhx = td.hx + ((dx / plot_w) as f64 / seg_frac) as f32;
                         let mut nhy = td.hy;
                         if td.seg_v.abs() > 1e-6 {
-                            nhy = td.hy + (-dy / GRAPH_PLOT_H * td.vspan) / td.seg_v;
+                            nhy = td.hy + (-dy / plot_h * td.vspan) / td.seg_v;
                         }
                         let nhx = nhx.clamp(0.0, 1.0);
                         let nhy = nhy.clamp(-2.0, 2.0);
@@ -17979,11 +18035,16 @@ impl Render for TimelinePanel {
                     let dx = cur_x - gd.last_x;
                     let dy = cur_y - gd.last_y;
                     if dx != 0.0 || dy != 0.0 {
-                        let track_w = (window.bounds().size.width / px(1.0) - 560.0).max(200.0);
-                        let graph_h = GRAPH_PLOT_H;
-                        let dt = dx / track_w * gd.span as f32;
+                        let (plot_w, plot_h) = {
+                            let p = p_root_move.read(cx);
+                            (
+                                p.graph_plot_width.max(50.0),
+                                p.graph_plot_height.max(50.0),
+                            )
+                        };
+                        let dt = dx / plot_w * gd.span as f32;
                         let vspan = (gd.v_max - gd.v_min).max(1e-5);
-                        let dv = -dy / graph_h * vspan;
+                        let dv = -dy / plot_h * vspan;
                         // Current value of the dragged key.
                         let cur_v = graph_key_live_value(
                             s_root_move.read(cx),
@@ -19724,7 +19785,13 @@ impl Render for TimelinePanel {
             root = root.child(context_menu_overlay);
         }
 
-        // Dropdown Overlay Logic
+        // Dropdown Overlay Logic: popups open directly above their
+        // bottom-bar buttons (both lists are fixed 200x400).
+        let win_w = window.bounds().size.width / px(1.0);
+        let popup_spot = |pos: Option<(f32, f32)>| {
+            let (x, y) = dropdown_above(win_w, pos);
+            point(px(x), px(y))
+        };
         if self.easing_dropdown_open {
             let p_tl_dismiss_bg = cx.entity().clone();
             let p_tl_dismiss_r = cx.entity().clone();
@@ -19803,7 +19870,7 @@ impl Render for TimelinePanel {
             }
 
             let dropdown = deferred(
-                Positioner::corner(Anchor::TopRight, point(px(200.), px(80.)))
+                Positioner::corner(Anchor::TopLeft, popup_spot(self.ease_btn_pos))
                     .margin(px(8.))
                     .occlude()
                     .child(
@@ -19897,7 +19964,7 @@ impl Render for TimelinePanel {
             }
 
             let dropdown = deferred(
-                Positioner::corner(Anchor::TopRight, point(px(100.), px(80.)))
+                Positioner::corner(Anchor::TopLeft, popup_spot(self.anim_btn_pos))
                     .margin(px(8.))
                     .occlude()
                     .child(
