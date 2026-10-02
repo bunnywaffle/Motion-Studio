@@ -14630,6 +14630,56 @@ fn graph_key_live_value(s: &EditorState, layer_id: &str, path: &str, at_s: f64) 
                 .map(|k| k.v)
         })
 }
+fn draw_line_segment(
+    path: &mut gpui::Path<gpui::Pixels>,
+    p0: gpui::Point<gpui::Pixels>,
+    p1: gpui::Point<gpui::Pixels>,
+    thickness: f32,
+) {
+    let dx = (p1.x - p0.x) / gpui::px(1.0);
+    let dy = (p1.y - p0.y) / gpui::px(1.0);
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 0.001 {
+        return;
+    }
+    let nx = -dy / len * (thickness * 0.5);
+    let ny = dx / len * (thickness * 0.5);
+    let v0 = gpui::point(p0.x + gpui::px(nx), p0.y + gpui::px(ny));
+    let v1 = gpui::point(p0.x - gpui::px(nx), p0.y - gpui::px(ny));
+    let v2 = gpui::point(p1.x - gpui::px(nx), p1.y - gpui::px(ny));
+    let v3 = gpui::point(p1.x + gpui::px(nx), p1.y + gpui::px(ny));
+
+    let st = (gpui::point(0., 1.), gpui::point(0., 1.), gpui::point(0., 1.));
+    path.push_triangle((v0, v1, v2), st);
+    path.push_triangle((v0, v2, v3), st);
+}
+
+#[derive(Clone)]
+struct GraphCurveData {
+    color: Rgba,
+    dimmed: bool,
+    points: Vec<(f32, f32)>,
+}
+
+#[derive(Clone)]
+struct GraphHandleData {
+    color: Rgba,
+    kx: f32,
+    ky: f32,
+    hx: f32,
+    hy: f32,
+}
+
+struct GraphHandleDescriptor {
+    is_in: bool,
+    hx: f32,
+    hy: f32,
+    start_t: f64,
+    start_v: f32,
+    seg_t: f64,
+    seg_v: f32,
+}
+
 ///
 /// Shows one normalized curve per animated scalar property of the selected
 /// layer (`graph_series`), sampled via `evaluate_graph_param`. Keyframes are
@@ -14992,17 +15042,14 @@ fn render_graph_view(
                 .collect(),
             None => Vec::new(),
         };
-        let mut col = h_flex()
+        let mut col = v_flex()
             .id("graph_legend")
             .test_support()
             .flex_none()
             .w_full()
-            .flex_wrap()
-            .gap_2()
+            .gap_1()
             .py_1()
-            .px_2()
-            .border_b_1()
-            .border_color(ae::border());
+            .px_2();
         for (llid, lname, is_sel) in layers {
             let lseries = s.graph_series(&llid);
             if lseries.is_empty() && !is_sel {
@@ -15481,11 +15528,10 @@ fn render_graph_view(
             });
         });
 
-    // Curves as continuous SVG polylines (one per visible series): real
-    // stroked lines like every other graph editor, not dot chains. The
-    // 0..1000 viewBox stretches over the plot box, so lines stay sharp at
-    // any panel size.
+    // Curves and tangent handles rendered as smooth GPU paths via canvas:
+    // solid continuous stroked lines like every standard graph editor.
     let speed_tab = tab == GraphTab::Speed;
+    let mut curves_to_draw = Vec::new();
     for (vi, &si) in visible_idx.iter().enumerate() {
         let se = &series[si];
         let dimmed = !is_focused(&se.path);
@@ -15493,7 +15539,7 @@ fn render_graph_view(
         if vals.len() < 2 {
             continue;
         }
-        let mut pts = String::with_capacity(vals.len() * 12);
+        let mut pts = Vec::with_capacity(vals.len());
         for (i, v) in vals.iter().enumerate() {
             let t = i as f64 / (SAMPLES - 1) as f64 * duration;
             let (x, y) = if speed_tab {
@@ -15501,29 +15547,127 @@ fn render_graph_view(
             } else {
                 (x_of(t), y_of(*v))
             };
-            use std::fmt::Write as _;
-            let _ = write!(pts, "{:.1},{:.1} ", x * 1000.0, (1.0 - y) * 1000.0);
+            pts.push((x, y));
         }
-        let (r, g, b) = (
-            (se.color.0.clamp(0.0, 1.0) * 255.0) as u8,
-            (se.color.1.clamp(0.0, 1.0) * 255.0) as u8,
-            (se.color.2.clamp(0.0, 1.0) * 255.0) as u8,
-        );
-        let svg_data = format!(
-            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1000 1000\" preserveAspectRatio=\"none\">\
-             <polyline points=\"{pts}\" fill=\"none\" stroke=\"#{r:02X}{g:02X}{b:02X}\" \
-             stroke-width=\"4\" stroke-linejoin=\"round\" stroke-linecap=\"round\"/></svg>"
-        );
-        plot = plot.child(
-            gpui::svg()
-                .data(svg_data.as_bytes())
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full()
-                .opacity(if dimmed { 0.3 } else { 1.0 }),
-        );
+        let scol = if dimmed {
+            Rgba { r: se.color.0, g: se.color.1, b: se.color.2, a: 0.35 }
+        } else {
+            Rgba { r: se.color.0, g: se.color.1, b: se.color.2, a: 1.0 }
+        };
+        curves_to_draw.push(GraphCurveData {
+            color: scol,
+            dimmed,
+            points: pts,
+        });
     }
+
+    let mut handles_to_draw: Vec<GraphHandleData> = Vec::new();
+    if show_keys && !speed_tab {
+        if let Some(i) = focus_idx {
+            let se = &series[i];
+            for (ki, k) in se.keys.iter().enumerate() {
+                if k.interp != project::KeyframeInterpolation::Bezier {
+                    continue;
+                }
+                if k.t < view.t0 - half_frame2 || k.t > view.t1 + half_frame2 {
+                    continue;
+                }
+                let kx = x_of(k.t);
+                let ky = y_of(k.v);
+                if ki > 0 {
+                    let p = &se.keys[ki - 1];
+                    if k.t - p.t > 1e-6 {
+                        let seg_t = k.t - p.t;
+                        let seg_v = k.v - p.v;
+                        let (hx, hy) = k.in_tan.unwrap_or((0.67, 0.67));
+                        let ht = p.t + hx as f64 * seg_t;
+                        let hv = p.v + hy * seg_v;
+                        handles_to_draw.push(GraphHandleData {
+                            color: ae::amber(),
+                            kx,
+                            ky,
+                            hx: x_of(ht),
+                            hy: y_of(hv),
+                        });
+                    }
+                }
+                if ki + 1 < se.keys.len() {
+                    let n = &se.keys[ki + 1];
+                    if n.t - k.t > 1e-6 {
+                        let seg_t = n.t - k.t;
+                        let seg_v = n.v - k.v;
+                        let (hx, hy) = k.out_tan.unwrap_or((0.33, 0.33));
+                        let ht = k.t + hx as f64 * seg_t;
+                        let hv = k.v + hy * seg_v;
+                        handles_to_draw.push(GraphHandleData {
+                            color: ae::amber(),
+                            kx,
+                            ky,
+                            hx: x_of(ht),
+                            hy: y_of(hv),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    plot = plot.child(
+        gpui::canvas(
+            move |bounds: gpui::Bounds<gpui::Pixels>, _window, _cx| bounds,
+            {
+                let curves_to_draw = curves_to_draw.clone();
+                let handles_to_draw = handles_to_draw.clone();
+                move |_bounds, plot_bounds: gpui::Bounds<gpui::Pixels>, window, _cx| {
+                    let w = (plot_bounds.size.width / gpui::px(1.0)).max(1.0);
+                    let h = (plot_bounds.size.height / gpui::px(1.0)).max(1.0);
+                    let ox = plot_bounds.origin.x / gpui::px(1.0);
+                    let oy = plot_bounds.origin.y / gpui::px(1.0);
+
+                    // 1. Draw smooth continuous curves
+                    for curve in &curves_to_draw {
+                        if curve.points.len() < 2 {
+                            continue;
+                        }
+                        let p_start = gpui::point(
+                            gpui::px(ox + curve.points[0].0 * w),
+                            gpui::px(oy + (1.0 - curve.points[0].1) * h),
+                        );
+                        let mut path = gpui::Path::new(p_start);
+                        for seg in curve.points.windows(2) {
+                            let p0 = gpui::point(
+                                gpui::px(ox + seg[0].0 * w),
+                                gpui::px(oy + (1.0 - seg[0].1) * h),
+                            );
+                            let p1 = gpui::point(
+                                gpui::px(ox + seg[1].0 * w),
+                                gpui::px(oy + (1.0 - seg[1].1) * h),
+                            );
+                            draw_line_segment(&mut path, p0, p1, if curve.dimmed { 1.5 } else { 2.5 });
+                        }
+                        window.paint_path(path, curve.color);
+                    }
+
+                    // 2. Draw continuous solid tangent leader lines
+                    for handle in &handles_to_draw {
+                        let p_key = gpui::point(
+                            gpui::px(ox + handle.kx * w),
+                            gpui::px(oy + (1.0 - handle.ky) * h),
+                        );
+                        let p_tan = gpui::point(
+                            gpui::px(ox + handle.hx * w),
+                            gpui::px(oy + (1.0 - handle.hy) * h),
+                        );
+                        let mut path = gpui::Path::new(p_key);
+                        draw_line_segment(&mut path, p_key, p_tan, 1.5);
+                        window.paint_path(path, handle.color);
+                    }
+                }
+            },
+        )
+        .absolute()
+        .size_full(),
+    );
 
     // Playhead (red line + square handle, AE style).
     plot = plot
@@ -15735,49 +15879,30 @@ fn render_graph_view(
                 if k.t < view.t0 - half_frame2 || k.t > view.t1 + half_frame2 {
                     continue;
                 }
-                let kx = x_of(k.t);
-                let ky = y_of(k.v);
-                // (neighbor, is_in, default tangent)
-                let mut handles: Vec<(usize, bool, (f32, f32))> = Vec::new();
+                let mut handles: Vec<GraphHandleDescriptor> = Vec::new();
                 if ki > 0 {
                     let p = &se.keys[ki - 1];
                     if k.t - p.t > 1e-6 {
-                        handles.push((ki - 1, true, k.in_tan.unwrap_or((0.67, 0.67))));
+                        let seg_t = k.t - p.t;
+                        let seg_v = k.v - p.v;
+                        let (hx, hy) = k.in_tan.unwrap_or((0.67, 0.67));
+                        handles.push(GraphHandleDescriptor { is_in: true, hx, hy, start_t: p.t, start_v: p.v, seg_t, seg_v });
                     }
                 }
                 if ki + 1 < se.keys.len() {
                     let n = &se.keys[ki + 1];
                     if n.t - k.t > 1e-6 {
-                        handles.push((ki + 1, false, k.out_tan.unwrap_or((0.33, 0.33))));
+                        let seg_t = n.t - k.t;
+                        let seg_v = n.v - k.v;
+                        let (hx, hy) = k.out_tan.unwrap_or((0.33, 0.33));
+                        handles.push(GraphHandleDescriptor { is_in: false, hx, hy, start_t: k.t, start_v: k.v, seg_t, seg_v });
                     }
                 }
-                for (ni, is_in, (hx, hy)) in handles {
-                    let n = &se.keys[ni];
-                    let seg_t = (n.t - k.t).abs().max(1e-6);
-                    let seg_v = n.v - k.v;
-                    let (ht, hv) = if is_in {
-                        (k.t - hx as f64 * seg_t, k.v - hy * seg_v)
-                    } else {
-                        (k.t + hx as f64 * seg_t, k.v + hy * seg_v)
-                    };
+                for hd in handles {
+                    let ht = hd.start_t + hd.hx as f64 * hd.seg_t;
+                    let hv = hd.start_v + hd.hy * hd.seg_v;
                     let (hx_r, hy_r) = (x_of(ht), y_of(hv));
-                    // Dotted leader key → handle.
-                    for s in 1..7 {
-                        let f = s as f32 / 7.0;
-                    plot = plot.child(
-                        div()
-                            .absolute()
-                            .left(relative(kx + (hx_r - kx) * f))
-                            .top(relative(1.0 - (ky + (hy_r - ky) * f)))
-                            .w(px(3.))
-                            .h(px(3.))
-                            .ml(px(-1.))
-                            .mt(px(-1.))
-                            .rounded_full()
-                            .bg(ae::amber())
-                            .opacity(0.85),
-                    );
-                    }
+                    let (is_in, hx, hy, seg_t, seg_v) = (hd.is_in, hd.hx, hd.hy, hd.seg_t, hd.seg_v);
                     let p_tan = panel_entity.clone();
                     let s_tan = state.clone();
                     let lid_t = lid_graph.clone();
@@ -15940,21 +16065,29 @@ fn render_graph_view(
         .text_color(ae::text())
         .child(header)
         .child(
-            // Legend: capped but scrollable, so long prop lists never
-            // push the curve strip out of view — and never clip a row
-            // mid-height the way a hard overflow_hidden cut does.
-            v_flex()
-                .id("graph_legend_scroll")
-                .test_support()
-                .w_full()
-                .max_h(px(120.))
-                .overflow_y_scroll()
-                .flex_none()
-                .child(legend)
-        )
-        .child(
-            v_flex()
+            h_flex()
                 .flex_1()
+                .min_h_0()
+                .overflow_hidden()
+                .child(
+                    // Legend: left-side vertical properties hierarchy (AE Graph Editor style),
+                    // so graphed properties align on the left rather than squishing the plot vertically.
+                    v_flex()
+                        .id("graph_legend_scroll")
+                        .test_support()
+                        .w(px(220.))
+                        .flex_none()
+                        .h_full()
+                        .border_r_1()
+                        .border_color(ae::border())
+                        .bg(ae::panel())
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .child(legend)
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
                 .min_h_0()
                 .min_w_0()
                 .px_2()
@@ -16006,7 +16139,8 @@ fn render_graph_view(
                                             "Click-drag diamonds to move time + value · right-click cycles interp"
                                         }),
                                 ),
-                        )
+                        ),
+                ),
         )
         .into_any_element()
 }
@@ -18083,14 +18217,15 @@ impl Render for TimelinePanel {
                                 p.graph_plot_height.max(50.0),
                             )
                         };
-                        let seg_frac = (td.seg_t / td.span.max(1e-6)).max(1e-6);
-                        let nhx = td.hx + ((dx / plot_w) as f64 / seg_frac) as f32;
-                        let mut nhy = td.hy;
-                        if td.seg_v.abs() > 1e-6 {
-                            nhy = td.hy + (-dy / plot_h * td.vspan) / td.seg_v;
-                        }
-                        let nhx = nhx.clamp(0.0, 1.0);
-                        let nhy = nhy.clamp(-2.0, 2.0);
+                        let seg_frac = (td.seg_t / td.span.max(1e-6)).max(1e-4);
+                        let dhx = ((dx / plot_w) as f64 / seg_frac) as f32;
+                        let nhx = (td.hx + dhx).clamp(0.0, 1.0);
+                        let dhy = if td.seg_v.abs() > 1e-5 {
+                            (-dy / plot_h * td.vspan) / td.seg_v
+                        } else {
+                            -dy / plot_h * 2.0
+                        };
+                        let nhy = (td.hy + dhy).clamp(-2.0, 2.0);
                         let (lid, path, at_s, is_in) =
                             (td.layer_id.clone(), td.path.clone(), td.at_s, td.is_in);
                         let (it, ot) = if is_in {

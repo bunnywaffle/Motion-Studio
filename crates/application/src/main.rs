@@ -5682,6 +5682,78 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         });
     }
 
+    #[gpui_kit::test]
+    fn test_in_tangent_handle_drag_reshapes(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+        use gpui_kit::point;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.select_layer(Some("layer_accent".to_string()));
+                if !s.spline_editor_open {
+                    s.toggle_spline_editor();
+                }
+                cx.notify();
+            });
+        });
+        let before: (f32, f32) = app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            let k = s
+                .active_composition()
+                .unwrap()
+                .get_layer("layer_accent")
+                .unwrap()
+                .transform
+                .position
+                .keyframes()
+                .iter()
+                .find(|k| (k.time.seconds() - 2.0).abs() < 1e-6)
+                .unwrap();
+            let it = k.in_tangent.unwrap();
+            (it.x, it.y)
+        });
+        // Drag in-handle to the right: x influence must grow.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let snap = window.find("graph_tan_layer_accent_transform_position_x_2000_in");
+            assert!(snap.visible());
+            let from = snap.bounds().center();
+            window.drag(from, from + point(px(40.0), px(0.0)), cx);
+        })
+        .expect("update_window failed");
+        app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            let k = s
+                .active_composition()
+                .unwrap()
+                .get_layer("layer_accent")
+                .unwrap()
+                .transform
+                .position
+                .keyframes()
+                .iter()
+                .find(|k| (k.time.seconds() - 2.0).abs() < 1e-6)
+                .unwrap()
+                .clone();
+            let it = k.in_tangent.unwrap();
+            assert!(
+                it.x > before.0,
+                "rightward handle drag on in-tangent grows influence: {} -> {}",
+                before.0,
+                it.x
+            );
+        });
+    }
+
     #[test]
     fn test_dropdown_anchor_sits_above_button() {
         // Popup origins are computed from the button position (the old
