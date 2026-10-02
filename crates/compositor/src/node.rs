@@ -75,7 +75,14 @@ impl SceneNode {
 
     /// Check if this node is active at the specified timecode (in_point <= time < out_point).
     pub fn is_active_at(&self, time: &TimeCode) -> bool {
-        time.frames() >= self.in_point.frames() && time.frames() < self.out_point.frames()
+        if (self.in_point.frame_rate() - time.frame_rate()).abs() < 1e-4
+            && (self.out_point.frame_rate() - time.frame_rate()).abs() < 1e-4
+        {
+            time.frames() >= self.in_point.frames() && time.frames() < self.out_point.frames()
+        } else {
+            let t = time.seconds();
+            t >= self.in_point.seconds() - 1e-6 && t < self.out_point.seconds() - 1e-6
+        }
     }
 
     /// Check if this node is both active and marked visible at the specified timecode.

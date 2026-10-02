@@ -1687,7 +1687,7 @@ impl EditorState {
         height: u32,
     ) -> Result<String, String> {
         self.checkpoint();
-        let (id, in_pt, out_pt, _comp_w, _comp_h) = {
+        let (id, in_pt, out_pt, comp_w, comp_h) = {
             let comp = self
                 .active_composition()
                 .ok_or_else(|| "No active composition".to_string())?;
@@ -1706,11 +1706,14 @@ impl EditorState {
             )
         };
 
-        let mut layer = Layer::solid(&id, name, color, width, height, in_pt, out_pt);
+        let effective_w = if width == 0 { comp_w } else { width };
+        let effective_h = if height == 0 { comp_h } else { height };
+
+        let mut layer = Layer::solid(&id, name, color, effective_w, effective_h, in_pt, out_pt);
         layer.transform.position.set_value(Vec2::ZERO);
         layer.transform.anchor_point.set_value(Vec2::new(
-            (width / 2) as f32,
-            (height / 2) as f32,
+            (effective_w / 2) as f32,
+            (effective_h / 2) as f32,
         ));
 
         let comp_mut = self
@@ -5930,8 +5933,7 @@ impl EditorState {
     pub fn evaluate_graph_param(&self, layer_id: &str, path: &str, seconds: f64) -> Option<f32> {
         let comp = self.active_composition()?;
         let layer = comp.get_layer(layer_id)?;
-        let fps = comp.frame_rate;
-        let tc = TimeCode::from_seconds(seconds.max(0.0), fps);
+        let sec = seconds.max(0.0);
         let (base, comp_sfx) = split_graph_path(path)?;
         let is_vec2_base = matches!(
             base,
@@ -5942,11 +5944,11 @@ impl EditorState {
         }
         let axis = comp_sfx.unwrap_or(1);
         let get_vec = |p: &Property<Vec2>| {
-            let v = if p.is_animated() { p.evaluate_at(&tc) } else { p.value };
+            let v = if p.is_animated() { p.evaluate_at_seconds(sec) } else { p.value };
             if axis == 0 { v.x } else { v.y }
         };
         let get_f32 = |p: &Property<f32>| {
-            if p.is_animated() { p.evaluate_at(&tc) } else { p.value }
+            if p.is_animated() { p.evaluate_at_seconds(sec) } else { p.value }
         };
         Some(match base {
             "transform.anchor_point" => get_vec(&layer.transform.anchor_point),
@@ -7770,7 +7772,7 @@ impl EditorState {
             }
             comp.width = width.clamp(320, 7680);
             comp.height = height.clamp(240, 4320);
-            comp.frame_rate = fps.clamp(1.0, 120.0);
+            comp.set_frame_rate(fps);
             let frames = (duration_secs * comp.frame_rate).round() as i64;
             comp.duration = project::TimeCode::from_frames(frames, comp.frame_rate);
         }

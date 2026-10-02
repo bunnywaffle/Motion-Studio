@@ -748,7 +748,78 @@ impl Layer {
 
     /// Check if this layer is active at the specified timecode (in_point <= time < out_point).
     pub fn is_active_at(&self, time: &TimeCode) -> bool {
-        time.frames() >= self.in_point.frames() && time.frames() < self.out_point.frames()
+        if (self.in_point.frame_rate() - time.frame_rate()).abs() < 1e-4
+            && (self.out_point.frame_rate() - time.frame_rate()).abs() < 1e-4
+        {
+            time.frames() >= self.in_point.frames() && time.frames() < self.out_point.frames()
+        } else {
+            let t = time.seconds();
+            t >= self.in_point.seconds() - 1e-6 && t < self.out_point.seconds() - 1e-6
+        }
+    }
+
+    /// Migrate layer timing, keyframes, and markers to a new frame rate, preserving absolute seconds.
+    pub fn migrate_frame_rate(&mut self, new_fps: f64) {
+        self.in_point = TimeCode::from_seconds(self.in_point.seconds(), new_fps);
+        self.out_point = TimeCode::from_seconds(self.out_point.seconds(), new_fps);
+        if let Some(offset) = self.start_offset {
+            self.start_offset = Some(TimeCode::from_seconds(offset.seconds(), new_fps));
+        }
+        for m in &mut self.markers {
+            m.time = TimeCode::from_seconds(m.time.seconds(), new_fps);
+        }
+        self.transform.position.migrate_frame_rate(new_fps);
+        self.transform.scale.migrate_frame_rate(new_fps);
+        self.transform.rotation.migrate_frame_rate(new_fps);
+        self.transform.anchor_point.migrate_frame_rate(new_fps);
+        self.opacity.migrate_frame_rate(new_fps);
+        if let Some(ref mut tr) = self.time_remapping {
+            tr.migrate_frame_rate(new_fps);
+        }
+        match &mut self.source {
+            LayerSource::Solid { color, fill_gradient, .. } => {
+                color.migrate_frame_rate(new_fps);
+                if let Some(fg) = fill_gradient {
+                    fg.migrate_frame_rate(new_fps);
+                }
+            }
+            LayerSource::Text { font_size, tracking, leading, stroke_width, fill_color, fill_gradient, .. } => {
+                font_size.migrate_frame_rate(new_fps);
+                tracking.migrate_frame_rate(new_fps);
+                leading.migrate_frame_rate(new_fps);
+                stroke_width.migrate_frame_rate(new_fps);
+                fill_color.migrate_frame_rate(new_fps);
+                if let Some(fg) = fill_gradient {
+                    fg.migrate_frame_rate(new_fps);
+                }
+            }
+            LayerSource::Shape { shape_type } => match shape_type {
+                ShapeType::Rectangle { width, height, corner_radius, fill, fill_gradient } => {
+                    width.migrate_frame_rate(new_fps);
+                    height.migrate_frame_rate(new_fps);
+                    corner_radius.migrate_frame_rate(new_fps);
+                    fill.migrate_frame_rate(new_fps);
+                    if let Some(fg) = fill_gradient {
+                        fg.migrate_frame_rate(new_fps);
+                    }
+                }
+                ShapeType::Ellipse { radius_x, radius_y, fill, fill_gradient } => {
+                    radius_x.migrate_frame_rate(new_fps);
+                    radius_y.migrate_frame_rate(new_fps);
+                    fill.migrate_frame_rate(new_fps);
+                    if let Some(fg) = fill_gradient {
+                        fg.migrate_frame_rate(new_fps);
+                    }
+                }
+                ShapeType::Path { fill, fill_gradient, .. } => {
+                    fill.migrate_frame_rate(new_fps);
+                    if let Some(fg) = fill_gradient {
+                        fg.migrate_frame_rate(new_fps);
+                    }
+                }
+            },
+            _ => {}
+        }
     }
 
     /// Return the layer duration in frames.

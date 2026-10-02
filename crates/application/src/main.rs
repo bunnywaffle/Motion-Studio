@@ -1352,7 +1352,7 @@ fn render_menu_dropdown(
                         let (a, s) = (app.clone(), state.clone());
                         items = items.child(menu_item("menu_new_solid".to_string(), "New Solid".to_string(), None, true, cx, move |cx| {
                             s.update(cx, |s, cx| {
-                                let _ = s.add_solid_layer("New Solid", project::Color::from_rgba_u8(245, 158, 11, 255), 400, 400);
+                                let _ = s.add_solid_layer("New Solid", project::Color::from_rgba_u8(245, 158, 11, 255), 0, 0);
                                 cx.notify();
                             });
                             a.update(cx, |this, cx| {
@@ -10618,6 +10618,60 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             let (start, span) = p.visible_time_span(10.0);
             assert_eq!(start, 0.0);
             assert_eq!(span, 10.0);
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn test_solid_layer_full_screen_and_fps_change_preserves_clip(cx: &mut gpui_kit::TestAppContext) {
+        let state = cx.new(|_| EditorState::new());
+
+        // 1. Verify solid layer with 0, 0 matches composition dimensions
+        let solid_id = state.update(cx, |s, _| {
+            s.add_solid_layer("Full Comp Solid", project::Color::BLUE, 0, 0).expect("add solid")
+        });
+
+        state.read_with(cx, |s, _| {
+            let comp = s.active_composition().unwrap();
+            let layer = comp.get_layer(&solid_id).unwrap();
+            if let project::LayerSource::Solid { width, height, .. } = layer.source {
+                assert_eq!(width, comp.width);
+                assert_eq!(height, comp.height);
+            } else {
+                panic!("Expected Solid layer source");
+            }
+            // Anchor point centered
+            assert_eq!(layer.transform.anchor_point.value.x, (comp.width / 2) as f32);
+            assert_eq!(layer.transform.anchor_point.value.y, (comp.height / 2) as f32);
+        });
+
+        // 2. Change composition FPS from 30 to 60 fps
+        state.update(cx, |s, _| {
+            let (w, h, dur) = s.active_composition().map(|c| (c.width, c.height, c.duration_seconds())).unwrap();
+            s.update_project_settings("", w, h, 60.0, dur);
+        });
+
+        state.read_with(cx, |s, _| {
+            let comp = s.active_composition().unwrap();
+            assert_eq!(comp.frame_rate, 60.0);
+            assert_eq!(comp.duration.frames(), 300); // 5 seconds at 60 fps
+
+            let layer = comp.get_layer(&solid_id).unwrap();
+            assert_eq!(layer.out_point.frames(), 300); // spans full 300 frames
+            assert!((layer.out_point.seconds() - 5.0).abs() < 1e-4);
+
+            // Layer remains active past halfway (e.g. at frame 150 @ 60fps = 2.5s and frame 280)
+            assert!(layer.is_active_at(&project::TimeCode::from_frames(150, 60.0)));
+            assert!(layer.is_active_at(&project::TimeCode::from_frames(280, 60.0)));
+        });
+
+        // 3. Verify continuous spline graph evaluation without quantization ripples
+        state.read_with(cx, |s, _| {
+            // Sampling at non-integer frame times produces smooth continuous values
+            let val1 = s.evaluate_graph_param("layer_accent", "transform.position.x", 0.1234);
+            let val2 = s.evaluate_graph_param("layer_accent", "transform.position.x", 0.1250);
+            assert!(val1.is_some());
+            assert!(val2.is_some());
+            assert_ne!(val1.unwrap(), val2.unwrap());
         });
     }
 }

@@ -2141,7 +2141,7 @@ impl Render for ProjectPanel {
                                         .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                                             add_state.update(cx, |s, cx| {
                                                 let color = Color::from_rgba_u8(245, 158, 11, 255);
-                                                let _ = s.add_solid_layer("New Solid", color, 400, 400);
+                                                let _ = s.add_solid_layer("New Solid", color, 0, 0);
                                                 cx.notify();
                                             });
                                         })
@@ -2330,7 +2330,7 @@ impl Render for ProjectPanel {
                                     .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
                                     .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                                         s_new.update(cx, |s, cx| {
-                                            let _ = s.add_solid_layer("New Solid", Color::from_rgba_u8(245, 158, 11, 255), 400, 400);
+                                            let _ = s.add_solid_layer("New Solid", Color::from_rgba_u8(245, 158, 11, 255), 0, 0);
                                             cx.notify();
                                         });
                                         p_new.update(cx, |this, cx| {
@@ -4171,8 +4171,8 @@ impl Render for CompositionViewerPanel {
                                     let _ = s.add_solid_layer(
                                         "New Solid",
                                         s.tool_solid_color,
-                                        400,
-                                        400,
+                                        0,
+                                        0,
                                     );
                                 }
                             }
@@ -4831,7 +4831,7 @@ impl Render for CompositionViewerPanel {
                                                     let s = s_menu.clone();
                                                     let p = p_close.clone();
                                                     move |cx| {
-                                                        s.update(cx, |s, cx| { let _ = s.add_solid_layer("New Solid", Color::from_rgba_u8(245, 158, 11, 255), 400, 400); cx.notify(); });
+                                                        s.update(cx, |s, cx| { let _ = s.add_solid_layer("New Solid", Color::from_rgba_u8(245, 158, 11, 255), 0, 0); cx.notify(); });
                                                         p.update(cx, |this, cx| { this.close_context_menu(); cx.notify(); });
                                                     }
                                                 }))
@@ -14630,6 +14630,21 @@ fn graph_key_live_value(s: &EditorState, layer_id: &str, path: &str, at_s: f64) 
                 .map(|k| k.v)
         })
 }
+fn draw_point_cap(
+    path: &mut gpui::Path<gpui::Pixels>,
+    p: gpui::Point<gpui::Pixels>,
+    radius: f32,
+) {
+    let r = gpui::px(radius);
+    let p_top = gpui::point(p.x, p.y - r);
+    let p_bot = gpui::point(p.x, p.y + r);
+    let p_left = gpui::point(p.x - r, p.y);
+    let p_right = gpui::point(p.x + r, p.y);
+    let st = (gpui::point(0., 1.), gpui::point(0., 1.), gpui::point(0., 1.));
+    path.push_triangle((p_top, p_left, p_bot), st);
+    path.push_triangle((p_top, p_bot, p_right), st);
+}
+
 fn draw_line_segment(
     path: &mut gpui::Path<gpui::Pixels>,
     p0: gpui::Point<gpui::Pixels>,
@@ -14642,8 +14657,9 @@ fn draw_line_segment(
     if len < 0.001 {
         return;
     }
-    let nx = -dy / len * (thickness * 0.5);
-    let ny = dx / len * (thickness * 0.5);
+    let half = thickness * 0.5;
+    let nx = -dy / len * half;
+    let ny = dx / len * half;
     let v0 = gpui::point(p0.x + gpui::px(nx), p0.y + gpui::px(ny));
     let v1 = gpui::point(p0.x - gpui::px(nx), p0.y - gpui::px(ny));
     let v2 = gpui::point(p1.x - gpui::px(nx), p1.y - gpui::px(ny));
@@ -14652,6 +14668,8 @@ fn draw_line_segment(
     let st = (gpui::point(0., 1.), gpui::point(0., 1.), gpui::point(0., 1.));
     path.push_triangle((v0, v1, v2), st);
     path.push_triangle((v0, v2, v3), st);
+    draw_point_cap(path, p0, half);
+    draw_point_cap(path, p1, half);
 }
 
 #[derive(Clone)]
@@ -14965,10 +14983,9 @@ fn render_graph_view(
                 .child("Keys"),
         );
 
-    // Easing preset buttons. Their origins are cached so the dropdown
-    // popups open directly above them (not at a fixed window corner).
+    // Easing preset buttons. Origin is cached so the dropdown
+    // popup opens directly above it (not at a fixed window corner).
     let p_ease_btn = panel_entity.clone();
-    let p_anim_btn = panel_entity.clone();
     let easing_row = h_flex().gap_1().items_center().child(
         div()
             .cursor_pointer()
@@ -14996,35 +15013,7 @@ fn render_graph_view(
                     });
                 }
             })
-            .child("Easing ▾")
-    ).child(
-        div()
-            .cursor_pointer()
-            .px_2()
-            .py_0p5()
-            .rounded_sm()
-            .bg(ae::control())
-            .hover(|s| s.bg(ae::hover()))
-            .text_color(ae::text())
-            .text_xs()
-            .on_prepaint(move |bounds, _window, cx| {
-                let ox = bounds.origin.x / px(1.0);
-                let oy = bounds.origin.y / px(1.0);
-                p_anim_btn.update(cx, |this, _cx| {
-                    this.anim_btn_pos = Some((ox, oy));
-                });
-            })
-            .on_mouse_down(MouseButton::Left, {
-                let panel = panel_entity.clone();
-                move |_e, _w, cx| {
-                    panel.update(cx, |p, cx| {
-                        p.animation_dropdown_open = !p.animation_dropdown_open;
-                        p.easing_dropdown_open = false;
-                        cx.notify();
-                    });
-                }
-            })
-            .child("★ Presets ▾")
+            .child("Easing ▾"),
     );
 
     // --- Legend column: per-series eye, value, key for the SELECTED layer
@@ -15173,7 +15162,7 @@ fn render_graph_view(
         Some(i) => vec![i],
         None => visible_idx.clone(),
     };
-    const SAMPLES: usize = 120;
+    const SAMPLES: usize = 240;
     // Sampled values per visible series, across the FULL duration (view
     // mapping applied at draw time so Fit Sel never resamples).
     let mut values_per_series: Vec<Vec<f32>> = Vec::new();
@@ -18893,7 +18882,36 @@ impl Render for TimelinePanel {
                                                     .child(icon_box(IconName::Trash))
                                                     .child("Delete"),
                                             ),
-                                    ),
+                                    )
+                                    .child({
+                                        let p_anim_btn = panel_entity.clone();
+                                        let p_anim_click = panel_entity.clone();
+                                        div()
+                                            .id("timeline_action_presets_btn")
+                                            .test_support()
+                                            .cursor_pointer()
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_sm()
+                                            .bg(cx.theme().muted)
+                                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                            .text_xs()
+                                            .on_prepaint(move |bounds, _window, cx| {
+                                                let ox = bounds.origin.x / px(1.0);
+                                                let oy = bounds.origin.y / px(1.0);
+                                                p_anim_btn.update(cx, |this, _cx| {
+                                                    this.anim_btn_pos = Some((ox, oy));
+                                                });
+                                            })
+                                            .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                                                p_anim_click.update(cx, |p, cx| {
+                                                    p.animation_dropdown_open = !p.animation_dropdown_open;
+                                                    p.easing_dropdown_open = false;
+                                                    cx.notify();
+                                                });
+                                            })
+                                            .child("★ Animate ▾")
+                                    }),
                             ),
                     )
                     // Duration & In/Out + Zoom Controls
@@ -19541,7 +19559,7 @@ impl Render for TimelinePanel {
                             .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
                             .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                                 s_sol.update(cx, |s, cx| {
-                                    let _ = s.add_solid_layer("New Solid", Color::from_rgba_u8(245, 158, 11, 255), 400, 400);
+                                    let _ = s.add_solid_layer("New Solid", Color::from_rgba_u8(245, 158, 11, 255), 0, 0);
                                     cx.notify();
                                 });
                                 p_sol.update(cx, |this, cx| {
@@ -20037,7 +20055,7 @@ impl Render for TimelinePanel {
                             .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
                             .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                                 s_sol.update(cx, |s, cx| {
-                                    let _ = s.add_solid_layer("New Solid", Color::from_rgba_u8(245, 158, 11, 255), 400, 400);
+                                    let _ = s.add_solid_layer("New Solid", Color::from_rgba_u8(245, 158, 11, 255), 0, 0);
                                     cx.notify();
                                 });
                                 p_sol.update(cx, |this, cx| {

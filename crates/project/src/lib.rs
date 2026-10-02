@@ -2206,4 +2206,51 @@ mod tests {
         assert_eq!(layer, deserialized_layer);
         assert_eq!(deserialized_layer.effects.len(), 4);
     }
+
+    #[test]
+    fn test_composition_frame_rate_migration() {
+        let mut comp = Composition::hd_1080p_30fps("comp_fps", "FPS Migration Test", 5.0);
+        let mut layer = Layer::solid(
+            "layer_solid",
+            "Full Clip",
+            Color::RED,
+            1920,
+            1080,
+            TimeCode::from_frames(0, 30.0),
+            TimeCode::from_frames(150, 30.0),
+        );
+        layer.transform.position.add_keyframe(Keyframe::linear(
+            TimeCode::from_frames(75, 30.0),
+            Vec2::new(100.0, 200.0),
+        ));
+        comp.add_layer(layer).expect("add layer");
+
+        assert_eq!(comp.duration_frames(), 150);
+        assert!((comp.duration_seconds() - 5.0).abs() < 1e-4);
+
+        // Migrate composition to 60 fps
+        comp.set_frame_rate(60.0);
+
+        assert_eq!(comp.frame_rate, 60.0);
+        assert_eq!(comp.duration.frames(), 300);
+        assert!((comp.duration_seconds() - 5.0).abs() < 1e-4);
+
+        let migrated_layer = comp.get_layer("layer_solid").unwrap();
+        assert_eq!(migrated_layer.in_point.frames(), 0);
+        assert_eq!(migrated_layer.out_point.frames(), 300);
+        assert!((migrated_layer.out_point.seconds() - 5.0).abs() < 1e-4);
+
+        // Verify keyframe migrated to frame 150 @ 60fps (2.5s)
+        let kf = &migrated_layer.transform.position.keyframes()[0];
+        assert_eq!(kf.time.frames(), 150);
+        assert!((kf.time.seconds() - 2.5).abs() < 1e-4);
+
+        // Verify layer is active halfway (frame 150 @ 60fps = 2.5s) and near the end
+        assert!(migrated_layer.is_active_at(&TimeCode::from_frames(150, 60.0)));
+        assert!(migrated_layer.is_active_at(&TimeCode::from_frames(299, 60.0)));
+        assert!(!migrated_layer.is_active_at(&TimeCode::from_frames(300, 60.0)));
+
+        // Also verify cross-framerate is_active_at check
+        assert!(migrated_layer.is_active_at(&TimeCode::from_frames(75, 30.0)));
+    }
 }

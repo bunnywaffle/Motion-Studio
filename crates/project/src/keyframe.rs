@@ -336,13 +336,13 @@ pub fn evaluate_cubic_bezier(t: f32, p1: KeyframeTangent, p2: KeyframeTangent) -
     }
 
     // Step 2: Bisection fallback if Newton did not fully converge
-    if (sample_curve_x(theta) - t).abs() > 1e-5 {
+    if (sample_curve_x(theta) - t).abs() > 1e-6 {
         let mut t_low = 0.0f32;
         let mut t_high = 1.0f32;
         theta = t;
-        for _ in 0..16 {
+        for _ in 0..24 {
             let x_val = sample_curve_x(theta);
-            if (x_val - t).abs() < 1e-6 {
+            if (x_val - t).abs() < 1e-7 {
                 break;
             }
             if x_val > t {

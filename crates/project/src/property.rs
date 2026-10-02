@@ -213,6 +213,13 @@ impl<T> Property<T> {
             true
         }
     }
+
+    /// Migrate all keyframes in this property to a new frame rate, preserving absolute time in seconds.
+    pub fn migrate_frame_rate(&mut self, new_fps: f64) {
+        for kf in &mut self.keyframes {
+            kf.time = TimeCode::from_seconds(kf.time.seconds(), new_fps);
+        }
+    }
 }
 
 impl<T: Interpolate> Property<T> {

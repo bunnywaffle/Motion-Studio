@@ -86,6 +86,23 @@ impl Composition {
         self.duration.seconds()
     }
 
+    /// Update the composition frame rate, migrating duration, markers, and all layers'
+    /// in/out points, keyframes, and markers so that all absolute timings in seconds are preserved.
+    pub fn set_frame_rate(&mut self, new_fps: f64) {
+        let new_fps = new_fps.clamp(1.0, 120.0);
+        if (self.frame_rate - new_fps).abs() < 1e-4 {
+            return;
+        }
+        self.frame_rate = new_fps;
+        self.duration = TimeCode::from_seconds(self.duration.seconds(), new_fps);
+        for layer in &mut self.layers {
+            layer.migrate_frame_rate(new_fps);
+        }
+        for m in &mut self.markers {
+            m.time = TimeCode::from_seconds(m.time.seconds(), new_fps);
+        }
+    }
+
     // --- Layer Stack Management ---
 
     /// Append a layer to the end of the layer stack (the bottom, behind all
