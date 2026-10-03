@@ -242,6 +242,46 @@ pub enum TextAlign {
     JustifyAll,
 }
 
+impl TextAlign {
+    pub const ALL: [Self; 7] = [
+        Self::Left,
+        Self::Center,
+        Self::Right,
+        Self::JustifyLeft,
+        Self::JustifyCenter,
+        Self::JustifyRight,
+        Self::JustifyAll,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Left => "Left",
+            Self::Center => "Center",
+            Self::Right => "Right",
+            Self::JustifyLeft => "Justify Left",
+            Self::JustifyCenter => "Justify Center",
+            Self::JustifyRight => "Justify Right",
+            Self::JustifyAll => "Justify All",
+        }
+    }
+
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.label() == label)
+    }
+
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Left => 0,
+            Self::Center => 1,
+            Self::Right => 2,
+            Self::JustifyLeft => 3,
+            Self::JustifyCenter => 4,
+            Self::JustifyRight => 5,
+            Self::JustifyAll => 6,
+        }
+    }
+}
+
 fn default_stroke_position() -> String {
     "center".to_string()
 }

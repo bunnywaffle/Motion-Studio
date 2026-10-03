@@ -35,6 +35,10 @@ fn default_text_split_spread() -> Property<f32> {
     Property::new("Spread / Overlap", 40.0)
 }
 
+fn default_text_split_locked() -> Property<bool> {
+    Property::new("Lock Layout", true)
+}
+
 fn default_text_split_zero() -> Property<f32> {
     Property::new("Offset", 0.0)
 }
@@ -415,6 +419,8 @@ pub enum EffectType {
         progress: Property<f32>,
         #[serde(default = "default_text_split_spread")]
         spread: Property<f32>,
+        #[serde(deserialize_with = "crate::property::de_property_or_value", default = "default_text_split_locked")]
+        lock_layout: Property<bool>,
         #[serde(default)]
         easing: TextSplitEasing,
         #[serde(default = "default_text_split_zero")]
@@ -847,6 +853,7 @@ impl EffectType {
             random_seed: default_text_split_seed(),
             progress: default_text_split_progress(),
             spread: default_text_split_spread(),
+            lock_layout: default_text_split_locked(),
             easing: TextSplitEasing::EaseInOut,
             position_x: default_text_split_zero(),
             position_y: default_text_split_pos_y(),
@@ -1565,6 +1572,11 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
             EffectType::Tiler { mirror, .. } if field.eq_ignore_ascii_case("mirror") => {
                 Some(mirror)
             }
+            EffectType::TextSplitAnimator { lock_layout, .. }
+                if field.eq_ignore_ascii_case("lock_layout") =>
+            {
+                Some(lock_layout)
+            }
             _ => None,
         }
     }
@@ -1580,6 +1592,11 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
             }
             EffectType::Tiler { mirror, .. } if field.eq_ignore_ascii_case("mirror") => {
                 Some(mirror)
+            }
+            EffectType::TextSplitAnimator { lock_layout, .. }
+                if field.eq_ignore_ascii_case("lock_layout") =>
+            {
+                Some(lock_layout)
             }
             _ => None,
         }
@@ -1665,6 +1682,12 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
             }
             EffectType::Tiler { mirror, .. } if field.eq_ignore_ascii_case("mirror") => {
                 mirror.set_value(next);
+                true
+            }
+            EffectType::TextSplitAnimator { lock_layout, .. }
+                if field.eq_ignore_ascii_case("lock_layout") =>
+            {
+                lock_layout.set_value(next);
                 true
             }
             _ => false,
@@ -2905,6 +2928,7 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 random_seed,
                 progress,
                 spread,
+                lock_layout,
                 easing,
                 position_x,
                 position_y,
@@ -2928,6 +2952,7 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 scalar("random_seed", "Random Seed", WidgetKind::Integer, ParamMeta::slider(0.0, 99999.0, 1.0, 0, "", 100.0), random_seed),
                 scalar("progress", "Progress", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 1.0, 0, "%", 100.0), progress),
                 scalar("spread", "Spread / Overlap", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 1.0, 0, "%", 100.0), spread),
+                PropDecl::boolean("lock_layout", "Lock Layout", lock_layout.value, lock_layout.is_animated()),
                 PropDecl::enumeration(
                     "easing",
                     "Easing Curve",

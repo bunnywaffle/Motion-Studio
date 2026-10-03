@@ -457,6 +457,7 @@ pub enum EvaluatedEffectType {
         random_seed: i32,
         progress: f32,
         spread: f32,
+        lock_layout: bool,
         easing: project::TextSplitEasing,
         offset_position: Vec2,
         offset_rotation: f32,
@@ -1878,6 +1879,7 @@ impl LayerStackEvaluator {
                             random_seed,
                             progress,
                             spread,
+                            lock_layout,
                             easing,
                             position_x,
                             position_y,
@@ -1892,6 +1894,7 @@ impl LayerStackEvaluator {
                                 random_seed: random_seed.evaluate_at(time) as i32,
                                 progress: progress.evaluate_at(time),
                                 spread: spread.evaluate_at(time),
+                                lock_layout: lock_layout.evaluate_at(time),
                                 easing: *easing,
                                 offset_position: Vec2::new(
                                     position_x.evaluate_at(time),

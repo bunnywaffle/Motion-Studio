@@ -531,6 +531,9 @@ pub struct TextSplitParams {
     pub random_seed: i32,
     pub progress: f32, // 0.0 .. 100.0%
     pub spread: f32,   // 0.0 .. 100.0%
+    /// Keep every token at its layout slot while progress changes (no
+    /// reflow jumps); false recenters the visible tokens each frame.
+    pub lock_layout: bool,
     pub easing: project::TextSplitEasing,
     pub offset_position: project::Vec2,
     pub offset_rotation: f32,
@@ -887,7 +890,22 @@ pub fn raster_text_split(
     if max_x <= min_x {
         return (buf, (0.0, 0.0, 0.0, 0.0));
     }
-    (buf, (min_x, min_y, max_x, max_y))
+    // Locked layout anchors on the full token union (progress-independent),
+    // so visible characters never jump as progress changes; unlocked keeps
+    // the old recenter-on-visible-ink behavior.
+    if params.lock_layout {
+        (
+            buf,
+            (
+                total_min_x - out_ox,
+                total_min_y - out_oy,
+                total_max_x - out_ox,
+                total_max_y - out_oy,
+            ),
+        )
+    } else {
+        (buf, (min_x, min_y, max_x, max_y))
+    }
 }
 
 #[cfg(test)]
@@ -922,6 +940,7 @@ mod tests {
             random_seed: 12487,
             progress: 50.0,
             spread: 40.0,
+            lock_layout: true,
             easing: TextSplitEasing::EaseInOut,
             offset_position: Vec2::new(0.0, -50.0),
             offset_rotation: -25.0,
@@ -931,5 +950,56 @@ mod tests {
         let (buf, bounds) = raster_text_split(&spec, &params);
         assert!(buf.w > 0 && buf.h > 0);
         assert!(bounds.2 >= bounds.0);
+    }
+
+    #[test]
+    fn test_text_split_lock_keeps_anchor_stable_across_progress() {
+        let spec = TextSpec {
+            text: "HELLO WORLD",
+            family: "Arial",
+            size: 32.0,
+            fill: Px { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+            fill_gradient: None,
+            weight: 400,
+            italic: false,
+            tracking: 0.0,
+            leading: 40.0,
+            align: TextAlign::Left,
+            all_caps: false,
+            stroke_w: 0.0,
+            stroke_col: Px { r: 0.0, g: 0.0, b: 0.0, a: 0.0 },
+            stroke_gradient: None,
+            baseline_shift: 0.0,
+            box_w: 400.0,
+            bevel: None,
+        };
+        let base = TextSplitParams {
+            split_by: TextSplitBy::Character,
+            order: TextSplitOrder::FromStart,
+            random_seed: 12487,
+            progress: 30.0,
+            spread: 40.0,
+            lock_layout: true,
+            easing: TextSplitEasing::EaseInOut,
+            offset_position: Vec2::new(0.0, -50.0),
+            offset_rotation: -25.0,
+            offset_opacity: 0.0,
+            anchor_alignment: Vec2::new(0.0, 0.0),
+        };
+        let (_, locked_lo) = raster_text_split(&spec, &base);
+        let mut hi = base.clone();
+        hi.progress = 100.0;
+        let (_, locked_hi) = raster_text_split(&spec, &hi);
+        // Same anchor box at any progress: characters stay put.
+        assert_eq!(locked_lo, locked_hi);
+        // Unlocked recenters on visible ink: the partial-progress box is
+        // narrower than the full-progress box (visible tokens reflow).
+        let mut unlocked_lo = base.clone();
+        unlocked_lo.lock_layout = false;
+        let (_, ink_lo) = raster_text_split(&spec, &unlocked_lo);
+        let mut unlocked_hi = hi.clone();
+        unlocked_hi.lock_layout = false;
+        let (_, ink_hi) = raster_text_split(&spec, &unlocked_hi);
+        assert!((ink_lo.2 - ink_lo.0) < (ink_hi.2 - ink_hi.0));
     }
 }

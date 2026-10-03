@@ -8503,10 +8503,10 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
 
-            // 1. Text Presets (Button)
-            assert!(window.find("text_preset_Title Text").visible());
-            assert!(window.find("text_preset_Motion Effect").visible());
-            window.click("text_preset_Motion Effect", cx);
+            // 1. Source text input is clean: no example-text shortcuts.
+            assert!(window.find("text_content_input").visible());
+            assert!(window.try_find("text_preset_Title Text").is_none());
+            assert!(window.try_find("text_preset_Motion Effect").is_none());
         })
         .expect("update_window failed");
 
@@ -8515,7 +8515,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             let comp = s.active_composition().unwrap();
             let l = comp.get_layer(&text_id).unwrap();
             match &l.source {
-                project::LayerSource::Text { text, .. } => text.value == "Motion Effect",
+                project::LayerSource::Text { text, .. } => text.value == "Hello GPUI Kit",
                 _ => false,
             }
         }));
@@ -8584,11 +8584,16 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             });
         });
 
-        // 5. Text Alignment (Button)
+        // 5. Text Alignment (Combobox): Left -> Center via keyboard pick.
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            assert!(window.find("text_align_Center").visible());
-            window.click("text_align_Center", cx);
+            assert!(window.find("text_align_combobox").visible());
+            assert!(window.find("text_vert_combobox").visible());
+            assert!(window.find("text_stroke_pos_combobox").visible());
+            assert!(window.find("text_paint_order_combobox").visible());
+            window.click("text_align_combobox", cx);
+            window.press("down", cx);
+            window.press("enter", cx);
         })
         .expect("update_window failed");
 
@@ -8684,6 +8689,10 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             window.render_frame(cx);
             assert!(window.find("text_font_combobox").visible());
             assert!(window.find("text_style_combobox").visible());
+            assert!(window.find("text_align_combobox").visible());
+            assert!(window.find("text_vert_combobox").visible());
+            assert!(window.find("text_stroke_pos_combobox").visible());
+            assert!(window.find("text_paint_order_combobox").visible());
             assert!(window.find("text_fill_swatch").visible());
             assert!(window.find("text_stroke_swatch").visible());
         })

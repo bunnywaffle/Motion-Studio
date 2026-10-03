@@ -10151,7 +10151,7 @@ fn render_applied_effects(
 
                     // 2. [ TIMING & RANGE ]
                     effect_box = effect_box.child(render_group_header("TIMING & RANGE"));
-                    for f in &["progress", "spread", "easing"] {
+                    for f in &["progress", "spread", "lock_layout", "easing"] {
                         if let Some(d) = find_decl(f) {
                             effect_box = effect_box.child(crate::widgets::widget_for_decl(
                                 state, panel_entity, &layer.id, &eff_id, d, wheels, enums, cx,
@@ -10918,7 +10918,14 @@ impl Render for PropertiesPanel {
                         l.matte_mode,
                         l.parent_id.clone(),
                         match &l.source {
-                            LayerSource::Text { font_family, weight, .. } => Some((font_family.clone(), *weight)),
+                            LayerSource::Text { font_family, weight, align, stroke_position, paint_order, vertical_align, .. } => Some((
+                                font_family.clone(),
+                                *weight,
+                                *align,
+                                stroke_position.clone(),
+                                paint_order.clone(),
+                                vertical_align.clone(),
+                            )),
                             _ => None,
                         },
                     )
@@ -10926,7 +10933,9 @@ impl Render for PropertiesPanel {
             };
 
             if let Some((sel_lid, cur_bm, cur_matte, cur_parent, text_info)) = selected_info {
-                if let Some((cur_fam, cur_w)) = text_info {
+                if let Some((cur_fam, cur_w, cur_align, cur_stroke_pos, cur_paint_order, cur_vert_align)) =
+                    text_info
+                {
                     let font_key = format!("text_font_family_{sel_lid}");
                     if !self.combobox_states.contains_key(&font_key) {
                         let sys_fonts = EditorState::available_system_fonts().to_vec();
@@ -10986,6 +10995,147 @@ impl Render for PropertiesPanel {
                         self.combobox_states.insert(style_key.clone(), cb.clone());
                         self.combobox_subs.insert(style_key, sub);
                         self.combobox_states.insert("text_font_style".to_string(), cb);
+                    }
+
+                    // Stroke Position Combobox (Center / Inside / Outside)
+                    let sp_key = format!("text_stroke_pos_{sel_lid}");
+                    if !self.combobox_states.contains_key(&sp_key) {
+                        let sp_options = ["Center", "Inside", "Outside"]
+                            .into_iter()
+                            .map(str::to_string)
+                            .collect::<Vec<_>>();
+                        let sel_sp_idx = sp_options
+                            .iter()
+                            .position(|o| o.eq_ignore_ascii_case(&cur_stroke_pos))
+                            .unwrap_or(0);
+                        let delegate = SearchableVec::new(sp_options);
+                        let cb = cx.new(|cx| {
+                            ComboboxState::new(delegate, vec![IndexPath::new(sel_sp_idx)], window, cx)
+                        });
+                        let s_sp = self.state.clone();
+                        let lid_c = sel_lid.clone();
+                        let sub = cx.subscribe(&cb, move |_, _, event: &ComboboxEvent<SearchableVec<String>>, cx| {
+                            let vals = match event {
+                                ComboboxEvent::Confirm(v) => v,
+                                ComboboxEvent::Change(v) => v,
+                            };
+                            if let Some(name) = vals.first() {
+                                s_sp.update(cx, |s, cx| {
+                                    let _ = s.set_layer_stroke_position(&lid_c, name.as_str());
+                                    cx.notify();
+                                });
+                            }
+                        });
+                        self.combobox_states.insert(sp_key.clone(), cb.clone());
+                        self.combobox_subs.insert(sp_key, sub);
+                        self.combobox_states.insert("text_stroke_pos".to_string(), cb);
+                    }
+
+                    // Paint Order Combobox
+                    let po_key = format!("text_paint_order_{sel_lid}");
+                    if !self.combobox_states.contains_key(&po_key) {
+                        let po_options = ["Fill over Stroke", "Stroke over Fill"]
+                            .into_iter()
+                            .map(str::to_string)
+                            .collect::<Vec<_>>();
+                        let sel_po_idx = po_options
+                            .iter()
+                            .position(|o| o.eq_ignore_ascii_case(&cur_paint_order))
+                            .unwrap_or(0);
+                        let delegate = SearchableVec::new(po_options);
+                        let cb = cx.new(|cx| {
+                            ComboboxState::new(delegate, vec![IndexPath::new(sel_po_idx)], window, cx)
+                        });
+                        let s_po = self.state.clone();
+                        let lid_c = sel_lid.clone();
+                        let sub = cx.subscribe(&cb, move |_, _, event: &ComboboxEvent<SearchableVec<String>>, cx| {
+                            let vals = match event {
+                                ComboboxEvent::Confirm(v) => v,
+                                ComboboxEvent::Change(v) => v,
+                            };
+                            if let Some(name) = vals.first() {
+                                s_po.update(cx, |s, cx| {
+                                    let _ = s.set_layer_paint_order(&lid_c, name.as_str());
+                                    cx.notify();
+                                });
+                            }
+                        });
+                        self.combobox_states.insert(po_key.clone(), cb.clone());
+                        self.combobox_subs.insert(po_key, sub);
+                        self.combobox_states.insert("text_paint_order".to_string(), cb);
+                    }
+
+                    // Horizontal Alignment Combobox
+                    let ta_key = format!("text_align_{sel_lid}");
+                    if !self.combobox_states.contains_key(&ta_key) {
+                        let delegate = SearchableVec::new(
+                            project::TextAlign::ALL
+                                .iter()
+                                .map(|a| a.label().to_string())
+                                .collect::<Vec<_>>(),
+                        );
+                        let cb = cx.new(|cx| {
+                            ComboboxState::new(
+                                delegate,
+                                vec![IndexPath::new(cur_align.index())],
+                                window,
+                                cx,
+                            )
+                        });
+                        let s_a = self.state.clone();
+                        let lid_c = sel_lid.clone();
+                        let sub = cx.subscribe(&cb, move |_, _, event: &ComboboxEvent<SearchableVec<String>>, cx| {
+                            let vals = match event {
+                                ComboboxEvent::Confirm(v) => v,
+                                ComboboxEvent::Change(v) => v,
+                            };
+                            if let Some(name) = vals.first() {
+                                if let Some(align) = project::TextAlign::from_label(name) {
+                                    s_a.update(cx, |s, cx| {
+                                        let _ = s.set_layer_text_align(&lid_c, align);
+                                        cx.notify();
+                                    });
+                                }
+                            }
+                        });
+                        self.combobox_states.insert(ta_key.clone(), cb.clone());
+                        self.combobox_subs.insert(ta_key, sub);
+                        self.combobox_states.insert("text_align".to_string(), cb);
+                    }
+
+                    // Vertical Alignment Combobox (model stores lowercase codes)
+                    let va_key = format!("text_vert_{sel_lid}");
+                    if !self.combobox_states.contains_key(&va_key) {
+                        let va_options = ["Top", "Center", "Bottom"]
+                            .into_iter()
+                            .map(str::to_string)
+                            .collect::<Vec<_>>();
+                        let sel_va_idx = va_options
+                            .iter()
+                            .position(|o| o.eq_ignore_ascii_case(&cur_vert_align))
+                            .unwrap_or(0);
+                        let delegate = SearchableVec::new(va_options);
+                        let cb = cx.new(|cx| {
+                            ComboboxState::new(delegate, vec![IndexPath::new(sel_va_idx)], window, cx)
+                        });
+                        let s_v = self.state.clone();
+                        let lid_c = sel_lid.clone();
+                        let sub = cx.subscribe(&cb, move |_, _, event: &ComboboxEvent<SearchableVec<String>>, cx| {
+                            let vals = match event {
+                                ComboboxEvent::Confirm(v) => v,
+                                ComboboxEvent::Change(v) => v,
+                            };
+                            if let Some(name) = vals.first() {
+                                let code = name.to_lowercase();
+                                s_v.update(cx, |s, cx| {
+                                    let _ = s.set_layer_vertical_align(&lid_c, code.as_str());
+                                    cx.notify();
+                                });
+                            }
+                        });
+                        self.combobox_states.insert(va_key.clone(), cb.clone());
+                        self.combobox_subs.insert(va_key, sub);
+                        self.combobox_states.insert("text_vert".to_string(), cb);
                     }
                 }
 
@@ -11188,9 +11338,63 @@ impl Render for PropertiesPanel {
                         .iter()
                         .position(|b| b == &cur_bm)
                         .unwrap_or(0);
+                    let text_wants: Vec<(String, usize, String)> = self
+                        .state
+                        .read(cx)
+                        .selected_layer()
+                        .and_then(|l| match &l.source {
+                            LayerSource::Text {
+                                align,
+                                stroke_position,
+                                paint_order,
+                                vertical_align,
+                                ..
+                            } => {
+                                let sp_opts = ["Center", "Inside", "Outside"];
+                                let sp_idx = sp_opts
+                                    .iter()
+                                    .position(|o| o.eq_ignore_ascii_case(stroke_position))
+                                    .unwrap_or(0);
+                                let po_opts = ["Fill over Stroke", "Stroke over Fill"];
+                                let po_idx = po_opts
+                                    .iter()
+                                    .position(|o| o.eq_ignore_ascii_case(paint_order))
+                                    .unwrap_or(0);
+                                let va_opts = ["Top", "Center", "Bottom"];
+                                let va_idx = va_opts
+                                    .iter()
+                                    .position(|o| o.eq_ignore_ascii_case(vertical_align))
+                                    .unwrap_or(0);
+                                Some(vec![
+                                    (
+                                        format!("text_stroke_pos_{sel_lid}"),
+                                        sp_idx,
+                                        sp_opts[sp_idx].to_string(),
+                                    ),
+                                    (
+                                        format!("text_paint_order_{sel_lid}"),
+                                        po_idx,
+                                        po_opts[po_idx].to_string(),
+                                    ),
+                                    (
+                                        format!("text_align_{sel_lid}"),
+                                        align.index(),
+                                        align.label().to_string(),
+                                    ),
+                                    (
+                                        format!("text_vert_{sel_lid}"),
+                                        va_idx,
+                                        va_opts[va_idx].to_string(),
+                                    ),
+                                ])
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or_default();
                     let wants: Vec<(String, usize, String)> = mask_descs
                         .iter()
                         .map(|(mid, label, idx)| (format!("mask_mode_{mid}"), *idx, label.clone()))
+                        .chain(text_wants)
                         .chain([
                             (
                                 format!("props_blend_mode_{sel_lid}"),
@@ -11702,7 +11906,7 @@ impl Render for PropertiesPanel {
                                 italic,
                                 tracking,
                                 leading,
-                                align,
+                                align: _align,
                                 all_caps,
                                 stroke_width,
                                 stroke_color,
@@ -11713,14 +11917,13 @@ impl Render for PropertiesPanel {
                                 small_caps,
                                 superscript,
                                 subscript,
-                                stroke_position,
-                                paint_order,
-                                vertical_align,
+                                stroke_position: _stroke_position,
+                                paint_order: _paint_order,
+                                vertical_align: _vertical_align,
                                 text_path,
                                 ..
                             } => {
                                 let lid_t = layer.id.clone();
-                                let s_text = self.state.clone();
                                 let s_fs = self.state.clone();
                                 let _s_col = self.state.clone();
                                 let s_typo = self.state.clone();
@@ -11733,7 +11936,6 @@ impl Render for PropertiesPanel {
                                 let cur_italic = *italic;
                                 let cur_tracking = tracking.value;
                                 let cur_leading = leading.value;
-                                let cur_align = *align;
                                 let cur_caps = *all_caps;
                                 let cur_stroke_w = stroke_width.value;
                                 let cur_stroke = stroke_color.value;
@@ -11744,37 +11946,8 @@ impl Render for PropertiesPanel {
                                 let cur_small_caps = *small_caps;
                                 let cur_superscript = *superscript;
                                 let cur_subscript = *subscript;
-                                let cur_stroke_pos = stroke_position.clone();
-                                let cur_paint_order = paint_order.clone();
-                                let cur_vert_align = vertical_align.clone();
 
                                 let inputs = text_inputs.read(cx);
-
-                                // 1. Source Text Presets
-                                let presets = ["Title Text", "Motion Effect", "Subheading", "Visual Effect"];
-                                let mut text_presets = h_flex().gap_1().items_center().flex_wrap();
-                                for p_str in presets {
-                                    let s_p = s_text.clone();
-                                    let lid_p = lid_t.clone();
-                                    let target_str = p_str.to_string();
-                                    text_presets = text_presets.child(
-                                        div()
-                                            .id(SharedString::from(format!("text_preset_{p_str}")))
-                                            .test_support()
-                                            .child(
-                                                Button::new(SharedString::from(format!("text_preset_btn_{p_str}")))
-                                                    .compact()
-                                                    .child(p_str)
-                                                    .on_click(move |_, _, cx| {
-                                                        let t = target_str.clone();
-                                                        s_p.update(cx, |s, cx| {
-                                                            let _ = s.set_layer_text(&lid_p, &t);
-                                                            cx.notify();
-                                                        });
-                                                    }),
-                                            ),
-                                    );
-                                }
 
                                 // 2. Font Group Collapsible
                                 let (font_open, fill_open, para_open) = (
@@ -12150,6 +12323,19 @@ impl Render for PropertiesPanel {
                                 let s_st2 = s_typo.clone();
                                 let lid_st2 = lid_t.clone();
 
+                                // Option dropdowns (retained Combobox states,
+                                // same pattern as font family/style above).
+                                let stroke_pos_combo = if let Some(cb) = self.combobox_states.get("text_stroke_pos") {
+                                    div().id("text_stroke_pos_combobox").test_support().w(px(140.)).child(Combobox::new(cb)).into_any_element()
+                                } else {
+                                    div().text_xs().text_color(cx.theme().muted_foreground).child("Center").into_any_element()
+                                };
+                                let paint_order_combo = if let Some(cb) = self.combobox_states.get("text_paint_order") {
+                                    div().id("text_paint_order_combobox").test_support().w(px(140.)).child(Combobox::new(cb)).into_any_element()
+                                } else {
+                                    div().text_xs().text_color(cx.theme().muted_foreground).child("Fill over Stroke").into_any_element()
+                                };
+
                                 let p_fill_stroke = panel_entity.clone();
                                 let fill_stroke_group = nested_group(
                                     SharedString::from("text_group_fill_stroke"),
@@ -12212,53 +12398,7 @@ impl Render for PropertiesPanel {
                                                 .justify_between()
                                                 .text_xs()
                                                 .child(div().text_color(cx.theme().muted_foreground).child("Position"))
-                                                .child(
-                                                    h_flex()
-                                                        .gap_1()
-                                                        .items_center()
-                                                        .child({
-                                                            let s_pos = s_typo.clone();
-                                                            let lid_pos = lid_t.clone();
-                                                            Button::new("text_pos_center")
-                                                                .compact()
-                                                                .selected(cur_stroke_pos == "Center" || cur_stroke_pos.is_empty())
-                                                                .child("Center")
-                                                                .on_click(move |_, _, cx| {
-                                                                    s_pos.update(cx, |s, cx| {
-                                                                        let _ = s.set_layer_stroke_position(&lid_pos, "Center");
-                                                                        cx.notify();
-                                                                    });
-                                                                })
-                                                        })
-                                                        .child({
-                                                            let s_pos = s_typo.clone();
-                                                            let lid_pos = lid_t.clone();
-                                                            Button::new("text_pos_inside")
-                                                                .compact()
-                                                                .selected(cur_stroke_pos == "Inside")
-                                                                .child("Inside")
-                                                                .on_click(move |_, _, cx| {
-                                                                    s_pos.update(cx, |s, cx| {
-                                                                        let _ = s.set_layer_stroke_position(&lid_pos, "Inside");
-                                                                        cx.notify();
-                                                                    });
-                                                                })
-                                                        })
-                                                        .child({
-                                                            let s_pos = s_typo.clone();
-                                                            let lid_pos = lid_t.clone();
-                                                            Button::new("text_pos_outside")
-                                                                .compact()
-                                                                .selected(cur_stroke_pos == "Outside")
-                                                                .child("Outside")
-                                                                .on_click(move |_, _, cx| {
-                                                                    s_pos.update(cx, |s, cx| {
-                                                                        let _ = s.set_layer_stroke_position(&lid_pos, "Outside");
-                                                                        cx.notify();
-                                                                    });
-                                                                })
-                                                        }),
-                                                ),
+                                                .child(stroke_pos_combo),
                                         )
                                         .child(
                                             h_flex()
@@ -12266,103 +12406,22 @@ impl Render for PropertiesPanel {
                                                 .justify_between()
                                                 .text_xs()
                                                 .child(div().text_color(cx.theme().muted_foreground).child("Paint Order"))
-                                                .child(
-                                                    h_flex()
-                                                        .gap_1()
-                                                        .items_center()
-                                                        .child({
-                                                            let s_po = s_typo.clone();
-                                                            let lid_po = lid_t.clone();
-                                                            Button::new("text_po_fos")
-                                                                .compact()
-                                                                .selected(cur_paint_order == "Fill over Stroke" || cur_paint_order.is_empty())
-                                                                .child("Fill over Stroke")
-                                                                .on_click(move |_, _, cx| {
-                                                                    s_po.update(cx, |s, cx| {
-                                                                        let _ = s.set_layer_paint_order(&lid_po, "Fill over Stroke");
-                                                                        cx.notify();
-                                                                    });
-                                                                })
-                                                        })
-                                                        .child({
-                                                            let s_po = s_typo.clone();
-                                                            let lid_po = lid_t.clone();
-                                                            Button::new("text_po_sof")
-                                                                .compact()
-                                                                .selected(cur_paint_order == "Stroke over Fill")
-                                                                .child("Stroke over Fill")
-                                                                .on_click(move |_, _, cx| {
-                                                                    s_po.update(cx, |s, cx| {
-                                                                        let _ = s.set_layer_paint_order(&lid_po, "Stroke over Fill");
-                                                                        cx.notify();
-                                                                    });
-                                                                })
-                                                        }),
-                                                ),
+                                                .child(paint_order_combo),
                                         )
                                         .into_any_element(),
                                 );
 
                                 // 4. Paragraph Group Collapsible
-                                let align_presets = [
-                                    (project::TextAlign::Left, "Left", "L"),
-                                    (project::TextAlign::Center, "Center", "C"),
-                                    (project::TextAlign::Right, "Right", "R"),
-                                    (project::TextAlign::JustifyLeft, "JustifyLeft", "JL"),
-                                    (project::TextAlign::JustifyCenter, "JustifyCenter", "JC"),
-                                    (project::TextAlign::JustifyRight, "JustifyRight", "JR"),
-                                    (project::TextAlign::JustifyAll, "JustifyAll", "JA"),
-                                ];
-                                let mut align_row = h_flex().gap_1().items_center().flex_wrap();
-                                for (a, id_tag, label) in align_presets {
-                                    let s_a = s_typo.clone();
-                                    let lid_a = lid_t.clone();
-                                    let sel = cur_align == a;
-                                    align_row = align_row.child(
-                                        div()
-                                            .id(SharedString::from(format!("text_align_{id_tag}")))
-                                            .test_support()
-                                            .child(
-                                                Button::new(SharedString::from(format!("text_align_btn_{id_tag}")))
-                                                    .compact()
-                                                    .selected(sel)
-                                                    .child(label)
-                                                    .on_click(move |_, _, cx| {
-                                                        s_a.update(cx, |s, cx| {
-                                                            let _ = s.set_layer_text_align(&lid_a, a);
-                                                            cx.notify();
-                                                        });
-                                                    }),
-                                            ),
-                                    );
-                                }
-
-                                let vert_presets = [
-                                    ("top", "Top"),
-                                    ("center", "Center"),
-                                    ("bottom", "Bottom"),
-                                ];
-                                let mut vert_row = h_flex().gap_1().items_center().flex_wrap();
-                                for (v_code, v_label) in vert_presets {
-                                    let s_v = s_typo.clone();
-                                    let lid_v = lid_t.clone();
-                                    let sel = cur_vert_align.eq_ignore_ascii_case(v_code);
-                                    let v_str = v_code.to_string();
-                                    vert_row = vert_row.child(
-                                        Button::new(SharedString::from(format!("text_vert_{v_code}")))
-                                            .compact()
-                                            .selected(sel)
-                                            .child(v_label)
-                                            .on_click(move |_, _, cx| {
-                                                let vs = v_str.clone();
-                                                s_v.update(cx, |s, cx| {
-                                                    let _ = s.set_layer_vertical_align(&lid_v, &vs);
-                                                    cx.notify();
-                                                });
-                                            }),
-                                    );
-                                }
-
+                                let align_combo = if let Some(cb) = self.combobox_states.get("text_align") {
+                                    div().id("text_align_combobox").test_support().w(px(140.)).child(Combobox::new(cb)).into_any_element()
+                                } else {
+                                    div().text_xs().text_color(cx.theme().muted_foreground).child("Left").into_any_element()
+                                };
+                                let vert_combo = if let Some(cb) = self.combobox_states.get("text_vert") {
+                                    div().id("text_vert_combobox").test_support().w(px(140.)).child(Combobox::new(cb)).into_any_element()
+                                } else {
+                                    div().text_xs().text_color(cx.theme().muted_foreground).child("Top").into_any_element()
+                                };
                                 let p_para = panel_entity.clone();
                                 let para_group = nested_group(
                                     SharedString::from("text_group_paragraph"),
@@ -12379,16 +12438,20 @@ impl Render for PropertiesPanel {
                                     v_flex()
                                         .gap_2()
                                         .child(
-                                            v_flex()
-                                                .gap_1()
-                                                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Horizontal Alignment"))
-                                                .child(align_row),
+                                            h_flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .text_xs()
+                                                .child(div().text_color(cx.theme().muted_foreground).child("Horizontal Alignment"))
+                                                .child(align_combo),
                                         )
                                         .child(
-                                            v_flex()
-                                                .gap_1()
-                                                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Vertical Alignment"))
-                                                .child(vert_row),
+                                            h_flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .text_xs()
+                                                .child(div().text_color(cx.theme().muted_foreground).child("Vertical Alignment"))
+                                                .child(vert_combo),
                                         )
                                         .into_any_element(),
                                 );
@@ -12467,7 +12530,6 @@ impl Render for PropertiesPanel {
                                                     .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Source Text")),
                                             )
                                             .child(Input::new(&inputs.text).id("text_content_input").w_full())
-                                            .child(text_presets),
                                     )
                                     // Box Size
                                     .child(

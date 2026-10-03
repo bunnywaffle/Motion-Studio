@@ -236,6 +236,7 @@ pub fn raster_content(
                     random_seed,
                     progress,
                     spread,
+                    lock_layout,
                     easing,
                     offset_position,
                     offset_rotation,
@@ -249,6 +250,7 @@ pub fn raster_content(
                         random_seed: *random_seed,
                         progress: *progress,
                         spread: *spread,
+                        lock_layout: *lock_layout,
                         easing: *easing,
                         offset_position: *offset_position,
                         offset_rotation: *offset_rotation,
@@ -708,6 +710,7 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
             random_seed,
             progress,
             spread,
+            lock_layout,
             easing,
             offset_position,
             offset_rotation,
@@ -719,6 +722,7 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
             random_seed.hash(h);
             progress.to_bits().hash(h);
             spread.to_bits().hash(h);
+            lock_layout.hash(h);
             easing.index().hash(h);
             offset_position.x.to_bits().hash(h);
             offset_position.y.to_bits().hash(h);
