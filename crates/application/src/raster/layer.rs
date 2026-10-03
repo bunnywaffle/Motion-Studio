@@ -467,6 +467,7 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
         EvaluatedEffectType::Tint { .. } => 3,
         EvaluatedEffectType::Invert { .. } => 4,
         EvaluatedEffectType::DropShadow { .. } => 5,
+        EvaluatedEffectType::OuterGlow { .. } => 27,
         EvaluatedEffectType::GlslShader { .. } => 6,
         EvaluatedEffectType::DisplacementMap { .. } => 7,
         EvaluatedEffectType::ChromaKey { .. } => 8,
@@ -509,6 +510,13 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
             softness.to_bits().hash(h);
             opacity.to_bits().hash(h);
             color_hash(color, h);
+        }
+        EvaluatedEffectType::OuterGlow { size, spread, opacity, color, range } => {
+            size.to_bits().hash(h);
+            spread.to_bits().hash(h);
+            opacity.to_bits().hash(h);
+            color_hash(color, h);
+            range.to_bits().hash(h);
         }
         EvaluatedEffectType::GlslShader { code, param1, param2, param3, param4 } => {
             code.hash(h);
@@ -1046,6 +1054,44 @@ pub fn rasterize_layer(
             break;
         }
     }
+    // Outer glow (blurred expanded silhouette rendered outward).
+    for eff in &layer.effects {
+        if !eff.enabled {
+            continue;
+        }
+        if let EvaluatedEffectType::OuterGlow { size, spread, opacity, color, .. } =
+            &eff.effect_type
+        {
+            let glow_radius = (size * kx).clamp(0.5, 120.0);
+            let glow_opacity = (opacity / 100.0).clamp(0.0, 1.0);
+            if glow_opacity > 0.01 && glow_radius > 0.5 {
+                // Build alpha silhouette with optional spread dilation
+                let mut sil = FloatBuf::clear(work.w, work.h);
+                let spread_val = *spread;
+                for (d, s) in sil.px.iter_mut().zip(work.px.iter()) {
+                    let a = if spread_val > 5.0 {
+                        (s.a * (1.0 + spread_val / 20.0)).clamp(0.0, 1.0)
+                    } else {
+                        s.a
+                    };
+                    *d = Px { r: 0.0, g: 0.0, b: 0.0, a };
+                }
+                blur_buffer(&mut sil, glow_radius);
+                let glow_params = Some((0.0, 0.0, glow_opacity, *color));
+                // Blit glow underneath onto out buffer
+                blit_affine(
+                    &mut out,
+                    &work,
+                    shifted,
+                    layer.effective_opacity.clamp(0.0, 1.0),
+                    BlendMode::Normal,
+                    glow_params,
+                    Some(&sil),
+                );
+            }
+            break;
+        }
+    }
     let normal = layer.blend_mode == BlendMode::Normal;
     if normal {
         blit_affine(
@@ -1302,6 +1348,7 @@ pub(crate) fn apply_layer_fx(
         match &eff.effect_type {
             EvaluatedEffectType::GaussianBlur { .. }
             | EvaluatedEffectType::DropShadow { .. }
+            | EvaluatedEffectType::OuterGlow { .. }
             | EvaluatedEffectType::Bloom { .. }
             | EvaluatedEffectType::Perspective { .. }
             | EvaluatedEffectType::TextOutline { .. }

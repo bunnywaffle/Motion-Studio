@@ -150,6 +150,14 @@ pub enum EffectType {
         #[serde(deserialize_with = "crate::property::de_property_or_value", default)]
         color: Property<Color>,
     },
+    OuterGlow {
+        size: Property<f32>,
+        spread: Property<f32>,
+        opacity: Property<f32>,
+        #[serde(deserialize_with = "crate::property::de_property_or_value", default)]
+        color: Property<Color>,
+        range: Property<f32>,
+    },
     GlslShader {
         code: String,
         param1: Property<f32>,
@@ -327,6 +335,7 @@ impl EffectType {
             Self::Tint { .. } => "Tint",
             Self::Invert { .. } => "Invert",
             Self::DropShadow { .. } => "Drop Shadow",
+            Self::OuterGlow { .. } => "Outer Glow",
             Self::GlslShader { .. } => "Custom GLSL Shader",
             Self::ShaderLab { .. } => "Shader Lab",
             Self::DisplacementMap { .. } => "Displacement Map",
@@ -397,6 +406,23 @@ impl EffectType {
             softness: Property::new("Softness", softness.max(0.0)),
             opacity: Property::new("Opacity", opacity.clamp(0.0, 100.0)),
             color: Property::new("Shadow Color", color),
+        }
+    }
+
+    /// Construct an Outer Glow effect type.
+    pub fn outer_glow(
+        size: f32,
+        spread: f32,
+        opacity: f32,
+        color: Color,
+        range: f32,
+    ) -> Self {
+        Self::OuterGlow {
+            size: Property::new("Size", size.max(0.0)),
+            spread: Property::new("Spread", spread.clamp(0.0, 100.0)),
+            opacity: Property::new("Opacity", opacity.clamp(0.0, 100.0)),
+            color: Property::new("Glow Color", color),
+            range: Property::new("Range", range.clamp(0.0, 100.0)),
         }
     }
 
@@ -714,6 +740,7 @@ impl EffectType {
             Self::Tint { .. } => "net.sf.openfx.tint",
             Self::Invert { .. } => "net.sf.openfx.invert",
             Self::DropShadow { .. } => "net.sf.openfx.drop_shadow",
+            Self::OuterGlow { .. } => "net.sf.openfx.outer_glow",
             Self::GlslShader { .. } => "net.sf.openfx.custom.glsl",
             Self::ShaderLab { .. } => "net.sf.openfx.custom.shader_lab",
             Self::DisplacementMap { .. } => "net.sf.openfx.displacement",
@@ -1114,6 +1141,14 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     false
                 }
             }
+            EffectType::OuterGlow { color, .. } => {
+                if field.eq_ignore_ascii_case("color") {
+                    color.set_value(next);
+                    true
+                } else {
+                    false
+                }
+            }
             EffectType::ChromaKey { key_color, .. } => {
                 if field.eq_ignore_ascii_case("key_color") || field.eq_ignore_ascii_case("color") {
                     key_color.set_value(next);
@@ -1181,6 +1216,9 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
             EffectType::DropShadow { color, .. } => {
                 if field.eq_ignore_ascii_case("color") { Some(color) } else { None }
             }
+            EffectType::OuterGlow { color, .. } => {
+                if field.eq_ignore_ascii_case("color") { Some(color) } else { None }
+            }
             EffectType::ChromaKey { key_color, .. } => {
                 if field.eq_ignore_ascii_case("key_color") || field.eq_ignore_ascii_case("color") {
                     Some(key_color)
@@ -1244,6 +1282,9 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 }
             }
             EffectType::DropShadow { color, .. } => {
+                if field.eq_ignore_ascii_case("color") { Some(color) } else { None }
+            }
+            EffectType::OuterGlow { color, .. } => {
                 if field.eq_ignore_ascii_case("color") { Some(color) } else { None }
             }
             EffectType::ChromaKey { key_color, .. } => {
@@ -1501,6 +1542,27 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     return true;
                 } else if param_name.eq_ignore_ascii_case("opacity") {
                     opacity.set_value((opacity.value + delta).clamp(0.0, 100.0));
+                    return true;
+                }
+            }
+            EffectType::OuterGlow {
+                size,
+                spread,
+                opacity,
+                range,
+                ..
+            } => {
+                if param_name.eq_ignore_ascii_case("size") || param_name.eq_ignore_ascii_case("radius") {
+                    size.set_value((size.value + delta).max(0.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("spread") {
+                    spread.set_value((spread.value + delta).clamp(0.0, 100.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("opacity") {
+                    opacity.set_value((opacity.value + delta).clamp(0.0, 100.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("range") {
+                    range.set_value((range.value + delta).clamp(0.0, 100.0));
                     return true;
                 }
             }
@@ -1774,6 +1836,25 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     None
                 }
             }
+            EffectType::OuterGlow {
+                size,
+                spread,
+                opacity,
+                range,
+                ..
+            } => {
+                if param_name.eq_ignore_ascii_case("size") || param_name.eq_ignore_ascii_case("radius") {
+                    Some(size)
+                } else if param_name.eq_ignore_ascii_case("spread") {
+                    Some(spread)
+                } else if param_name.eq_ignore_ascii_case("opacity") {
+                    Some(opacity)
+                } else if param_name.eq_ignore_ascii_case("range") {
+                    Some(range)
+                } else {
+                    None
+                }
+            }
             EffectType::GlslShader {
                 param1,
                 param2,
@@ -2032,6 +2113,25 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     Some(softness)
                 } else if param_name.eq_ignore_ascii_case("opacity") {
                     Some(opacity)
+                } else {
+                    None
+                }
+            }
+            EffectType::OuterGlow {
+                size,
+                spread,
+                opacity,
+                range,
+                ..
+            } => {
+                if param_name.eq_ignore_ascii_case("size") || param_name.eq_ignore_ascii_case("radius") {
+                    Some(size)
+                } else if param_name.eq_ignore_ascii_case("spread") {
+                    Some(spread)
+                } else if param_name.eq_ignore_ascii_case("opacity") {
+                    Some(opacity)
+                } else if param_name.eq_ignore_ascii_case("range") {
+                    Some(range)
                 } else {
                     None
                 }
@@ -2363,6 +2463,13 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 scalar("softness", "Softness", WidgetKind::Slider, px1(0.0, 100.0, 2.0, 50.0), softness),
                 scalar("opacity", "Opacity", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 10.0, 0, " %", 100.0), opacity),
                 PropDecl::color("color", "Color", color.value, color.is_animated()),
+            ],
+            EffectType::OuterGlow { size, spread, opacity, color, range } => vec![
+                scalar("size", "Size", WidgetKind::Slider, px1(0.0, 250.0, 2.0, 50.0), size),
+                scalar("spread", "Spread", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, " %", 100.0), spread),
+                scalar("opacity", "Opacity", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, " %", 100.0), opacity),
+                PropDecl::color("color", "Color", color.value, color.is_animated()),
+                scalar("range", "Range", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, " %", 100.0), range),
             ],
             EffectType::GlslShader { param1, param2, param3, param4, .. } => vec![
                 scalar("param1", "P1 (Speed)", WidgetKind::Slider, ParamMeta::slider(-100.0, 100.0, 0.5, 2, "", 10.0), param1),

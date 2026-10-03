@@ -213,6 +213,18 @@ pub const OFX_SUITE: &[OfxEffectDescriptor] = &[
         spatial: true,
     },
     OfxEffectDescriptor {
+        id: "net.sf.openfx.outer_glow",
+        label: "Outer Glow",
+        category: OfxCategory::Stylize,
+        params: &[
+            OfxParamDescriptor { name: "size", label: "Size", min: 0.0, max: 250.0, default: 20.0 },
+            OfxParamDescriptor { name: "spread", label: "Spread", min: 0.0, max: 100.0, default: 0.0 },
+            OfxParamDescriptor { name: "opacity", label: "Opacity", min: 0.0, max: 100.0, default: 75.0 },
+            OfxParamDescriptor { name: "range", label: "Range", min: 0.0, max: 100.0, default: 50.0 },
+        ],
+        spatial: true,
+    },
+    OfxEffectDescriptor {
         id: "net.sf.openfx.displacement",
         label: "Displacement Map",
         category: OfxCategory::Distort,

@@ -381,6 +381,13 @@ pub enum EvaluatedEffectType {
         opacity: f32,
         color: Color,
     },
+    OuterGlow {
+        size: f32,
+        spread: f32,
+        opacity: f32,
+        color: Color,
+        range: f32,
+    },
     GlslShader {
         code: String,
         param1: f32,
@@ -527,6 +534,7 @@ impl EvaluatedEffectType {
             Self::HueSaturation { .. } => "Hue / Saturation",
             Self::Sharpen { .. } => "Sharpen",
             Self::Vignette { .. } => "Vignette",
+            Self::OuterGlow { .. } => "Outer Glow",
             Self::Stock { plugin, .. } => plugin.descriptor().label,
         }
     }
@@ -560,6 +568,7 @@ impl EvaluatedEffectType {
             Self::HueSaturation { .. } => "net.sf.openfx.hue_saturation",
             Self::Sharpen { .. } => "net.sf.openfx.sharpen",
             Self::Vignette { .. } => "net.sf.openfx.vignette",
+            Self::OuterGlow { .. } => "net.sf.openfx.outer_glow",
             Self::Stock { plugin, .. } => plugin.plugin_id(),
         }
     }
@@ -575,6 +584,8 @@ impl EvaluatedEffectType {
             _ => matches!(
                 self,
                 Self::GaussianBlur { .. }
+                    | Self::DropShadow { .. }
+                    | Self::OuterGlow { .. }
                     | Self::DisplacementMap { .. }
                     | Self::ShaderLab { .. }
                     | Self::Checkerboard { .. }
@@ -827,7 +838,7 @@ impl EvaluatedEffectType {
             }
             // Sharpen (unsharp mask) and Vignette need neighbours / pixel
             // position: identity here, resolved by the rasterizer.
-            Self::Sharpen { .. } | Self::Vignette { .. } => c,
+            Self::Sharpen { .. } | Self::Vignette { .. } | Self::OuterGlow { .. } => c,
             // Stock per-pixel kernels; spatial stock is identity here.
             Self::Stock { plugin, params, .. } => process_color_stock(*plugin, params, c),
         }
@@ -1706,6 +1717,19 @@ impl LayerStackEvaluator {
                             softness: eval_eff_prop("softness", softness.evaluate_at(time)),
                             opacity: eval_eff_prop("opacity", opacity.evaluate_at(time)),
                             color: color.evaluate_at(time),
+                        },
+                        EffectType::OuterGlow {
+                            size,
+                            spread,
+                            opacity,
+                            color,
+                            range,
+                        } => EvaluatedEffectType::OuterGlow {
+                            size: eval_eff_prop("size", size.evaluate_at(time)),
+                            spread: eval_eff_prop("spread", spread.evaluate_at(time)),
+                            opacity: eval_eff_prop("opacity", opacity.evaluate_at(time)),
+                            color: color.evaluate_at(time),
+                            range: eval_eff_prop("range", range.evaluate_at(time)),
                         },
                         EffectType::GlslShader {
                             code,

@@ -252,6 +252,59 @@ pub fn rasterize_comp(
                     break;
                 }
             }
+            // Outer glow blit
+            for eff in &layer.effects {
+                if !eff.enabled {
+                    continue;
+                }
+                if let EvaluatedEffectType::OuterGlow { size, spread, opacity, color, .. } =
+                    &eff.effect_type
+                {
+                    let glow_radius = (size * k).clamp(0.5, 120.0);
+                    let glow_opacity = (opacity / 100.0).clamp(0.0, 1.0);
+                    if glow_opacity > 0.01 && glow_radius > 0.5 {
+                        let mut sil = FloatBuf::clear(work.w, work.h);
+                        let spread_val = *spread;
+                        for (d, s) in sil.px.iter_mut().zip(work.px.iter()) {
+                            let a = if spread_val > 5.0 {
+                                (s.a * (1.0 + spread_val / 20.0)).clamp(0.0, 1.0)
+                            } else {
+                                s.a
+                            };
+                            *d = Px { r: 0.0, g: 0.0, b: 0.0, a };
+                        }
+                        crate::raster::buffer::blur_buffer(&mut sil, glow_radius);
+                        let mut glow_sub = FloatBuf::clear(x1 - x0, y1 - y0);
+                        let glow_shifted = Aff {
+                            a: map.a,
+                            b: map.b,
+                            c: map.c,
+                            d: map.d,
+                            tx: map.tx - x0 as f32,
+                            ty: map.ty - y0 as f32,
+                        };
+                        crate::raster::layer::blit_affine(
+                            &mut glow_sub,
+                            &work,
+                            glow_shifted,
+                            layer.effective_opacity.clamp(0.0, 1.0),
+                            BlendMode::Normal,
+                            Some((0.0, 0.0, glow_opacity, *color)),
+                            Some(&sil),
+                        );
+                        for y in 0..glow_sub.h {
+                            for x in 0..glow_sub.w {
+                                let gp = glow_sub.px[(y * glow_sub.w + x) as usize];
+                                if gp.a > 0.003 {
+                                    let idx = ((y0 + y) * ow + (x0 + x)) as usize;
+                                    dst.px[idx].blend_over(gp, BlendMode::Normal);
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
             // Blit sub-region.
             let mut sub = FloatBuf::clear(x1 - x0, y1 - y0);
             // NOTE: blit_affine walks dst pixels; map translates output px

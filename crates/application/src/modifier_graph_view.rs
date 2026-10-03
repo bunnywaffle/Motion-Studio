@@ -79,6 +79,8 @@ pub struct ModifierGraphView {
     pan_offset: (f32, f32),
     /// Canvas panning: `(initial_canvas_x, initial_canvas_y, initial_pan_x, initial_pan_y)`
     panning_canvas: Option<(f32, f32, f32, f32)>,
+    /// Scrubbing param: `(node_id, param_name, last_mouse_x, original_val)`
+    scrubbing_param: Option<(String, String, f32, f32)>,
 }
 
 impl ModifierGraphView {
@@ -110,6 +112,7 @@ impl ModifierGraphView {
             selected_node: None,
             pan_offset: (0.0, 0.0),
             panning_canvas: None,
+            scrubbing_param: None,
         }
     }
 
@@ -136,6 +139,21 @@ impl ModifierGraphView {
         let node = ModifierNode::new(id, offset_x, offset_y, kind);
         self.graph.add_node(node);
         self.sync_to_state(cx);
+    }
+
+    /// Paste copied property link as a new DriverLink node into the graph.
+    /// Can be called multiple times, creating multiple driver link nodes!
+    pub fn paste_copied_property_link(&mut self, cx: &mut Context<Self>) {
+        let copied = self.editor_state.read(cx).copied_property_link.clone();
+        if let Some((driver_layer_id, driver_prop_path)) = copied {
+            self.add_node(
+                NodeKind::DriverLink {
+                    driver_layer_id,
+                    driver_prop_path,
+                },
+                cx,
+            );
+        }
     }
 
     /// Reset graph to default passthrough.
@@ -301,12 +319,23 @@ impl Render for ModifierGraphView {
         // 2. Node Canvas Area
         let canvas = self.render_canvas(&entity, cx);
 
+        let ent_key = entity.clone();
         v_flex()
             .id("modifier_graph_root")
             .test_support()
             .size_full()
             .bg(cx.theme().background)
             .track_focus(&self.focus_handle)
+            .on_key_down(move |event, _window, cx| {
+                let mods = event.keystroke.modifiers;
+                let ctrl = mods.control || mods.platform;
+                let key = event.keystroke.key.to_lowercase();
+                if ctrl && key == "v" {
+                    ent_key.update(cx, |this, cx| {
+                        this.paste_copied_property_link(cx);
+                    });
+                }
+            })
             .child(header)
             .child(canvas)
     }
@@ -332,7 +361,9 @@ impl ModifierGraphView {
         let ent_step = entity.clone();
         let ent_const = entity.clone();
         let ent_driver = entity.clone();
+        let ent_paste_link = entity.clone();
         let ent_reset = entity.clone();
+        let this_copied_link = self.editor_state.read(cx).copied_property_link.clone();
 
         v_flex()
             .w_full()
@@ -552,6 +583,30 @@ impl ModifierGraphView {
                             cx,
                         );
                     }, cx))
+                    .child({
+                        let has_copied = this_copied_link.is_some();
+                        let ent_pl = ent_paste_link.clone();
+                        div()
+                            .id("paste_property_link_btn")
+                            .test_support()
+                            .px_2()
+                            .py_0p5()
+                            .rounded_sm()
+                            .bg(if has_copied { rgb(0x451a1a) } else { rgb(0x1e2029) })
+                            .border_1()
+                            .border_color(if has_copied { rgb(0xef4444) } else { rgb(0x3a3c4e) })
+                            .hover(|s| s.bg(rgb(0x7f1d1d)).text_color(rgb(0xfecaca)))
+                            .cursor_pointer()
+                            .text_xs()
+                            .text_color(if has_copied { rgb(0xfca5a5) } else { rgb(0x9ca3af) })
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                cx.stop_propagation();
+                                ent_pl.update(cx, |this, cx| {
+                                    this.paste_copied_property_link(cx);
+                                });
+                            })
+                            .child("Paste Property Link")
+                    })
                     .child(div().flex_grow(1.0))
                     .child(
                         div()
@@ -671,6 +726,17 @@ impl ModifierGraphView {
                         wire.cur_y = curr_y;
                         changed = true;
                     }
+                    // Param scrub
+                    if let Some((node_id, param_name, last_x, _)) = this.scrubbing_param.clone() {
+                        let dx = curr_x - last_x;
+                        if dx.abs() >= 1.0 {
+                            this.apply_param_scrub(&node_id, &param_name, dx * 0.1, cx);
+                            if let Some((_, _, lx, _)) = &mut this.scrubbing_param {
+                                *lx = curr_x;
+                            }
+                            changed = true;
+                        }
+                    }
                     // Canvas pan
                     if let Some((mx, my, px, py)) = &this.panning_canvas {
                         let dx = curr_x - *mx;
@@ -687,6 +753,10 @@ impl ModifierGraphView {
             .on_mouse_up(MouseButton::Left, move |event, _window, cx| {
                 let (curr_x, curr_y) = event_to_canvas_pos(event.position);
                 ent_up.update(cx, |this, cx| {
+                    if this.scrubbing_param.is_some() {
+                        this.scrubbing_param = None;
+                        this.sync_to_state(cx);
+                    }
                     if this.dragging_node.is_some() {
                         this.dragging_node = None;
                         this.sync_to_state(cx);
@@ -1244,11 +1314,6 @@ impl ModifierGraphView {
         match &node.kind {
             NodeKind::Constant { value } => {
                 let v = *value;
-                let ent_dec = ent.clone();
-                let ent_inc = ent.clone();
-                let nid_dec = nid.clone();
-                let nid_inc = nid.clone();
-
                 h_flex()
                     .w_full()
                     .px_2()
@@ -1258,47 +1323,12 @@ impl ModifierGraphView {
                     .justify_between()
                     .items_center()
                     .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Value:"))
-                    .child(
-                        h_flex()
-                            .gap_1()
-                            .items_center()
-                            .child(self.param_step_btn("-", ent_dec, move |this, cx| {
-                                if let Some(n) = this.graph.get_node_mut(&nid_dec) {
-                                    if let NodeKind::Constant { value } = &mut n.kind {
-                                        *value -= 1.0;
-                                        this.sync_to_state(cx);
-                                    }
-                                }
-                            }, cx))
-                            .child(
-                                div()
-                                    .px_1p5()
-                                    .py_0p5()
-                                    .rounded_sm()
-                                    .bg(rgb(0x232430))
-                                    .text_xs()
-                                    .font_medium()
-                                    .text_color(rgb(0x38bdf8))
-                                    .child(format!("{v:.2}")),
-                            )
-                            .child(self.param_step_btn("+", ent_inc, move |this, cx| {
-                                if let Some(n) = this.graph.get_node_mut(&nid_inc) {
-                                    if let NodeKind::Constant { value } = &mut n.kind {
-                                        *value += 1.0;
-                                        this.sync_to_state(cx);
-                                    }
-                                }
-                            }, cx)),
-                    )
+                    .child(self.param_scrub_input(nid, "value", v, rgb(0x38bdf8), ent, cx))
             }
 
             NodeKind::Math { op, default_b } => {
                 let current_op = *op;
                 let def_b = *default_b;
-                let ent_b_dec = ent.clone();
-                let ent_b_inc = ent.clone();
-                let nid_b_dec = nid.clone();
-                let nid_b_inc = nid.clone();
 
                 v_flex()
                     .w_full()
@@ -1326,38 +1356,7 @@ impl ModifierGraphView {
                             .justify_between()
                             .items_center()
                             .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Default B:"))
-                            .child(
-                                h_flex()
-                                    .gap_1()
-                                    .items_center()
-                                    .child(self.param_step_btn("-", ent_b_dec, move |this, cx| {
-                                        if let Some(n) = this.graph.get_node_mut(&nid_b_dec) {
-                                            if let NodeKind::Math { default_b, .. } = &mut n.kind {
-                                                *default_b -= 0.5;
-                                                this.sync_to_state(cx);
-                                            }
-                                        }
-                                    }, cx))
-                                    .child(
-                                        div()
-                                            .px_1p5()
-                                            .py_0p5()
-                                            .rounded_sm()
-                                            .bg(rgb(0x232430))
-                                            .text_xs()
-                                            .font_medium()
-                                            .text_color(rgb(0xc084fc))
-                                            .child(format!("{def_b:.2}")),
-                                    )
-                                    .child(self.param_step_btn("+", ent_b_inc, move |this, cx| {
-                                        if let Some(n) = this.graph.get_node_mut(&nid_b_inc) {
-                                            if let NodeKind::Math { default_b, .. } = &mut n.kind {
-                                                *default_b += 0.5;
-                                                this.sync_to_state(cx);
-                                            }
-                                        }
-                                    }, cx)),
-                            ),
+                            .child(self.param_scrub_input(nid, "default_b", def_b, rgb(0xc084fc), ent, cx)),
                     )
             }
 
@@ -1371,10 +1370,6 @@ impl ModifierGraphView {
                 let ent_wt1 = ent.clone();
                 let ent_wt2 = ent.clone();
                 let ent_wt3 = ent.clone();
-                let ent_f_dec = ent.clone();
-                let ent_f_inc = ent.clone();
-                let nid_f_dec = nid.clone();
-                let nid_f_inc = nid.clone();
 
                 v_flex()
                     .w_full()
@@ -1398,38 +1393,7 @@ impl ModifierGraphView {
                             .justify_between()
                             .items_center()
                             .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Freq:"))
-                            .child(
-                                h_flex()
-                                    .gap_1()
-                                    .items_center()
-                                    .child(self.param_step_btn("-", ent_f_dec, move |this, cx| {
-                                        if let Some(n) = this.graph.get_node_mut(&nid_f_dec) {
-                                            if let NodeKind::Wave { frequency, .. } = &mut n.kind {
-                                                *frequency = (*frequency - 0.5).max(0.1);
-                                                this.sync_to_state(cx);
-                                            }
-                                        }
-                                    }, cx))
-                                    .child(
-                                        div()
-                                            .px_1p5()
-                                            .py_0p5()
-                                            .rounded_sm()
-                                            .bg(rgb(0x232430))
-                                            .text_xs()
-                                            .font_medium()
-                                            .text_color(rgb(0x4ade80))
-                                            .child(format!("{freq:.1}x")),
-                                    )
-                                    .child(self.param_step_btn("+", ent_f_inc, move |this, cx| {
-                                        if let Some(n) = this.graph.get_node_mut(&nid_f_inc) {
-                                            if let NodeKind::Wave { frequency, .. } = &mut n.kind {
-                                                *frequency += 0.5;
-                                                this.sync_to_state(cx);
-                                            }
-                                        }
-                                    }, cx)),
-                            ),
+                            .child(self.param_scrub_input(nid, "frequency", freq, rgb(0x4ade80), ent, cx)),
                     )
                     .child(
                         div()
@@ -1441,10 +1405,6 @@ impl ModifierGraphView {
 
             NodeKind::Stepped { steps } => {
                 let st = *steps;
-                let ent_dec = ent.clone();
-                let ent_inc = ent.clone();
-                let nid_dec = nid.clone();
-                let nid_inc = nid.clone();
 
                 h_flex()
                     .w_full()
@@ -1455,38 +1415,7 @@ impl ModifierGraphView {
                     .justify_between()
                     .items_center()
                     .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Steps:"))
-                    .child(
-                        h_flex()
-                            .gap_1()
-                            .items_center()
-                            .child(self.param_step_btn("-", ent_dec, move |this, cx| {
-                                if let Some(n) = this.graph.get_node_mut(&nid_dec) {
-                                    if let NodeKind::Stepped { steps } = &mut n.kind {
-                                        *steps = (*steps - 1.0).max(1.0);
-                                        this.sync_to_state(cx);
-                                    }
-                                }
-                            }, cx))
-                            .child(
-                                div()
-                                    .px_1p5()
-                                    .py_0p5()
-                                    .rounded_sm()
-                                    .bg(rgb(0x232430))
-                                    .text_xs()
-                                    .font_medium()
-                                    .text_color(rgb(0x4ade80))
-                                    .child(format!("{st:.0}")),
-                            )
-                            .child(self.param_step_btn("+", ent_inc, move |this, cx| {
-                                if let Some(n) = this.graph.get_node_mut(&nid_inc) {
-                                    if let NodeKind::Stepped { steps } = &mut n.kind {
-                                        *steps += 1.0;
-                                        this.sync_to_state(cx);
-                                    }
-                                }
-                            }, cx)),
-                    )
+                    .child(self.param_scrub_input(nid, "steps", st, rgb(0x4ade80), ent, cx))
             }
 
             NodeKind::DriverLink { driver_layer_id, driver_prop_path } => {
@@ -1590,28 +1519,62 @@ impl ModifierGraphView {
             .child(label)
     }
 
-    fn param_step_btn<F>(&self, label: &'static str, entity: Entity<Self>, on_click: F, cx: &App) -> Div
-    where
-        F: Fn(&mut Self, &mut Context<Self>) + 'static,
-    {
+    fn param_scrub_input(
+        &self,
+        node_id: String,
+        param_name: &'static str,
+        value: f32,
+        val_color: Rgba,
+        entity: Entity<Self>,
+        cx: &App,
+    ) -> Div {
+        let nid_scrub = node_id.clone();
+        let pname_scrub = param_name.to_string();
+        let ent_scrub = entity.clone();
+
         div()
-            .w(px(16.0))
-            .h(px(16.0))
+            .px_2()
+            .py_0p5()
             .rounded_sm()
             .bg(rgb(0x232430))
+            .border_1()
+            .border_color(rgb(0x3a3c4e))
             .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
+            .cursor_col_resize()
             .text_xs()
-            .font_bold()
-            .text_color(cx.theme().foreground)
-            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+            .font_medium()
+            .text_color(val_color)
+            .child(format!("{value:.2}"))
+            .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
                 cx.stop_propagation();
-                entity.update(cx, |this, cx| {
-                    on_click(this, cx);
+                let curr_x = event.position.x / px(1.0);
+                let nid = nid_scrub.clone();
+                let pname = pname_scrub.clone();
+                ent_scrub.update(cx, |this, cx| {
+                    this.scrubbing_param = Some((nid, pname, curr_x, value));
+                    cx.notify();
                 });
             })
-            .child(label)
+    }
+
+    fn apply_param_scrub(&mut self, node_id: &str, param_name: &str, delta: f32, cx: &mut Context<Self>) {
+        if let Some(n) = self.graph.get_node_mut(node_id) {
+            match (&mut n.kind, param_name) {
+                (NodeKind::Constant { value }, "value") => {
+                    *value += delta;
+                }
+                (NodeKind::Math { default_b, .. }, "default_b") => {
+                    *default_b += delta;
+                }
+                (NodeKind::Wave { frequency, .. }, "frequency") => {
+                    *frequency = (*frequency + delta * 0.1).max(0.01);
+                }
+                (NodeKind::Stepped { steps }, "steps") => {
+                    *steps = (*steps + delta * 0.2).round().max(1.0);
+                }
+                _ => {}
+            }
+            self.sync_to_state(cx);
+        }
     }
 }

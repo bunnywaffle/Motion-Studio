@@ -397,8 +397,10 @@ pub fn apply_effect_pixels(
                 None => {}
             }
         }
-        EvaluatedEffectType::TextOutline { .. } | EvaluatedEffectType::TextBevel { .. } => {
-            // Resolved inside the text rasterizer.
+        EvaluatedEffectType::TextOutline { .. }
+        | EvaluatedEffectType::TextBevel { .. }
+        | EvaluatedEffectType::OuterGlow { .. } => {
+            // Resolved inside the text/blit rasterizer.
         }
         EvaluatedEffectType::Stock { plugin, params, colors } => {
             apply_stock(buf, *plugin, params, colors, ctx);

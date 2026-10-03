@@ -2796,6 +2796,8 @@ pub struct CompositionViewerPanel {
     pub zoom_factor: Option<f32>,
     /// Whether transformation gizmos, handles, and path overlays are enabled.
     pub overlays_enabled: bool,
+    /// Active shape tool drag in viewport.
+    pub shape_drag: Option<ShapeDragState>,
 }
 
 /// Evaluated world-space AABB of one layer for viewport picking (comp px).
@@ -2828,6 +2830,15 @@ pub struct MaskDrag {
     /// cursor position, so without this every grab teleports the point by
     /// the within-dot grab error.
     pub grab_offset: (f32, f32),
+}
+
+/// Active shape tool drag in viewport.
+#[derive(Clone, Debug)]
+pub struct ShapeDragState {
+    pub start_comp: Vec2,
+    pub current_comp: Vec2,
+    pub target_layer: Option<String>,
+    pub is_ellipse: bool,
 }
 
 /// Viewport transform-gizmo drag state (After Effects-style direct
@@ -2888,6 +2899,7 @@ impl CompositionViewerPanel {
             canvas_comp_fingerprint: None,
             zoom_factor: None,
             overlays_enabled: true,
+            shape_drag: None,
         }
     }
 
@@ -4228,6 +4240,29 @@ impl Render for CompositionViewerPanel {
                 }
                 let curr_x = event.position.x / px(1.0);
                 let curr_y = event.position.y / px(1.0);
+                // Viewport Shape tool drag preview
+                if let Some(sdrag) = &mut this.shape_drag {
+                    let frame_org = frame_origin_or_center(
+                        this.frame_origin,
+                        this.viewport_px,
+                        this.viewport_origin,
+                        this.canvas_px,
+                    );
+                    let (fox, foy) = frame_org.unwrap_or((0.0, 0.0));
+                    let (cw, ch) = {
+                        let s = this.state.read(cx);
+                        match s.active_composition() {
+                            Some(c) => (c.width as f32, c.height as f32),
+                            None => (1920.0, 1080.0),
+                        }
+                    };
+                    let fit_here = canvas_scale(this.viewport_px, this.zoom_factor, cw, ch);
+                    let cmx = (curr_x - fox) / fit_here - cw / 2.0;
+                    let cmy = (curr_y - foy) / fit_here - ch / 2.0;
+                    sdrag.current_comp = Vec2::new(cmx, cmy);
+                    cx.notify();
+                    return;
+                }
                 // Path Editor mask drags win over everything (nodes map
                 // through the cheap matrix path, no scene eval per move).
                 if let Some(mdrag) = this.mask_drag.clone() {
@@ -4452,6 +4487,34 @@ impl Render for CompositionViewerPanel {
                 this.last_canvas_mouse = None;
                 this.gizmo_drag = None;
                 this.down_on_layer = false;
+                // Finalize Shape tool drag (creates shape layer or shaped mask)
+                if let Some(sdrag) = this.shape_drag.take() {
+                    let min_x = sdrag.start_comp.x.min(sdrag.current_comp.x);
+                    let max_x = sdrag.start_comp.x.max(sdrag.current_comp.x);
+                    let min_y = sdrag.start_comp.y.min(sdrag.current_comp.y);
+                    let max_y = sdrag.start_comp.y.max(sdrag.current_comp.y);
+                    let drag_w = (max_x - min_x).max(10.0);
+                    let drag_h = (max_y - min_y).max(10.0);
+                    let center = Vec2::new((min_x + max_x) / 2.0, (min_y + max_y) / 2.0);
+                    let s = this.state.clone();
+                    s.update(cx, |s, cx| {
+                        if let Some(lid) = sdrag.target_layer {
+                            let kind = if sdrag.is_ellipse {
+                                project::MaskShapeKind::Ellipse
+                            } else {
+                                project::MaskShapeKind::Rectangle
+                            };
+                            let _ = s.add_shaped_mask_at(&lid, kind, Some(center), Some((drag_w, drag_h)));
+                        } else if sdrag.is_ellipse {
+                            let _ = s.add_ellipse_shape_layer(drag_w, drag_h, Some(center));
+                        } else {
+                            let _ = s.add_rectangle_shape_layer(drag_w, drag_h, Some(center));
+                        }
+                        s.preview_fast = false;
+                        cx.notify();
+                    });
+                    return;
+                }
                 // Mask node click without drag cycles the node kind
                 // (Corner → Smooth → Symmetric → Auto).
                 if let Some(mdrag) = this.mask_drag.take() {
@@ -4492,6 +4555,7 @@ impl Render for CompositionViewerPanel {
                 this.last_canvas_mouse = None;
                 this.gizmo_drag = None;
                 this.mask_drag = None;
+                this.shape_drag = None;
                 this.mask_down_moved = false;
                 this.down_on_layer = false;
                 this.empty_down = None;
@@ -4695,24 +4759,26 @@ impl Render for CompositionViewerPanel {
                                                     });
                                                 }
                                                 EditorTool::ShapeRect => {
-                                                    s_tool.update(cx, |s, cx| {
-                                                        let sel = s.selected_layer_id.clone();
-                                                        if let Some(lid) = sel {
-                                                            let _ = s.add_shaped_mask_at(&lid, project::MaskShapeKind::Rectangle, Some(Vec2::new(comp_x, comp_y)), Some((300.0, 200.0)));
-                                                        } else {
-                                                            let _ = s.add_rectangle_shape_layer(300.0, 200.0, Some(Vec2::new(comp_x, comp_y)));
-                                                        }
+                                                    let target_layer = s_tool.read(cx).selected_layer_id.clone();
+                                                    p_drag.update(cx, |this, cx| {
+                                                        this.shape_drag = Some(ShapeDragState {
+                                                            start_comp: Vec2::new(comp_x, comp_y),
+                                                            current_comp: Vec2::new(comp_x, comp_y),
+                                                            target_layer,
+                                                            is_ellipse: false,
+                                                        });
                                                         cx.notify();
                                                     });
                                                 }
                                                 EditorTool::ShapeEllipse => {
-                                                    s_tool.update(cx, |s, cx| {
-                                                        let sel = s.selected_layer_id.clone();
-                                                        if let Some(lid) = sel {
-                                                            let _ = s.add_shaped_mask_at(&lid, project::MaskShapeKind::Ellipse, Some(Vec2::new(comp_x, comp_y)), Some((200.0, 200.0)));
-                                                        } else {
-                                                            let _ = s.add_ellipse_shape_layer(150.0, 150.0, Some(Vec2::new(comp_x, comp_y)));
-                                                        }
+                                                    let target_layer = s_tool.read(cx).selected_layer_id.clone();
+                                                    p_drag.update(cx, |this, cx| {
+                                                        this.shape_drag = Some(ShapeDragState {
+                                                            start_comp: Vec2::new(comp_x, comp_y),
+                                                            current_comp: Vec2::new(comp_x, comp_y),
+                                                            target_layer,
+                                                            is_ellipse: true,
+                                                        });
                                                         cx.notify();
                                                     });
                                                 }
@@ -4771,6 +4837,42 @@ impl Render for CompositionViewerPanel {
                                     .children(rendered_layers);
                                 if self.overlays_enabled {
                                     canvas_frame = canvas_frame.children(gizmo_els);
+                                }
+
+                                if let Some(ref sdrag) = self.shape_drag {
+                                    let s_min_x = sdrag.start_comp.x.min(sdrag.current_comp.x);
+                                    let s_max_x = sdrag.start_comp.x.max(sdrag.current_comp.x);
+                                    let s_min_y = sdrag.start_comp.y.min(sdrag.current_comp.y);
+                                    let s_max_y = sdrag.start_comp.y.max(sdrag.current_comp.y);
+                                    let s_w = (s_max_x - s_min_x).max(1.0);
+                                    let s_h = (s_max_y - s_min_y).max(1.0);
+                                    let c_x = (s_min_x + comp_w / 2.0) * current_scale;
+                                    let c_y = (s_min_y + comp_h / 2.0) * current_scale;
+                                    let c_w = s_w * current_scale;
+                                    let c_h = s_h * current_scale;
+                                    let is_ellipse = sdrag.is_ellipse;
+                                    let is_mask = sdrag.target_layer.is_some();
+                                    let border_col = if is_mask {
+                                        rgb(0xf59e0b) // amber for mask
+                                    } else {
+                                        rgb(0x38bdf8) // sky blue for shape layer
+                                    };
+                                    let mut preview_div = div()
+                                        .id("shape_drag_preview")
+                                        .test_support()
+                                        .absolute()
+                                        .left(px(c_x))
+                                        .top(px(c_y))
+                                        .w(px(c_w))
+                                        .h(px(c_h))
+                                        .border_2()
+                                        .border_color(border_col);
+                                    if is_ellipse {
+                                        preview_div = preview_div.rounded_full();
+                                    } else {
+                                        preview_div = preview_div.rounded_xs();
+                                    }
+                                    canvas_frame = canvas_frame.child(preview_div);
                                 }
 
                                 let p_canvas_rclick = cx.entity().clone();
@@ -8172,7 +8274,7 @@ fn render_masks_section(
             .bg(cx.theme().secondary)
             .gap_1p5();
 
-        // Header: enable, name, mode pill, invert, edit, delete.
+        // Header Row 1: Eye, Name, Rename, and on right side: Lock, Delete.
         box_el = box_el.child(
             h_flex()
                 .items_center()
@@ -8182,6 +8284,8 @@ fn render_masks_section(
                     h_flex()
                         .gap_1p5()
                         .items_center()
+                        .flex_1()
+                        .min_w_0()
                         .child(
                             div()
                                 .id(SharedString::from(format!("mask_toggle_{mid}")))
@@ -8246,24 +8350,6 @@ fn render_masks_section(
                         .items_center()
                         .child(
                             div()
-                                .id(SharedString::from(format!("mask_mode_{mid}")))
-                                .test_support()
-                                .w(px(108.))
-                                .child({
-                                    let key = format!("mask_mode_{mid}");
-                                    if let Some(cb) = combos.get(&key) {
-                                        Combobox::new(cb).small().into_any_element()
-                                    } else {
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(mask.mode.label())
-                                            .into_any_element()
-                                    }
-                                }),
-                        )
-                        .child(
-                            div()
                                 .id(SharedString::from(format!("mask_lock_{mid}")))
                                 .test_support()
                                 .cursor_pointer()
@@ -8286,8 +8372,8 @@ fn render_masks_section(
                                 .id(SharedString::from(format!("mask_delete_{mid}")))
                                 .test_support()
                                 .cursor_pointer()
-                                .w(px(14.))
-                                .h(px(14.))
+                                .w(px(16.))
+                                .h(px(16.))
                                 .flex()
                                 .items_center()
                                 .justify_center()
@@ -8304,13 +8390,31 @@ fn render_masks_section(
                 ),
         );
 
-        // Second row: invert, path open/close, edit target, path keys.
+        // Second row: Mode dropdown, invert, path open/close, edit target, path keys.
         box_el = box_el.child(
             h_flex()
                 .gap_1()
                 .flex_wrap()
                 .items_center()
                 .text_xs()
+                .child(
+                    div()
+                        .id(SharedString::from(format!("mask_mode_{mid}")))
+                        .test_support()
+                        .w(px(108.))
+                        .child({
+                            let key = format!("mask_mode_{mid}");
+                            if let Some(cb) = combos.get(&key) {
+                                Combobox::new(cb).small().into_any_element()
+                            } else {
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(mask.mode.label())
+                                    .into_any_element()
+                            }
+                        }),
+                )
                 .child(
                     div()
                         .cursor_pointer()
@@ -8755,7 +8859,9 @@ fn render_applied_effects(
                 // Fully declarative arms: every parameter renders from its
                 // declaration (no per-effect UI). Custom arms below keep
                 // only their bespoke parts (pickers, editors, gradients).
-                EffectType::GaussianBlur { .. } | EffectType::BrightnessContrast { .. } => {
+                EffectType::GaussianBlur { .. }
+                | EffectType::BrightnessContrast { .. }
+                | EffectType::OuterGlow { .. } => {
                     for decl in effect.declarations() {
                         effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, enums, cx));
                     }
@@ -13386,6 +13492,9 @@ fn effect_template_for(plugin_id: &str) -> Option<EffectType> {
         }
         "net.sf.openfx.drop_shadow" => {
             EffectType::drop_shadow(8.0, 45.0, 10.0, 75.0, Color::BLACK)
+        }
+        "net.sf.openfx.outer_glow" => {
+            EffectType::outer_glow(20.0, 0.0, 75.0, Color::rgb(0.3, 0.8, 1.0), 50.0)
         }
         "net.sf.openfx.displacement" => EffectType::displacement(50.0, 50.0),
         "net.sf.openfx.perspective" => EffectType::perspective(0.0, 0.0),
