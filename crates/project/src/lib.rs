@@ -33,7 +33,7 @@ pub use clock::{
 };
 pub use color::Color;
 pub use composition::Composition;
-pub use effect::{Effect, EffectType, TileCell, TileMode};
+pub use effect::{Effect, EffectType, TextSplitBy, TextSplitEasing, TextSplitOrder, TileCell, TileMode};
 pub use error::{ColorError, ProjectError, TimeCodeError, ValidationError};
 pub use frame_rate::FrameRate;
 pub use keyframe::{

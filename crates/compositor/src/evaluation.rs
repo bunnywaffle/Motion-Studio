@@ -451,6 +451,18 @@ pub enum EvaluatedEffectType {
         strength: f32,
         softness: f32,
     },
+    TextSplitAnimator {
+        split_by: project::TextSplitBy,
+        order: project::TextSplitOrder,
+        random_seed: i32,
+        progress: f32,
+        spread: f32,
+        easing: project::TextSplitEasing,
+        offset_position: Vec2,
+        offset_rotation: f32,
+        offset_opacity: f32,
+        anchor_alignment: Vec2,
+    },
     Bloom {
         intensity: f32,
         radius: f32,
@@ -525,6 +537,7 @@ impl EvaluatedEffectType {
             Self::Perspective { .. } => "Perspective",
             Self::TextOutline { .. } => "Text Outline",
             Self::TextBevel { .. } => "Text Bevel",
+            Self::TextSplitAnimator { .. } => "Text Split Animator (2D)",
             Self::Bloom { .. } => "Bloom",
             Self::Tiler { .. } => "Tiler",
             Self::Warp { .. } => "Warp",
@@ -559,6 +572,7 @@ impl EvaluatedEffectType {
             Self::Perspective { .. } => "net.sf.openfx.perspective",
             Self::TextOutline { .. } => "net.sf.openfx.text_outline",
             Self::TextBevel { .. } => "net.sf.openfx.text_bevel",
+            Self::TextSplitAnimator { .. } => "net.sf.openfx.text_split_animator",
             Self::Bloom { .. } => "net.sf.openfx.bloom",
             Self::Tiler { .. } => "net.sf.openfx.tiler",
             Self::Warp { .. } => "net.sf.openfx.warp",
@@ -593,6 +607,7 @@ impl EvaluatedEffectType {
                     | Self::Perspective { .. }
                     | Self::TextOutline { .. }
                     | Self::TextBevel { .. }
+                    | Self::TextSplitAnimator { .. }
                     | Self::Tiler { .. }
                     | Self::Warp { .. }
                     | Self::Sharpen { .. }
@@ -776,6 +791,7 @@ impl EvaluatedEffectType {
             | Self::Perspective { .. }
             | Self::TextOutline { .. }
             | Self::TextBevel { .. }
+            | Self::TextSplitAnimator { .. }
             | Self::Tiler { .. }
             | Self::Warp { .. } => c,
             Self::Bloom { intensity, .. } => {
@@ -1851,6 +1867,39 @@ impl LayerStackEvaluator {
                             EvaluatedEffectType::TextBevel {
                                 strength: strength.evaluate_at(time),
                                 softness: softness.evaluate_at(time),
+                            }
+                        }
+                        EffectType::TextSplitAnimator {
+                            split_by,
+                            order,
+                            random_seed,
+                            progress,
+                            spread,
+                            easing,
+                            position_x,
+                            position_y,
+                            rotation,
+                            opacity,
+                            anchor_x,
+                            anchor_y,
+                        } => {
+                            EvaluatedEffectType::TextSplitAnimator {
+                                split_by: *split_by,
+                                order: *order,
+                                random_seed: random_seed.evaluate_at(time) as i32,
+                                progress: progress.evaluate_at(time),
+                                spread: spread.evaluate_at(time),
+                                easing: *easing,
+                                offset_position: Vec2::new(
+                                    position_x.evaluate_at(time),
+                                    position_y.evaluate_at(time),
+                                ),
+                                offset_rotation: rotation.evaluate_at(time),
+                                offset_opacity: opacity.evaluate_at(time),
+                                anchor_alignment: Vec2::new(
+                                    anchor_x.evaluate_at(time),
+                                    anchor_y.evaluate_at(time),
+                                ),
                             }
                         }
                         EffectType::Bloom { intensity, radius } => {

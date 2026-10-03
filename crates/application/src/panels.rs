@@ -2858,6 +2858,7 @@ pub enum ViewerGizmoDrag {    Rotate {
         start_scale: Vec2,
         start_local: Vec2,
         anchor_local: Vec2,
+        start_world_inv: Option<compositor::AffineTransform2D>,
     },
     Anchor {
         layer_id: String,
@@ -3595,6 +3596,7 @@ impl Render for CompositionViewerPanel {
                                         if let Some(loc) = lay.world_to_local_point(Vec2::new(cmx, cmy)) {
                                             let a = lay.transform.anchor_point;
                                             let sc = lay.transform.scale;
+                                            let winv = lay.transform.world_matrix.inverse();
                                             p_h.update(cx, |this, cx| {
                                                 this.gizmo_drag = Some(ViewerGizmoDrag::Scale {
                                                     layer_id: lid_h.clone(),
@@ -3604,6 +3606,7 @@ impl Render for CompositionViewerPanel {
                                                     start_scale: sc,
                                                     start_local: loc,
                                                     anchor_local: a,
+                                                    start_world_inv: winv,
                                                 });
                                                 cx.notify();
                                             });
@@ -3649,6 +3652,7 @@ impl Render for CompositionViewerPanel {
                                         if let Some(loc) = lay.world_to_local_point(Vec2::new(cmx, cmy)) {
                                             let a = lay.transform.anchor_point;
                                             let sc = lay.transform.scale;
+                                            let winv = lay.transform.world_matrix.inverse();
                                             p_h.update(cx, |this, cx| {
                                                 this.gizmo_drag = Some(ViewerGizmoDrag::Scale {
                                                     layer_id: lid_h.clone(),
@@ -3658,6 +3662,7 @@ impl Render for CompositionViewerPanel {
                                                     start_scale: sc,
                                                     start_local: loc,
                                                     anchor_local: a,
+                                                    start_world_inv: winv,
                                                 });
                                                 cx.notify();
                                             });
@@ -4400,9 +4405,11 @@ impl Render for CompositionViewerPanel {
                                 });
                             }
                         }
-                        ViewerGizmoDrag::Scale { layer_id, uniform, use_x, use_y, start_scale, start_local, anchor_local } => {
-                            let local = st.read(cx).layer_drag_frame(&layer_id).and_then(|(world, _)| {
-                                world.transform_point_inverse(Vec2::new(cmx, cmy))
+                        ViewerGizmoDrag::Scale { layer_id, uniform, use_x, use_y, start_scale, start_local, anchor_local, start_world_inv } => {
+                            let local = start_world_inv.map(|inv| inv.transform_point(Vec2::new(cmx, cmy))).or_else(|| {
+                                st.read(cx).layer_drag_frame(&layer_id).and_then(|(world, _)| {
+                                    world.transform_point_inverse(Vec2::new(cmx, cmy))
+                                })
                             });
                             if let Some(loc) = local {
                                 let denom_x = (start_local.x - anchor_local.x).abs().max(1.0);
@@ -9696,6 +9703,62 @@ fn render_applied_effects(
                         effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &angle, wheels, enums, cx));
                     }
                 }
+                EffectType::TextSplitAnimator { .. } => {
+                    let decls = effect.declarations();
+                    let find_decl = |f: &str| decls.iter().find(|d| d.field == f);
+
+                    // Group styling helper
+                    let render_group_header = |title: &str| {
+                        h_flex()
+                            .items_center()
+                            .pt_1()
+                            .pb_0p5()
+                            .text_xs()
+                            .font_semibold()
+                            .text_color(cx.theme().primary)
+                            .child(format!("[ {} ]", title))
+                    };
+
+                    // 1. [ SPLIT ENGINE ]
+                    effect_box = effect_box.child(render_group_header("SPLIT ENGINE"));
+                    for f in &["split_by", "order", "random_seed"] {
+                        if let Some(d) = find_decl(f) {
+                            effect_box = effect_box.child(crate::widgets::widget_for_decl(
+                                state, panel_entity, &layer.id, &eff_id, d, wheels, enums, cx,
+                            ));
+                        }
+                    }
+
+                    // 2. [ TIMING & RANGE ]
+                    effect_box = effect_box.child(render_group_header("TIMING & RANGE"));
+                    for f in &["progress", "spread", "easing"] {
+                        if let Some(d) = find_decl(f) {
+                            effect_box = effect_box.child(crate::widgets::widget_for_decl(
+                                state, panel_entity, &layer.id, &eff_id, d, wheels, enums, cx,
+                            ));
+                        }
+                    }
+
+                    // 3. [ 2D TRANSFORM OFFSETS ]
+                    effect_box = effect_box.child(render_group_header("2D TRANSFORM OFFSETS"));
+                    for f in &["position_x", "position_y", "rotation", "opacity"] {
+                        if let Some(d) = find_decl(f) {
+                            effect_box = effect_box.child(crate::widgets::widget_for_decl(
+                                state, panel_entity, &layer.id, &eff_id, d, wheels, enums, cx,
+                            ));
+                        }
+                    }
+
+                    // 4. [ ALIGNMENT ]
+                    effect_box = effect_box.child(render_group_header("ALIGNMENT"));
+                    for f in &["anchor_x", "anchor_y"] {
+                        if let Some(d) = find_decl(f) {
+                            effect_box = effect_box.child(crate::widgets::widget_for_decl(
+                                state, panel_entity, &layer.id, &eff_id, d, wheels, enums, cx,
+                            ));
+                        }
+                    }
+                }
                 EffectType::Perspective { .. }
                 | EffectType::TextOutline { .. }
                 | EffectType::TextBevel { .. }
@@ -13521,6 +13584,7 @@ fn effect_template_for(plugin_id: &str) -> Option<EffectType> {
         }
         "net.sf.openfx.text_outline" => EffectType::text_outline(3.0, Color::BLACK),
         "net.sf.openfx.text_bevel" => EffectType::text_bevel(60.0, 30.0),
+        "net.sf.openfx.text_split_animator" => EffectType::text_split_animator(),
         "net.sf.openfx.custom.glsl" => EffectType::glsl_shader(
             project::Effect::default_glsl_code(),
             1.0,

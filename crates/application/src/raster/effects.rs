@@ -399,6 +399,7 @@ pub fn apply_effect_pixels(
         }
         EvaluatedEffectType::TextOutline { .. }
         | EvaluatedEffectType::TextBevel { .. }
+        | EvaluatedEffectType::TextSplitAnimator { .. }
         | EvaluatedEffectType::OuterGlow { .. } => {
             // Resolved inside the text/blit rasterizer.
         }

@@ -521,3 +521,415 @@ pub fn raster_text_on_path(
 }
 
 // ---------------------------------------------------------------------------
+// Text Split Animator (2D)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct TextSplitParams {
+    pub split_by: project::TextSplitBy,
+    pub order: project::TextSplitOrder,
+    pub random_seed: i32,
+    pub progress: f32, // 0.0 .. 100.0%
+    pub spread: f32,   // 0.0 .. 100.0%
+    pub easing: project::TextSplitEasing,
+    pub offset_position: project::Vec2,
+    pub offset_rotation: f32,
+    pub offset_opacity: f32,
+    pub anchor_alignment: project::Vec2,
+}
+
+struct TokenGlyph {
+    mask: GlyphMask,
+    rel_x: f32,
+    rel_y: f32,
+}
+
+struct TokenItem {
+    glyphs: Vec<TokenGlyph>,
+    bounds: (f32, f32, f32, f32), // min_x, min_y, max_x, max_y
+    center: (f32, f32),
+}
+
+/// Rasterize text with per-character or per-word 2D split animation transforms.
+pub fn raster_text_split(
+    spec: &TextSpec,
+    params: &TextSplitParams,
+) -> (FloatBuf, (f32, f32, f32, f32)) {
+    use cosmic_text::{Align, Attrs, Family, LetterSpacing, Metrics, Shaping, Style, Weight};
+    let content = if spec.all_caps { spec.text.to_uppercase() } else { spec.text.to_string() };
+    if content.is_empty() {
+        return (FloatBuf::clear(8, 8), (0.0, 0.0, 0.0, 0.0));
+    }
+    let size = spec.size.max(4.0);
+    let leading = if spec.leading > 0.0 { spec.leading } else { size * 1.2 };
+    let wrap_w = if spec.box_w > 0.0 { Some(spec.box_w) } else { None };
+    let _scratch_w = wrap_w.unwrap_or((content.chars().count().max(1) as f32 * size * 0.75 + 120.0).max(64.0));
+    let scratch_h = (leading * (content.lines().count().max(1) as f32 + 2.0)).max(leading * 3.0).max(64.0);
+
+    let mut fs = font_system();
+    let metrics = Metrics::new(size, leading);
+    let mut buffer = cosmic_text::Buffer::new(&mut fs, metrics);
+    buffer.set_size(wrap_w, Some(scratch_h));
+    let mut attrs = Attrs::new();
+    attrs.family = Family::Name(spec.family);
+    attrs.weight = Weight(spec.weight.clamp(100, 900));
+    if spec.italic {
+        attrs.style = Style::Italic;
+    }
+    if spec.tracking.abs() > 0.01 {
+        attrs.letter_spacing_opt = Some(LetterSpacing(spec.tracking));
+    }
+    let align = match spec.align {
+        TextAlign::Left | TextAlign::JustifyLeft => Align::Left,
+        TextAlign::Center | TextAlign::JustifyCenter => Align::Center,
+        TextAlign::Right | TextAlign::JustifyRight => Align::Right,
+        TextAlign::JustifyAll => Align::Justified,
+    };
+    buffer.set_text(&content, &attrs, Shaping::Advanced, Some(align));
+    buffer.shape_until_scroll(&mut fs, false);
+
+    struct RawGlyph {
+        mask: GlyphMask,
+        byte_start: usize,
+        byte_end: usize,
+    }
+
+    let mut swash = swash_cache();
+    let mut raw_glyphs: Vec<RawGlyph> = Vec::new();
+    for run in buffer.layout_runs() {
+        for glyph in run.glyphs.iter() {
+            let physical = glyph.physical((0.0, run.line_y), 1.0);
+            let img = match swash.get_image(&mut fs, physical.cache_key) {
+                Some(v) => v,
+                None => continue,
+            };
+            use cosmic_text::SwashContent;
+            let (mw, mh, data) = match &img.content {
+                SwashContent::Mask => (img.placement.width, img.placement.height, img.data.clone()),
+                SwashContent::Color | SwashContent::SubpixelMask => {
+                    (img.placement.width, img.placement.height, vec![255u8; (img.placement.width * img.placement.height) as usize])
+                }
+            };
+            raw_glyphs.push(RawGlyph {
+                mask: GlyphMask {
+                    x: physical.x + img.placement.left,
+                    y: physical.y - img.placement.top + spec.baseline_shift.round() as i32,
+                    w: mw,
+                    h: mh,
+                    data,
+                },
+                byte_start: glyph.start,
+                byte_end: glyph.end,
+            });
+        }
+    }
+    drop(swash);
+
+    if raw_glyphs.is_empty() {
+        return (FloatBuf::clear(8, 8), (0.0, 0.0, 0.0, 0.0));
+    }
+
+    // Group raw glyphs into tokens (either individual glyphs or words)
+    let mut tokens: Vec<TokenItem> = Vec::new();
+    match params.split_by {
+        project::TextSplitBy::Character => {
+            for rg in raw_glyphs {
+                let gx = rg.mask.x as f32;
+                let gy = rg.mask.y as f32;
+                let gw = rg.mask.w as f32;
+                let gh = rg.mask.h as f32;
+                let cx = gx + gw * 0.5;
+                let cy = gy + gh * 0.5;
+                tokens.push(TokenItem {
+                    glyphs: vec![TokenGlyph {
+                        mask: rg.mask,
+                        rel_x: 0.0,
+                        rel_y: 0.0,
+                    }],
+                    bounds: (gx, gy, gx + gw, gy + gh),
+                    center: (cx, cy),
+                });
+            }
+        }
+        project::TextSplitBy::Word => {
+            // Group by word spans in the underlying text
+            let mut current_glyphs: Vec<RawGlyph> = Vec::new();
+            for rg in raw_glyphs {
+                let slice = content.get(rg.byte_start..rg.byte_end).unwrap_or("");
+                let is_whitespace = slice.chars().all(|c| c.is_whitespace());
+                if is_whitespace && !current_glyphs.is_empty() {
+                    // Flush current word
+                    tokens.push(make_token(std::mem::take(&mut current_glyphs)));
+                } else if !is_whitespace {
+                    current_glyphs.push(rg);
+                }
+            }
+            if !current_glyphs.is_empty() {
+                tokens.push(make_token(current_glyphs));
+            }
+        }
+    }
+
+    fn make_token(glyphs: Vec<RawGlyph>) -> TokenItem {
+        let mut min_x = f32::INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        for g in &glyphs {
+            let gx = g.mask.x as f32;
+            let gy = g.mask.y as f32;
+            let gw = g.mask.w as f32;
+            let gh = g.mask.h as f32;
+            min_x = min_x.min(gx);
+            min_y = min_y.min(gy);
+            max_x = max_x.max(gx + gw);
+            max_y = max_y.max(gy + gh);
+        }
+        let cx = (min_x + max_x) * 0.5;
+        let cy = (min_y + max_y) * 0.5;
+        let token_glyphs = glyphs
+            .into_iter()
+            .map(|g| TokenGlyph {
+                rel_x: g.mask.x as f32 - min_x,
+                rel_y: g.mask.y as f32 - min_y,
+                mask: g.mask,
+            })
+            .collect();
+        TokenItem {
+            glyphs: token_glyphs,
+            bounds: (min_x, min_y, max_x, max_y),
+            center: (cx, cy),
+        }
+    }
+
+    if tokens.is_empty() {
+        return (FloatBuf::clear(8, 8), (0.0, 0.0, 0.0, 0.0));
+    }
+
+    // Determine normalized rank u_i in [0.0, 1.0] for each token
+    let n = tokens.len();
+    let mut ranks: Vec<f32> = Vec::with_capacity(n);
+    match params.order {
+        project::TextSplitOrder::FromStart => {
+            for i in 0..n {
+                let u = if n > 1 { i as f32 / (n - 1) as f32 } else { 0.0 };
+                ranks.push(u);
+            }
+        }
+        project::TextSplitOrder::FromEnd => {
+            for i in 0..n {
+                let u = if n > 1 { (n - 1 - i) as f32 / (n - 1) as f32 } else { 0.0 };
+                ranks.push(u);
+            }
+        }
+        project::TextSplitOrder::Random => {
+            // Seeded permutation using LCG
+            let mut perm: Vec<usize> = (0..n).collect();
+            let mut state = (params.random_seed as u64).wrapping_add(1);
+            for i in (1..n).rev() {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                let j = (state >> 33) as usize % (i + 1);
+                perm.swap(i, j);
+            }
+            ranks.resize(n, 0.0);
+            for (rank_idx, &orig_idx) in perm.iter().enumerate() {
+                ranks[orig_idx] = if n > 1 { rank_idx as f32 / (n - 1) as f32 } else { 0.0 };
+            }
+        }
+    }
+
+    let progress_norm = (params.progress / 100.0).clamp(0.0, 1.0);
+    let spread_norm = (params.spread / 100.0).clamp(0.01, 1.0);
+
+    // Bounding bounds of all tokens combined with padding
+    let mut total_min_x = f32::INFINITY;
+    let mut total_min_y = f32::INFINITY;
+    let mut total_max_x = f32::NEG_INFINITY;
+    let mut total_max_y = f32::NEG_INFINITY;
+    for t in &tokens {
+        total_min_x = total_min_x.min(t.bounds.0);
+        total_min_y = total_min_y.min(t.bounds.1);
+        total_max_x = total_max_x.max(t.bounds.2);
+        total_max_y = total_max_y.max(t.bounds.3);
+    }
+
+    let pad_w = (params.offset_position.x.abs() + size * 2.0 + 80.0).max(64.0);
+    let pad_h = (params.offset_position.y.abs() + size * 2.0 + 80.0).max(64.0);
+    let out_ox = total_min_x - pad_w;
+    let out_oy = total_min_y - pad_h;
+    let out_w = ((total_max_x - total_min_x) + pad_w * 2.0).ceil().max(32.0) as u32;
+    let out_h = ((total_max_y - total_min_y) + pad_h * 2.0).ceil().max(32.0) as u32;
+
+    let mut buf = FloatBuf::clear(out_w, out_h);
+
+    let sw_px = spec.stroke_w.round() as i32;
+    let fill_axis = spec.fill_gradient.as_ref().map(|g| gradient_axis(out_w as f32, out_h as f32, g.angle));
+    let stroke_axis = spec.stroke_gradient.as_ref().map(|g| gradient_axis(out_w as f32, out_h as f32, g.angle));
+
+    for (i, token) in tokens.iter().enumerate() {
+        let u = ranks[i];
+        // Activation calculation with spread/overlap
+        let raw_w = ((progress_norm - u * (1.0 - spread_norm)) / spread_norm).clamp(0.0, 1.0);
+        let weight = params.easing.apply(raw_w);
+        let offset_factor = 1.0 - weight;
+
+        let delta_pos = params.offset_position * offset_factor;
+        let delta_rot = params.offset_rotation * offset_factor;
+        let min_opacity = (params.offset_opacity / 100.0).clamp(0.0, 1.0);
+        let alpha_factor = (1.0 - (1.0 - min_opacity) * offset_factor).clamp(0.0, 1.0);
+
+        if alpha_factor <= 0.003 {
+            continue;
+        }
+
+        let tw = (token.bounds.2 - token.bounds.0).max(1.0);
+        let th = (token.bounds.3 - token.bounds.1).max(1.0);
+
+        // Local token anchor point (relative to token bounds min)
+        // User anchor_alignment is -1.0..1.0 or pixel offset; normalize around center
+        let anc_x = tw * 0.5 + params.anchor_alignment.x;
+        let anc_y = th * 0.5 + params.anchor_alignment.y;
+
+        // Render token into a temporary sub-buffer
+        let tmp_pad = (sw_px.max(4) + 4) as f32;
+        let tmp_w = (tw + tmp_pad * 2.0).ceil() as u32;
+        let tmp_h = (th + tmp_pad * 2.0).ceil() as u32;
+        let mut tmp = FloatBuf::clear(tmp_w, tmp_h);
+
+        // Draw glyphs into temp buffer
+        for g in &token.glyphs {
+            let gx = (g.rel_x + tmp_pad).round() as i32;
+            let gy = (g.rel_y + tmp_pad).round() as i32;
+            let shifted = GlyphMask {
+                x: gx,
+                y: gy,
+                w: g.mask.w,
+                h: g.mask.h,
+                data: g.mask.data.clone(),
+            };
+
+            if let Some((strength, _)) = spec.bevel {
+                if strength > 0.5 {
+                    let k = (strength / 100.0 * 0.8).clamp(0.0, 0.9);
+                    draw_mask(&mut tmp, &shifted, -1, -1, Px { r: 0.0, g: 0.0, b: 0.0, a: k * 0.9 });
+                    draw_mask(&mut tmp, &shifted, 1, 1, Px { r: k * 0.9, g: k * 0.9, b: k * 0.9, a: k * 0.9 });
+                }
+            }
+
+            if sw_px >= 1 {
+                let white = Px { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+                let mut a_buf = FloatBuf::clear(tmp.w, tmp.h);
+                draw_mask(&mut a_buf, &shifted, 0, 0, white);
+                if spec.weight >= 700 {
+                    draw_mask(&mut a_buf, &shifted, 1, 0, white);
+                }
+                let flat: Vec<f32> = a_buf.px.iter().map(|p| p.a).collect();
+                let grown = super::mask::box_extremum(&flat, tmp.w, tmp.h, spec.stroke_w.clamp(1.0, 128.0), true);
+                for (idx, dst) in tmp.px.iter_mut().enumerate() {
+                    let ring = (grown[idx] - flat[idx]).clamp(0.0, 1.0);
+                    if ring <= 0.003 {
+                        continue;
+                    }
+                    let col = match (&spec.stroke_gradient, stroke_axis) {
+                        (Some(grad), Some(axis)) => Px::from_color(sample_fill_gradient(grad, token.center.0 - out_ox, token.center.1 - out_oy, axis)),
+                        _ => spec.stroke_col,
+                    };
+                    let mut p = col;
+                    p.scale(ring);
+                    let mut out = *dst;
+                    out.over(p);
+                    *dst = out;
+                }
+            }
+
+            let fill_col = match (&spec.fill_gradient, fill_axis) {
+                (Some(grad), Some(axis)) => Px::from_color(sample_fill_gradient(grad, token.center.0 - out_ox, token.center.1 - out_oy, axis)),
+                _ => spec.fill,
+            };
+            draw_mask(&mut tmp, &shifted, 0, 0, fill_col);
+            if spec.weight >= 700 {
+                draw_mask(&mut tmp, &shifted, 1, 0, fill_col);
+            }
+        }
+
+        // Blit token via 2D affine transform into destination buffer
+        // Destination pivot point:
+        let dst_pivot_x = (token.bounds.0 - out_ox) + anc_x + delta_pos.x;
+        let dst_pivot_y = (token.bounds.1 - out_oy) + anc_y + delta_pos.y;
+        let src_pivot_x = tmp_pad + anc_x;
+        let src_pivot_y = tmp_pad + anc_y;
+
+        let rad = delta_rot.to_radians();
+        let (sn, cs) = (rad.sin(), rad.cos());
+        let rot = Aff { a: cs, b: sn, c: -sn, d: cs, tx: 0.0, ty: 0.0 };
+        let to_dst = Aff { a: 1.0, b: 0.0, c: 0.0, d: 1.0, tx: dst_pivot_x, ty: dst_pivot_y };
+        let from_src = Aff { a: 1.0, b: 0.0, c: 0.0, d: 1.0, tx: -src_pivot_x, ty: -src_pivot_y };
+        let map = aff_mul(to_dst, aff_mul(rot, from_src));
+
+        blit_affine(&mut buf, &tmp, map, alpha_factor, BlendMode::Normal, None, None);
+    }
+
+    // Compute ink bounds
+    let mut min_x = buf.w as f32;
+    let mut min_y = buf.h as f32;
+    let mut max_x = 0.0f32;
+    let mut max_y = 0.0f32;
+    for y in 0..buf.h {
+        for x in 0..buf.w {
+            if buf.px[(y * buf.w + x) as usize].a > 0.01 {
+                min_x = min_x.min(x as f32);
+                min_y = min_y.min(y as f32);
+                max_x = max_x.max(x as f32 + 1.0);
+                max_y = max_y.max(y as f32 + 1.0);
+            }
+        }
+    }
+    if max_x <= min_x {
+        return (buf, (0.0, 0.0, 0.0, 0.0));
+    }
+    (buf, (min_x, min_y, max_x, max_y))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use project::{TextSplitBy, TextSplitEasing, TextSplitOrder, Vec2};
+
+    #[test]
+    fn test_raster_text_split_smoke() {
+        let spec = TextSpec {
+            text: "HELLO WORLD",
+            family: "Arial",
+            size: 32.0,
+            fill: Px { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+            fill_gradient: None,
+            weight: 400,
+            italic: false,
+            tracking: 0.0,
+            leading: 40.0,
+            align: TextAlign::Left,
+            all_caps: false,
+            stroke_w: 0.0,
+            stroke_col: Px { r: 0.0, g: 0.0, b: 0.0, a: 0.0 },
+            stroke_gradient: None,
+            baseline_shift: 0.0,
+            box_w: 400.0,
+            bevel: None,
+        };
+        let params = TextSplitParams {
+            split_by: TextSplitBy::Character,
+            order: TextSplitOrder::FromStart,
+            random_seed: 12487,
+            progress: 50.0,
+            spread: 40.0,
+            easing: TextSplitEasing::EaseInOut,
+            offset_position: Vec2::new(0.0, -50.0),
+            offset_rotation: -25.0,
+            offset_opacity: 0.0,
+            anchor_alignment: Vec2::new(0.0, 0.0),
+        };
+        let (buf, bounds) = raster_text_split(&spec, &params);
+        assert!(buf.w > 0 && buf.h > 0);
+        assert!(bounds.2 >= bounds.0);
+    }
+}

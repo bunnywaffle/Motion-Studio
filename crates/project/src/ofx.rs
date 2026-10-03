@@ -327,6 +327,20 @@ pub const OFX_SUITE: &[OfxEffectDescriptor] = &[
         spatial: true,
     },
     OfxEffectDescriptor {
+        id: "net.sf.openfx.text_split_animator",
+        label: "Text Split Animator (2D)",
+        category: OfxCategory::Text,
+        params: &[
+            OfxParamDescriptor { name: "progress", label: "Progress", min: 0.0, max: 100.0, default: 0.0 },
+            OfxParamDescriptor { name: "spread", label: "Spread / Overlap", min: 0.0, max: 100.0, default: 40.0 },
+            OfxParamDescriptor { name: "position_x", label: "Position X", min: -1000.0, max: 1000.0, default: 0.0 },
+            OfxParamDescriptor { name: "position_y", label: "Position Y", min: -1000.0, max: 1000.0, default: -50.0 },
+            OfxParamDescriptor { name: "rotation", label: "Rotation", min: -360.0, max: 360.0, default: -25.0 },
+            OfxParamDescriptor { name: "opacity", label: "Opacity", min: 0.0, max: 100.0, default: 0.0 },
+        ],
+        spatial: true,
+    },
+    OfxEffectDescriptor {
         id: "net.sf.openfx.custom.glsl",
         label: "Custom GLSL Shader",
         category: OfxCategory::Custom,

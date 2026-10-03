@@ -224,6 +224,59 @@ pub fn raster_content(
                 }
                 return Some(out);
             }
+            // Check for active TextSplitAnimator effect
+            let mut split_params = None;
+            for eff in &layer.effects {
+                if !eff.enabled {
+                    continue;
+                }
+                if let EvaluatedEffectType::TextSplitAnimator {
+                    split_by,
+                    order,
+                    random_seed,
+                    progress,
+                    spread,
+                    easing,
+                    offset_position,
+                    offset_rotation,
+                    offset_opacity,
+                    anchor_alignment,
+                } = &eff.effect_type
+                {
+                    split_params = Some(super::text::TextSplitParams {
+                        split_by: *split_by,
+                        order: *order,
+                        random_seed: *random_seed,
+                        progress: *progress,
+                        spread: *spread,
+                        easing: *easing,
+                        offset_position: *offset_position,
+                        offset_rotation: *offset_rotation,
+                        offset_opacity: *offset_opacity,
+                        anchor_alignment: *anchor_alignment,
+                    });
+                    break;
+                }
+            }
+            if let Some(sp) = split_params {
+                let (tbuf, ink) = super::text::raster_text_split(&spec, &sp);
+                let (ix0, iy0, ix1, iy1) = ink;
+                let mut out = FloatBuf::clear(base_w.ceil().max(1.0) as u32, base_h.ceil().max(1.0) as u32);
+                if ix1 > ix0 && iy1 > iy0 {
+                    let dx = (base_w - (ix1 - ix0)) / 2.0 - ix0;
+                    let dy = (base_h - (iy1 - iy0)) / 2.0 - iy0;
+                    for y in 0..out.h {
+                        for x in 0..out.w {
+                            let s = tbuf.sample(x as f32 - dx, y as f32 - dy);
+                            if s.a > 0.003 {
+                                out.px[(y * out.w + x) as usize] = s;
+                            }
+                        }
+                    }
+                }
+                return Some(out);
+            }
+
             let (tbuf, ink) = raster_text(&spec);
             // Center the ink in the estimate box (mirrors the old
             // flex-center div layout and the anchor math exactly).
@@ -480,6 +533,7 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
         EvaluatedEffectType::Perspective { .. } => 14,
         EvaluatedEffectType::TextOutline { .. } => 15,
         EvaluatedEffectType::TextBevel { .. } => 16,
+        EvaluatedEffectType::TextSplitAnimator { .. } => 28,
         EvaluatedEffectType::Bloom { .. } => 17,
         EvaluatedEffectType::Tiler { .. } => 18,
         EvaluatedEffectType::Warp { .. } => 19,
@@ -641,6 +695,31 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
             for c in colors {
                 color_hash(c, h);
             }
+        }
+        EvaluatedEffectType::TextSplitAnimator {
+            split_by,
+            order,
+            random_seed,
+            progress,
+            spread,
+            easing,
+            offset_position,
+            offset_rotation,
+            offset_opacity,
+            anchor_alignment,
+        } => {
+            split_by.index().hash(h);
+            order.index().hash(h);
+            random_seed.hash(h);
+            progress.to_bits().hash(h);
+            spread.to_bits().hash(h);
+            easing.index().hash(h);
+            offset_position.x.to_bits().hash(h);
+            offset_position.y.to_bits().hash(h);
+            offset_rotation.to_bits().hash(h);
+            offset_opacity.to_bits().hash(h);
+            anchor_alignment.x.to_bits().hash(h);
+            anchor_alignment.y.to_bits().hash(h);
         }
     }
 }

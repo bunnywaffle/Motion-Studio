@@ -22,6 +22,30 @@ fn default_tile_amount() -> Property<f32> {
     Property::new("Randomize", 0.0)
 }
 
+fn default_text_split_seed() -> Property<f32> {
+    Property::new("Random Seed", 12487.0)
+}
+
+fn default_text_split_progress() -> Property<f32> {
+    Property::new("Progress", 0.0)
+}
+
+fn default_text_split_spread() -> Property<f32> {
+    Property::new("Spread / Overlap", 40.0)
+}
+
+fn default_text_split_zero() -> Property<f32> {
+    Property::new("Offset", 0.0)
+}
+
+fn default_text_split_pos_y() -> Property<f32> {
+    Property::new("Position Y", -50.0)
+}
+
+fn default_text_split_rot() -> Property<f32> {
+    Property::new("Rotation", -25.0)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TileMode {
@@ -121,6 +145,130 @@ impl TileCell {
         }
     }
 }
+
+/// Unit of subdivision for the 2D text split animator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextSplitBy {
+    /// Animate each character/glyph independently.
+    #[default]
+    Character,
+    /// Animate word tokens independently.
+    Word,
+}
+
+impl TextSplitBy {
+    pub const ALL: [Self; 2] = [Self::Character, Self::Word];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Character => "By Character",
+            Self::Word => "By Word",
+        }
+    }
+
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.label() == label)
+    }
+
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Character => 0,
+            Self::Word => 1,
+        }
+    }
+}
+
+/// Order of token activation across time in the 2D text split animator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextSplitOrder {
+    /// Left-to-right / start-to-end traversal.
+    #[default]
+    FromStart,
+    /// Right-to-left / end-to-start traversal.
+    FromEnd,
+    /// Seeded pseudorandom shuffle.
+    Random,
+}
+
+impl TextSplitOrder {
+    pub const ALL: [Self; 3] = [Self::FromStart, Self::FromEnd, Self::Random];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::FromStart => "From Start",
+            Self::FromEnd => "From End",
+            Self::Random => "Random",
+        }
+    }
+
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.label() == label)
+    }
+
+    pub const fn index(self) -> usize {
+        match self {
+            Self::FromStart => 0,
+            Self::FromEnd => 1,
+            Self::Random => 2,
+        }
+    }
+}
+
+/// Interpolation easing curve applied to each token's transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextSplitEasing {
+    #[default]
+    EaseInOut,
+    Linear,
+    EaseIn,
+    EaseOut,
+}
+
+impl TextSplitEasing {
+    pub const ALL: [Self; 4] = [Self::EaseInOut, Self::Linear, Self::EaseIn, Self::EaseOut];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::EaseInOut => "Ease In / Out",
+            Self::Linear => "Linear",
+            Self::EaseIn => "Ease In",
+            Self::EaseOut => "Ease Out",
+        }
+    }
+
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.label() == label)
+    }
+
+    pub const fn index(self) -> usize {
+        match self {
+            Self::EaseInOut => 0,
+            Self::Linear => 1,
+            Self::EaseIn => 2,
+            Self::EaseOut => 3,
+        }
+    }
+
+    pub fn apply(self, t: f32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        match self {
+            Self::Linear => t,
+            Self::EaseIn => t * t,
+            Self::EaseOut => t * (2.0 - t),
+            Self::EaseInOut => {
+                if t < 0.5 {
+                    2.0 * t * t
+                } else {
+                    -1.0 + (4.0 - 2.0 * t) * t
+                }
+            }
+        }
+    }
+}
+
 /// The specific algorithm and animatable parameters for an image processing effect.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -244,6 +392,35 @@ pub enum EffectType {
         strength: Property<f32>,
         softness: Property<f32>,
     },
+    /// Text split animator (2D): animates text glyphs/words individually
+    /// with customizable split unit, order, timing overlap, 2D transform
+    /// offsets and alignment anchors.
+    TextSplitAnimator {
+        #[serde(default)]
+        split_by: TextSplitBy,
+        #[serde(default)]
+        order: TextSplitOrder,
+        #[serde(default = "default_text_split_seed")]
+        random_seed: Property<f32>,
+        #[serde(default = "default_text_split_progress")]
+        progress: Property<f32>,
+        #[serde(default = "default_text_split_spread")]
+        spread: Property<f32>,
+        #[serde(default)]
+        easing: TextSplitEasing,
+        #[serde(default = "default_text_split_zero")]
+        position_x: Property<f32>,
+        #[serde(default = "default_text_split_pos_y")]
+        position_y: Property<f32>,
+        #[serde(default = "default_text_split_rot")]
+        rotation: Property<f32>,
+        #[serde(default = "default_text_split_zero")]
+        opacity: Property<f32>,
+        #[serde(default = "default_text_split_zero")]
+        anchor_x: Property<f32>,
+        #[serde(default = "default_text_split_zero")]
+        anchor_y: Property<f32>,
+    },
     /// Highlight bloom lift (per-pixel approximation; radius is spatial).
     Bloom {
         intensity: Property<f32>,
@@ -348,6 +525,7 @@ impl EffectType {
             Self::Perspective { .. } => "Perspective",
             Self::TextOutline { .. } => "Text Outline",
             Self::TextBevel { .. } => "Text Bevel",
+            Self::TextSplitAnimator { .. } => "Text Split Animator (2D)",
             Self::Bloom { .. } => "Bloom",
             Self::Tiler { .. } => "Tiler",
             Self::Warp { .. } => "Warp",
@@ -644,6 +822,24 @@ impl EffectType {
         }
     }
 
+    /// Construct a 2D Text Split Animator effect type.
+    pub fn text_split_animator() -> Self {
+        Self::TextSplitAnimator {
+            split_by: TextSplitBy::Character,
+            order: TextSplitOrder::FromStart,
+            random_seed: default_text_split_seed(),
+            progress: default_text_split_progress(),
+            spread: default_text_split_spread(),
+            easing: TextSplitEasing::EaseInOut,
+            position_x: default_text_split_zero(),
+            position_y: default_text_split_pos_y(),
+            rotation: default_text_split_rot(),
+            opacity: default_text_split_zero(),
+            anchor_x: default_text_split_zero(),
+            anchor_y: default_text_split_zero(),
+        }
+    }
+
     /// Construct a Bloom effect type.
     pub fn bloom(intensity: f32, radius: f32) -> Self {
         Self::Bloom {
@@ -753,6 +949,7 @@ impl EffectType {
             Self::Perspective { .. } => "net.sf.openfx.perspective",
             Self::TextOutline { .. } => "net.sf.openfx.text_outline",
             Self::TextBevel { .. } => "net.sf.openfx.text_bevel",
+            Self::TextSplitAnimator { .. } => "net.sf.openfx.text_split_animator",
             Self::Bloom { .. } => "net.sf.openfx.bloom",
             Self::Tiler { .. } => "net.sf.openfx.tiler",
             Self::Warp { .. } => "net.sf.openfx.warp",
@@ -1386,6 +1583,25 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 }
                 false
             }
+            EffectType::TextSplitAnimator { split_by, order, easing, .. } => {
+                if field.eq_ignore_ascii_case("split_by") {
+                    if let Some(s) = TextSplitBy::ALL.get(index).copied() {
+                        *split_by = s;
+                        return true;
+                    }
+                } else if field.eq_ignore_ascii_case("order") {
+                    if let Some(o) = TextSplitOrder::ALL.get(index).copied() {
+                        *order = o;
+                        return true;
+                    }
+                } else if field.eq_ignore_ascii_case("easing") {
+                    if let Some(e) = TextSplitEasing::ALL.get(index).copied() {
+                        *easing = e;
+                        return true;
+                    }
+                }
+                false
+            }
             _ => false,
         }
     }
@@ -1398,6 +1614,17 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     Some(mode.index())
                 } else if field.eq_ignore_ascii_case("cell") {
                     Some(cell.index())
+                } else {
+                    None
+                }
+            }
+            EffectType::TextSplitAnimator { split_by, order, easing, .. } => {
+                if field.eq_ignore_ascii_case("split_by") {
+                    Some(split_by.index())
+                } else if field.eq_ignore_ascii_case("order") {
+                    Some(order.index())
+                } else if field.eq_ignore_ascii_case("easing") {
+                    Some(easing.index())
                 } else {
                     None
                 }
@@ -1662,6 +1889,47 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     return true;
                 } else if param_name.eq_ignore_ascii_case("softness") {
                     softness.set_value((softness.value + delta).clamp(0.0, 100.0));
+                    return true;
+                }
+            }
+            EffectType::TextSplitAnimator {
+                random_seed,
+                progress,
+                spread,
+                position_x,
+                position_y,
+                rotation,
+                opacity,
+                anchor_x,
+                anchor_y,
+                ..
+            } => {
+                if param_name.eq_ignore_ascii_case("random_seed") || param_name.eq_ignore_ascii_case("seed") {
+                    random_seed.set_value((random_seed.value + delta).max(0.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("progress") {
+                    progress.set_value((progress.value + delta).clamp(0.0, 100.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("spread") {
+                    spread.set_value((spread.value + delta).clamp(0.0, 100.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("position_x") || param_name.eq_ignore_ascii_case("pos_x") {
+                    position_x.set_value(position_x.value + delta);
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("position_y") || param_name.eq_ignore_ascii_case("pos_y") {
+                    position_y.set_value(position_y.value + delta);
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("rotation") || param_name.eq_ignore_ascii_case("rot") {
+                    rotation.set_value(rotation.value + delta);
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("opacity") {
+                    opacity.set_value((opacity.value + delta).clamp(0.0, 100.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("anchor_x") {
+                    anchor_x.set_value(anchor_x.value + delta);
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("anchor_y") {
+                    anchor_y.set_value(anchor_y.value + delta);
                     return true;
                 }
             }
@@ -1956,6 +2224,40 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     None
                 }
             }
+            EffectType::TextSplitAnimator {
+                random_seed,
+                progress,
+                spread,
+                position_x,
+                position_y,
+                rotation,
+                opacity,
+                anchor_x,
+                anchor_y,
+                ..
+            } => {
+                if param_name.eq_ignore_ascii_case("random_seed") || param_name.eq_ignore_ascii_case("seed") {
+                    Some(random_seed)
+                } else if param_name.eq_ignore_ascii_case("progress") {
+                    Some(progress)
+                } else if param_name.eq_ignore_ascii_case("spread") {
+                    Some(spread)
+                } else if param_name.eq_ignore_ascii_case("position_x") || param_name.eq_ignore_ascii_case("pos_x") {
+                    Some(position_x)
+                } else if param_name.eq_ignore_ascii_case("position_y") || param_name.eq_ignore_ascii_case("pos_y") {
+                    Some(position_y)
+                } else if param_name.eq_ignore_ascii_case("rotation") || param_name.eq_ignore_ascii_case("rot") {
+                    Some(rotation)
+                } else if param_name.eq_ignore_ascii_case("opacity") {
+                    Some(opacity)
+                } else if param_name.eq_ignore_ascii_case("anchor_x") {
+                    Some(anchor_x)
+                } else if param_name.eq_ignore_ascii_case("anchor_y") {
+                    Some(anchor_y)
+                } else {
+                    None
+                }
+            }
             EffectType::Bloom { intensity, radius } => {
                 if param_name.eq_ignore_ascii_case("intensity") {
                     Some(intensity)
@@ -2233,6 +2535,40 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     Some(strength)
                 } else if param_name.eq_ignore_ascii_case("softness") {
                     Some(softness)
+                } else {
+                    None
+                }
+            }
+            EffectType::TextSplitAnimator {
+                random_seed,
+                progress,
+                spread,
+                position_x,
+                position_y,
+                rotation,
+                opacity,
+                anchor_x,
+                anchor_y,
+                ..
+            } => {
+                if param_name.eq_ignore_ascii_case("random_seed") || param_name.eq_ignore_ascii_case("seed") {
+                    Some(random_seed)
+                } else if param_name.eq_ignore_ascii_case("progress") {
+                    Some(progress)
+                } else if param_name.eq_ignore_ascii_case("spread") {
+                    Some(spread)
+                } else if param_name.eq_ignore_ascii_case("position_x") || param_name.eq_ignore_ascii_case("pos_x") {
+                    Some(position_x)
+                } else if param_name.eq_ignore_ascii_case("position_y") || param_name.eq_ignore_ascii_case("pos_y") {
+                    Some(position_y)
+                } else if param_name.eq_ignore_ascii_case("rotation") || param_name.eq_ignore_ascii_case("rot") {
+                    Some(rotation)
+                } else if param_name.eq_ignore_ascii_case("opacity") {
+                    Some(opacity)
+                } else if param_name.eq_ignore_ascii_case("anchor_x") {
+                    Some(anchor_x)
+                } else if param_name.eq_ignore_ascii_case("anchor_y") {
+                    Some(anchor_y)
                 } else {
                     None
                 }
@@ -2522,6 +2858,48 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
             EffectType::TextBevel { strength, softness } => vec![
                 scalar("strength", "Strength", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), strength),
                 scalar("softness", "Softness", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), softness),
+            ],
+            EffectType::TextSplitAnimator {
+                split_by,
+                order,
+                random_seed,
+                progress,
+                spread,
+                easing,
+                position_x,
+                position_y,
+                rotation,
+                opacity,
+                anchor_x,
+                anchor_y,
+            } => vec![
+                PropDecl::enumeration(
+                    "split_by",
+                    "Split By",
+                    TextSplitBy::ALL.iter().map(|s| s.label().to_string()).collect(),
+                    split_by.index(),
+                ),
+                PropDecl::enumeration(
+                    "order",
+                    "Order",
+                    TextSplitOrder::ALL.iter().map(|o| o.label().to_string()).collect(),
+                    order.index(),
+                ),
+                scalar("random_seed", "Random Seed", WidgetKind::Integer, ParamMeta::slider(0.0, 99999.0, 1.0, 0, "", 100.0), random_seed),
+                scalar("progress", "Progress", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 1.0, 0, "%", 100.0), progress),
+                scalar("spread", "Spread / Overlap", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 1.0, 0, "%", 100.0), spread),
+                PropDecl::enumeration(
+                    "easing",
+                    "Easing Curve",
+                    TextSplitEasing::ALL.iter().map(|e| e.label().to_string()).collect(),
+                    easing.index(),
+                ),
+                scalar("position_x", "Position X", WidgetKind::Slider, ParamMeta::slider(-1000.0, 1000.0, 1.0, 1, " px", 100.0), position_x),
+                scalar("position_y", "Position Y", WidgetKind::Slider, ParamMeta::slider(-1000.0, 1000.0, 1.0, 1, " px", 100.0), position_y),
+                scalar("rotation", "Rotation (Angle)", WidgetKind::Angle, ParamMeta::slider(-360.0, 360.0, 1.0, 1, " deg", 100.0), rotation),
+                scalar("opacity", "Opacity", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 1.0, 0, "%", 100.0), opacity),
+                scalar("anchor_x", "Anchor Point X", WidgetKind::Slider, ParamMeta::slider(-500.0, 500.0, 1.0, 1, " px", 100.0), anchor_x),
+                scalar("anchor_y", "Anchor Point Y", WidgetKind::Slider, ParamMeta::slider(-500.0, 500.0, 1.0, 1, " px", 100.0), anchor_y),
             ],
             EffectType::Bloom { intensity, radius } => vec![
                 scalar("intensity", "Intensity", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), intensity),
