@@ -791,89 +791,18 @@ impl EditorState {
 
     /// Create a new EditorState pre-seeded with a starter composition and animated demo layers.
     pub fn new() -> Self {
-        let mut project = Project::new("proj_default", "Motion Effect Project");
-        let fps = 30.0;
-        let duration_secs = 5.0;
-        let mut comp = Composition::hd_1080p_30fps("comp_main", "Main Composition", duration_secs);
+        let mut state = Self::blank();
+        state.seed_demo_layers();
+        state
+    }
 
-        let tc0 = TimeCode::from_frames(0, fps);
-        let tc150 = TimeCode::from_frames(150, fps);
-
-        // Layer 1: Dark background canvas solid (centered at 0, 0)
-        let mut bg_solid = Layer::solid(
-            "layer_bg",
-            "Background Solid",
-            Color::from_hex("#121316").unwrap_or(Color::BLACK),
-            1920,
-            1080,
-            tc0,
-            tc150,
-        );
-        bg_solid.transform.position.set_value(Vec2::ZERO);
-        bg_solid.transform.anchor_point.set_value(Vec2::new(960.0, 540.0));
-
-        // Layer 2: Animated accent solid with Position and Rotation keyframes (centered at 0, 0)
-        let mut accent = Layer::solid(
-            "layer_accent",
-            "Animated Box",
-            Color::from_hex("#3B82F6").unwrap_or(Color::BLUE),
-            300,
-            300,
-            tc0,
-            tc150,
-        );
-        accent.transform.anchor_point.set_value(Vec2::new(150.0, 150.0));
-        accent.transform.position.set_value(Vec2::ZERO);
-
-        // Position animation: horizontal sway around center (0, 0)
-        accent.transform.position.add_keyframe(Keyframe::bezier(
-            TimeCode::from_frames(0, fps),
-            Vec2::new(-200.0, 0.0),
-            None,
-            Some(KeyframeTangent::ease_in_out_out()),
-        ));
-        accent.transform.position.add_keyframe(Keyframe::bezier(
-            TimeCode::from_frames(60, fps),
-            Vec2::new(200.0, 0.0),
-            Some(KeyframeTangent::ease_in_out_in()),
-            Some(KeyframeTangent::ease_in_out_out()),
-        ));
-        accent.transform.position.add_keyframe(Keyframe::bezier(
-            TimeCode::from_frames(120, fps),
-            Vec2::new(-200.0, 0.0),
-            Some(KeyframeTangent::ease_in_out_in()),
-            None,
-        ));
-
-        // Rotation animation: continuous spin
-        accent.transform.rotation.add_keyframe(Keyframe::linear(TimeCode::from_frames(0, fps), 0.0));
-        accent.transform.rotation.add_keyframe(Keyframe::linear(TimeCode::from_frames(120, fps), 360.0));
-
-        // Layer 3: Title badge with opacity fade-in (offset below center)
-        let mut title_card = Layer::solid(
-            "layer_badge",
-            "Accent Badge",
-            Color::from_hex("#10B981").unwrap_or(Color::GREEN),
-            400,
-            120,
-            TimeCode::from_frames(15, fps),
-            tc150,
-        );
-        title_card.transform.anchor_point.set_value(Vec2::new(200.0, 60.0));
-        title_card.transform.position.set_value(Vec2::new(0.0, 240.0));
-        title_card.opacity.add_keyframe(Keyframe::linear(TimeCode::from_frames(15, fps), 0.0));
-        title_card.opacity.add_keyframe(Keyframe::linear(TimeCode::from_frames(45, fps), 100.0));
-
-        comp.add_layer(accent).unwrap();
-        comp.add_layer(title_card).unwrap();
-        // Background solid added LAST so it sits at the bottom of the stack
-        // (index 0 is the topmost layer, After Effects convention).
-        comp.add_layer(bg_solid).unwrap();
-
+    /// Create a completely blank EditorState with a clean composition and no layers.
+    pub fn blank() -> Self {
+        let mut project = Project::new("proj_default", "Motion Studio Project");
+        let comp = Composition::hd_1080p_30fps("comp_main", "Untitled Composition", 5.0);
         let clock = PlaybackClock::from_composition(&comp);
         let active_comp_id = "comp_main".to_string();
-        let selected_layer_id = Some("layer_accent".to_string());
-
+        let selected_layer_id = None;
         project.add_composition(comp).unwrap();
 
         Self {
@@ -909,6 +838,83 @@ impl EditorState {
             copied_property_link: None,
             property_link_toast: None,
         }
+    }
+
+    /// Seed the active composition with the three animated demo layers used in tests
+    /// (Background Solid, Animated Box, Accent Badge). Clears any existing layers first.
+    /// Selects "layer_accent" as the active layer after seeding.
+    pub fn seed_demo_layers(&mut self) {
+        let fps = 30.0;
+        let tc0 = TimeCode::from_frames(0, fps);
+        let tc150 = TimeCode::from_frames(150, fps);
+
+        let mut bg_solid = Layer::solid(
+            "layer_bg",
+            "Background Solid",
+            Color::from_hex("#121316").unwrap_or(Color::BLACK),
+            1920,
+            1080,
+            tc0,
+            tc150,
+        );
+        bg_solid.transform.position.set_value(Vec2::ZERO);
+        bg_solid.transform.anchor_point.set_value(Vec2::new(960.0, 540.0));
+
+        let mut accent = Layer::solid(
+            "layer_accent",
+            "Animated Box",
+            Color::from_hex("#3B82F6").unwrap_or(Color::BLUE),
+            300,
+            300,
+            tc0,
+            tc150,
+        );
+        accent.transform.anchor_point.set_value(Vec2::new(150.0, 150.0));
+        accent.transform.position.set_value(Vec2::ZERO);
+        accent.transform.position.add_keyframe(Keyframe::bezier(
+            TimeCode::from_frames(0, fps),
+            Vec2::new(-200.0, 0.0),
+            None,
+            Some(KeyframeTangent::ease_in_out_out()),
+        ));
+        accent.transform.position.add_keyframe(Keyframe::bezier(
+            TimeCode::from_frames(60, fps),
+            Vec2::new(200.0, 0.0),
+            Some(KeyframeTangent::ease_in_out_in()),
+            Some(KeyframeTangent::ease_in_out_out()),
+        ));
+        accent.transform.position.add_keyframe(Keyframe::bezier(
+            TimeCode::from_frames(120, fps),
+            Vec2::new(-200.0, 0.0),
+            Some(KeyframeTangent::ease_in_out_in()),
+            None,
+        ));
+        accent.transform.rotation.add_keyframe(Keyframe::linear(TimeCode::from_frames(0, fps), 0.0));
+        accent.transform.rotation.add_keyframe(Keyframe::linear(TimeCode::from_frames(120, fps), 360.0));
+
+        let mut title_card = Layer::solid(
+            "layer_badge",
+            "Accent Badge",
+            Color::from_hex("#10B981").unwrap_or(Color::GREEN),
+            400,
+            120,
+            TimeCode::from_frames(15, fps),
+            tc150,
+        );
+        title_card.transform.anchor_point.set_value(Vec2::new(200.0, 60.0));
+        title_card.transform.position.set_value(Vec2::new(0.0, 240.0));
+        title_card.opacity.add_keyframe(Keyframe::linear(TimeCode::from_frames(15, fps), 0.0));
+        title_card.opacity.add_keyframe(Keyframe::linear(TimeCode::from_frames(45, fps), 100.0));
+
+        if let Some(comp) = self.active_composition_mut() {
+            comp.name = "Main Composition".to_string();
+            comp.layers.clear();
+            comp.add_layer(accent).unwrap();
+            comp.add_layer(title_card).unwrap();
+            // Background solid last = bottom of the stack (After Effects convention)
+            comp.add_layer(bg_solid).unwrap();
+        }
+        self.selected_layer_id = Some("layer_accent".to_string());
     }
 
     /// Nudge one component of a vector/color Shader Lab parameter.

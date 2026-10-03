@@ -4034,19 +4034,26 @@ impl Render for CompositionViewerPanel {
                                         .child(
                                             gpui::canvas(
                                                 move |_bounds, _window, _cx| {},
-                                                move |_bounds, _, window, _cx| {
+                                                move |bounds, _, window, _cx| {
+                                                    let ox = bounds.origin.x;
+                                                    let oy = bounds.origin.y;
                                                     for curve in &curves {
                                                         if curve.points.len() >= 2 {
-                                                            let mut path = gpui::Path::new(curve.points[0]);
-                                                            for seg in curve.points.windows(2) {
+                                                            let shifted: Vec<gpui::Point<gpui::Pixels>> = curve.points.iter()
+                                                                .map(|p| gpui::point(p.x + ox, p.y + oy))
+                                                                .collect();
+                                                            let mut path = gpui::Path::new(shifted[0]);
+                                                            for seg in shifted.windows(2) {
                                                                 draw_line_segment(&mut path, seg[0], seg[1], curve.thickness);
                                                             }
                                                             window.paint_path(path, curve.color);
                                                         }
                                                     }
                                                     for leader in &leaders {
-                                                        let mut path = gpui::Path::new(leader.p0);
-                                                        draw_line_segment(&mut path, leader.p0, leader.p1, leader.thickness);
+                                                        let p0 = gpui::point(leader.p0.x + ox, leader.p0.y + oy);
+                                                        let p1 = gpui::point(leader.p1.x + ox, leader.p1.y + oy);
+                                                        let mut path = gpui::Path::new(p0);
+                                                        draw_line_segment(&mut path, p0, p1, leader.thickness);
                                                         window.paint_path(path, leader.color);
                                                     }
                                                 },
@@ -8204,6 +8211,8 @@ fn render_masks_section(
                             }
                             _ => div()
                                 .font_semibold()
+                                .min_w_0()
+                                .overflow_hidden()
                                 .text_color(if mask.enabled {
                                     cx.theme().foreground
                                 } else {
@@ -8299,6 +8308,7 @@ fn render_masks_section(
         box_el = box_el.child(
             h_flex()
                 .gap_1()
+                .flex_wrap()
                 .items_center()
                 .text_xs()
                 .child(

@@ -3252,7 +3252,8 @@ fn main() {
                 window.activate_window();
                 window.set_window_title("Motion Compositor");
                 Theme::change(ThemeMode::Dark, Some(window), cx);
-                let view = cx.new(|cx| AppView::new(window, cx));
+                let state = cx.new(|_| EditorState::blank());
+                let view = cx.new(|cx| AppView::new_with_state(state, window, cx));
                 cx.new(|cx| Root::new(view, window, cx).bg(cx.theme().background))
             },
         )
