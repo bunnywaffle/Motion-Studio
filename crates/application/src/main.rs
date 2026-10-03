@@ -5455,6 +5455,67 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
     }
 
     #[gpui_kit::test]
+    fn test_corner_pin_overlay_drags_and_resets_corners(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+        use gpui_kit::point;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        // CornerPin on the accent solid; selecting it shows the quad.
+        let pin_id = app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, _| {
+                s.select_layer(Some("layer_accent".to_string()));
+                s.add_effect_to_selected_layer(project::EffectType::Stock {
+                    plugin: project::StockPlugin::CornerPin,
+                    params: project::EffectType::stock_params(
+                        project::StockPlugin::CornerPin,
+                    ),
+                    colors: project::EffectType::stock_colors(
+                        project::StockPlugin::CornerPin,
+                    ),
+                })
+                .unwrap()
+            })
+        });
+        let dot_id = SharedString::from(format!("corner_pin_layer_accent_{pin_id}_2"));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find(dot_id.clone()).visible());
+            // Drag the lower-right corner left: lr_x must shrink.
+            let from = window.find(dot_id.clone()).bounds().center();
+            window.drag(from, from + point(px(-60.0), px(0.0)), cx);
+        })
+        .expect("update_window failed");
+        let lrx = app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            let layer = s.active_composition().unwrap().get_layer("layer_accent").unwrap();
+            let eff = layer.get_effect(&pin_id).unwrap();
+            eff.get_param_property("lr_x").unwrap().value
+        });
+        assert!(lrx < 1.0, "corner follows leftward drag: lr_x={lrx}");
+        // Right-click resets that corner to identity.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.right_click(dot_id.clone(), cx);
+        })
+        .expect("update_window failed");
+        app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            let layer = s.active_composition().unwrap().get_layer("layer_accent").unwrap();
+            let eff = layer.get_effect(&pin_id).unwrap();
+            assert_eq!(eff.get_param_property("lr_x").unwrap().value, 1.0);
+            assert_eq!(eff.get_param_property("lr_y").unwrap().value, 1.0);
+        });
+    }
+
+    #[gpui_kit::test]
     fn test_graph_key_selection_shows_compact_easing_bar(cx: &mut TestAppContext) {
         use gpui_kit::test::TestWindowExt;
 

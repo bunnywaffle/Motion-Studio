@@ -39,6 +39,14 @@ fn default_text_split_zero() -> Property<f32> {
     Property::new("Offset", 0.0)
 }
 
+fn default_warp_cols() -> Property<f32> {
+    Property::new("Columns", 4.0)
+}
+
+fn default_warp_rows() -> Property<f32> {
+    Property::new("Rows", 4.0)
+}
+
 fn default_text_split_pos_y() -> Property<f32> {
     Property::new("Position Y", -50.0)
 }
@@ -450,11 +458,16 @@ pub enum EffectType {
         amount: Property<f32>,
     },
 
-    /// Warp distortion (spatial): sine wobble plus a draggable 4x4 pin
-    /// lattice (`pins` row-major, empty = identity, offsets in layer px).
+    /// Warp distortion (spatial): sine wobble plus a draggable pin
+    /// lattice (`pins` row-major over `cols` x `rows`, empty = identity,
+    /// offsets in layer px).
     Warp {
         amount: Property<f32>,
         scale: Property<f32>,
+        #[serde(default = "default_warp_cols")]
+        cols: Property<f32>,
+        #[serde(default = "default_warp_rows")]
+        rows: Property<f32>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pins: Vec<WarpPin>,
     },
@@ -872,6 +885,8 @@ impl EffectType {
         Self::Warp {
             amount: Property::new("Amount", amount.clamp(0.0, 100.0)),
             scale: Property::new("Scale", scale.clamp(0.1, 10.0)),
+            cols: default_warp_cols(),
+            rows: default_warp_rows(),
             pins: Vec::new(),
         }
     }
@@ -1968,12 +1983,20 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     return true;
                 }
             }
-            EffectType::Warp { amount, scale, .. } => {
+            EffectType::Warp { amount, scale, cols, rows, .. } => {
                 if param_name.eq_ignore_ascii_case("amount") {
                     amount.set_value((amount.value + delta).clamp(0.0, 100.0));
                     return true;
                 } else if param_name.eq_ignore_ascii_case("scale") {
                     scale.set_value((scale.value + delta).clamp(0.1, 10.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("cols")
+                    || param_name.eq_ignore_ascii_case("columns")
+                {
+                    cols.set_value((cols.value + delta).clamp(2.0, 8.0).round());
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("rows") {
+                    rows.set_value((rows.value + delta).clamp(2.0, 8.0).round());
                     return true;
                 }
             }
@@ -2289,11 +2312,17 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     None
                 }
             }
-            EffectType::Warp { amount, scale, .. } => {
+            EffectType::Warp { amount, scale, cols, rows, .. } => {
                 if param_name.eq_ignore_ascii_case("amount") {
                     Some(amount)
                 } else if param_name.eq_ignore_ascii_case("scale") {
                     Some(scale)
+                } else if param_name.eq_ignore_ascii_case("cols")
+                    || param_name.eq_ignore_ascii_case("columns")
+                {
+                    Some(cols)
+                } else if param_name.eq_ignore_ascii_case("rows") {
+                    Some(rows)
                 } else {
                     None
                 }
@@ -2604,11 +2633,17 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     None
                 }
             }
-            EffectType::Warp { amount, scale, .. } => {
+            EffectType::Warp { amount, scale, cols, rows, .. } => {
                 if param_name.eq_ignore_ascii_case("amount") {
                     Some(amount)
                 } else if param_name.eq_ignore_ascii_case("scale") {
                     Some(scale)
+                } else if param_name.eq_ignore_ascii_case("cols")
+                    || param_name.eq_ignore_ascii_case("columns")
+                {
+                    Some(cols)
+                } else if param_name.eq_ignore_ascii_case("rows") {
+                    Some(rows)
                 } else {
                     None
                 }
@@ -2933,9 +2968,11 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     scalar("amount", "Randomize", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), amount),
                 ]
             }
-            EffectType::Warp { amount, scale, .. } => vec![
+            EffectType::Warp { amount, scale, cols, rows, .. } => vec![
                 scalar("amount", "Amount", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), amount),
                 scalar("scale", "Scale", WidgetKind::Slider, ParamMeta::slider(0.1, 32.0, 0.2, 1, "", 100.0), scale),
+                scalar("cols", "Columns", WidgetKind::Integer, ParamMeta::slider(2.0, 8.0, 1.0, 0, "", 100.0), cols),
+                scalar("rows", "Rows", WidgetKind::Integer, ParamMeta::slider(2.0, 8.0, 1.0, 0, "", 100.0), rows),
             ],
             EffectType::Exposure { exposure } => vec![PropDecl {
                 field: "exposure".to_string(),

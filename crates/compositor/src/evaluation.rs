@@ -481,6 +481,8 @@ pub enum EvaluatedEffectType {
     Warp {
         amount: f32,
         scale: f32,
+        cols: f32,
+        rows: f32,
         pins: Vec<project::WarpPin>,
     },
     Exposure {
@@ -1922,10 +1924,12 @@ impl LayerStackEvaluator {
                                 amount: amount.evaluate_at(time),
                             }
                         }
-                        EffectType::Warp { amount, scale, pins } => {
+                        EffectType::Warp { amount, scale, cols, rows, pins } => {
                             EvaluatedEffectType::Warp {
                                 amount: amount.evaluate_at(time),
                                 scale: scale.evaluate_at(time),
+                                cols: cols.evaluate_at(time),
+                                rows: rows.evaluate_at(time),
                                 pins: pins.clone(),
                             }
                         }

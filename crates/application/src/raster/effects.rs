@@ -229,7 +229,7 @@ pub fn apply_effect_pixels(
                 }
             }
         }
-        EvaluatedEffectType::Warp { amount, scale, pins } => {
+        EvaluatedEffectType::Warp { amount, scale, cols, rows, pins } => {
             let amp = (*amount / 100.0 * base_w.min(base_h) * 0.25).clamp(0.0, 200.0);
             if amp >= 0.25 {
                 let freq = (*scale).clamp(0.1, 10.0) * 0.05;
@@ -250,12 +250,15 @@ pub fn apply_effect_pixels(
             if pins.iter().any(|p| !p.is_identity()) {
                 let (bw, bh) = (base_w.max(1.0), base_h.max(1.0));
                 let (ox0, oy0) = ((buf.w as f32 - bw) / 2.0, (buf.h as f32 - bh) / 2.0);
+                let (gc, gr) = project::warp::grid_dims(*cols, *rows);
                 let src = buf.px.clone();
                 let snap = FloatBuf { w: buf.w, h: buf.h, px: src };
                 for y in 0..buf.h {
                     for x in 0..buf.w {
                         let (ox, oy) = project::warp::sample_offset(
                             pins,
+                            gc,
+                            gr,
                             (x as f32 - ox0) / bw,
                             (y as f32 - oy0) / bh,
                         );
@@ -662,6 +665,8 @@ mod tests {
         let eff = EvaluatedEffectType::Warp {
             amount: 0.0,
             scale: 1.0,
+            cols: 4.0,
+            rows: 4.0,
             pins: Vec::new(),
         };
         apply_effect_pixels(&mut buf, 100.0, 100.0, &eff, &warp_test_ctx());
@@ -681,17 +686,21 @@ mod tests {
         let plain_fx = EvaluatedEffectType::Warp {
             amount: 0.0,
             scale: 1.0,
+            cols: 4.0,
+            rows: 4.0,
             pins: Vec::new(),
         };
         apply_effect_pixels(&mut plain, 100.0, 100.0, &plain_fx, &ctx);
 
         // Bottom-right pin pushed +40x: output(x) samples src(x-40).
         let mut pins = vec![project::WarpPin::default(); project::WARP_PIN_COUNT];
-        pins[project::warp::pin_index(3, 3)] = project::WarpPin::new(40.0, 0.0);
+        pins[project::warp::pin_index(3, 3, 4, 4)] = project::WarpPin::new(40.0, 0.0);
         let mut buf = warp_gradient_buf();
         let eff = EvaluatedEffectType::Warp {
             amount: 0.0,
             scale: 1.0,
+            cols: 4.0,
+            rows: 4.0,
             pins,
         };
         apply_effect_pixels(&mut buf, 100.0, 100.0, &eff, &ctx);

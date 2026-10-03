@@ -2765,6 +2765,8 @@ pub struct CompositionViewerPanel {
     pub mask_drag: Option<MaskDrag>,
     /// Active warp lattice pin drag (viewport warp overlay).
     pub warp_drag: Option<WarpDrag>,
+    /// Active corner-pin drag (viewport corner overlay).
+    pub corner_drag: Option<CornerDrag>,
     /// Selected mask node index for handle display (viewport Path Editor).
     pub mask_edit_point: Option<usize>,
     /// True once the current mask drag moved (click without drag cycles
@@ -2832,6 +2834,28 @@ pub struct WarpDrag {
     /// Cursor-minus-tip delta in comp px at grab time.
     pub grab_offset: (f32, f32),
 }
+
+/// Active corner-pin drag in the viewport (AE Corner Pin style).
+#[derive(Clone, Debug)]
+pub struct CornerDrag {
+    pub layer_id: String,
+    pub effect_id: String,
+    /// Corner 0..4 (UL, UR, LR, LL in descriptor order).
+    pub corner: usize,
+    /// Content origin/size (layer-local) at grab time for unit mapping.
+    pub origin: Vec2,
+    pub size: Vec2,
+    /// Cursor-minus-tip delta in comp px at grab time.
+    pub grab_offset: (f32, f32),
+}
+
+/// Corner-pin param names (x/y pairs, descriptor order) + identity defaults.
+const CORNER_PIN_PARAMS: [(&str, &str, f32, f32); 4] = [
+    ("ul_x", "ul_y", 0.0, 0.0),
+    ("ur_x", "ur_y", 1.0, 0.0),
+    ("lr_x", "lr_y", 1.0, 1.0),
+    ("ll_x", "ll_y", 0.0, 1.0),
+];
 
 /// Active mask node/handle drag in the viewport Path Editor.
 #[derive(Clone, Debug)]
@@ -2902,6 +2926,7 @@ impl CompositionViewerPanel {
             gizmo_drag: None,
             mask_drag: None,
             warp_drag: None,
+            corner_drag: None,
             mask_edit_point: None,
             mask_down_moved: false,
             raster_cache: HashMap::new(),
@@ -4018,9 +4043,15 @@ impl Render for CompositionViewerPanel {
                                         compositor::EvaluatedEffectType::Warp { .. }
                                     )
                                 }) {
-                                    if let compositor::EvaluatedEffectType::Warp { pins, .. } =
-                                        &fx.effect_type
+                                    if let compositor::EvaluatedEffectType::Warp {
+                                        pins,
+                                        cols,
+                                        rows,
+                                        ..
+                                    } = &fx.effect_type
                                     {
+                                        let (wcols, wrows) =
+                                            project::warp::grid_dims(*cols, *rows);
                                         let warp_origin = local_box.min;
                                         let warp_size = Vec2::new(base_w, base_h);
                                         let wfull = layer.world_matrix();
@@ -4033,10 +4064,10 @@ impl Render for CompositionViewerPanel {
                                         };
                                         let warp_col = Rgba { r: 0.65, g: 0.45, b: 1.0, a: 0.9 };
                                         let pin_tip = |idx: usize| -> Vec2 {
-                                            let col = idx % project::WARP_GRID;
-                                            let row = idx / project::WARP_GRID;
+                                            let col = idx % wcols.max(1);
+                                            let row = idx / wcols.max(1);
                                             let base = project::warp::pin_base(
-                                                col, row, warp_origin, warp_size,
+                                                col, row, wcols, wrows, warp_origin, warp_size,
                                             );
                                             let (dx, dy) = pins
                                                 .get(idx)
@@ -4045,28 +4076,32 @@ impl Render for CompositionViewerPanel {
                                             Vec2::new(base.x + dx, base.y + dy)
                                         };
                                         // Lattice rows + columns as curves.
-                                        for line in 0..project::WARP_GRID {
-                                            for horizontal in [true, false] {
-                                                let mut pts = Vec::with_capacity(project::WARP_GRID);
-                                                for k in 0..project::WARP_GRID {
-                                                    let idx = if horizontal {
-                                                        line * project::WARP_GRID + k
-                                                    } else {
-                                                        k * project::WARP_GRID + line
-                                                    };
-                                                    let tip = pin_tip(idx);
-                                                    let (cxp, cyp) = w2c(tip);
-                                                    pts.push(gpui::point(gpui::px(cxp), gpui::px(cyp)));
-                                                }
-                                                overlay_curves.push(OverlayCurve {
-                                                    points: pts,
-                                                    color: warp_col,
-                                                    thickness: 1.5,
-                                                });
+                                        for r in 0..wrows {
+                                            let mut pts = Vec::with_capacity(wcols);
+                                            for c in 0..wcols {
+                                                let (cxp, cyp) = w2c(pin_tip(r * wcols + c));
+                                                pts.push(gpui::point(gpui::px(cxp), gpui::px(cyp)));
                                             }
+                                            overlay_curves.push(OverlayCurve {
+                                                points: pts,
+                                                color: warp_col,
+                                                thickness: 1.5,
+                                            });
+                                        }
+                                        for c in 0..wcols {
+                                            let mut pts = Vec::with_capacity(wrows);
+                                            for r in 0..wrows {
+                                                let (cxp, cyp) = w2c(pin_tip(r * wcols + c));
+                                                pts.push(gpui::point(gpui::px(cxp), gpui::px(cyp)));
+                                            }
+                                            overlay_curves.push(OverlayCurve {
+                                                points: pts,
+                                                color: warp_col,
+                                                thickness: 1.5,
+                                            });
                                         }
                                         // Draggable pins (right-click resets one).
-                                        for idx in 0..project::WARP_PIN_COUNT {
+                                        for idx in 0..wcols * wrows {
                                             let tip = pin_tip(idx);
                                             let tip_w = wfull.transform_point(tip);
                                             let (pdx, pdy) = pins
@@ -4135,6 +4170,148 @@ impl Render for CompositionViewerPanel {
                                                             s.checkpoint();
                                                             let _ = s.move_warp_pin_live(
                                                                 &lid_wr, &eid_wr, idx, 0.0, 0.0,
+                                                            );
+                                                            cx.notify();
+                                                        });
+                                                    },
+                                                )
+                                                .into_any_element(),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+
+                            // --- Corner-pin overlay: draggable quad for the
+                            // selected layer's first CornerPin stock effect.
+                            // Params are unit-space (descriptor order); the
+                            // kernel backward-maps, so the box never clips.
+                            if is_selected {
+                                if let Some(fx) = layer.effects.iter().find(|e| {
+                                    matches!(
+                                        &e.effect_type,
+                                        compositor::EvaluatedEffectType::Stock {
+                                            plugin: project::StockPlugin::CornerPin,
+                                            ..
+                                        }
+                                    )
+                                }) {
+                                    if let compositor::EvaluatedEffectType::Stock {
+                                        plugin,
+                                        params,
+                                        ..
+                                    } = &fx.effect_type
+                                    {
+                                        use compositor::fx::stock_p;
+                                        let corner_uv = |i: usize| -> (f32, f32) {
+                                            (
+                                                stock_p(*plugin, params, i * 2),
+                                                stock_p(*plugin, params, i * 2 + 1),
+                                            )
+                                        };
+                                        let cfull = layer.world_matrix();
+                                        let c2c = |p: Vec2| {
+                                            let w = cfull.transform_point(p);
+                                            (
+                                                (w.x + giz_cw / 2.0) * giz_fit,
+                                                (w.y + giz_ch / 2.0) * giz_fit,
+                                            )
+                                        };
+                                        let corner_col =
+                                            Rgba { r: 1.0, g: 0.55, b: 0.15, a: 0.95 };
+                                        // Closed quad through the corners.
+                                        let mut quad = Vec::with_capacity(5);
+                                        for i in 0..4 {
+                                            let (ux, uy) = corner_uv(i);
+                                            let tip = Vec2::new(
+                                                local_box.min.x + ux * base_w,
+                                                local_box.min.y + uy * base_h,
+                                            );
+                                            let (cxp, cyp) = c2c(tip);
+                                            quad.push(gpui::point(gpui::px(cxp), gpui::px(cyp)));
+                                        }
+                                        quad.push(quad[0]);
+                                        overlay_curves.push(OverlayCurve {
+                                            points: quad,
+                                            color: corner_col,
+                                            thickness: 2.0,
+                                        });
+                                        for (i, (reset_x, reset_y, reset_dx, reset_dy)) in
+                                            CORNER_PIN_PARAMS.iter().copied().enumerate()
+                                        {
+                                            let (ux, uy) = corner_uv(i);
+                                            let tip = Vec2::new(
+                                                local_box.min.x + ux * base_w,
+                                                local_box.min.y + uy * base_h,
+                                            );
+                                            let tip_w = cfull.transform_point(tip);
+                                            let (nx, ny) = c2c(tip);
+                                            let p_ch = giz_panel.clone();
+                                            let s_ch = giz_state.clone();
+                                            let lid_ch = giz_lid.clone();
+                                            let eid_ch = fx.id.clone();
+                                            let s_cr = giz_state.clone();
+                                            let lid_cr = giz_lid.clone();
+                                            let eid_cr = fx.id.clone();
+                                            let (h_frame, h_fit, h_cw, h_ch) =
+                                                (giz_frame, giz_fit, giz_cw, giz_ch);
+                                            let origin = local_box.min;
+                                            let size = Vec2::new(base_w, base_h);
+                                            overlay_dots.push(
+                                                gizmo_dot(
+                                                    format!("corner_pin_{}_{}_{}", giz_lid, eid_ch, i),
+                                                    nx,
+                                                    ny,
+                                                    11.0,
+                                                    corner_col,
+                                                    white,
+                                                    false,
+                                                )
+                                                .test_support()
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    move |event, _window, cx| {
+                                                        let (mx, my) = (
+                                                            event.position.x / px(1.0),
+                                                            event.position.y / px(1.0),
+                                                        );
+                                                        s_ch.update(cx, |s, cx| {
+                                                            s.checkpoint();
+                                                            s.select_layer(Some(lid_ch.clone()));
+                                                            s.preview_fast = true;
+                                                            cx.notify();
+                                                        });
+                                                        let (cur_cmx, cur_cmy) = gizmo_to_comp(
+                                                            mx, my, h_frame, h_fit, h_cw, h_ch,
+                                                        );
+                                                        let grab = (
+                                                            cur_cmx - tip_w.x,
+                                                            cur_cmy - tip_w.y,
+                                                        );
+                                                        p_ch.update(cx, |this, cx| {
+                                                            this.mask_down_moved = false;
+                                                            this.corner_drag = Some(CornerDrag {
+                                                                layer_id: lid_ch.clone(),
+                                                                effect_id: eid_ch.clone(),
+                                                                corner: i,
+                                                                origin,
+                                                                size,
+                                                                grab_offset: grab,
+                                                            });
+                                                            cx.notify();
+                                                        });
+                                                    },
+                                                )
+                                                .on_mouse_down(
+                                                    MouseButton::Right,
+                                                    move |_event, _window, cx| {
+                                                        s_cr.update(cx, |s, cx| {
+                                                            s.checkpoint();
+                                                            let _ = s.move_stock_param_live(
+                                                                &lid_cr, &eid_cr, reset_x, reset_dx,
+                                                            );
+                                                            let _ = s.move_stock_param_live(
+                                                                &lid_cr, &eid_cr, reset_y, reset_dy,
                                                             );
                                                             cx.notify();
                                                         });
@@ -4556,6 +4733,53 @@ impl Render for CompositionViewerPanel {
                     }
                     return;
                 }
+                // Corner-pin drags (same grab-offset + layer-local mapping
+                // as warp drags; layer-local maps to unit uv via the grab
+                // box, then commits through move_stock_param_live).
+                if let Some(cdrag) = this.corner_drag.clone() {
+                    let frame_org = frame_origin_or_center(
+                        this.frame_origin,
+                        this.viewport_px,
+                        this.viewport_origin,
+                        this.canvas_px,
+                    );
+                    let (fox, foy) = frame_org.unwrap_or((0.0, 0.0));
+                    let (cw, ch) = {
+                        let s = this.state.read(cx);
+                        match s.active_composition() {
+                            Some(c) => (c.width as f32, c.height as f32),
+                            None => (1920.0, 1080.0),
+                        }
+                    };
+                    let fit_here = canvas_scale(this.viewport_px, this.zoom_factor, cw, ch);
+                    let cmx = (curr_x - fox) / fit_here - cw / 2.0 - cdrag.grab_offset.0;
+                    let cmy = (curr_y - foy) / fit_here - ch / 2.0 - cdrag.grab_offset.1;
+                    let st = this.state.clone();
+                    if let Some(loc) =
+                        st.read(cx).comp_to_layer_local(&cdrag.layer_id, Vec2::new(cmx, cmy))
+                    {
+                        let (bw, bh) = (cdrag.size.x.max(1.0), cdrag.size.y.max(1.0));
+                        let u = (loc.x - cdrag.origin.x) / bw;
+                        let v = (loc.y - cdrag.origin.y) / bh;
+                        let (nx, ny, _, _) = CORNER_PIN_PARAMS[cdrag.corner.min(3)];
+                        st.update(cx, |s, cx| {
+                            let _ = s.move_stock_param_live(
+                                &cdrag.layer_id,
+                                &cdrag.effect_id,
+                                nx,
+                                u,
+                            );
+                            let _ = s.move_stock_param_live(
+                                &cdrag.layer_id,
+                                &cdrag.effect_id,
+                                ny,
+                                v,
+                            );
+                            cx.notify();
+                        });
+                    }
+                    return;
+                }
                 // Transform-gizmo drags win over canvas drags.
                 if let Some(drag) = this.gizmo_drag.clone() {
                     // Window px -> composition px via the measured frame.
@@ -4696,6 +4920,7 @@ impl Render for CompositionViewerPanel {
                 this.last_canvas_mouse = None;
                 this.gizmo_drag = None;
                 this.warp_drag = None;
+                this.corner_drag = None;
                 this.down_on_layer = false;
                 // Finalize Shape tool drag (creates shape layer or shaped mask)
                 if let Some(sdrag) = this.shape_drag.take() {
@@ -4766,6 +4991,7 @@ impl Render for CompositionViewerPanel {
                 this.gizmo_drag = None;
                 this.mask_drag = None;
                 this.warp_drag = None;
+                this.corner_drag = None;
                 this.shape_drag = None;
                 this.mask_down_moved = false;
                 this.down_on_layer = false;

@@ -4946,6 +4946,38 @@ impl EditorState {
         }
     }
 
+    /// Set one stock scalar param to an absolute value (live drag: the
+    /// grab site checkpoints, mirroring mask handle drags). Used by
+    /// viewport gizmos (corner pin) that compute targets, not deltas.
+    pub fn move_stock_param_live(
+        &mut self,
+        layer_id: &str,
+        effect_id: &str,
+        param_name: &str,
+        value: f32,
+    ) -> Result<(), String> {
+        let current_tc = self.clock.timecode();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let effect = layer
+            .get_effect_mut(effect_id)
+            .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
+        match effect.get_param_property_mut(param_name) {
+            Some(prop) => {
+                prop.set_value(value);
+                if prop.is_animated() {
+                    prop.add_keyframe(Keyframe::new(current_tc, value));
+                }
+                Ok(())
+            }
+            None => Err(format!("Parameter {param_name} not found on effect {effect_id}")),
+        }
+    }
+
     /// Move one warp lattice pin (live drag: the grab site checkpoints,
     /// mirroring mask handle drags). Empty grids materialize as identity.
     pub fn move_warp_pin_live(
@@ -4967,13 +4999,12 @@ impl EditorState {
             .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
         match &mut effect.effect_type {
             EffectType::Warp { pins, .. } => {
-                if pins.is_empty() {
-                    *pins = vec![WarpPin::default(); project::WARP_PIN_COUNT];
+                // Grow on demand (overlay only addresses live grid cells);
+                // shrinking keeps tail offsets so regrowing restores them.
+                while pins.len() <= index {
+                    pins.push(WarpPin::default());
                 }
-                let pin = pins.get_mut(index).ok_or_else(|| {
-                    format!("Warp pin {index} out of range on effect {effect_id}")
-                })?;
-                *pin = WarpPin::new(dx, dy);
+                pins[index] = WarpPin::new(dx, dy);
                 Ok(())
             }
             _ => Err(format!("Effect {effect_id} is not a Warp")),

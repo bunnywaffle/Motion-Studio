@@ -265,6 +265,8 @@ pub const OFX_SUITE: &[OfxEffectDescriptor] = &[
         params: &[
             OfxParamDescriptor { name: "amount", label: "Amount", min: 0.0, max: 100.0, default: 30.0 },
             OfxParamDescriptor { name: "scale", label: "Scale", min: 0.1, max: 10.0, default: 1.0 },
+            OfxParamDescriptor { name: "cols", label: "Columns", min: 2.0, max: 8.0, default: 4.0 },
+            OfxParamDescriptor { name: "rows", label: "Rows", min: 2.0, max: 8.0, default: 4.0 },
         ],
         spatial: true,
     },

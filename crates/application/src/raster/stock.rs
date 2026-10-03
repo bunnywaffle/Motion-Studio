@@ -1981,6 +1981,24 @@ mod tests {
     }
 
     #[test]
+    fn corner_pin_squeeze_maps_content() {
+        // Squeeze the right edge to center: output x=25% must sample
+        // source x=50% (backward-mapped homography).
+        let mut buf = test_buf();
+        let src_mid = buf.px[(24 * 48 + 24) as usize].r;
+        k_corner_pin(
+            &mut buf,
+            &[0.0, 0.0, 0.5, 0.0, 0.5, 1.0, 0.0, 1.0],
+            StockPlugin::CornerPin,
+        );
+        let got = buf.px[(24 * 48 + 12) as usize].r;
+        assert!(
+            (got - src_mid).abs() < 0.05,
+            "squeezed output samples the middle: got {got}, want {src_mid}"
+        );
+    }
+
+    #[test]
     fn homography_rejects_degenerate_quads() {
         assert!(homography([(0.0, 0.0), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0)]).is_none());
         let h = homography([(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]).unwrap();

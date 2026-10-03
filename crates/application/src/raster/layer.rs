@@ -661,9 +661,11 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
             seed.to_bits().hash(h);
             amount.to_bits().hash(h);
         }
-        EvaluatedEffectType::Warp { amount, scale, pins } => {
+        EvaluatedEffectType::Warp { amount, scale, cols, rows, pins } => {
             amount.to_bits().hash(h);
             scale.to_bits().hash(h);
+            cols.to_bits().hash(h);
+            rows.to_bits().hash(h);
             for pin in pins {
                 pin.dx.to_bits().hash(h);
                 pin.dy.to_bits().hash(h);
