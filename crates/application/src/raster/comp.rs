@@ -130,7 +130,7 @@ pub fn rasterize_comp(
         let (base_w, base_h) = layer_base_dims(layer, comp_w, comp_h, assets);
         let local_box = layer_local_box(layer, base_w, base_h);
         let render_box = layer_render_box(layer, base_w, base_h);
-        let pad = layer_effect_padding(layer);
+        let pad = layer_effect_padding(layer, base_w, base_h);
         let (frame_ox, frame_oy) = (local_box.min.x, local_box.min.y);
         let (eff_ox, eff_oy) = if pad > 0.0 {
             (frame_ox - pad, frame_oy - pad)
@@ -155,7 +155,8 @@ pub fn rasterize_comp(
             }
             if let EvaluatedEffectType::Perspective { skew_x, skew_y } = &eff.effect_type {
                 if skew_x.abs() >= 0.05 || skew_y.abs() >= 0.05 {
-                    map = aff_mul(map, skew_about(*skew_x, *skew_y, base_w / 2.0, base_h / 2.0));
+                    // Work-buffer coords: padding shifts content center.
+                    map = aff_mul(map, skew_about(*skew_x, *skew_y, base_w / 2.0 + pad, base_h / 2.0 + pad));
                 }
                 break;
             }

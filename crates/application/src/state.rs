@@ -5,7 +5,7 @@ use project::{
     Asset, AutoTraceOptions, BlendMode, Color, Composition, Effect, EffectType, FillGradient,
     GradientType, Keyframe, KeyframeInterpolation, KeyframeTangent, Layer, LayerSource,
     Mask, MaskShapeKind, Path, PathPointKind, PlaybackClock, Project, Property, ShapeType,
-    TimeCode, TraceRange, TrackMatteMode, Vec2,
+    TimeCode, TraceRange, TrackMatteMode, Vec2, WarpPin,
 };
 use std::path::{Path as StdPath, PathBuf};
 use std::time::Duration;
@@ -4943,6 +4943,40 @@ impl EditorState {
             Ok(())
         } else {
             Err(format!("Bool field {field} not found on effect {effect_id}"))
+        }
+    }
+
+    /// Move one warp lattice pin (live drag: the grab site checkpoints,
+    /// mirroring mask handle drags). Empty grids materialize as identity.
+    pub fn move_warp_pin_live(
+        &mut self,
+        layer_id: &str,
+        effect_id: &str,
+        index: usize,
+        dx: f32,
+        dy: f32,
+    ) -> Result<(), String> {
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let effect = layer
+            .get_effect_mut(effect_id)
+            .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
+        match &mut effect.effect_type {
+            EffectType::Warp { pins, .. } => {
+                if pins.is_empty() {
+                    *pins = vec![WarpPin::default(); project::WARP_PIN_COUNT];
+                }
+                let pin = pins.get_mut(index).ok_or_else(|| {
+                    format!("Warp pin {index} out of range on effect {effect_id}")
+                })?;
+                *pin = WarpPin::new(dx, dy);
+                Ok(())
+            }
+            _ => Err(format!("Effect {effect_id} is not a Warp")),
         }
     }
 

@@ -23,6 +23,7 @@ pub mod timecode;
 pub mod trace;
 pub mod transform;
 pub mod vec2;
+pub mod warp;
 pub mod widget;
 
 // Re-export primary types at crate root for ergonomic use
@@ -60,6 +61,7 @@ pub use stock::{stock_color_slots, stock_default_color, stock_default_params, st
 pub use timecode::{drop_frame_smpte_to_frame, frame_to_drop_frame_smpte, TimeCode};
 pub use transform::Transform;
 pub use vec2::Vec2;
+pub use warp::{WarpPin, WARP_GRID, WARP_PIN_COUNT};
 pub use widget::{ParamMeta, PropDecl, PropValue, WidgetKind};
 
 #[cfg(test)]

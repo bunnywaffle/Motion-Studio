@@ -3,6 +3,7 @@ use crate::layer::{FillGradient, GradientStop, GradientType};
 use crate::property::Property;
 use crate::shader::{parse_shader_params, ShaderParam, ShaderParamValue};
 use crate::stock::{stock_default_color, StockPlugin};
+use crate::warp::WarpPin;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -449,10 +450,13 @@ pub enum EffectType {
         amount: Property<f32>,
     },
 
-    /// Turbulent warp distortion (spatial).
+    /// Warp distortion (spatial): sine wobble plus a draggable 4x4 pin
+    /// lattice (`pins` row-major, empty = identity, offsets in layer px).
     Warp {
         amount: Property<f32>,
         scale: Property<f32>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pins: Vec<WarpPin>,
     },
     /// Exposure in EV stops (per-pixel gain).
     Exposure {
@@ -868,6 +872,7 @@ impl EffectType {
         Self::Warp {
             amount: Property::new("Amount", amount.clamp(0.0, 100.0)),
             scale: Property::new("Scale", scale.clamp(0.1, 10.0)),
+            pins: Vec::new(),
         }
     }
 
@@ -1963,7 +1968,7 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     return true;
                 }
             }
-            EffectType::Warp { amount, scale } => {
+            EffectType::Warp { amount, scale, .. } => {
                 if param_name.eq_ignore_ascii_case("amount") {
                     amount.set_value((amount.value + delta).clamp(0.0, 100.0));
                     return true;
@@ -2284,7 +2289,7 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     None
                 }
             }
-            EffectType::Warp { amount, scale } => {
+            EffectType::Warp { amount, scale, .. } => {
                 if param_name.eq_ignore_ascii_case("amount") {
                     Some(amount)
                 } else if param_name.eq_ignore_ascii_case("scale") {
@@ -2599,7 +2604,7 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     None
                 }
             }
-            EffectType::Warp { amount, scale } => {
+            EffectType::Warp { amount, scale, .. } => {
                 if param_name.eq_ignore_ascii_case("amount") {
                     Some(amount)
                 } else if param_name.eq_ignore_ascii_case("scale") {
@@ -2928,7 +2933,7 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     scalar("amount", "Randomize", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), amount),
                 ]
             }
-            EffectType::Warp { amount, scale } => vec![
+            EffectType::Warp { amount, scale, .. } => vec![
                 scalar("amount", "Amount", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), amount),
                 scalar("scale", "Scale", WidgetKind::Slider, ParamMeta::slider(0.1, 32.0, 0.2, 1, "", 100.0), scale),
             ],

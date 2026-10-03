@@ -279,7 +279,7 @@ mod tests {
             fx(EffectType::TextBevel { strength: p(50.0), softness: p(10.0) }),
             fx(EffectType::Bloom { intensity: p(50.0), radius: p(5.0) }),
             fx(EffectType::Tiler { tiles_x: p(4.0), tiles_y: p(4.0), mode: TileMode::Grid, mirror: b(false), offset_x: p(0.0), offset_y: p(0.0), cell: TileCell::Square, seed: p(1.0), amount: p(0.0) }),
-            fx(EffectType::Warp { amount: p(50.0), scale: p(1.0) }),
+            fx(EffectType::Warp { amount: p(50.0), scale: p(1.0), pins: Vec::new() }),
             fx(EffectType::Exposure { exposure: p(1.5) }),
             fx(EffectType::Vibrance { vibrance: p(20.0) }),
             fx(EffectType::Levels { input_black: p(0.0), input_white: p(255.0), gamma: p(1.0), output_black: p(0.0), output_white: p(255.0) }),

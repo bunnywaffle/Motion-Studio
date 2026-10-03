@@ -661,9 +661,13 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
             seed.to_bits().hash(h);
             amount.to_bits().hash(h);
         }
-        EvaluatedEffectType::Warp { amount, scale } => {
+        EvaluatedEffectType::Warp { amount, scale, pins } => {
             amount.to_bits().hash(h);
             scale.to_bits().hash(h);
+            for pin in pins {
+                pin.dx.to_bits().hash(h);
+                pin.dy.to_bits().hash(h);
+            }
         }
         EvaluatedEffectType::Exposure { exposure } => exposure.to_bits().hash(h),
         EvaluatedEffectType::Vibrance { vibrance } => vibrance.to_bits().hash(h),
@@ -970,7 +974,7 @@ pub fn rasterize_layer(
     // below so buffer px (0, 0) means local `frame origin`.
     let local_box = layer_local_box(layer, base_w, base_h);
     let render_box = layer_render_box(layer, base_w, base_h);
-    let pad = layer_effect_padding(layer);
+    let pad = layer_effect_padding(layer, base_w, base_h);
     let (frame_ox, frame_oy) = (local_box.min.x, local_box.min.y);
     let bbox = layer.local_to_world_bbox(&render_box);
     let bw = (bbox.max.x - bbox.min.x).max(1e-3);
@@ -1089,9 +1093,11 @@ pub fn rasterize_layer(
         }
         if let EvaluatedEffectType::Perspective { skew_x, skew_y } = &eff.effect_type {
             if skew_x.abs() >= 0.05 || skew_y.abs() >= 0.05 {
+                // Skew runs in work-buffer coords, where padding shifts
+                // the content center by `pad`.
                 pmap = aff_mul(
                     pmap,
-                    skew_about(*skew_x, *skew_y, base_w / 2.0, base_h / 2.0),
+                    skew_about(*skew_x, *skew_y, base_w / 2.0 + pad, base_h / 2.0 + pad),
                 );
             }
             break;
@@ -1333,8 +1339,10 @@ pub fn layer_local_box(layer: &EvaluatedLayer, base_w: f32, base_h: f32) -> Boun
 }
 
 /// Maximum outward visual expansion (padding in local pixels) needed by active
-/// layer effects (Outer Glow, Drop Shadow, Gaussian Blur, Bloom, Glare/Glow plugins).
-pub fn layer_effect_padding(layer: &EvaluatedLayer) -> f32 {
+/// layer effects (Outer Glow, Drop Shadow, Gaussian Blur, Bloom, Glare/Glow plugins,
+/// plus every geometric effect that pushes pixels out of the content box:
+/// Perspective, Displacement, Warp, TransformFx).
+pub fn layer_effect_padding(layer: &EvaluatedLayer, base_w: f32, base_h: f32) -> f32 {
     let mut pad = 0.0f32;
     for eff in &layer.effects {
         if !eff.enabled {
@@ -1353,6 +1361,24 @@ pub fn layer_effect_padding(layer: &EvaluatedLayer) -> f32 {
             EvaluatedEffectType::DropShadow { distance, softness, opacity, .. } if *opacity > 0.5 => {
                 pad = pad.max(distance.abs() + *softness * 2.5);
             }
+            // Geometric effects remap pixels outside the content box
+            // (same math as their kernels: skew_about tan clamps, (lum-0.5)
+            // displacement range, warp amplitude). Without this the skewed
+            // corners are cut by the fixed-size blit destination.
+            EvaluatedEffectType::Perspective { skew_x, skew_y } => {
+                let sx = skew_x.to_radians().tan().clamp(-2.0, 2.0).abs();
+                let sy = skew_y.to_radians().tan().clamp(-2.0, 2.0).abs();
+                pad = pad.max(sx * base_h / 2.0).max(sy * base_w / 2.0);
+            }
+            EvaluatedEffectType::DisplacementMap { max_horizontal, max_vertical } => {
+                pad = pad
+                    .max(max_horizontal.abs() / 2.0)
+                    .max(max_vertical.abs() / 2.0);
+            }
+            EvaluatedEffectType::Warp { amount, pins, .. } => {
+                pad = pad.max(amount.abs() / 100.0 * base_w.min(base_h) * 0.25);
+                pad = pad.max(project::warp::max_offset(pins));
+            }
             EvaluatedEffectType::Stock { plugin, params, .. } => {
                 use compositor::fx::stock_p;
                 match *plugin {
@@ -1363,6 +1389,20 @@ pub fn layer_effect_padding(layer: &EvaluatedLayer) -> f32 {
                     StockPlugin::Glare => {
                         let len = stock_p(*plugin, params, 1);
                         pad = pad.max(len * 1.5);
+                    }
+                    StockPlugin::TransformFx => {
+                        let tx = stock_p(*plugin, params, 0).abs();
+                        let ty = stock_p(*plugin, params, 1).abs();
+                        let s = (stock_p(*plugin, params, 2) / 100.0).max(0.0);
+                        let r = stock_p(*plugin, params, 3).to_radians();
+                        let (sn, cs) = (r.sin().abs(), r.cos().abs());
+                        let hw = (base_w * cs + base_h * sn) / 2.0 * s;
+                        let hh = (base_w * sn + base_h * cs) / 2.0 * s;
+                        pad = pad
+                            .max(tx)
+                            .max(ty)
+                            .max(hw - base_w / 2.0)
+                            .max(hh - base_h / 2.0);
                     }
                     _ => {}
                 }
@@ -1376,7 +1416,7 @@ pub fn layer_effect_padding(layer: &EvaluatedLayer) -> f32 {
 /// The local bounding box expanded by effect visual padding.
 pub fn layer_render_box(layer: &EvaluatedLayer, base_w: f32, base_h: f32) -> BoundingBox2D {
     let local_box = layer_local_box(layer, base_w, base_h);
-    let pad = layer_effect_padding(layer);
+    let pad = layer_effect_padding(layer, base_w, base_h);
     if pad <= 0.0 {
         local_box
     } else {
@@ -2014,7 +2054,7 @@ mod tests {
         project.add_composition(comp).unwrap();
         let eval_l = eval_first(&project, "c");
 
-        let pad = layer_effect_padding(&eval_l);
+        let pad = layer_effect_padding(&eval_l, 200.0, 200.0);
         assert!(pad >= 60.0, "Expected padding >= 60.0 for glow, got {pad}");
 
         let local_box = layer_local_box(&eval_l, 200.0, 200.0);
@@ -2038,6 +2078,74 @@ mod tests {
 
         let glow_pixel = buf.get((pad - 5.0) as i32, (rh / 2) as i32);
         assert!(glow_pixel.a > 0.01, "glow must expand beyond content boundary: {glow_pixel:?}");
+    }
+
+    #[test]
+    fn test_perspective_padding_grows_with_skew() {
+        let mut project = Project::new("p", "P");
+        let mut comp = Composition::hd_1080p_30fps("c", "C", 5.0);
+        let tc = TimeCode::from_frames(0, 30.0);
+        let out = TimeCode::from_frames(150, 30.0);
+        let mut layer = project::Layer::solid("l1", "L", Color::WHITE, 200, 200, tc, out);
+        layer.effects.push(project::Effect {
+            id: "fx_p".to_string(),
+            name: "Perspective".to_string(),
+            enabled: true,
+            effect_type: project::EffectType::perspective(30.0, 0.0),
+        });
+        comp.add_layer(layer).unwrap();
+        project.add_composition(comp).unwrap();
+        let eval_l = eval_first(&project, "c");
+
+        // tan(30deg) * 200 / 2 ~ 57.7: corners must fit inside the box.
+        let pad = layer_effect_padding(&eval_l, 200.0, 200.0);
+        assert!((pad - 58.0).abs() < 2.0, "skew pad follows tan: got {pad}");
+        let render_box = layer_render_box(&eval_l, 200.0, 200.0);
+        assert!(render_box.min.x < 0.0 && render_box.max.x > 200.0);
+    }
+
+    #[test]
+    fn test_perspective_skew_loses_no_corners() {
+        // Skew preserves area (det 1): lost alpha means cut corners.
+        let mut project = Project::new("p", "P");
+        let mut comp = Composition::hd_1080p_30fps("c", "C", 5.0);
+        let tc = TimeCode::from_frames(0, 30.0);
+        let out = TimeCode::from_frames(150, 30.0);
+        let mut layer = project::Layer::solid("l1", "L", Color::WHITE, 200, 200, tc, out);
+        layer.effects.push(project::Effect {
+            id: "fx_p".to_string(),
+            name: "Perspective".to_string(),
+            enabled: true,
+            effect_type: project::EffectType::perspective(30.0, 0.0),
+        });
+        comp.add_layer(layer).unwrap();
+        project.add_composition(comp).unwrap();
+        let eval_l = eval_first(&project, "c");
+        let assets: HashMap<String, std::sync::Arc<image::RgbaImage>> = HashMap::new();
+
+        let ink = |pad: f32| {
+            let rw = (200.0 + pad * 2.0).max(1.0) as u32;
+            let (buf, _, _) = rasterize_layer(
+                &eval_l, 200.0, 200.0, rw, rw, 1920.0, 1080.0, Color::BLACK, None, 0.0, 0,
+                false, 5.0, &assets,
+            );
+            buf.px.iter().map(|p| p.a).sum::<f32>()
+        };
+        let skewed = ink(layer_effect_padding(&eval_l, 200.0, 200.0));
+        // Baseline without the effect.
+        let mut plain = eval_l.clone();
+        plain.effects.clear();
+        let plain_ink = {
+            let (buf, _, _) = rasterize_layer(
+                &plain, 200.0, 200.0, 200, 200, 1920.0, 1080.0, Color::BLACK, None, 0.0, 0,
+                false, 5.0, &assets,
+            );
+            buf.px.iter().map(|p| p.a).sum::<f32>()
+        };
+        assert!(
+            (skewed - plain_ink).abs() / plain_ink < 0.05,
+            "skew must preserve ink, lost corners otherwise: {skewed} vs {plain_ink}"
+        );
     }
 
     #[test]

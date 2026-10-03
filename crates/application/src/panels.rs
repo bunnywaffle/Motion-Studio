@@ -2763,6 +2763,8 @@ pub struct CompositionViewerPanel {
     pub gizmo_drag: Option<ViewerGizmoDrag>,
     /// Active mask node/handle drag (viewport Path Editor).
     pub mask_drag: Option<MaskDrag>,
+    /// Active warp lattice pin drag (viewport warp overlay).
+    pub warp_drag: Option<WarpDrag>,
     /// Selected mask node index for handle display (viewport Path Editor).
     pub mask_edit_point: Option<usize>,
     /// True once the current mask drag moved (click without drag cycles
@@ -2817,6 +2819,18 @@ pub enum MaskDragKind {
     Point,
     InHandle,
     OutHandle,
+}
+
+/// Active warp lattice pin drag in the viewport (AE Mesh Warp style).
+#[derive(Clone, Debug)]
+pub struct WarpDrag {
+    pub layer_id: String,
+    pub effect_id: String,
+    pub pin_index: usize,
+    /// Rest position of the pin in layer-local coords (grab-time box).
+    pub base: Vec2,
+    /// Cursor-minus-tip delta in comp px at grab time.
+    pub grab_offset: (f32, f32),
 }
 
 /// Active mask node/handle drag in the viewport Path Editor.
@@ -2887,6 +2901,7 @@ impl CompositionViewerPanel {
             frame_origin: None,
             gizmo_drag: None,
             mask_drag: None,
+            warp_drag: None,
             mask_edit_point: None,
             mask_down_moved: false,
             raster_cache: HashMap::new(),
@@ -3992,6 +4007,146 @@ impl Render for CompositionViewerPanel {
                                 }
                             }
 
+                            // --- Warp lattice overlay: draggable pin grid for
+                            // the selected layer's first warp effect (AE Mesh
+                            // Warp style). Pins live in the evaluated effect;
+                            // drags commit to the model via move_warp_pin_live.
+                            if is_selected {
+                                if let Some(fx) = layer.effects.iter().find(|e| {
+                                    matches!(
+                                        &e.effect_type,
+                                        compositor::EvaluatedEffectType::Warp { .. }
+                                    )
+                                }) {
+                                    if let compositor::EvaluatedEffectType::Warp { pins, .. } =
+                                        &fx.effect_type
+                                    {
+                                        let warp_origin = local_box.min;
+                                        let warp_size = Vec2::new(base_w, base_h);
+                                        let wfull = layer.world_matrix();
+                                        let w2c = |p: Vec2| {
+                                            let w = wfull.transform_point(p);
+                                            (
+                                                (w.x + giz_cw / 2.0) * giz_fit,
+                                                (w.y + giz_ch / 2.0) * giz_fit,
+                                            )
+                                        };
+                                        let warp_col = Rgba { r: 0.65, g: 0.45, b: 1.0, a: 0.9 };
+                                        let pin_tip = |idx: usize| -> Vec2 {
+                                            let col = idx % project::WARP_GRID;
+                                            let row = idx / project::WARP_GRID;
+                                            let base = project::warp::pin_base(
+                                                col, row, warp_origin, warp_size,
+                                            );
+                                            let (dx, dy) = pins
+                                                .get(idx)
+                                                .map(|p| (p.dx, p.dy))
+                                                .unwrap_or((0.0, 0.0));
+                                            Vec2::new(base.x + dx, base.y + dy)
+                                        };
+                                        // Lattice rows + columns as curves.
+                                        for line in 0..project::WARP_GRID {
+                                            for horizontal in [true, false] {
+                                                let mut pts = Vec::with_capacity(project::WARP_GRID);
+                                                for k in 0..project::WARP_GRID {
+                                                    let idx = if horizontal {
+                                                        line * project::WARP_GRID + k
+                                                    } else {
+                                                        k * project::WARP_GRID + line
+                                                    };
+                                                    let tip = pin_tip(idx);
+                                                    let (cxp, cyp) = w2c(tip);
+                                                    pts.push(gpui::point(gpui::px(cxp), gpui::px(cyp)));
+                                                }
+                                                overlay_curves.push(OverlayCurve {
+                                                    points: pts,
+                                                    color: warp_col,
+                                                    thickness: 1.5,
+                                                });
+                                            }
+                                        }
+                                        // Draggable pins (right-click resets one).
+                                        for idx in 0..project::WARP_PIN_COUNT {
+                                            let tip = pin_tip(idx);
+                                            let tip_w = wfull.transform_point(tip);
+                                            let (pdx, pdy) = pins
+                                                .get(idx)
+                                                .map(|p| (p.dx, p.dy))
+                                                .unwrap_or((0.0, 0.0));
+                                            let pbase = Vec2::new(tip.x - pdx, tip.y - pdy);
+                                            let (nx, ny) = w2c(tip);
+                                            let p_wh = giz_panel.clone();
+                                            let s_wh = giz_state.clone();
+                                            let lid_wh = giz_lid.clone();
+                                            let eid_wh = fx.id.clone();
+                                            let s_wr = giz_state.clone();
+                                            let lid_wr = giz_lid.clone();
+                                            let eid_wr = fx.id.clone();
+                                            let (h_frame, h_fit, h_cw, h_ch) =
+                                                (giz_frame, giz_fit, giz_cw, giz_ch);
+                                            overlay_dots.push(
+                                                gizmo_dot(
+                                                    format!("warp_pin_{}_{}_{}", giz_lid, eid_wh, idx),
+                                                    nx,
+                                                    ny,
+                                                    9.0,
+                                                    Rgba { r: 0.65, g: 0.45, b: 1.0, a: 1.0 },
+                                                    white,
+                                                    true,
+                                                )
+                                                .test_support()
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    move |event, _window, cx| {
+                                                        let (mx, my) = (
+                                                            event.position.x / px(1.0),
+                                                            event.position.y / px(1.0),
+                                                        );
+                                                        s_wh.update(cx, |s, cx| {
+                                                            s.checkpoint();
+                                                            s.select_layer(Some(lid_wh.clone()));
+                                                            s.preview_fast = true;
+                                                            cx.notify();
+                                                        });
+                                                        let (cur_cmx, cur_cmy) = gizmo_to_comp(
+                                                            mx, my, h_frame, h_fit, h_cw, h_ch,
+                                                        );
+                                                        let grab = (
+                                                            cur_cmx - tip_w.x,
+                                                            cur_cmy - tip_w.y,
+                                                        );
+                                                        p_wh.update(cx, |this, cx| {
+                                                            this.mask_down_moved = false;
+                                                            this.warp_drag = Some(WarpDrag {
+                                                                layer_id: lid_wh.clone(),
+                                                                effect_id: eid_wh.clone(),
+                                                                pin_index: idx,
+                                                                base: pbase,
+                                                                grab_offset: grab,
+                                                            });
+                                                            cx.notify();
+                                                        });
+                                                    },
+                                                )
+                                                .on_mouse_down(
+                                                    MouseButton::Right,
+                                                    move |_event, _window, cx| {
+                                                        s_wr.update(cx, |s, cx| {
+                                                            s.checkpoint();
+                                                            let _ = s.move_warp_pin_live(
+                                                                &lid_wr, &eid_wr, idx, 0.0, 0.0,
+                                                            );
+                                                            cx.notify();
+                                                        });
+                                                    },
+                                                )
+                                                .into_any_element(),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+
                             // --- Pen/shape path overlay: continuous spline curves
                             // (+ nodes) for the selected layer's own paths, so
                             // pen work is always visible, not just masks.
@@ -4364,6 +4519,43 @@ impl Render for CompositionViewerPanel {
                     }
                     return;
                 }
+                // Warp lattice pin drags (same grab-offset + layer-local
+                // mapping as mask drags; offset is tip minus rest base).
+                if let Some(wdrag) = this.warp_drag.clone() {
+                    let frame_org = frame_origin_or_center(
+                        this.frame_origin,
+                        this.viewport_px,
+                        this.viewport_origin,
+                        this.canvas_px,
+                    );
+                    let (fox, foy) = frame_org.unwrap_or((0.0, 0.0));
+                    let (cw, ch) = {
+                        let s = this.state.read(cx);
+                        match s.active_composition() {
+                            Some(c) => (c.width as f32, c.height as f32),
+                            None => (1920.0, 1080.0),
+                        }
+                    };
+                    let fit_here = canvas_scale(this.viewport_px, this.zoom_factor, cw, ch);
+                    let cmx = (curr_x - fox) / fit_here - cw / 2.0 - wdrag.grab_offset.0;
+                    let cmy = (curr_y - foy) / fit_here - ch / 2.0 - wdrag.grab_offset.1;
+                    let st = this.state.clone();
+                    if let Some(loc) =
+                        st.read(cx).comp_to_layer_local(&wdrag.layer_id, Vec2::new(cmx, cmy))
+                    {
+                        st.update(cx, |s, cx| {
+                            let _ = s.move_warp_pin_live(
+                                &wdrag.layer_id,
+                                &wdrag.effect_id,
+                                wdrag.pin_index,
+                                loc.x - wdrag.base.x,
+                                loc.y - wdrag.base.y,
+                            );
+                            cx.notify();
+                        });
+                    }
+                    return;
+                }
                 // Transform-gizmo drags win over canvas drags.
                 if let Some(drag) = this.gizmo_drag.clone() {
                     // Window px -> composition px via the measured frame.
@@ -4503,6 +4695,7 @@ impl Render for CompositionViewerPanel {
                 this.is_dragging_canvas = false;
                 this.last_canvas_mouse = None;
                 this.gizmo_drag = None;
+                this.warp_drag = None;
                 this.down_on_layer = false;
                 // Finalize Shape tool drag (creates shape layer or shaped mask)
                 if let Some(sdrag) = this.shape_drag.take() {
@@ -4572,6 +4765,7 @@ impl Render for CompositionViewerPanel {
                 this.last_canvas_mouse = None;
                 this.gizmo_drag = None;
                 this.mask_drag = None;
+                this.warp_drag = None;
                 this.shape_drag = None;
                 this.mask_down_moved = false;
                 this.down_on_layer = false;

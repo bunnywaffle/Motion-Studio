@@ -229,21 +229,42 @@ pub fn apply_effect_pixels(
                 }
             }
         }
-        EvaluatedEffectType::Warp { amount, scale } => {
+        EvaluatedEffectType::Warp { amount, scale, pins } => {
             let amp = (*amount / 100.0 * base_w.min(base_h) * 0.25).clamp(0.0, 200.0);
-            if amp < 0.25 {
-                return;
+            if amp >= 0.25 {
+                let freq = (*scale).clamp(0.1, 10.0) * 0.05;
+                let src = buf.px.clone();
+                for y in 0..buf.h {
+                    for x in 0..buf.w {
+                        let ox = ((y as f32 * freq).sin() * amp) as i32;
+                        let oy = ((x as f32 * freq * 1.3 + 1.7).sin() * amp) as i32;
+                        let sx = (x as i32 + ox).clamp(0, buf.w as i32 - 1);
+                        let sy = (y as i32 + oy).clamp(0, buf.h as i32 - 1);
+                        buf.px[(y * buf.w + x) as usize] =
+                            src[(sy as u32 * buf.w + sx as u32) as usize];
+                    }
+                }
             }
-            let freq = (*scale).clamp(0.1, 10.0) * 0.05;
-            let src = buf.px.clone();
-            for y in 0..buf.h {
-                for x in 0..buf.w {
-                    let ox = ((y as f32 * freq).sin() * amp) as i32;
-                    let oy = ((x as f32 * freq * 1.3 + 1.7).sin() * amp) as i32;
-                    let sx = (x as i32 + ox).clamp(0, buf.w as i32 - 1);
-                    let sy = (y as i32 + oy).clamp(0, buf.h as i32 - 1);
-                    buf.px[(y * buf.w + x) as usize] =
-                        src[(sy as u32 * buf.w + sx as u32) as usize];
+            // Pin lattice (AE Mesh Warp): backward-mapped bilinear offsets.
+            // Content-normalized (the buffer may carry effect padding).
+            if pins.iter().any(|p| !p.is_identity()) {
+                let (bw, bh) = (base_w.max(1.0), base_h.max(1.0));
+                let (ox0, oy0) = ((buf.w as f32 - bw) / 2.0, (buf.h as f32 - bh) / 2.0);
+                let src = buf.px.clone();
+                let snap = FloatBuf { w: buf.w, h: buf.h, px: src };
+                for y in 0..buf.h {
+                    for x in 0..buf.w {
+                        let (ox, oy) = project::warp::sample_offset(
+                            pins,
+                            (x as f32 - ox0) / bw,
+                            (y as f32 - oy0) / bh,
+                        );
+                        if ox.abs() < 1e-6 && oy.abs() < 1e-6 {
+                            continue;
+                        }
+                        buf.px[(y * buf.w + x) as usize] =
+                            snap.sample(x as f32 - ox, y as f32 - oy);
+                    }
                 }
             }
         }
@@ -606,5 +627,84 @@ mod tests {
             let ink_count = buf.px.iter().filter(|p| p.a > 0.5).count();
             assert!(ink_count > 0, "mode {mode:?} should render ink");
         }
+    }
+
+    fn warp_test_ctx() -> RasterFx {
+        RasterFx {
+            time_s: 0.0,
+            frame: 0,
+            res_w: 100.0,
+            res_h: 100.0,
+            duration_s: 10.0,
+            playing: false,
+        }
+    }
+
+    fn warp_gradient_buf() -> FloatBuf {
+        let mut buf = FloatBuf::clear(100, 100);
+        for y in 0..100 {
+            for x in 0..100 {
+                buf.px[(y * 100 + x) as usize] = Px {
+                    r: x as f32 / 100.0,
+                    g: 0.2,
+                    b: 0.4,
+                    a: 1.0,
+                };
+            }
+        }
+        buf
+    }
+
+    #[test]
+    fn test_warp_identity_pins_are_noop() {
+        let mut buf = warp_gradient_buf();
+        let before = buf.px.clone();
+        let eff = EvaluatedEffectType::Warp {
+            amount: 0.0,
+            scale: 1.0,
+            pins: Vec::new(),
+        };
+        apply_effect_pixels(&mut buf, 100.0, 100.0, &eff, &warp_test_ctx());
+        assert!(
+            buf.px
+                .iter()
+                .zip(before.iter())
+                .all(|(a, b)| a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a),
+            "empty pins + zero amount must not touch pixels"
+        );
+    }
+
+    #[test]
+    fn test_warp_pin_drags_pixels() {
+        let ctx = warp_test_ctx();
+        let mut plain = warp_gradient_buf();
+        let plain_fx = EvaluatedEffectType::Warp {
+            amount: 0.0,
+            scale: 1.0,
+            pins: Vec::new(),
+        };
+        apply_effect_pixels(&mut plain, 100.0, 100.0, &plain_fx, &ctx);
+
+        // Bottom-right pin pushed +40x: output(x) samples src(x-40).
+        let mut pins = vec![project::WarpPin::default(); project::WARP_PIN_COUNT];
+        pins[project::warp::pin_index(3, 3)] = project::WarpPin::new(40.0, 0.0);
+        let mut buf = warp_gradient_buf();
+        let eff = EvaluatedEffectType::Warp {
+            amount: 0.0,
+            scale: 1.0,
+            pins,
+        };
+        apply_effect_pixels(&mut buf, 100.0, 100.0, &eff, &ctx);
+
+        let diff = buf
+            .px
+            .iter()
+            .zip(plain.px.iter())
+            .filter(|(a, b)| (a.r - b.r).abs() > 1e-3)
+            .count();
+        assert!(diff > 100, "pin must visibly displace pixels, got {diff}");
+        // Bilinear resample keeps nearly all ink (edges go transparent).
+        let ink: f32 = buf.px.iter().map(|p| p.a).sum();
+        assert!(ink > 0.9 * 100.0 * 100.0, "ink preserved: {ink}");
     }
 }
