@@ -3109,20 +3109,21 @@ impl Render for CompositionViewerPanel {
                     // World box from the shared origin-aware local content
                     // box (same helper as the rasterizer and gizmo, so
                     // pixels, hit areas and handles always agree).
-                    let bbox = layer.local_to_world_bbox(
-                        &crate::raster::layer_local_box(layer, base_w, base_h),
-                    );
-                    let l_x = (bbox.min.x + comp_w / 2.0) * scale_x;
-                    let l_y = (bbox.min.y + comp_h / 2.0) * scale_y;
-                    let l_w = ((bbox.max.x - bbox.min.x) * scale_x).max(2.0);
-                    let l_h = ((bbox.max.y - bbox.min.y) * scale_y).max(2.0);
+                    let local_box = crate::raster::layer_local_box(layer, base_w, base_h);
+                    let render_box = crate::raster::layer_render_box(layer, base_w, base_h);
+                    let bbox = layer.local_to_world_bbox(&local_box);
+                    let render_bbox = layer.local_to_world_bbox(&render_box);
+                    let l_x = (render_bbox.min.x + comp_w / 2.0) * scale_x;
+                    let l_y = (render_bbox.min.y + comp_h / 2.0) * scale_y;
+                    let l_w = ((render_bbox.max.x - render_bbox.min.x) * scale_x).max(2.0);
+                    let l_h = ((render_bbox.max.y - render_bbox.min.y) * scale_y).max(2.0);
                     let is_selected = state.selected_layer_id.as_deref() == Some(&layer.id);
 
                     // Sample backdrop for this layer from the composition background
                     // and all intersecting underlying layers rendered so far.
                     let mut sampled_backdrop = full_frame_backdrop;
                     for (rx1, ry1, rx2, ry2, rcol) in &rendered_regions {
-                        if bbox.min.x < *rx2 && bbox.max.x > *rx1 && bbox.min.y < *ry2 && bbox.max.y > *ry1 {
+                        if render_bbox.min.x < *rx2 && render_bbox.max.x > *rx1 && render_bbox.min.y < *ry2 && render_bbox.max.y > *ry1 {
                             sampled_backdrop = BlendMode::Normal.composite(sampled_backdrop, *rcol);
                         }
                     }
@@ -3359,7 +3360,7 @@ impl Render for CompositionViewerPanel {
                         entry.avg
                     };
 
-                    rendered_regions.push((bbox.min.x, bbox.min.y, bbox.max.x, bbox.max.y, recorded_color));
+                    rendered_regions.push((render_bbox.min.x, render_bbox.min.y, render_bbox.max.x, render_bbox.max.y, recorded_color));
                     pick_list.push(PickBox {
                         id: layer.id.clone(),
                         min_x: bbox.min.x,
@@ -3497,11 +3498,7 @@ impl Render for CompositionViewerPanel {
                         );
                     }
 
-                    if is_selected {
-                        layer_el = layer_el
-                            .border_2()
-                            .border_color(rgb(0x3b82f6)); // accent selection border
-                    }
+                    // Selection border is rendered tightly around content geometry via overlay_curves in gizmo_els
 
                     // Transform gizmo for the selected layer (After Effects
                     // style): corner/edge scale handles, a rotate handle
@@ -3779,6 +3776,19 @@ impl Render for CompositionViewerPanel {
                             let mut overlay_curves: Vec<OverlayCurve> = Vec::new();
                             let mut overlay_leaders: Vec<OverlayLeader> = Vec::new();
                             let mut overlay_dots: Vec<AnyElement> = Vec::new();
+
+                            // Tight accent selection outline around content geometry
+                            overlay_curves.push(OverlayCurve {
+                                points: vec![
+                                    gpui::point(gpui::px(c00.0), gpui::px(c00.1)),
+                                    gpui::point(gpui::px(c10.0), gpui::px(c10.1)),
+                                    gpui::point(gpui::px(c11.0), gpui::px(c11.1)),
+                                    gpui::point(gpui::px(c01.0), gpui::px(c01.1)),
+                                    gpui::point(gpui::px(c00.0), gpui::px(c00.1)),
+                                ],
+                                color: accent,
+                                thickness: 1.5,
+                            });
 
                             let edit_target: Option<(String, String)> =
                                 giz_state.read(cx).active_mask_edit.clone();

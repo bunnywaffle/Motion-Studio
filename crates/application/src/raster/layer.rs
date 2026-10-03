@@ -890,8 +890,10 @@ pub fn rasterize_layer(
     // frame origin — not at (0, 0). `frame_ox/oy` re-bases the world map
     // below so buffer px (0, 0) means local `frame origin`.
     let local_box = layer_local_box(layer, base_w, base_h);
+    let render_box = layer_render_box(layer, base_w, base_h);
+    let pad = layer_effect_padding(layer);
     let (frame_ox, frame_oy) = (local_box.min.x, local_box.min.y);
-    let bbox = layer.local_to_world_bbox(&local_box);
+    let bbox = layer.local_to_world_bbox(&render_box);
     let bw = (bbox.max.x - bbox.min.x).max(1e-3);
     let bh = (bbox.max.y - bbox.min.y).max(1e-3);
     let kx = ow as f32 / bw;
@@ -952,6 +954,19 @@ pub fn rasterize_layer(
     } else {
         apply_masks(&mut work, &layer.masks);
     }
+    let (eff_ox, eff_oy) = if pad > 0.0 {
+        let pad_u = pad as u32;
+        let mut padded = FloatBuf::clear(work.w + pad_u * 2, work.h + pad_u * 2);
+        for y in 0..work.h {
+            for x in 0..work.w {
+                padded.put((x + pad_u) as i32, (y + pad_u) as i32, work.get(x as i32, y as i32));
+            }
+        }
+        work = padded;
+        (frame_ox - pad, frame_oy - pad)
+    } else {
+        (frame_ox, frame_oy)
+    };
     apply_layer_fx(&mut work, base_w, base_h, &layer.effects, &fx);
     let mut blur_total = 0.0f32;
     let mut bloom: Option<(f32, f32)> = None;
@@ -984,8 +999,8 @@ pub fn rasterize_layer(
         b: wm.b * ky,
         c: wm.c * kx,
         d: wm.d * ky,
-        tx: ((wm.a * frame_ox + wm.c * frame_oy + wm.tx) - bbox.min.x) * kx,
-        ty: ((wm.b * frame_ox + wm.d * frame_oy + wm.ty) - bbox.min.y) * ky,
+        tx: ((wm.a * eff_ox + wm.c * eff_oy + wm.tx) - bbox.min.x) * kx,
+        ty: ((wm.b * eff_ox + wm.d * eff_oy + wm.ty) - bbox.min.y) * ky,
     };
     // Perspective skew folds into the map (same as the full-comp path:
     // the skew runs first in local px, the world map scales after it).
@@ -1062,7 +1077,7 @@ pub fn rasterize_layer(
         if let EvaluatedEffectType::OuterGlow { size, spread, opacity, color, .. } =
             &eff.effect_type
         {
-            let glow_radius = (size * kx).clamp(0.5, 120.0);
+            let glow_radius = (size * kx).clamp(0.5, 2048.0);
             let glow_opacity = (opacity / 100.0).clamp(0.0, 1.0);
             if glow_opacity > 0.01 && glow_radius > 0.5 {
                 // Build alpha silhouette with optional spread dilation
@@ -1235,6 +1250,61 @@ pub fn layer_local_box(layer: &EvaluatedLayer, base_w: f32, base_h: f32) -> Boun
             BoundingBox2D::from_origin_size(origin, Vec2::new(w, h))
         }
         _ => BoundingBox2D::from_origin_size(Vec2::ZERO, Vec2::new(base_w, base_h)),
+    }
+}
+
+/// Maximum outward visual expansion (padding in local pixels) needed by active
+/// layer effects (Outer Glow, Drop Shadow, Gaussian Blur, Bloom, Glare/Glow plugins).
+pub fn layer_effect_padding(layer: &EvaluatedLayer) -> f32 {
+    let mut pad = 0.0f32;
+    for eff in &layer.effects {
+        if !eff.enabled {
+            continue;
+        }
+        match &eff.effect_type {
+            EvaluatedEffectType::GaussianBlur { radius } => {
+                pad = pad.max(*radius * 2.5);
+            }
+            EvaluatedEffectType::Bloom { intensity, radius } if *intensity > 0.1 => {
+                pad = pad.max(*radius * 2.0);
+            }
+            EvaluatedEffectType::OuterGlow { size, spread, opacity, .. } if *opacity > 0.5 => {
+                pad = pad.max(*size * 2.0 + *spread * 2.5);
+            }
+            EvaluatedEffectType::DropShadow { distance, softness, opacity, .. } if *opacity > 0.5 => {
+                pad = pad.max(distance.abs() + *softness * 2.5);
+            }
+            EvaluatedEffectType::Stock { plugin, params, .. } => {
+                use compositor::fx::stock_p;
+                match *plugin {
+                    StockPlugin::Glow => {
+                        let radius = stock_p(*plugin, params, 1);
+                        pad = pad.max(radius * 2.0);
+                    }
+                    StockPlugin::Glare => {
+                        let len = stock_p(*plugin, params, 1);
+                        pad = pad.max(len * 1.5);
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    pad.ceil().min(1024.0)
+}
+
+/// The local bounding box expanded by effect visual padding.
+pub fn layer_render_box(layer: &EvaluatedLayer, base_w: f32, base_h: f32) -> BoundingBox2D {
+    let local_box = layer_local_box(layer, base_w, base_h);
+    let pad = layer_effect_padding(layer);
+    if pad <= 0.0 {
+        local_box
+    } else {
+        BoundingBox2D::new(
+            Vec2::new(local_box.min.x - pad, local_box.min.y - pad),
+            Vec2::new(local_box.max.x + pad, local_box.max.y + pad),
+        )
     }
 }
 
@@ -1838,5 +1908,69 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_layer_effect_padding_and_render_box() {
+        let mut project = Project::new("p", "P");
+        let mut comp = Composition::hd_1080p_30fps("c", "C", 5.0);
+        let tc = TimeCode::from_frames(0, 30.0);
+        let out = TimeCode::from_frames(150, 30.0);
+        let mut layer = project::Layer::solid("l1", "L", Color::WHITE, 200, 200, tc, out);
+        
+        let glow = project::Effect {
+            id: "fx_glow".to_string(),
+            name: "Outer Glow".to_string(),
+            enabled: true,
+            effect_type: project::EffectType::outer_glow(
+                20.0,
+                10.0,
+                80.0,
+                Color::rgb(0.0, 1.0, 0.0),
+                50.0,
+            ),
+        };
+        layer.effects.push(glow);
+        comp.add_layer(layer).unwrap();
+        project.add_composition(comp).unwrap();
+        let eval_l = eval_first(&project, "c");
+
+        let pad = layer_effect_padding(&eval_l);
+        assert!(pad >= 60.0, "Expected padding >= 60.0 for glow, got {pad}");
+
+        let local_box = layer_local_box(&eval_l, 200.0, 200.0);
+        assert_eq!(local_box.min, Vec2::new(0.0, 0.0));
+        assert_eq!(local_box.max, Vec2::new(200.0, 200.0));
+
+        let render_box = layer_render_box(&eval_l, 200.0, 200.0);
+        assert_eq!(render_box.min, Vec2::new(-pad, -pad));
+        assert_eq!(render_box.max, Vec2::new(200.0 + pad, 200.0 + pad));
+
+        let assets: HashMap<String, std::sync::Arc<image::RgbaImage>> = HashMap::new();
+        let rw = (200.0 + pad * 2.0) as u32;
+        let rh = (200.0 + pad * 2.0) as u32;
+        let (buf, _avg, empty) = rasterize_layer(
+            &eval_l, 200.0, 200.0, rw, rh, 1920.0, 1080.0, Color::BLACK, None, 0.0, 0,
+            false, 5.0, &assets,
+        );
+        assert!(!empty);
+        let center = buf.get((rw / 2) as i32, (rh / 2) as i32);
+        assert!(center.a > 0.9, "center must be opaque: {center:?}");
+
+        let glow_pixel = buf.get((pad - 5.0) as i32, (rh / 2) as i32);
+        assert!(glow_pixel.a > 0.01, "glow must expand beyond content boundary: {glow_pixel:?}");
+    }
+
+    #[test]
+    fn test_large_blur_does_not_clamp() {
+        let mut buf = FloatBuf::clear(200, 200);
+        for y in 90..110 {
+            for x in 90..110 {
+                buf.put(x, y, Px { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
+            }
+        }
+        blur_buffer(&mut buf, 100.0);
+        let edge = buf.get(10, 100);
+        assert!(edge.a > 0.002, "large blur must spread wide to edges: {edge:?}");
     }
 }

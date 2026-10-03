@@ -35,7 +35,10 @@ pub use affine::{Aff, aff_apply, aff_invert, aff_mul, fold_transform, skew_about
 pub use buffer::{FloatBuf, blur_buffer};
 pub use comp::rasterize_comp;
 pub use effects::{RasterFx, apply_effect_pixels};
-pub use layer::{RasterEntry, decoded_asset, gizmo_local_corners, layer_cache_key, layer_local_box, rasterize_layer};
+pub use layer::{
+    RasterEntry, decoded_asset, gizmo_local_corners, layer_cache_key, layer_effect_padding,
+    layer_local_box, layer_render_box, rasterize_layer,
+};
 pub use mask::apply_masks;
 pub use pixel::Px;
 pub use stock::apply_stock;

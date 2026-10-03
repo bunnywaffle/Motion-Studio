@@ -301,7 +301,7 @@ fn glow_core(buf: &mut FloatBuf, intensity: f32, radius: f32, threshold: f32) {
         return;
     }
     let mut hi = highlights(&snap(buf), threshold);
-    blur_buffer(&mut hi, radius.clamp(0.5, 48.0));
+    blur_buffer(&mut hi, radius.clamp(0.5, 2048.0));
     screen_over(buf, &hi, k);
 }
 

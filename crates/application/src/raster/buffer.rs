@@ -136,34 +136,34 @@ fn get_gpu_engine() -> &'static Mutex<Option<GpuEffectEngine>> {
 /// Wide radii (> 8px) downsample first (cost drops with the square of the
 /// factor; gaussian-soft signals resample cleanly), then blur small.
 pub fn blur_buffer(buf: &mut FloatBuf, radius_px: f32) {
-    let radius_px = radius_px.clamp(0.0, 48.0);
+    let radius_px = radius_px.clamp(0.0, 2048.0);
     if radius_px < 0.5 || buf.w == 0 || buf.h == 0 {
         return;
     }
-    if radius_px > 8.0 {
-        // Downsample factor keeps the effective radius ≤ 8.
+    if radius_px > 8.0 && (buf.w > 2 || buf.h > 2) {
+        // Downsample factor keeps the effective radius <= 8.
         let k = (radius_px / 8.0).ceil().clamp(2.0, 8.0);
-        let (sw, sh) = (
-            ((buf.w as f32 / k).ceil().max(2.0)) as u32,
-            ((buf.h as f32 / k).ceil().max(2.0)) as u32,
-        );
-        let mut small = FloatBuf::clear(sw, sh);
-        for y in 0..sh {
-            for x in 0..sw {
-                let sx = (x as f32 + 0.5) / sw as f32 * buf.w as f32 - 0.5;
-                let sy = (y as f32 + 0.5) / sh as f32 * buf.h as f32 - 0.5;
-                small.px[(y * sw + x) as usize] = buf.sample(sx, sy);
+        let sw = ((buf.w as f32 / k).ceil() as u32).clamp(2, buf.w);
+        let sh = ((buf.h as f32 / k).ceil() as u32).clamp(2, buf.h);
+        if sw < buf.w || sh < buf.h {
+            let mut small = FloatBuf::clear(sw, sh);
+            for y in 0..sh {
+                for x in 0..sw {
+                    let sx = (x as f32 + 0.5) / sw as f32 * buf.w as f32 - 0.5;
+                    let sy = (y as f32 + 0.5) / sh as f32 * buf.h as f32 - 0.5;
+                    small.px[(y * sw + x) as usize] = buf.sample(sx, sy);
+                }
             }
-        }
-        blur_buffer(&mut small, radius_px / k);
-        for y in 0..buf.h {
-            for x in 0..buf.w {
-                let sx = (x as f32 + 0.5) / buf.w as f32 * sw as f32 - 0.5;
-                let sy = (y as f32 + 0.5) / buf.h as f32 * sh as f32 - 0.5;
-                buf.px[(y * buf.w + x) as usize] = small.sample(sx, sy);
+            blur_buffer(&mut small, radius_px / k);
+            for y in 0..buf.h {
+                for x in 0..buf.w {
+                    let sx = (x as f32 + 0.5) / buf.w as f32 * sw as f32 - 0.5;
+                    let sy = (y as f32 + 0.5) / buf.h as f32 * sh as f32 - 0.5;
+                    buf.px[(y * buf.w + x) as usize] = small.sample(sx, sy);
+                }
             }
+            return;
         }
-        return;
     }
     // Attempt GPU compute blur (its shader apron covers radii up to 8;
     // wider radii silently clamp there, so they take the CPU kernel which

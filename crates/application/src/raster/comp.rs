@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use super::affine::{Aff, aff_mul, fold_transform, skew_about};
 use super::buffer::{FloatBuf, blur_buffer};
-use super::effects::RasterFx;use super::layer::{apply_adjustment, apply_bloom, apply_layer_fx, blit_affine, layer_base_dims, layer_local_box, raster_layer_content};
+use super::effects::RasterFx;use super::layer::{apply_adjustment, apply_bloom, apply_layer_fx, blit_affine, layer_base_dims, layer_effect_padding, layer_local_box, layer_render_box, raster_layer_content};
 use super::mask::apply_masks;
 use super::pixel::Px;
 
@@ -129,7 +129,14 @@ pub fn rasterize_comp(
         // Pen/path shapes use their raster frame (arbitrary local coords).
         let (base_w, base_h) = layer_base_dims(layer, comp_w, comp_h, assets);
         let local_box = layer_local_box(layer, base_w, base_h);
+        let render_box = layer_render_box(layer, base_w, base_h);
+        let pad = layer_effect_padding(layer);
         let (frame_ox, frame_oy) = (local_box.min.x, local_box.min.y);
+        let (eff_ox, eff_oy) = if pad > 0.0 {
+            (frame_ox - pad, frame_oy - pad)
+        } else {
+            (frame_ox, frame_oy)
+        };
         // Local->world affine from the evaluated matrix, scaled to output.
         // Content px (0, 0) is local `frame origin`, hence `W * origin`.
         let wm = layer.world_matrix();
@@ -138,8 +145,8 @@ pub fn rasterize_comp(
             b: wm.b * k,
             c: wm.c * k,
             d: wm.d * k,
-            tx: (wm.a * frame_ox + wm.c * frame_oy + wm.tx + comp_w / 2.0) * k,
-            ty: (wm.b * frame_ox + wm.d * frame_oy + wm.ty + comp_h / 2.0) * k,
+            tx: (wm.a * eff_ox + wm.c * eff_oy + wm.tx + comp_w / 2.0) * k,
+            ty: (wm.b * eff_ox + wm.d * eff_oy + wm.ty + comp_h / 2.0) * k,
         };
         // Perspective skew folds into the map (local skew about center).
         for eff in &layer.effects {
@@ -174,7 +181,7 @@ pub fn rasterize_comp(
             }
         }
         // Output bounds: world AABB of the local content box in output px.
-        let bbox = layer.local_to_world_bbox(&local_box);
+        let bbox = layer.local_to_world_bbox(&render_box);
         let x0 = ((bbox.min.x + comp_w / 2.0) * k).floor().max(0.0) as u32;
         let y0 = ((bbox.min.y + comp_h / 2.0) * k).floor().max(0.0) as u32;
         let x1 = ((bbox.max.x + comp_w / 2.0) * k).ceil().min(ow as f32) as u32;
@@ -209,6 +216,16 @@ pub fn rasterize_comp(
                 apply_masks(&mut work, &shifted_masks);
             } else {
                 apply_masks(&mut work, &layer.masks);
+            }
+            if pad > 0.0 {
+                let pad_u = pad as u32;
+                let mut padded = FloatBuf::clear(work.w + pad_u * 2, work.h + pad_u * 2);
+                for y in 0..work.h {
+                    for x in 0..work.w {
+                        padded.put((x + pad_u) as i32, (y + pad_u) as i32, work.get(x as i32, y as i32));
+                    }
+                }
+                work = padded;
             }
             apply_layer_fx(&mut work, base_w, base_h, &layer.effects, &fx);
             // Blur + bloom radius (convolution on the content pixmap).
@@ -260,7 +277,7 @@ pub fn rasterize_comp(
                 if let EvaluatedEffectType::OuterGlow { size, spread, opacity, color, .. } =
                     &eff.effect_type
                 {
-                    let glow_radius = (size * k).clamp(0.5, 120.0);
+                    let glow_radius = (size * k).clamp(0.5, 2048.0);
                     let glow_opacity = (opacity / 100.0).clamp(0.0, 1.0);
                     if glow_opacity > 0.01 && glow_radius > 0.5 {
                         let mut sil = FloatBuf::clear(work.w, work.h);
