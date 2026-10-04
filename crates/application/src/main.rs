@@ -10716,6 +10716,37 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         });
     }
 
+    #[test]
+    fn test_effect_path_helpers_for_modifier_graph() {
+        use crate::state::EditorState;
+
+        // Scrub keys normalize to the canonical paths the graph, links,
+        // and compositor share; other paths pass through untouched.
+        assert_eq!(
+            crate::panels::effect_path_for_value_key("fx:abc:radius:100"),
+            "effect:abc:radius"
+        );
+        assert_eq!(
+            crate::panels::effect_path_for_value_key("fx:abc:radius"),
+            "effect:abc:radius"
+        );
+        assert_eq!(
+            crate::panels::effect_path_for_value_key("transform.position.x"),
+            "transform.position.x"
+        );
+
+        // Base/live reads resolve effect scalars (graph editor display).
+        let mut s = EditorState::new();
+        s.select_layer(Some("layer_accent".to_string()));
+        let fx = s
+            .add_effect_to_selected_layer(project::EffectType::gaussian_blur(7.0))
+            .unwrap();
+        let path = format!("effect:{fx}:radius");
+        assert!((s.get_layer_property_base_value("layer_accent", &path) - 7.0).abs() < 1e-6);
+        assert!((s.get_layer_property_live_value("layer_accent", &path) - 7.0).abs() < 1e-6);
+        assert_eq!(s.get_layer_property_base_value("layer_accent", "effect:missing:radius"), 0.0);
+    }
+
     #[gpui_kit::test]
     fn test_timeline_context_menu_has_modifier_graph_option(cx: &mut TestAppContext) {
         let (root, app_view) = setup_test_window(cx);

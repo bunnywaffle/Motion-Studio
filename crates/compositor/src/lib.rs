@@ -2579,6 +2579,41 @@ mod tests {
     }
 
     #[test]
+    fn test_modifier_graph_effect_params_evaluation() {
+        use project::{Effect, ModifierGraph, ModifierNode, NodeConnection, NodeKind};
+
+        let mut comp = Composition::hd_1080p_30fps("comp_fxmg", "Effect Graph Test", 5.0);
+        let tc0 = TimeCode::zero(30.0);
+        let tc150 = TimeCode::from_frames(150, 30.0);
+
+        let mut layer = Layer::solid("l_fxmg", "Fx Graph Layer", Color::RED, 100, 100, tc0, tc150);
+        layer.add_effect(Effect::gaussian_blur("fx_blur", 5.0));
+
+        // Modifier graph on the blur radius: Constant 42 -> output.
+        let mg = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("c", 0.0, 0.0, NodeKind::Constant { value: 42.0 }),
+                ModifierNode::new("out", 200.0, 0.0, NodeKind::Output),
+            ],
+            connections: vec![NodeConnection::new("c", "value", "out", "result")],
+        };
+        layer.set_modifier_graph("effect:fx_blur:radius", mg);
+
+        comp.add_layer(layer).unwrap();
+        let graph = SceneGraph::from_composition(&comp).unwrap();
+        let evaluator = LayerStackEvaluator::new();
+
+        let eval = evaluator.evaluate(&graph, &tc0);
+        let l = eval.get_layer("l_fxmg").unwrap();
+        match &l.effects[0].effect_type {
+            EvaluatedEffectType::GaussianBlur { radius } => {
+                assert_eq!(*radius, 42.0, "modifier graph must drive the effect param");
+            }
+            _ => panic!("Expected GaussianBlur"),
+        }
+    }
+
+    #[test]
     fn test_property_links_live_synchronization() {
         let mut comp = Composition::hd_1080p_30fps("comp_link", "Links Test", 5.0);
         let tc0 = TimeCode::zero(30.0);

@@ -6770,7 +6770,21 @@ impl EditorState {
             "transform.scale.y" | "scale_y" => layer.transform.scale.evaluate_at(&tc).y,
             "transform.rotation" | "rotation" => layer.transform.rotation.evaluate_at(&tc),
             "opacity" => layer.opacity.evaluate_at(&tc),
-            _ => 0.0,
+            _ => {
+                // Effect scalars share the canonical `effect:{id}:{param}`
+                // path everywhere (graph, links, compositor).
+                if let Some(rest) = prop_path.strip_prefix("effect:") {
+                    let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                    if parts.len() == 2 {
+                        if let Some(fx) = layer.get_effect(parts[0]) {
+                            if let Some(prop) = fx.get_param_property(parts[1]) {
+                                return prop.evaluate_at(&tc);
+                            }
+                        }
+                    }
+                }
+                0.0
+            }
         }
     }
 

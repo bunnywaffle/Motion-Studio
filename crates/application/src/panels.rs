@@ -159,6 +159,22 @@ fn menu_button_disabled(label: &'static str, cx: &App) -> impl IntoElement {
         .child(label)
 }
 
+/// Canonical `effect:{id}:{param}` graph/link path for a properties-panel
+/// value key. Effect scrub keys carry a display multiplier
+/// (`fx:{id}:{param}:{mult}`); the graph, links, and compositor all share
+/// the multiplier-free `effect:` form.
+pub(crate) fn effect_path_for_value_key(key: &str) -> String {
+    if let Some(rest) = key.strip_prefix("fx:") {
+        let mut parts = rest.split(':');
+        match (parts.next(), parts.next()) {
+            (Some(eid), Some(field)) => format!("effect:{eid}:{field}"),
+            _ => key.to_string(),
+        }
+    } else {
+        key.to_string()
+    }
+}
+
 /// Viewport gizmo handle dot, centered on canvas-space `(x, y)`.
 /// Note: no `.test_support()` wrapper here — it would hide the concrete
 /// `Stateful<Div>` type that callers extend with children and handlers.
@@ -13774,7 +13790,7 @@ impl Render for PropertiesPanel {
             let s_mod = s_menu.clone();
             let p_mod = p_close.clone();
             let l_mod = lid_str.clone();
-            let pt_mod = path_str.clone();
+            let pt_mod = effect_path_for_value_key(&path_str);
             menu_items = menu_items.child(
                 div()
                     .id("props_ctx_modifier_graph")

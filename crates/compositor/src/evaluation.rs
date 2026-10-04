@@ -1692,11 +1692,23 @@ impl LayerStackEvaluator {
                 if eff.enabled {
                     let eval_eff_prop = |param_name: &str, def_val: f32| -> f32 {
                         let path = format!("effect:{}:{}", eff.id, param_name);
-                        if let Some(link) = node.property_links.get(&path) {
+                        let base = if let Some(link) = node.property_links.get(&path) {
                             let mut visited = HashSet::new();
                             resolve_property_link_value(graph, &link.driver_layer_id, &link.driver_prop_path, time, &mut visited).unwrap_or(def_val)
                         } else {
                             def_val
+                        };
+                        // Modifier graphs reshape the (possibly linked) base
+                        // value, exactly like transform/opacity above.
+                        if let Some(mg) = node.modifier_graphs.get(&path) {
+                            let factor = node.progression_factor(time);
+                            let resolver = |d_lid: &str, d_prop: &str| {
+                                let mut visited = HashSet::new();
+                                resolve_property_link_value(graph, d_lid, d_prop, time, &mut visited).unwrap_or(0.0)
+                            };
+                            mg.evaluate_with_resolver(base, factor, &resolver)
+                        } else {
+                            base
                         }
                     };
 
