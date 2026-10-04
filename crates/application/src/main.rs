@@ -7445,6 +7445,139 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         });
     }
 
+    #[test]
+    fn test_layer_and_asset_clipboard_round_trip() {
+        use crate::state::EditorState;
+
+        let mut s = EditorState::new();
+        // Empty clipboards refuse to paste; unknown ids refuse to copy.
+        assert!(s.paste_copied_layer().is_err());
+        assert!(s.paste_copied_asset().is_err());
+        assert!(s.copy_layer("missing").is_err());
+        assert!(s.copy_asset("missing").is_err());
+
+        // Layer copy/paste: fresh id, "Copy" name, repeatable.
+        s.copy_layer("layer_accent").unwrap();
+        let n0 = s.active_composition().unwrap().layers.len();
+        let nid = s.paste_copied_layer().unwrap();
+        assert_ne!(nid, "layer_accent");
+        {
+            let comp = s.active_composition().unwrap();
+            assert_eq!(comp.layers.len(), n0 + 1);
+            assert!(comp.get_layer(&nid).unwrap().name.ends_with("Copy"));
+        }
+        s.paste_copied_layer().unwrap();
+        assert_eq!(s.active_composition().unwrap().layers.len(), n0 + 2);
+
+        // Asset copy/paste: pastes the copied asset as a new layer.
+        let aid = "clip_asset";
+        s.project
+            .add_asset(project::Asset::from_path(aid, "Clip", "/tmp/clip.png"))
+            .unwrap();
+        s.copy_asset(aid).unwrap();
+        let n1 = s.active_composition().unwrap().layers.len();
+        s.paste_copied_asset().unwrap();
+        assert_eq!(s.active_composition().unwrap().layers.len(), n1 + 1);
+    }
+
+    #[gpui_kit::test]
+    fn test_layer_context_menu_copy_paste_add_mask(cx: &mut TestAppContext) {
+        // Timeline layer menu: Copy -> Paste duplicates, Add Mask adds one.
+        use crate::panels::ContextMenuTarget;
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        let open_layer_menu = |app_view: &gpui_kit::Entity<AppView>, cx: &mut TestAppContext| {
+            app_view.update(cx, |view, cx| {
+                view.panels().timeline.update(cx, |p, _| {
+                    p.open_context_menu(
+                        ContextMenuTarget::Layer("layer_accent".to_string()),
+                        gpui::point(gpui::px(150.), gpui::px(150.)),
+                    );
+                });
+            });
+        };
+        let n0 = app_view.read_with(cx, |view, cx| {
+            view.state().read(cx).active_composition().unwrap().layers.len()
+        });
+        open_layer_menu(&app_view, cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("timeline_ctx_copy_layer").visible());
+            window.click("timeline_ctx_copy_layer", cx);
+        })
+        .expect("update_window failed");
+        assert!(app_view.read_with(cx, |view, cx| view.state().read(cx).layer_clipboard.is_some()));
+        open_layer_menu(&app_view, cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("timeline_ctx_paste_layer").visible());
+            window.click("timeline_ctx_paste_layer", cx);
+        })
+        .expect("update_window failed");
+        assert!(app_view.read_with(cx, |view, cx| {
+            view.state().read(cx).active_composition().unwrap().layers.len() == n0 + 1
+        }));
+        open_layer_menu(&app_view, cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("timeline_ctx_add_mask").visible());
+            window.click("timeline_ctx_add_mask", cx);
+        })
+        .expect("update_window failed");
+        assert!(app_view.read_with(cx, |view, cx| {
+            view.state().read(cx).active_composition().unwrap()
+                .get_layer("layer_accent").unwrap().masks.len() == 1
+        }));
+
+        // Project asset menu: Copy -> Paste adds the asset as a layer.
+        let aid = "menu_asset";
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, _| {
+                let _ = s.project.add_asset(project::Asset::from_path(aid, "Menu Clip", "/tmp/menu.png"));
+            });
+        });
+        let open_asset_menu = |app_view: &gpui_kit::Entity<AppView>, cx: &mut TestAppContext| {
+            app_view.update(cx, |view, cx| {
+                view.panels().project.update(cx, |p, _| {
+                    p.open_context_menu(
+                        crate::panels::ProjectContextMenuTarget::Asset(aid.to_string()),
+                        gpui::point(gpui::px(50.), gpui::px(50.)),
+                    );
+                });
+            });
+        };
+        open_asset_menu(&app_view, cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("proj_ctx_copy_asset").visible());
+            window.click("proj_ctx_copy_asset", cx);
+        })
+        .expect("update_window failed");
+        assert!(app_view.read_with(cx, |view, cx| view.state().read(cx).asset_clipboard.is_some()));
+        let n1 = app_view.read_with(cx, |view, cx| {
+            view.state().read(cx).active_composition().unwrap().layers.len()
+        });
+        open_asset_menu(&app_view, cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("proj_ctx_paste_asset").visible());
+            window.click("proj_ctx_paste_asset", cx);
+        })
+        .expect("update_window failed");
+        assert!(app_view.read_with(cx, |view, cx| {
+            view.state().read(cx).active_composition().unwrap().layers.len() == n1 + 1
+        }));
+    }
+
     #[gpui_kit::test]
     fn test_timeline_row_comboboxes_drive_blend_matte_parent(cx: &mut TestAppContext) {
         // Timeline row Comboboxes: open, arrow down, confirm commits.

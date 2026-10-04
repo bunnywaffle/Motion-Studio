@@ -146,6 +146,19 @@ where
         .child(label)
 }
 
+/// Disabled (empty-clipboard) menu row: same shape as [`menu_button`],
+/// muted with no click handler.
+fn menu_button_disabled(label: &'static str, cx: &App) -> impl IntoElement {
+    div()
+        .px_2()
+        .py_1()
+        .rounded_sm()
+        .text_xs()
+        .text_color(cx.theme().muted_foreground)
+        .cursor_not_allowed()
+        .child(label)
+}
+
 /// Viewport gizmo handle dot, centered on canvas-space `(x, y)`.
 /// Note: no `.test_support()` wrapper here — it would hide the concrete
 /// `Stateful<Div>` type that callers extend with children and handlers.
@@ -2411,6 +2424,38 @@ impl Render for ProjectPanel {
                                         });
                                     })
                                     .child("Import Sample Footage")
+                            })
+                            .child({
+                                let has_bg_asset = s_menu.read(cx).asset_clipboard.is_some();
+                                let s_pst = s_menu.clone();
+                                let p_pst = p_close.clone();
+                                let mut pst_item = div()
+                                    .id("proj_ctx_paste_asset_bg")
+                                    .test_support()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .text_xs();
+                                if has_bg_asset {
+                                    pst_item = pst_item
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                            s_pst.update(cx, |s, cx| {
+                                                let _ = s.paste_copied_asset();
+                                                cx.notify();
+                                            });
+                                            p_pst.update(cx, |this, cx| {
+                                                this.close_context_menu();
+                                                cx.notify();
+                                            });
+                                        });
+                                } else {
+                                    pst_item = pst_item
+                                        .text_color(cx.theme().muted_foreground)
+                                        .cursor_not_allowed();
+                                }
+                                pst_item.child("Paste Asset")
                             });
                     }
                     ProjectContextMenuTarget::Asset(asset_id) => {
@@ -2423,6 +2468,38 @@ impl Render for ProjectPanel {
                         let aid3 = asset_id.clone();
                         let s_kf = s_menu.clone();
                         let p_kf = p_close.clone();
+                        let aid_cpy = asset_id.clone();
+                        let s_cpy = s_menu.clone();
+                        let p_cpy = p_close.clone();
+                        let has_asset = s_menu.read(cx).asset_clipboard.is_some();
+                        let s_pst = s_menu.clone();
+                        let p_pst = p_close.clone();
+                        let mut pst_item = div()
+                            .id("proj_ctx_paste_asset")
+                            .test_support()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_xs();
+                        if has_asset {
+                            pst_item = pst_item
+                                .cursor_pointer()
+                                .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                    s_pst.update(cx, |s, cx| {
+                                        let _ = s.paste_copied_asset();
+                                        cx.notify();
+                                    });
+                                    p_pst.update(cx, |this, cx| {
+                                        this.close_context_menu();
+                                        cx.notify();
+                                    });
+                                });
+                        } else {
+                            pst_item = pst_item
+                                .text_color(cx.theme().muted_foreground)
+                                .cursor_not_allowed();
+                        }
                         menu_items = menu_items
                             .child(
                                 div()
@@ -2446,6 +2523,29 @@ impl Render for ProjectPanel {
                                     })
                                     .child("Add to Composition"),
                             )
+                            .child(
+                                div()
+                                    .id("proj_ctx_copy_asset")
+                                    .test_support()
+                                    .cursor_pointer()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .text_xs()
+                                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        s_cpy.update(cx, |s, cx| {
+                                            let _ = s.copy_asset(&aid_cpy);
+                                            cx.notify();
+                                        });
+                                        p_cpy.update(cx, |this, cx| {
+                                            this.close_context_menu();
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child("Copy Asset"),
+                            )
+                            .child(pst_item.child("Paste Asset"))
                             .child(
                                 div()
                                     .id("proj_ctx_del_asset")
@@ -5413,13 +5513,29 @@ impl Render for CompositionViewerPanel {
                                                         s.update(cx, |s, cx| { let _ = s.add_adjustment_layer(None); cx.notify(); });
                                                         p.update(cx, |this, cx| { this.close_context_menu(); cx.notify(); });
                                                     }
-                                                }));
+                                                }))
+                                                .child(if s_menu.read(cx).layer_clipboard.is_some() {
+                                                    menu_button("Paste Layer", cx, {
+                                                        let s = s_menu.clone();
+                                                        let p = p_close.clone();
+                                                        move |cx| {
+                                                            s.update(cx, |s, cx| { let _ = s.paste_copied_layer(); cx.notify(); });
+                                                            p.update(cx, |this, cx| { this.close_context_menu(); cx.notify(); });
+                                                        }
+                                                    })
+                                                    .into_any_element()
+                                                } else {
+                                                    menu_button_disabled("Paste Layer", cx).into_any_element()
+                                                });
                                         }
                                         ViewerContextMenuTarget::Layer(lid) => {
                                             let lid_del = lid.clone();
                                             let lid_dup = lid.clone();
+                                            let lid_cpy = lid.clone();
+                                            let lid_msk = lid.clone();
                                             let lid_rst = lid.clone();
                                             let lid_piv = lid.clone();
+                                            let has_layer = s_menu.read(cx).layer_clipboard.is_some();
 
                                             menu_items = menu_items
                                                 .child(
@@ -5445,6 +5561,35 @@ impl Render for CompositionViewerPanel {
                                                     let p = p_close.clone();
                                                     move |cx| {
                                                         s.update(cx, |s, cx| { let _ = s.duplicate_layer(&lid_dup); cx.notify(); });
+                                                        p.update(cx, |this, cx| { this.close_context_menu(); cx.notify(); });
+                                                    }
+                                                }))
+                                                .child(menu_button("Copy Layer", cx, {
+                                                    let s = s_menu.clone();
+                                                    let p = p_close.clone();
+                                                    move |cx| {
+                                                        s.update(cx, |s, cx| { let _ = s.copy_layer(&lid_cpy); cx.notify(); });
+                                                        p.update(cx, |this, cx| { this.close_context_menu(); cx.notify(); });
+                                                    }
+                                                }))
+                                                .child(if has_layer {
+                                                    menu_button("Paste Layer", cx, {
+                                                        let s = s_menu.clone();
+                                                        let p = p_close.clone();
+                                                        move |cx| {
+                                                            s.update(cx, |s, cx| { let _ = s.paste_copied_layer(); cx.notify(); });
+                                                            p.update(cx, |this, cx| { this.close_context_menu(); cx.notify(); });
+                                                        }
+                                                    })
+                                                    .into_any_element()
+                                                } else {
+                                                    menu_button_disabled("Paste Layer", cx).into_any_element()
+                                                })
+                                                .child(menu_button("Add Mask", cx, {
+                                                    let s = s_menu.clone();
+                                                    let p = p_close.clone();
+                                                    move |cx| {
+                                                        s.update(cx, |s, cx| { let _ = s.add_mask_to_layer(&lid_msk); cx.notify(); });
                                                         p.update(cx, |this, cx| { this.close_context_menu(); cx.notify(); });
                                                     }
                                                 }))
@@ -19992,6 +20137,89 @@ impl Render for TimelinePanel {
                             .child("Duplicate Layer"),
                     );
 
+                    let s_cpy = s_menu.clone();
+                    let p_cpy = p_close.clone();
+                    let t_cpy = target_lid.clone();
+                    menu_items = menu_items.child(
+                        div()
+                            .id("timeline_ctx_copy_layer")
+                            .test_support()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                s_cpy.update(cx, |s, cx| {
+                                    let _ = s.copy_layer(&t_cpy);
+                                    cx.notify();
+                                });
+                                p_cpy.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    cx.notify();
+                                });
+                            })
+                            .child("Copy Layer"),
+                    );
+
+                    let has_tl_layer = s_menu.read(cx).layer_clipboard.is_some();
+                    let s_pst = s_menu.clone();
+                    let p_pst = p_close.clone();
+                    let mut pst_item = div()
+                        .id("timeline_ctx_paste_layer")
+                        .test_support()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .text_xs();
+                    if has_tl_layer {
+                        pst_item = pst_item
+                            .cursor_pointer()
+                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                s_pst.update(cx, |s, cx| {
+                                    let _ = s.paste_copied_layer();
+                                    cx.notify();
+                                });
+                                p_pst.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    cx.notify();
+                                });
+                            });
+                    } else {
+                        pst_item = pst_item
+                            .text_color(cx.theme().muted_foreground)
+                            .cursor_not_allowed();
+                    }
+                    menu_items = menu_items.child(pst_item.child("Paste Layer"));
+
+                    let s_msk = s_menu.clone();
+                    let p_msk = p_close.clone();
+                    let t_msk = target_lid.clone();
+                    menu_items = menu_items.child(
+                        div()
+                            .id("timeline_ctx_add_mask")
+                            .test_support()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                s_msk.update(cx, |s, cx| {
+                                    let _ = s.add_mask_to_layer(&t_msk);
+                                    cx.notify();
+                                });
+                                p_msk.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    cx.notify();
+                                });
+                            })
+                            .child("Add Mask"),
+                    );
+
                     let s2 = s_menu.clone();
                     let p2 = p_close.clone();
                     let t2 = target_lid.clone();
@@ -20805,6 +21033,37 @@ impl Render for TimelinePanel {
                             })
                             .child("New Text Layer"),
                     );
+
+                    let has_empty_layer = s_menu.read(cx).layer_clipboard.is_some();
+                    let s_epst = s_menu.clone();
+                    let p_epst = p_close.clone();
+                    let mut epst_item = div()
+                        .id("timeline_ctx_paste_layer_empty")
+                        .test_support()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .text_xs();
+                    if has_empty_layer {
+                        epst_item = epst_item
+                            .cursor_pointer()
+                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                s_epst.update(cx, |s, cx| {
+                                    let _ = s.paste_copied_layer();
+                                    cx.notify();
+                                });
+                                p_epst.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    cx.notify();
+                                });
+                            });
+                    } else {
+                        epst_item = epst_item
+                            .text_color(cx.theme().muted_foreground)
+                            .cursor_not_allowed();
+                    }
+                    menu_items = menu_items.child(epst_item.child("Paste Layer"));
                 }
             }
 

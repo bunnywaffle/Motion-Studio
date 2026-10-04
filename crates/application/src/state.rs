@@ -191,6 +191,10 @@ pub struct EditorState {
     pub copied_property_link: Option<(String, String)>,
     /// Brief highlight toast when property link is copied or pasted.
     pub property_link_toast: Option<String>,
+    /// Copied layer snapshot for Copy / Paste Layer (context menus).
+    pub layer_clipboard: Option<Layer>,
+    /// Copied asset id for Copy / Paste Asset (project panel menus).
+    pub asset_clipboard: Option<String>,
 }
 
 /// One undo/redo snapshot: the whole project plus UI context.
@@ -837,6 +841,8 @@ impl EditorState {
             timeline_masks_reveal_path: false,
             copied_property_link: None,
             property_link_toast: None,
+            layer_clipboard: None,
+            asset_clipboard: None,
         }
     }
 
@@ -8613,34 +8619,82 @@ impl EditorState {
     /// Duplicate the specified layer in the active composition.
     pub fn duplicate_layer(&mut self, layer_id: &str) -> Result<String, String> {
         self.checkpoint();
+        let layer = self
+            .active_composition()
+            .ok_or_else(|| "No active composition".to_string())?
+            .get_layer(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?
+            .clone();
+        self.insert_layer_copy(layer, layer_id)
+    }
+
+    /// Copy a layer snapshot to the layer clipboard (no mutation).
+    pub fn copy_layer(&mut self, layer_id: &str) -> Result<(), String> {
+        let layer = self
+            .active_composition()
+            .ok_or_else(|| "No active composition".to_string())?
+            .get_layer(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?
+            .clone();
+        self.layer_clipboard = Some(layer);
+        Ok(())
+    }
+
+    /// Paste the copied layer into the active composition (fresh id, top).
+    pub fn paste_copied_layer(&mut self) -> Result<String, String> {
+        self.checkpoint();
+        let layer = self
+            .layer_clipboard
+            .clone()
+            .ok_or_else(|| "Layer clipboard is empty".to_string())?;
+        let base_id = layer.id.clone();
+        self.insert_layer_copy(layer, &base_id)
+    }
+
+    /// Copy an asset id to the asset clipboard (no mutation).
+    pub fn copy_asset(&mut self, asset_id: &str) -> Result<(), String> {
+        if self.project.get_asset(asset_id).is_none() {
+            return Err(format!("Asset {asset_id} not found"));
+        }
+        self.asset_clipboard = Some(asset_id.to_string());
+        Ok(())
+    }
+
+    /// Paste the copied asset as a new layer in the active composition.
+    pub fn paste_copied_asset(&mut self) -> Result<String, String> {
+        let aid = self
+            .asset_clipboard
+            .clone()
+            .ok_or_else(|| "Asset clipboard is empty".to_string())?;
+        self.add_asset_layer(&aid)
+    }
+
+    /// Insert a layer snapshot with a fresh id + "Copy" name at the top of
+    /// the active composition. Shared by duplicate and clipboard paste so
+    /// both stay consistent (callers checkpoint first).
+    fn insert_layer_copy(&mut self, mut layer: Layer, base_id: &str) -> Result<String, String> {
         let comp = self
             .active_composition()
             .ok_or_else(|| "No active composition".to_string())?;
 
-        let layer = comp
-            .get_layer(layer_id)
-            .ok_or_else(|| format!("Layer {layer_id} not found"))?
-            .clone();
-
         let new_id = {
             let mut counter = comp.layers.len() + 1;
-            let mut id = format!("{layer_id}_copy_{counter}");
+            let mut id = format!("{base_id}_copy_{counter}");
             while comp.get_layer(&id).is_some() {
                 counter += 1;
-                id = format!("{layer_id}_copy_{counter}");
+                id = format!("{base_id}_copy_{counter}");
             }
             id
         };
 
-        let mut dup_layer = layer;
-        dup_layer.id = new_id.clone();
-        dup_layer.name = format!("{} Copy", dup_layer.name);
+        layer.id = new_id.clone();
+        layer.name = format!("{} Copy", layer.name);
 
         let comp_mut = self
             .active_composition_mut()
             .ok_or_else(|| "No active composition".to_string())?;
         comp_mut
-            .insert_layer(0, dup_layer)
+            .insert_layer(0, layer)
             .map_err(|e| format!("Failed to add duplicated layer: {e:?}"))?;
 
         self.selected_layer_id = Some(new_id.clone());
