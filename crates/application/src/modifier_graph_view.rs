@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex, StyledExt, TestSupportExt};
+use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
 use gpui_kit::*;
 use project::modifier::{MathOp, ModifierGraph, ModifierNode, NodeKind, WaveType};
@@ -78,9 +79,18 @@ pub struct ModifierGraphView {
     /// Canvas pan offset (X, Y)
     pan_offset: (f32, f32),
     /// Canvas panning: `(initial_canvas_x, initial_canvas_y, initial_pan_x, initial_pan_y)`
-    panning_canvas: Option<(f32, f32, f32, f32)>,
+    pub(crate) panning_canvas: Option<(f32, f32, f32, f32)>,
     /// Scrubbing param: `(node_id, param_name, last_mouse_x, original_val)`
     scrubbing_param: Option<(String, String, f32, f32)>,
+    /// True once the active param scrub moved (a press without movement
+    /// opens keyboard entry instead, like timeline value pills).
+    scrub_moved: bool,
+    /// Param currently under keyboard entry: `(node_id, param_name)`.
+    pub(crate) editing_param: Option<(String, String)>,
+    /// Retained single-line editor for `editing_param`.
+    pub(crate) param_editor: Option<Entity<InputState>>,
+    /// Subscription for the retained editor.
+    param_editor_sub: Option<Subscription>,
 }
 
 impl ModifierGraphView {
@@ -113,6 +123,10 @@ impl ModifierGraphView {
             pan_offset: (0.0, 0.0),
             panning_canvas: None,
             scrubbing_param: None,
+            scrub_moved: false,
+            editing_param: None,
+            param_editor: None,
+            param_editor_sub: None,
         }
     }
 
@@ -656,12 +670,14 @@ impl ModifierGraphView {
             .child(label)
     }
 
-    fn render_canvas(&mut self, entity: &Entity<Self>, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn render_canvas(&mut self, entity: &Entity<Self>, cx: &mut Context<Self>) -> impl IntoElement {
         let (pan_x, pan_y) = self.pan_offset;
 
         let ent_drag = entity.clone();
         let ent_up = entity.clone();
         let ent_pan_down = entity.clone();
+        let ent_pan_up = entity.clone();
+        let ent_pan_up_out = entity.clone();
         let ent_canvas_down = entity.clone();
 
         // Calculate positions of all sockets for wire rendering
@@ -684,6 +700,7 @@ impl ModifierGraphView {
 
         let mut canvas_div = div()
             .id("modifier_graph_canvas")
+            .test_support()
             .size_full()
             .relative()
             .overflow_hidden()
@@ -731,6 +748,7 @@ impl ModifierGraphView {
                         let dx = curr_x - last_x;
                         if dx.abs() >= 1.0 {
                             this.apply_param_scrub(&node_id, &param_name, dx * 0.1, cx);
+                            this.scrub_moved = true;
                             if let Some((_, _, lx, _)) = &mut this.scrubbing_param {
                                 *lx = curr_x;
                             }
@@ -755,6 +773,7 @@ impl ModifierGraphView {
                 ent_up.update(cx, |this, cx| {
                     if this.scrubbing_param.is_some() {
                         this.scrubbing_param = None;
+                        this.scrub_moved = false;
                         this.sync_to_state(cx);
                     }
                     if this.dragging_node.is_some() {
@@ -785,6 +804,24 @@ impl ModifierGraphView {
                 ent_pan_down.update(cx, |this, cx| {
                     this.panning_canvas = Some((curr_x, curr_y, this.pan_offset.0, this.pan_offset.1));
                     cx.notify();
+                });
+            })
+            // Right-button release ends canvas panning (without this the
+            // canvas stays stuck to the cursor after a right-drag pan).
+            .on_mouse_up(MouseButton::Right, move |_event, _window, cx| {
+                ent_pan_up.update(cx, |this, cx| {
+                    if this.panning_canvas.is_some() {
+                        this.panning_canvas = None;
+                        cx.notify();
+                    }
+                });
+            })
+            .on_mouse_up_out(MouseButton::Right, move |_event, _window, cx| {
+                ent_pan_up_out.update(cx, |this, cx| {
+                    if this.panning_canvas.is_some() {
+                        this.panning_canvas = None;
+                        cx.notify();
+                    }
                 });
             });
 
@@ -1527,12 +1564,40 @@ impl ModifierGraphView {
         val_color: Rgba,
         entity: Entity<Self>,
         cx: &App,
-    ) -> Div {
+    ) -> AnyElement {
         let nid_scrub = node_id.clone();
         let pname_scrub = param_name.to_string();
         let ent_scrub = entity.clone();
+        let nid_up = node_id.clone();
+        let pname_up = param_name.to_string();
+        let ent_scrub_up = entity.clone();
+
+        // Click (no drag) opens keyboard entry: render the live editor
+        // instead of the value label, like timeline value pills.
+        let is_editing = self
+            .editing_param
+            .as_ref()
+            .is_some_and(|(nid, pn)| nid == &node_id && pn == param_name);
+        if is_editing {
+            if let Some(editor) = self.param_editor.clone() {
+                let ent_esc = entity.clone();
+                return div()
+                    .id(SharedString::from(format!("mg_param_editor_{node_id}_{param_name}")))
+                    .test_support()
+                    .w(px(72.))
+                    .on_action(move |_: &Escape, _window, cx| {
+                        ent_esc.update(cx, |this, cx| {
+                            this.cancel_param_edit(cx);
+                        });
+                    })
+                    .child(Input::new(&editor).w_full())
+                    .into_any_element();
+            }
+        }
 
         div()
+            .id(SharedString::from(format!("mg_param_{node_id}_{param_name}")))
+            .test_support()
             .px_2()
             .py_0p5()
             .rounded_sm()
@@ -1551,10 +1616,140 @@ impl ModifierGraphView {
                 let nid = nid_scrub.clone();
                 let pname = pname_scrub.clone();
                 ent_scrub.update(cx, |this, cx| {
+                    // Committing a half-typed edit first keeps typed text
+                    // from being silently lost when scrubbing elsewhere.
+                    this.commit_open_param_edit(cx);
                     this.scrubbing_param = Some((nid, pname, curr_x, value));
+                    this.scrub_moved = false;
                     cx.notify();
                 });
             })
+            // Release without movement is a click, not a scrub: open
+            // keyboard entry (handled on the pill itself so it never
+            // depends on canvas bubbling).
+            .on_mouse_up(MouseButton::Left, move |_event, window, cx| {
+                cx.stop_propagation();
+                let nid = nid_up.clone();
+                let pname = pname_up.clone();
+                ent_scrub_up.update(cx, |this, cx| {
+                    let clicked = matches!(&this.scrubbing_param, Some((n, p, _, _)) if n == &nid && p == &pname)
+                        && !this.scrub_moved;
+                    if clicked {
+                        this.scrubbing_param = None;
+                        this.scrub_moved = false;
+                        this.begin_param_value_edit(&nid, &pname, window, cx);
+                    }
+                });
+            })
+            .into_any_element()
+    }
+
+    /// Open keyboard entry for a node param, prefilled with its current
+    /// value (mirrors the timeline value-pill editor).
+    fn begin_param_value_edit(
+        &mut self,
+        node_id: &str,
+        param_name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let initial = self
+            .graph
+            .get_node(node_id)
+            .map(|n| match (&n.kind, param_name) {
+                (NodeKind::Constant { value }, "value") => *value,
+                (NodeKind::Math { default_b, .. }, "default_b") => *default_b,
+                (NodeKind::Wave { frequency, .. }, "frequency") => *frequency,
+                (NodeKind::Stepped { steps }, "steps") => *steps,
+                _ => 0.0,
+            })
+            .unwrap_or(0.0);
+        let text = if (initial - initial.round()).abs() < 1e-4 {
+            format!("{}", initial.round() as i64)
+        } else {
+            format!("{initial:.2}")
+        };
+        let editor = cx.new(|cx| {
+            let mut st = InputState::new(window, cx);
+            st.set_value(text, window, cx);
+            st.select_all(window, cx);
+            st
+        });
+        let nid = node_id.to_string();
+        let pname = param_name.to_string();
+        let sub = cx.subscribe(
+            &editor,
+            move |this: &mut Self, input: Entity<InputState>, event: &InputEvent, cx| {
+                match event {
+                    InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                        this.commit_open_param_edit(cx);
+                        let _ = input;
+                    }
+                    _ => {}
+                }
+            },
+        );
+        let handle = editor.read(cx).focus_handle(cx);
+        self.editing_param = Some((nid, pname));
+        self.param_editor = Some(editor);
+        self.param_editor_sub = Some(sub);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    /// Commit the open editor text as an absolute param value (Enter/Blur
+    /// or starting to scrub elsewhere). Unparseable text keeps the old value.
+    fn commit_open_param_edit(&mut self, cx: &mut Context<Self>) {
+        if let Some(editor) = self.param_editor.clone() {
+            let text = editor.read(cx).value().trim().to_string();
+            if let (Ok(v), Some((nid, pname))) = (text.parse::<f32>(), self.editing_param.clone()) {
+                self.apply_param_value(&nid, &pname, v, cx);
+            }
+        }
+        self.editing_param = None;
+        self.param_editor = None;
+        self.param_editor_sub = None;
+        cx.notify();
+    }
+
+    /// Close keyboard entry without further changes.
+    fn cancel_param_edit(&mut self, cx: &mut Context<Self>) {
+        self.editing_param = None;
+        self.param_editor = None;
+        self.param_editor_sub = None;
+        cx.notify();
+    }
+
+    /// Set a node param to an absolute value (typed entry). Mirrors the
+    /// per-param clamps in [`Self::apply_param_scrub`].
+    fn apply_param_value(
+        &mut self,
+        node_id: &str,
+        param_name: &str,
+        value: f32,
+        cx: &mut Context<Self>,
+    ) {
+        if !value.is_finite() {
+            return;
+        }
+        if let Some(n) = self.graph.get_node_mut(node_id) {
+            match (&mut n.kind, param_name) {
+                (NodeKind::Constant { value: v }, "value") => {
+                    *v = value;
+                }
+                (NodeKind::Math { default_b, .. }, "default_b") => {
+                    *default_b = value;
+                }
+                (NodeKind::Wave { frequency, .. }, "frequency") => {
+                    *frequency = value.max(0.01);
+                }
+                (NodeKind::Stepped { steps }, "steps") => {
+                    *steps = value.round().max(1.0);
+                }
+                _ => return,
+            }
+            self.sync_to_state(cx);
+        }
     }
 
     fn apply_param_scrub(&mut self, node_id: &str, param_name: &str, delta: f32, cx: &mut Context<Self>) {

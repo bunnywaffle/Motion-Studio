@@ -10601,6 +10601,122 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
     }
 
     #[gpui_kit::test]
+    fn test_modifier_graph_right_click_pan_releases(cx: &mut TestAppContext) {
+        // Right-drag panning the canvas must end on right-button release
+        // (it used to stay stuck to the cursor: only Left-up cleared it).
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let state = cx.new(|_| EditorState::new());
+        let mut mg_view = None;
+        let handle = cx.open_window(size(px(1080.), px(720.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| {
+                crate::modifier_graph_view::ModifierGraphView::new(
+                    state.clone(),
+                    "layer_accent".to_string(),
+                    "transform.position.x".to_string(),
+                    window,
+                    cx,
+                )
+            });
+            mg_view = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let view = mg_view.expect("graph view created");
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.right_click("modifier_graph_canvas", cx);
+        })
+        .expect("update_window failed");
+        view.read_with(cx, |v, _| {
+            assert!(v.panning_canvas.is_none(), "right-button release must end panning");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn test_modifier_graph_click_opens_typed_param_entry(cx: &mut TestAppContext) {
+        // Click (no drag) on a param value opens keyboard entry; Enter
+        // commits the typed number, Escape cancels without changes.
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let state = cx.new(|_| EditorState::new());
+        let mut mg_view = None;
+        let handle = cx.open_window(size(px(1080.), px(720.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| {
+                crate::modifier_graph_view::ModifierGraphView::new(
+                    state.clone(),
+                    "layer_accent".to_string(),
+                    "transform.position.x".to_string(),
+                    window,
+                    cx,
+                )
+            });
+            mg_view = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let view = mg_view.expect("graph view created");
+        let const_id = view.update(cx, |v, cx| {
+            v.add_node(project::modifier::NodeKind::Constant { value: 1.0 }, cx);
+            v.graph
+                .nodes
+                .iter()
+                .find(|n| matches!(n.kind, project::modifier::NodeKind::Constant { .. }))
+                .unwrap()
+                .id
+                .clone()
+        });
+        let pill = SharedString::from(format!("mg_param_{const_id}_value"));
+        let editor_id = SharedString::from(format!("mg_param_editor_{const_id}_value"));
+        // Click without dragging opens the editor prefilled with the value.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find(pill.clone()).visible());
+            window.click(pill.clone(), cx);
+            window.render_frame(cx);
+            assert!(window.find(editor_id.clone()).visible());
+        })
+        .expect("update_window failed");
+        // Typing 2.5 + Enter commits it to the node.
+        cx.update_window(handle.into(), |_, window, cx| {
+            let ed = view.read_with(cx, |v, _| v.param_editor.clone().expect("editor open"));
+            ed.update(cx, |st, cx| {
+                st.set_value("2.5", window, cx);
+            });
+            window.render_frame(cx);
+            window.dispatch_keystroke(gpui_kit::Keystroke::parse("enter").unwrap(), cx);
+        })
+        .expect("update_window failed");
+        view.read_with(cx, |v, _| {
+            let n = v.graph.get_node(&const_id).unwrap();
+            assert!(
+                matches!(n.kind, project::modifier::NodeKind::Constant { value } if (value - 2.5).abs() < 1e-6),
+                "typed value must commit to the node"
+            );
+            assert!(v.editing_param.is_none(), "editor closes after commit");
+        });
+        // Escape cancels without changes.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click(pill.clone(), cx);
+            window.render_frame(cx);
+            assert!(window.find(editor_id.clone()).visible());
+            window.dispatch_keystroke(gpui_kit::Keystroke::parse("escape").unwrap(), cx);
+        })
+        .expect("update_window failed");
+        view.read_with(cx, |v, _| {
+            let n = v.graph.get_node(&const_id).unwrap();
+            assert!(
+                matches!(n.kind, project::modifier::NodeKind::Constant { value } if (value - 2.5).abs() < 1e-6),
+                "escape must keep the old value"
+            );
+            assert!(v.editing_param.is_none(), "editor closes on escape");
+        });
+    }
+
+    #[gpui_kit::test]
     fn test_timeline_context_menu_has_modifier_graph_option(cx: &mut TestAppContext) {
         let (root, app_view) = setup_test_window(cx);
         let timeline = app_view.read_with(cx, |view, _cx| view.panels.timeline.clone());
