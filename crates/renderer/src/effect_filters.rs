@@ -686,12 +686,13 @@ pub fn stock_light_leak() -> ColorFilter {
     )
 }
 
-/// Scanlines darkening.
+/// Scanlines darkening. Row math follows the CPU kernel's texel-corner
+/// convention (`y / size`), so both paths darken the same rows.
 pub fn stock_scanlines() -> ColorFilter {
     color_filter!(
         "stock_scanlines",
         r#"fn fx_stock_scanlines(uv: vec2<f32>, color: vec4<f32>, size: f32, intensity: f32, res_y: f32) -> vec4<f32> {
-    let row = floor(uv.y * res_y / clamp(size, 1.0, 16.0));
+    let row = floor((uv.y * res_y - 0.5) / clamp(size, 1.0, 16.0));
     var m = 1.0;
     if (fract(row * 0.5) > 0.25) {
         m = 1.0 - clamp(intensity / 100.0, 0.0, 1.0) * 0.85;
@@ -949,12 +950,15 @@ pub fn stock_particles() -> ColorFilter {
     )
 }
 
-/// Rectangular crop (transparent outside).
+/// Rectangular crop (transparent outside). Coordinates follow the CPU
+/// kernel's texel-corner convention (`x / w`, not the pixel-center uv),
+/// so both paths cut the same pixels.
 pub fn stock_crop() -> ColorFilter {
     color_filter!(
         "stock_crop",
-        r#"fn fx_stock_crop(uv: vec2<f32>, color: vec4<f32>, crop: vec4<f32>) -> vec4<f32> {
-    if (uv.x < crop.x / 100.0 || uv.y < crop.y / 100.0 || uv.x > 1.0 - crop.z / 100.0 || uv.y > 1.0 - crop.w / 100.0) {
+        r#"fn fx_stock_crop(uv: vec2<f32>, color: vec4<f32>, crop: vec4<f32>, res: vec2<f32>) -> vec4<f32> {
+    let p = (uv * res - vec2<f32>(0.5, 0.5)) / res;
+    if (p.x < crop.x / 100.0 || p.y < crop.y / 100.0 || p.x > 1.0 - crop.z / 100.0 || p.y > 1.0 - crop.w / 100.0) {
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
     return color;

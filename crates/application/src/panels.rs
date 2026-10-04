@@ -3278,13 +3278,16 @@ impl Render for CompositionViewerPanel {
                     let comp_fps = comp_opt.map(|c| c.frame_rate as f32).unwrap_or(30.0);
                     let time_s = current_frame as f32 / comp_fps.max(1.0);
                     let duration_s = comp_opt.map(|c| c.duration_seconds() as f32).unwrap_or(0.0);
-                    // Interactive dragging gestures preview fast; release and playback
-                    // maintain full per-pixel quality via the cache key below.
-                    let fast_gesture = state.preview_fast;
+                    // Interactive dragging gestures preview fast; degraded-res
+                    // playback also takes the cheap shader/mask paths and
+                    // restores full per-pixel quality on pause (cache key
+                    // covers the quality flag).
                     // Raster output size = AABB box, capped for speed up to 2048 (Full HD).
-                    // Halved only during fast dragging gestures and per the View > Preview
-                    // Quality preference when set. The cache key covers size + quality flag.
+                    // Halved during fast dragging gestures, degraded playback,
+                    // and per the View > Preview Quality preference when set.
+                    // The cache key covers size + quality flag.
                     let qdiv = state.preview_divisor().max(1);
+                    let fast_gesture = state.preview_fast || (state.is_playing && qdiv > 1);
                     let (rw, rh) = (
                         ((l_w / qdiv as f32).ceil().max(1.0) as u32).min(2048),
                         ((l_h / qdiv as f32).ceil().max(1.0) as u32).min(2048),
@@ -5707,6 +5710,15 @@ impl Render for CompositionViewerPanel {
                     .map(|l| l.name.clone())
                     .unwrap_or_else(|| "None".to_string());
                 let fps_label = comp_opt.map(|c| format!("{:.2}", c.frame_rate)).unwrap_or_else(|| "—.——".to_string());
+                // Effective raster divisor (Auto degrades while playing) +
+                // measured viewport frame rate for the playback governor.
+                let qdiv_here = state.preview_divisor().max(1);
+                let qdiv_suffix = if qdiv_here > 1 {
+                    format!(" (÷{qdiv_here})")
+                } else {
+                    String::new()
+                };
+                let fps = if ms > 0.0 { 1000.0 / ms } else { 0.0 };
                 // Pen target hint so routing never surprises.
                 let pen_hint = if state.active_tool == EditorTool::Pen {
                     match state.active_mask_edit.clone() {
@@ -5738,7 +5750,8 @@ impl Render for CompositionViewerPanel {
                         "{pen_hint}Layer: {sel_name}  FPS: {fps_label} (Realtime)"
                     )))
                     .child(div().child(format!(
-                        "{quality} · {ms:.1} ms · GPU Acceleration: ACTIVE"
+                        "{quality}{qdiv_suffix} · {ms:.1} ms · {fps:.0} fps · GPU: {}",
+                        if crate::raster::gpu_accelerated() { "ON" } else { "OFF" }
                     )))
             })
     }

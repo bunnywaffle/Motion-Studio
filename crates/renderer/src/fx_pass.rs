@@ -209,7 +209,7 @@ impl FxPass {
             ),
             StockPlugin::Threshold => (
                 crate::effect_filters::stock_threshold().wgsl,
-                "fx_stock_threshold(uv, color, u.params[0].x)",
+                "fx_stock_threshold(uv, color, u.params[0].x, u.params[0].y)",
                 &[],
             ),
             StockPlugin::FilmGrain => (
@@ -229,7 +229,7 @@ impl FxPass {
             ),
             StockPlugin::Crop => (
                 crate::effect_filters::stock_crop().wgsl,
-                "fx_stock_crop(uv, color, u.params[0])",
+                "fx_stock_crop(uv, color, u.params[0], vec2<f32>(u.misc.y, u.misc.z))",
                 &[],
             ),
             StockPlugin::TemperatureTint => (
@@ -239,12 +239,12 @@ impl FxPass {
             ),
             StockPlugin::SpillSuppress => (
                 crate::effect_filters::stock_spill_suppress().wgsl,
-                "fx_stock_spill_suppress(uv, color, u.params[0].x, u.params[0].y)",
+                "fx_stock_spill_suppress(uv, color, u.params[0].x)",
                 &[],
             ),
             StockPlugin::DifferenceKey => (
                 crate::effect_filters::stock_difference_key().wgsl,
-                "fx_stock_difference_key(uv, color, u.params[0].xyz, u.params[0].w)",
+                "fx_stock_difference_key(uv, color, u.params[0].x, u.params[0].y, u.params[0].z)",
                 &[],
             ),
             _ => {
@@ -327,6 +327,21 @@ impl FxPass {
         gpu.queue.submit(std::iter::once(encoder.finish()));
     }
 }
+
+/// Stock plug-ins whose native pass reproduces the CPU kernel within u8
+/// rounding (gentle point/rect math, no time seeds, no spatial
+/// resampling): the set the live GPU chain may take without visual change.
+/// Excluded despite compiling: Mosaic (spatial pixelate vs color-step
+/// twin), FilmGrain (frame-seeded CPU vs time-seeded twin), Threshold and
+/// DifferenceKey (steep smoothstep transfer curves amplify u8 rounding
+/// through cascades; they stay on the exact CPU path, as does export).
+pub const CHAIN_SAFE_STOCK: [StockPlugin; 5] = [
+    StockPlugin::Posterize,
+    StockPlugin::TemperatureTint,
+    StockPlugin::SpillSuppress,
+    StockPlugin::Crop,
+    StockPlugin::Scanlines,
+];
 
 /// Which stock plug-ins have native WGSL twins (the rest are multi-tap
 /// spatial passes that run on the CPU convolution path, like blur).
@@ -412,5 +427,51 @@ mod tests {
         );
         let full = format!("{FX_VERT}\n{src}");
         naga::front::wgsl::parse_str(&full).expect("composed fx pass parses");
+    }
+
+    /// Every `for_stock` arm must compile to a real pipeline (arity slips
+    /// used to fail here and were swallowed by `let _` at the call site).
+    /// Skips gracefully where no wgpu device exists at all.
+    #[test]
+    fn every_for_stock_arm_compiles() {
+        use StockPlugin as S;
+        let Ok(gpu) = GpuContext::new_headless() else { return };
+        for plugin in [
+            S::Posterize,
+            S::Threshold,
+            S::FilmGrain,
+            S::Scanlines,
+            S::Mosaic,
+            S::Crop,
+            S::TemperatureTint,
+            S::SpillSuppress,
+            S::DifferenceKey,
+        ] {
+            FxPass::for_stock(&gpu, plugin, wgpu::TextureFormat::Rgba8Unorm)
+                .unwrap_or_else(|e| panic!("for_stock {plugin:?} failed: {e}"));
+        }
+    }
+
+    /// Fragment passes must agree with the CPU row convention (row 0 =
+    /// top): cropping the top half clears the first rows, not the last.
+    #[test]
+    fn fx_pass_preserves_orientation() {
+        use crate::device::RenderTarget;
+        use StockPlugin as S;
+        let Ok(gpu) = GpuContext::new_headless() else { return };
+        let pass = FxPass::for_stock(&gpu, S::Crop, wgpu::TextureFormat::Rgba8Unorm)
+            .expect("crop pass compiles");
+        let src = RenderTarget::with_format(&gpu, 4, 4, wgpu::TextureFormat::Rgba8Unorm)
+            .expect("src target");
+        let dst = RenderTarget::with_format(&gpu, 4, 4, wgpu::TextureFormat::Rgba8Unorm)
+            .expect("dst target");
+        src.write_texture_rgba(&gpu, &[255u8; 4 * 4 * 4]);
+        let uniforms = FxUniforms::pack(&[0.0, 50.0, 0.0, 0.0], 0.0, 4.0, 4.0, 0.0);
+        pass.render(&gpu, src.view(), &dst, uniforms);
+        let px = dst.read_texture_to_cpu(&gpu).expect("readback");
+        assert_eq!(px.len(), 4 * 4 * 4);
+        // Top rows cleared, bottom rows intact.
+        assert_eq!(&px[0..8], &[0u8; 8], "row 0 must clear, got {:?}", &px[0..16]);
+        assert_eq!(&px[48..64], &[255u8; 16], "row 3 must survive, got {:?}", &px[48..64]);
     }
 }

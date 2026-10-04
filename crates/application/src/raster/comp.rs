@@ -228,7 +228,7 @@ pub fn rasterize_comp(
                 }
                 work = padded;
             }
-            apply_layer_fx(&mut work, base_w, base_h, &layer.effects, &fx);
+            apply_layer_fx(&mut work, base_w, base_h, &layer.effects, &fx, false);
             // Blur + bloom radius (convolution on the content pixmap).
             let mut blur_total = 0.0f32;
             let mut bloom: Option<(f32, f32)> = None;

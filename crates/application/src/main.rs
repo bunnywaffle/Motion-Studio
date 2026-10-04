@@ -10143,7 +10143,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         let state_entity = app_view.read_with(cx, |v, _| v.state().clone());
 
         state_entity.update(cx, |s, _| {
-            // Idle divisor matches user quality preference (default Full = 1)
+            // Idle divisor matches user quality preference (default Auto = 1 when paused)
             assert!(!s.preview_fast);
             assert!(!s.is_playing);
             assert_eq!(s.preview_divisor(), 1);
@@ -10158,6 +10158,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             assert_eq!(s.preview_divisor(), 1, "preview_divisor must restore to full quality when gesture ends");
 
             // During playback under Full quality preference, divisor must stay 1 (no blurry downsampling!)
+            s.set_preview_quality(crate::state::PreviewQuality::Full);
             s.is_playing = true;
             let d_play = s.preview_divisor();
             assert_eq!(d_play, 1, "preview_divisor during Full quality playback must be 1 to prevent blurry clips");
@@ -10206,10 +10207,12 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             assert_eq!(rw, 1920, "Raster width during Full playback must be 1920");
             assert_eq!(rh, 1080, "Raster height during Full playback must be 1080");
 
-            // Auto quality with standard composition maintains 1x
+            // Auto quality degrades while playing (governor) and restores on pause.
             s.set_preview_quality(crate::state::PreviewQuality::Auto);
             let auto_qdiv = s.preview_divisor().max(1);
-            assert_eq!(auto_qdiv, 1, "Auto quality on standard layer count maintains 1x crisp preview");
+            assert_eq!(auto_qdiv, 2, "Auto quality degrades to half res during playback");
+            s.is_playing = false;
+            assert_eq!(s.preview_divisor().max(1), 1, "Auto quality restores full res on pause");
         });
     }
 

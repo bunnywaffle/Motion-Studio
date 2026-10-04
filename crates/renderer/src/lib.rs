@@ -12,7 +12,7 @@ pub mod shader_lab;
 pub use blit::{BlitPipeline, BlitUniforms};
 pub use blur::{gaussian_blur_rgba, gaussian_kernel_1d, BLUR_WGSL};
 pub use compute_blur::{ComputeBlurPipeline, ComputeBlurUniforms, COMPUTE_BLUR_WGSL};
-pub use fx_pass::{FxPass, FxUniforms, fx_fragment_src, stock_wgsl_plugins, FX_VERT};
+pub use fx_pass::{FxPass, FxUniforms, CHAIN_SAFE_STOCK, fx_fragment_src, stock_wgsl_plugins, FX_VERT};
 pub use gpu_effect_engine::GpuEffectEngine;
 pub use shader_lab::{
     build_uniform_buffer, compile_source, hash_source, CachedShader, ShaderLabCache,

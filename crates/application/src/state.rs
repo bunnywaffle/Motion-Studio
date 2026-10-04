@@ -828,7 +828,7 @@ impl EditorState {
             tool_solid_color: Color::from_rgba_u8(59, 130, 246, 255),
             tool_rotate_step: 15.0,
             preview_fast: false,
-            preview_quality: PreviewQuality::Full,
+            preview_quality: PreviewQuality::Auto,
             project_path: None,
             recent_projects: Vec::new(),
             undo_stack: Vec::new(),
@@ -1523,8 +1523,9 @@ impl EditorState {
     }
 
     /// Effective raster divisor right now: interactive mouse dragging gestures (e.g. gizmo/slider scrub)
-    /// use a fast 2x proxy resolution for ultra-responsive manipulation, while timeline playback
-    /// and idle preview respect the user's `preview_quality` preference (Full = 1, crisp and native).
+    /// use a fast 2x proxy resolution for ultra-responsive manipulation; timeline playback in
+    /// Auto drops to half res on non-trivial comps (full quality returns on pause); otherwise
+    /// the user's `preview_quality` preference wins (Full = 1, crisp and native).
     pub fn preview_divisor(&self) -> u32 {
         if self.preview_fast {
             2
@@ -1536,7 +1537,7 @@ impl EditorState {
                 PreviewQuality::Auto => {
                     if self.is_playing {
                         let layer_count = self.active_composition().map(|c| c.layers.len()).unwrap_or(1);
-                        if layer_count > 6 { 2 } else { 1 }
+                        if layer_count > 2 { 2 } else { 1 }
                     } else {
                         1
                     }

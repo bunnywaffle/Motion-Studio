@@ -1056,7 +1056,7 @@ pub fn rasterize_layer(
     } else {
         (frame_ox, frame_oy)
     };
-    apply_layer_fx(&mut work, base_w, base_h, &layer.effects, &fx);
+    apply_layer_fx(&mut work, base_w, base_h, &layer.effects, &fx, true);
     let mut blur_total = 0.0f32;
     let mut bloom: Option<(f32, f32)> = None;
     for eff in &layer.effects {
@@ -1535,7 +1535,14 @@ pub(crate) fn apply_layer_fx(
     base_h: f32,
     effects: &[EvaluatedEffect],
     fx: &RasterFx,
+    allow_gpu: bool,
 ) {
+    // Whole-chain GPU fast path (viewport only; export stays CPU-exact):
+    // deterministic stock twins run natively, everything else (or any GPU
+    // miss) falls through to the per-pixel CPU chain below.
+    if allow_gpu && super::buffer::gpu_fx_chain(buf, effects, fx.time_s) {
+        return;
+    }
     for eff in effects {
         if !eff.enabled {
             continue;
@@ -2165,5 +2172,49 @@ mod tests {
         blur_buffer(&mut buf, 100.0);
         let edge = buf.get(10, 100);
         assert!(edge.a > 0.002, "large blur must spread wide to edges: {edge:?}");
+    }
+
+    #[test]
+    fn gpu_fx_chain_matches_cpu_within_tolerance() {
+        use compositor::{EvaluatedEffect, EvaluatedEffectType};
+        // No hardware here (CI, software adapter): the chain transparently
+        // declines and this parity check has nothing to compare against.
+        if !crate::raster::buffer::gpu_accelerated() {
+            return;
+        }
+        // Opaque gradient + a transparent corner (alpha must survive both).
+        let mut base = FloatBuf::clear(64, 64);
+        for y in 0..64 {
+            for x in 0..64 {
+                let (r, g, b) = (x as f32 / 63.0, y as f32 / 63.0, 0.4);
+                let a = if x > 48 && y > 48 { 0.0 } else { 1.0 };
+                base.put(x, y, Px { r: r * a, g: g * a, b: b * a, a });
+            }
+        }
+        let stock = |plugin: StockPlugin, params: Vec<f32>| EvaluatedEffect {
+            id: format!("fx_{plugin:?}"),
+            name: format!("{plugin:?}"),
+            enabled: true,
+            effect_type: EvaluatedEffectType::Stock { plugin, params, colors: Vec::new() },
+        };
+        let effects = vec![
+            stock(StockPlugin::Posterize, vec![4.0]),
+            stock(StockPlugin::TemperatureTint, vec![30.0, -20.0]),
+            stock(StockPlugin::SpillSuppress, vec![50.0]),
+            stock(StockPlugin::Scanlines, vec![3.0, 60.0]),
+            stock(StockPlugin::Crop, vec![10.0, 10.0, 10.0, 10.0]),
+        ];
+        let ctx = RasterFx { time_s: 0.0, frame: 0, res_w: 64.0, res_h: 64.0, duration_s: 0.0, playing: false };
+        let mut cpu = base.clone();
+        apply_layer_fx(&mut cpu, 64.0, 64.0, &effects, &ctx, false);
+        let mut gpu = base.clone();
+        apply_layer_fx(&mut gpu, 64.0, 64.0, &effects, &ctx, true);
+        let mut worst = 0.0f32;
+        for (c, g) in cpu.px.iter().zip(gpu.px.iter()) {
+            for (cc, gg) in [c.r, c.g, c.b, c.a].into_iter().zip([g.r, g.g, g.b, g.a]) {
+                worst = worst.max((cc - gg).abs());
+            }
+        }
+        assert!(worst < 0.02, "GPU chain must match CPU within u8 rounding: {worst}");
     }
 }

@@ -115,6 +115,8 @@ impl FloatBuf {
 }
 
 use std::sync::{Mutex, OnceLock};
+use compositor::fx::stock_params_resolved;
+use compositor::{EvaluatedEffect, EvaluatedEffectType};
 use renderer::{GpuContext, GpuEffectEngine};
 
 static GPU_ENGINE: OnceLock<Mutex<Option<GpuEffectEngine>>> = OnceLock::new();
@@ -128,6 +130,69 @@ fn get_gpu_engine() -> &'static Mutex<Option<GpuEffectEngine>> {
         let engine = engine.filter(|e| e.is_hardware());
         Mutex::new(engine)
     })
+}
+
+/// True when a real hardware GPU engine is available for accelerated
+/// effect passes (status UI + viewport fast paths). Portable wgpu only:
+/// software adapters report false and every caller keeps its CPU path.
+pub fn gpu_accelerated() -> bool {
+    get_gpu_engine().lock().map(|lock| lock.is_some()).unwrap_or(false)
+}
+
+/// Write straight-alpha RGBA8 bytes back into a premultiplied float
+/// buffer (exact inverse of [`FloatBuf::to_rgba8`]; shared by the blur
+/// and effect-chain GPU round trips).
+fn write_straight_rgba8(buf: &mut FloatBuf, rgba: &[u8]) {
+    for (i, p) in buf.px.iter_mut().enumerate() {
+        let a = rgba[i * 4 + 3] as f32 / 255.0;
+        *p = Px {
+            r: rgba[i * 4] as f32 / 255.0 * a,
+            g: rgba[i * 4 + 1] as f32 / 255.0 * a,
+            b: rgba[i * 4 + 2] as f32 / 255.0 * a,
+            a,
+        };
+    }
+}
+
+/// Run a layer's whole `apply_layer_fx` chain on the GPU when every
+/// enabled effect is in the parity-audited [`renderer::CHAIN_SAFE_STOCK`]
+/// set (gentle point/rect twins; blur runs in its own stage via
+/// `blur_buffer`, steep-curve and time-seeded kernels stay CPU).
+/// Params are descriptor-resolved first so packed uniforms match exactly
+/// what the CPU kernels see. Returns false for the transparent CPU
+/// fallback (no hardware, unsupported chain, any GPU error).
+pub fn gpu_fx_chain(buf: &mut FloatBuf, effects: &[EvaluatedEffect], time_s: f32) -> bool {
+    if buf.w == 0 || buf.h == 0 {
+        return false;
+    }
+    let Ok(mut lock) = get_gpu_engine().lock() else {
+        return false;
+    };
+    let Some(engine) = lock.as_mut() else {
+        return false;
+    };
+    if !engine.supports_fx_chain(effects) {
+        return false;
+    }
+    let resolved: Vec<EvaluatedEffect> = effects
+        .iter()
+        .map(|eff| {
+            let mut e = eff.clone();
+            if let EvaluatedEffectType::Stock { plugin, params, .. } = &e.effect_type {
+                let r = stock_params_resolved(*plugin, params).to_vec();
+                if let EvaluatedEffectType::Stock { params: dst, .. } = &mut e.effect_type {
+                    *dst = r;
+                }
+            }
+            e
+        })
+        .collect();
+    let rgba = buf.to_rgba8();
+    let Ok(out) = engine.process_rgba_frame(&rgba, buf.w, buf.h, &resolved, time_s) else {
+        return false;
+    };
+    write_straight_rgba8(buf, &out);
+    true
 }
 
 /// Gaussian blur a straight-alpha buffer in place.
@@ -173,15 +238,7 @@ pub fn blur_buffer(buf: &mut FloatBuf, radius_px: f32) {
             if let Some(engine) = lock.as_mut() {
                 let bytes = buf.to_rgba8();
                 if let Ok(out_rgba) = engine.blur_rgba(&bytes, buf.w, buf.h, radius_px) {
-                    for (i, p) in buf.px.iter_mut().enumerate() {
-                        let a = out_rgba[i * 4 + 3] as f32 / 255.0;
-                        *p = Px {
-                            r: out_rgba[i * 4] as f32 / 255.0 * a,
-                            g: out_rgba[i * 4 + 1] as f32 / 255.0 * a,
-                            b: out_rgba[i * 4 + 2] as f32 / 255.0 * a,
-                            a,
-                        };
-                    }
+                    write_straight_rgba8(buf, &out_rgba);
                     return;
                 }
             }
@@ -191,15 +248,7 @@ pub fn blur_buffer(buf: &mut FloatBuf, radius_px: f32) {
     // Fallback to CPU kernel
     let mut bytes = buf.to_rgba8();
     renderer::gaussian_blur_rgba(&mut bytes, buf.w, buf.h, radius_px);
-    for (i, p) in buf.px.iter_mut().enumerate() {
-        let a = bytes[i * 4 + 3] as f32 / 255.0;
-        *p = Px {
-            r: bytes[i * 4] as f32 / 255.0 * a,
-            g: bytes[i * 4 + 1] as f32 / 255.0 * a,
-            b: bytes[i * 4 + 2] as f32 / 255.0 * a,
-            a,
-        };
-    }
+    write_straight_rgba8(buf, &bytes);
 }
 
 #[cfg(test)]

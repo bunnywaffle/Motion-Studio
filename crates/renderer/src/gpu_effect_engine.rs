@@ -168,6 +168,36 @@ impl GpuEffectEngine {
         Ok(tightly_packed)
     }
 
+    /// True when every enabled effect in the chain has a native GPU pass,
+    /// so `process_rgba_frame` reproduces the CPU chain instead of
+    /// silently skipping stages. Membership is the parity-audited
+    /// [`crate::fx_pass::CHAIN_SAFE_STOCK`] set; compilability probes the
+    /// same `for_stock` constructors the chain itself uses. GaussianBlur
+    /// is deliberately excluded: blur runs in its own raster stage via
+    /// `blur_buffer`, which already picks the GPU compute path when
+    /// hardware exists.
+    pub fn supports_fx_chain(&mut self, effects: &[compositor::EvaluatedEffect]) -> bool {
+        let mut any = false;
+        for eff in effects {
+            if !eff.enabled {
+                continue;
+            }
+            match &eff.effect_type {
+                compositor::EvaluatedEffectType::Stock { plugin, .. } => {
+                    if !crate::fx_pass::CHAIN_SAFE_STOCK.contains(plugin) {
+                        return false;
+                    }
+                    if self.get_or_create_fx_pass(*plugin).is_err() {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+            any = true;
+        }
+        any
+    }
+
     /// Process an RGBA8 frame through the evaluated effect stack on the GPU.
     ///
     /// If `effects` has no enabled effects, returns `Ok(src_rgba.to_vec())` without GPU work.
