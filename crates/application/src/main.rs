@@ -5184,8 +5184,53 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
     }
 
     #[test]
-    fn test_remove_graph_keys_deletes_selection_at_once() {
+    fn test_graph_series_includes_all_effect_scalars() {
         use crate::state::EditorState;
+
+        let mut state = EditorState::new();
+        // Text layer + split animator with animated progress (none of the
+        // animator's scalars were in the old legacy probe list).
+        let tid = state.add_text_layer("Hello", None).unwrap();
+        state.select_layer(Some(tid.clone()));
+        let split = state
+            .add_effect_to_selected_layer(project::EffectType::text_split_animator())
+            .unwrap();
+        let split_path = format!("effect:{split}:progress");
+        state.toggle_layer_keyframe_at_current_time(&tid, &split_path);
+        // Warp cols was likewise invisible to the old list.
+        state.select_layer(Some("layer_accent".to_string()));
+        let warp = state
+            .add_effect_to_selected_layer(project::EffectType::warp(0.0, 1.0))
+            .unwrap();
+        let cols_path = format!("effect:{warp}:cols");
+        state.toggle_layer_keyframe_at_current_time("layer_accent", &cols_path);
+
+        // Both surface as graph series with readable keys.
+        assert!(state.graph_series(&tid).iter().any(|s| s.path == split_path));
+        assert!(!state.graph_key_times(&tid, &split_path).is_empty());
+        assert!(state.graph_series("layer_accent").iter().any(|s| s.path == cols_path));
+        assert!(!state.graph_key_times("layer_accent", &cols_path).is_empty());
+
+        // Color params stay timeline-only: the graph plots f32 curves.
+        let tint = state
+            .add_effect_to_selected_layer(project::EffectType::tint(
+                project::Color::BLACK,
+                project::Color::WHITE,
+                100.0,
+            ))
+            .unwrap();
+        state.toggle_layer_keyframe_at_current_time(
+            "layer_accent",
+            &format!("effect:{tint}:map_black"),
+        );
+        assert!(
+            !state.graph_series("layer_accent").iter().any(|s| s.path.contains("map_black")),
+            "color params must not become graph series"
+        );
+    }
+
+    #[test]
+    fn test_remove_graph_keys_deletes_selection_at_once() {        use crate::state::EditorState;
 
         let mut state = EditorState::new();
         // Fixture: accent position keys at 0s/2s/4s.

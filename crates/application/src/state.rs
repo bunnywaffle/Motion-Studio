@@ -633,27 +633,20 @@ fn graph_candidates(layer: &Layer) -> Vec<(String, String)> {
         _ => {}
     }
     for eff in &layer.effects {
-        use std::collections::HashSet;
-        let mut seen: HashSet<&str> = HashSet::new();
-        // Legacy params by name probe.
-        for name in ["radius", "brightness", "contrast", "amount", "distance", "softness", "opacity", "param1", "param2", "param3", "param4", "max_horizontal", "max_vertical", "tolerance", "threshold", "feather", "size", "angle", "skew_x", "skew_y", "width", "strength", "intensity", "tiles_x", "tiles_y", "scale", "exposure", "vibrance", "input_black", "input_white", "gamma", "output_black", "output_white", "hue_shift", "saturation", "lightness"] {
-            if eff.get_param_property(name).is_some() {
-                seen.insert(name);
-                out.push((
-                    format!("effect:{}:{name}", eff.id),
-                    format!("{} · {}", eff.name, name),
-                ));
+        // Every scalar the Properties panel and timeline can animate, from
+        // the same widget declarations both views enumerate — new effect
+        // params appear here with no per-effect list to keep in sync.
+        // (Color/bool params stay timeline-only: the graph plots f32 curves.)
+        for decl in eff.declarations() {
+            if !decl.is_scalar() {
+                continue;
             }
-        }
-        // Stock plug-ins enumerate from the descriptor (covers every param
-        // without a hardcoded list; already-seen names are skipped).
-        for (name, label, _v, _step) in eff.stock_scalar_params() {
-            if seen.contains(name) {
+            if eff.get_param_property(&decl.field).is_none() {
                 continue;
             }
             out.push((
-                format!("effect:{}:{name}", eff.id),
-                format!("{} · {label}", eff.name),
+                format!("effect:{}:{}", eff.id, decl.field),
+                format!("{} · {}", eff.name, decl.label),
             ));
         }
     }
