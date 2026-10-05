@@ -36,13 +36,13 @@ pub use buffer::{FloatBuf, blur_buffer, gpu_accelerated, gpu_fx_chain};
 pub use comp::rasterize_comp;
 pub use effects::{RasterFx, apply_effect_pixels};
 pub use layer::{
-    RasterEntry, decoded_asset, gizmo_local_corners, layer_cache_key, layer_effect_padding,
-    layer_local_box, layer_render_box, rasterize_layer,
+    RasterEntry, decoded_asset, gizmo_local_corners, layer_cache_key, layer_content_origin,
+    layer_effect_padding, layer_local_box, layer_render_box, rasterize_layer,
 };
 pub use mask::apply_masks;
 pub use pixel::Px;
 pub use stock::apply_stock;
-pub use text::{TextSpec, raster_text};
+pub use text::{StrokePos, TextSpec, raster_text};
 
 #[cfg(test)]
 mod tests {
@@ -127,6 +127,9 @@ mod tests {
             stroke_w: 0.0,
             stroke_col: Px::clear(),
             stroke_gradient: None,
+            stroke_pos: StrokePos::Outside,
+            stroke_fill_over: true,
+            stroke_offset: 0.0,
             baseline_shift: 0.0,
             box_w: 0.0,
             bevel: None,
@@ -163,6 +166,9 @@ mod tests {
             stroke_w: 10.0,
             stroke_col: Px { r: 1.0, g: 0.0, b: 0.0, a: 1.0 },
             stroke_gradient: None,
+            stroke_pos: StrokePos::Outside,
+            stroke_fill_over: true,
+            stroke_offset: 0.0,
             baseline_shift: 0.0,
             box_w: 0.0,
             bevel: None,
@@ -239,6 +245,9 @@ mod tests {
                 stroke_w,
                 stroke_col: Px { r: 1.0, g: 0.0, b: 0.0, a: 1.0 },
                 stroke_gradient: None,
+                stroke_pos: StrokePos::Outside,
+                stroke_fill_over: true,
+                stroke_offset: 0.0,
                 baseline_shift: 0.0,
                 box_w: 0.0,
                 bevel: None,
@@ -341,6 +350,9 @@ mod tests {
             stroke_w: 0.0,
             stroke_col: Px::clear(),
             stroke_gradient: None,
+            stroke_pos: StrokePos::Outside,
+            stroke_fill_over: true,
+            stroke_offset: 0.0,
             baseline_shift: 0.0,
             box_w: 0.0,
             bevel: None,

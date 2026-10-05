@@ -20,7 +20,7 @@ use super::shapes::{
     fill_ellipse, fill_ellipse_gradient, fill_path, fill_path_gradient, fill_rect,
     fill_rect_gradient, stroke_path, stroke_path_gradient,
 };
-use super::text::{TextSpec, raster_text};
+use super::text::{StrokePos, TextSpec, raster_text};
 
 // Layer + composition raster
 // ---------------------------------------------------------------------------
@@ -157,19 +157,23 @@ pub fn raster_content(
             baseline_shift,
             box_width,
             text_path,
+            stroke_position,
+            paint_order,
             ..
         } => {
             // Effective outline: TextOutline effect wins over native stroke.
             let mut sw = stroke_width.value.max(0.0);
             let mut sc = stroke_color.value;
+            let mut so = 0.0f32;
             let mut outline_override = false;
             for eff in &layer.effects {
                 if !eff.enabled {
                     continue;
                 }
-                if let EvaluatedEffectType::TextOutline { width, color } = &eff.effect_type {
+                if let EvaluatedEffectType::TextOutline { width, color, offset } = &eff.effect_type {
                     sw = (*width).max(0.0);
                     sc = *color;
+                    so = *offset;
                     outline_override = true;
                     break;
                 }
@@ -203,6 +207,9 @@ pub fn raster_content(
                 // An overriding outline effect replaces the native stroke
                 // (and its gradient) with a flat color.
                 stroke_gradient: if outline_override { None } else { stroke_gradient.as_ref().map(|p| p.value.clone()) },
+                stroke_pos: StrokePos::from_label(stroke_position),
+                stroke_fill_over: !paint_order.eq_ignore_ascii_case("stroke over fill"),
+                stroke_offset: so,
                 baseline_shift: baseline_shift.value,
                 box_w: box_width.value,
                 bevel,
@@ -393,6 +400,8 @@ pub fn layer_cache_key(
             baseline_shift,
             box_width,
             text_path,
+            stroke_position,
+            paint_order,
             ..
         } => {
             3u8.hash(&mut h);
@@ -410,6 +419,8 @@ pub fn layer_cache_key(
             stroke_width.value.to_bits().hash(&mut h);
             color_hash(&stroke_color.value, &mut h);
             gradient_hash(stroke_gradient, &mut h);
+            stroke_position.hash(&mut h);
+            paint_order.hash(&mut h);
             baseline_shift.value.to_bits().hash(&mut h);
             box_width.value.to_bits().hash(&mut h);
             if let Some(path) = text_path {
@@ -539,6 +550,7 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
         EvaluatedEffectType::Bloom { .. } => 17,
         EvaluatedEffectType::Tiler { .. } => 18,
         EvaluatedEffectType::Warp { .. } => 19,
+        EvaluatedEffectType::Puppet { .. } => 29,
         EvaluatedEffectType::Exposure { .. } => 20,
         EvaluatedEffectType::Vibrance { .. } => 21,
         EvaluatedEffectType::Levels { .. } => 22,
@@ -630,9 +642,10 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
             skew_x.to_bits().hash(h);
             skew_y.to_bits().hash(h);
         }
-        EvaluatedEffectType::TextOutline { width, color } => {
+        EvaluatedEffectType::TextOutline { width, color, offset } => {
             width.to_bits().hash(h);
             color_hash(color, h);
+            offset.to_bits().hash(h);
         }
         EvaluatedEffectType::TextBevel { strength, softness } => {
             strength.to_bits().hash(h);
@@ -669,6 +682,16 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
             cols.to_bits().hash(h);
             rows.to_bits().hash(h);
             for pin in pins {
+                pin.dx.to_bits().hash(h);
+                pin.dy.to_bits().hash(h);
+            }
+        }
+        EvaluatedEffectType::Puppet { expansion, stiffness, pins } => {
+            expansion.to_bits().hash(h);
+            stiffness.to_bits().hash(h);
+            for pin in pins {
+                pin.x.to_bits().hash(h);
+                pin.y.to_bits().hash(h);
                 pin.dx.to_bits().hash(h);
                 pin.dy.to_bits().hash(h);
             }
@@ -1344,6 +1367,18 @@ pub fn layer_local_box(layer: &EvaluatedLayer, base_w: f32, base_h: f32) -> Boun
     }
 }
 
+/// Content origin in layer-local px: pin rests and kernel sample points
+/// are relative to it. Equals `layer_local_box().min` without needing
+/// content dims (only pen paths move the origin).
+pub fn layer_content_origin(source: &LayerSource) -> Vec2 {
+    match source {
+        LayerSource::Shape { shape_type: ShapeType::Path { path_data, .. } } => {
+            path_frame(path_data).0
+        }
+        _ => Vec2::ZERO,
+    }
+}
+
 /// Maximum outward visual expansion (padding in local pixels) needed by active
 /// layer effects (Outer Glow, Drop Shadow, Gaussian Blur, Bloom, Glare/Glow plugins,
 /// plus every geometric effect that pushes pixels out of the content box:
@@ -1385,6 +1420,15 @@ pub fn layer_effect_padding(layer: &EvaluatedLayer, base_w: f32, base_h: f32) ->
                 pad = pad.max(amount.abs() / 100.0 * base_w.min(base_h) * 0.25);
                 pad = pad.max(project::warp::max_offset(pins));
             }
+            EvaluatedEffectType::Puppet { pins, .. } => {
+                pad = pad.max(project::puppet::max_offset(pins));
+            }
+            EvaluatedEffectType::TextOutline { width, offset, .. } => {
+                // Outline band reach (same extents as the text rasterizer:
+                // width plus offset either way); without this wide outlines
+                // are cut by the fixed-size blit destination.
+                pad = pad.max(width.max(0.0) + offset.abs());
+            }
             EvaluatedEffectType::Stock { plugin, params, .. } => {
                 use compositor::fx::stock_p;
                 match *plugin {
@@ -1415,6 +1459,10 @@ pub fn layer_effect_padding(layer: &EvaluatedLayer, base_w: f32, base_h: f32) ->
             }
             _ => {}
         }
+    }
+    // Native text stroke reaches beyond glyph ink by its width.
+    if let LayerSource::Text { stroke_width, .. } = &layer.source {
+        pad = pad.max(stroke_width.value.max(0.0));
     }
     pad.ceil().min(1024.0)
 }
@@ -1464,12 +1512,24 @@ pub(crate) fn layer_base_dims(
             }
         }
         LayerSource::Video { .. } => (1920.0, 1080.0),
-        LayerSource::Text { text, font_size, text_path, .. } => {
+        LayerSource::Text { text, font_size, text_path, stroke_width, .. } => {
+            // Stroke reach (native width, or outline override width+offset)
+            // so wide outlines fit the estimate box instead of clipping.
+            let mut sw = stroke_width.value.max(0.0);
+            for eff in &layer.effects {
+                if !eff.enabled {
+                    continue;
+                }
+                if let EvaluatedEffectType::TextOutline { width, offset, .. } = &eff.effect_type {
+                    sw = width.max(0.0) + offset.abs();
+                    break;
+                }
+            }
             if let Some(path) = text_path {
                 // Size origin-inclusive so the path-placed glyphs (which
                 // span from the local origin) are not clipped.
                 if let Some((mn, mx)) = path.bounds() {
-                    let pad = font_size.value * 1.5 + 16.0;
+                    let pad = font_size.value * 1.5 + 16.0 + sw;
                     let x0 = mn.x.min(0.0) - pad;
                     let y0 = mn.y.min(0.0) - pad;
                     let x1 = mx.x.max(0.0) + pad;
@@ -1479,7 +1539,7 @@ pub(crate) fn layer_base_dims(
             }
             let len = text.value.chars().count().max(1) as f32;
             let fs = font_size.value;
-            ((len * fs * 0.6 + 40.0).max(100.0), (fs * 1.4 + 20.0).max(40.0))
+            ((len * fs * 0.6 + 40.0 + sw * 2.0).max(100.0), (fs * 1.4 + 20.0 + sw * 2.0).max(40.0))
         }
         LayerSource::Shape { shape_type } => match shape_type {
             ShapeType::Rectangle { width, height, .. } => (width.value, height.value),
@@ -2077,7 +2137,6 @@ mod tests {
         let render_box = layer_render_box(&eval_l, 200.0, 200.0);
         assert_eq!(render_box.min, Vec2::new(-pad, -pad));
         assert_eq!(render_box.max, Vec2::new(200.0 + pad, 200.0 + pad));
-
         let assets: HashMap<String, std::sync::Arc<image::RgbaImage>> = HashMap::new();
         let rw = (200.0 + pad * 2.0) as u32;
         let rh = (200.0 + pad * 2.0) as u32;
@@ -2091,6 +2150,39 @@ mod tests {
 
         let glow_pixel = buf.get((pad - 5.0) as i32, (rh / 2) as i32);
         assert!(glow_pixel.a > 0.01, "glow must expand beyond content boundary: {glow_pixel:?}");
+    }
+
+    #[test]
+    fn test_text_outline_padding_covers_width_and_offset() {
+        let mut project = Project::new("p", "P");
+        let mut comp = Composition::hd_1080p_30fps("c", "C", 5.0);
+        let tc = TimeCode::from_frames(0, 30.0);
+        let out = TimeCode::from_frames(150, 30.0);
+        let mut layer = project::Layer::text(
+            "l1", "T", "Hi", "Arial", 64.0, Color::WHITE, tc, out,
+        );
+        let mut fx = project::Effect {
+            id: "fx_ol".to_string(),
+            name: "Text Outline".to_string(),
+            enabled: true,
+            effect_type: project::EffectType::text_outline(20.0, Color::BLACK),
+        };
+        if let project::EffectType::TextOutline { offset, .. } = &mut fx.effect_type {
+            offset.set_value(6.0);
+        }
+        layer.effects.push(fx);
+        comp.add_layer(layer).unwrap();
+        project.add_composition(comp).unwrap();
+        let eval_l = eval_first(&project, "c");
+        let assets: HashMap<String, std::sync::Arc<image::RgbaImage>> = HashMap::new();
+        let (bw, bh) = layer_base_dims(&eval_l, 1920.0, 1080.0, &assets);
+        let pad = layer_effect_padding(&eval_l, bw, bh);
+        assert!(pad >= 26.0, "outline width 20 + offset 6 needs pad >= 26, got {pad}");
+        // The render box must contain the padded box on every side.
+        let render_box = layer_render_box(&eval_l, bw, bh);
+        let local_box = layer_local_box(&eval_l, bw, bh);
+        assert!(render_box.min.x <= local_box.min.x - pad + 1.0);
+        assert!(render_box.max.x >= local_box.max.x + pad - 1.0);
     }
 
     #[test]

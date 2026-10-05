@@ -44,9 +44,99 @@ pub struct TextSpec<'a> {
     pub stroke_col: Px,
     /// Linear stroke gradient (None = solid `stroke_col`).
     pub stroke_gradient: Option<FillGradient>,
+    /// Stroke placement (parsed from the layer's position/order strings).
+    pub stroke_pos: StrokePos,
+    /// Fill paints over the stroke (false = stroke paints over the fill).
+    pub stroke_fill_over: bool,
+    /// Outline offset px: shifts the whole band outward (+) or inward (-).
+    pub stroke_offset: f32,
     pub baseline_shift: f32,
     pub box_w: f32,
     pub bevel: Option<(f32, f32)>,
+}
+
+/// Which side(s) of the glyph edge the stroke band occupies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrokePos {
+    Inside,
+    Center,
+    Outside,
+}
+
+impl StrokePos {
+    pub fn from_label(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "inside" => Self::Inside,
+            "outside" => Self::Outside,
+            _ => Self::Center,
+        }
+    }
+}
+
+/// Resolved stroke extents: outward/inward band radii after width,
+/// position, and offset. Center splits the width across the edge (so it
+/// visibly grows from the edge); offset shifts the band outward (+).
+#[derive(Debug, Clone, Copy)]
+pub struct StrokeLayout {
+    pub outer: f32,
+    pub inner: f32,
+    pub fill_over: bool,
+}
+
+impl StrokeLayout {
+    pub fn new(width: f32, offset: f32, pos: StrokePos, fill_over: bool) -> Self {
+        let w = width.max(0.0);
+        let (mut outer, mut inner) = match pos {
+            StrokePos::Inside => (0.0, w),
+            StrokePos::Outside => (w, 0.0),
+            StrokePos::Center => (w * 0.5, w * 0.5),
+        };
+        outer = (outer + offset).max(0.0);
+        inner = (inner - offset).max(0.0);
+        Self { outer, inner, fill_over }
+    }
+
+    /// Any band worth rasterizing (matches the old `round(w) >= 1` gate).
+    pub fn active(&self) -> bool {
+        self.outer >= 0.5 || self.inner >= 0.5
+    }
+
+    /// Max outward/inward reach, for padding.
+    pub fn extent(&self) -> f32 {
+        self.outer.max(self.inner)
+    }
+}
+
+/// Paint stroke bands into `dst`: outer = dilated minus flat, inner =
+/// flat minus eroded (either side absent when its radius is zero).
+/// `col_at` returns the unscaled stroke color at integer pixel coords.
+fn paint_stroke_bands(
+    dst: &mut FloatBuf,
+    flat: &[f32],
+    grown: Option<&[f32]>,
+    eroded: Option<&[f32]>,
+    col_at: impl Fn(f32, f32) -> Px,
+) {
+    let w = dst.w;
+    for (i, dst) in dst.px.iter_mut().enumerate() {
+        let mut band = 0.0f32;
+        if let Some(g) = grown {
+            band += (g[i] - flat[i]).clamp(0.0, 1.0);
+        }
+        if let Some(e) = eroded {
+            band += (flat[i] - e[i]).clamp(0.0, 1.0);
+        }
+        band = band.clamp(0.0, 1.0);
+        if band <= 0.003 {
+            continue;
+        }
+        let (x, y) = ((i as u32 % w) as f32, (i as u32 / w) as f32);
+        let mut p = col_at(x, y);
+        p.scale(band);
+        let mut out = *dst;
+        out.over(p);
+        *dst = out;
+    }
 }
 
 /// Rasterize text into a transparent pixmap. Returns the pixmap plus the
@@ -57,9 +147,12 @@ pub fn raster_text(spec: &TextSpec) -> (FloatBuf, (f32, f32, f32, f32)) {
     let size = spec.size.max(4.0);
     let leading = if spec.leading > 0.0 { spec.leading } else { size * 1.2 };
     let wrap_w = if spec.box_w > 0.0 { Some(spec.box_w) } else { None };
-    // Wide scratch buffer; cropped to ink afterwards.
-    let scratch_w = wrap_w.unwrap_or((content.chars().count().max(1) as f32 * size * 0.75 + 40.0).max(64.0));
-    let scratch_h = (leading * (content.lines().count().max(1) as f32 + 1.0)).max(leading * 2.0).max(64.0);
+    // Wide scratch buffer; cropped to ink afterwards. Grown on every side
+    // by the stroke reach so wide outlines never clip at the buffer edge.
+    let layout = StrokeLayout::new(spec.stroke_w, spec.stroke_offset, spec.stroke_pos, spec.stroke_fill_over);
+    let spad = layout.extent().ceil().max(0.0);
+    let scratch_w = wrap_w.unwrap_or((content.chars().count().max(1) as f32 * size * 0.75 + 40.0).max(64.0)) + spad * 2.0;
+    let scratch_h = (leading * (content.lines().count().max(1) as f32 + 1.0)).max(leading * 2.0).max(64.0) + spad * 2.0;
     let mut buf = FloatBuf::clear(scratch_w.ceil() as u32, scratch_h.ceil() as u32);
 
     let mut fs = font_system();
@@ -99,7 +192,7 @@ pub fn raster_text(spec: &TextSpec) -> (FloatBuf, (f32, f32, f32, f32)) {
                 SwashContent::Mask => (img.placement.width, img.placement.height, img.data.clone()),
                 SwashContent::Color => {
                     // Color emoji: blit straight (premultiplied-ish) with fill alpha.
-                    blit_color_glyph(&mut buf, physical.x, physical.y, img, spec.fill.a);
+                    blit_color_glyph(&mut buf, physical.x + spad as i32, physical.y + spad as i32, img, spec.fill.a);
                     continue;
                 }
                 SwashContent::SubpixelMask => {
@@ -114,12 +207,14 @@ pub fn raster_text(spec: &TextSpec) -> (FloatBuf, (f32, f32, f32, f32)) {
             };
             glyphs.push(GlyphMask {
                 // physical.* already include the (0, line_y) offset passed
-                // to LayoutGlyph::physical ΓÇö do NOT add line_y again.
+                // to LayoutGlyph::physical — do NOT add line_y again.
                 // Placement is y-up relative to the pen: bitmap top sits
                 // `top` px ABOVE the pen, so buffer y = pen.y - top.
-                x: physical.x + img.placement.left,
+                // Shifted by the stroke margin (see scratch sizing above).
+                x: physical.x + img.placement.left + spad as i32,
                 y: physical.y - img.placement.top
-                    + spec.baseline_shift.round() as i32,
+                    + spec.baseline_shift.round() as i32
+                    + spad as i32,
                 w: mw,
                 h: mh,
                 data,
@@ -140,8 +235,10 @@ pub fn raster_text(spec: &TextSpec) -> (FloatBuf, (f32, f32, f32, f32)) {
             }
         }
     }
-    // Outline ring (8-neighborhood dilate) under the fill.
-    let sw_px = spec.stroke_w.round() as i32;
+    // Outline bands (8-neighborhood morphology) under or over the fill
+    // per paint order: outer = dilated minus original, inner = original
+    // minus eroded. A true dilation has exact width with no gaps or
+    // detachment, unlike stamped offset copies.
     // Gradient axes span the laid-out block (scratch buffer dims).
     let fill_axis = spec
         .fill_gradient
@@ -151,11 +248,25 @@ pub fn raster_text(spec: &TextSpec) -> (FloatBuf, (f32, f32, f32, f32)) {
         .stroke_gradient
         .as_ref()
         .map(|g| gradient_axis(buf.w as f32, buf.h as f32, g.angle));
-    // Outline: dilate the combined glyph alpha by the stroke width and
-    // fill the ring (dilated minus original) under the fill. A true
-    // dilation has exact width with no gaps or detachment, unlike stamped
-    // offset copies.
-    if sw_px >= 1 {
+    // Fill + faux-bold pass (order vs stroke bands depends on paint order).
+    let draw_fill = |buf: &mut FloatBuf| {
+        for g in &glyphs {
+            match (&spec.fill_gradient, fill_axis) {
+                (Some(grad), Some(axis)) => draw_mask_gradient(buf, g, 0, 0, grad, axis),
+                _ => draw_mask(buf, g, 0, 0, spec.fill),
+            };
+            if spec.weight >= 700 {
+                match (&spec.fill_gradient, fill_axis) {
+                    (Some(grad), Some(axis)) => draw_mask_gradient(buf, g, 1, 0, grad, axis),
+                    _ => draw_mask(buf, g, 1, 0, spec.fill),
+                }
+            }
+        }
+    };
+    if !layout.fill_over {
+        draw_fill(&mut buf);
+    }
+    if layout.active() {
         let white = Px { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
         let mut alpha = FloatBuf::clear(buf.w, buf.h);
         for g in &glyphs {
@@ -165,47 +276,23 @@ pub fn raster_text(spec: &TextSpec) -> (FloatBuf, (f32, f32, f32, f32)) {
             }
         }
         let flat: Vec<f32> = alpha.px.iter().map(|p| p.a).collect();
-        let grown = super::mask::box_extremum(
-            &flat,
-            buf.w,
-            buf.h,
-            spec.stroke_w.clamp(1.0, 128.0),
-            true,
-        );
-        for (i, dst) in buf.px.iter_mut().enumerate() {
-            let ring = (grown[i] - flat[i]).clamp(0.0, 1.0);
-            if ring <= 0.003 {
-                continue;
-            }
-            let (x, y) = ((i as u32 % buf.w) as f32, (i as u32 / buf.w) as f32);
-            let p = match (&spec.stroke_gradient, stroke_axis) {
+        let grown = (layout.outer >= 0.5).then(|| {
+            super::mask::box_extremum(&flat, buf.w, buf.h, layout.outer.clamp(1.0, 128.0), true)
+        });
+        let eroded = (layout.inner >= 0.5).then(|| {
+            super::mask::box_extremum(&flat, buf.w, buf.h, layout.inner.clamp(1.0, 128.0), false)
+        });
+        paint_stroke_bands(&mut buf, &flat, grown.as_deref(), eroded.as_deref(), |x, y| {
+            match (&spec.stroke_gradient, stroke_axis) {
                 (Some(grad), Some(axis)) => {
-                    let c = sample_fill_gradient(grad, x + 0.5, y + 0.5, axis);
-                    Px::from_color_scaled(c, ring)
+                    Px::from_color(sample_fill_gradient(grad, x + 0.5, y + 0.5, axis))
                 }
-                _ => {
-                    let mut p = spec.stroke_col;
-                    p.scale(ring);
-                    p
-                }
-            };
-            let mut out = *dst;
-            out.over(p);
-            *dst = out;
-        }
-    }
-    // Fill + faux-bold second pass.
-    for g in &glyphs {
-        match (&spec.fill_gradient, fill_axis) {
-            (Some(grad), Some(axis)) => draw_mask_gradient(&mut buf, g, 0, 0, grad, axis),
-            _ => draw_mask(&mut buf, g, 0, 0, spec.fill),
-        }
-        if spec.weight >= 700 {
-            match (&spec.fill_gradient, fill_axis) {
-                (Some(grad), Some(axis)) => draw_mask_gradient(&mut buf, g, 1, 0, grad, axis),
-                _ => draw_mask(&mut buf, g, 1, 0, spec.fill),
+                _ => spec.stroke_col,
             }
-        }
+        });
+    }
+    if layout.fill_over {
+        draw_fill(&mut buf);
     }
 
     // Ink bounds (with baseline shift applied visually below).
@@ -403,7 +490,8 @@ pub fn raster_text_on_path(
     // Output sized to the path bounds + glyph padding, expanded to include
     // the local origin so pixel (0,0) is layer-local (0,0) — no centering.
     let (pmin, pmax) = path.bounds().unwrap_or((project::Vec2::ZERO, project::Vec2::new(64.0, 64.0)));
-    let pad = size * 1.5 + 8.0;
+    let layout = StrokeLayout::new(spec.stroke_w, spec.stroke_offset, spec.stroke_pos, spec.stroke_fill_over);
+    let pad = size * 1.5 + 8.0 + layout.extent();
     let (mut ox, mut oy) = (pmin.x - pad, pmin.y - pad);
     let (mut x1, mut y1) = (pmax.x + pad, pmax.y + pad);
     ox = ox.min(0.0);
@@ -422,7 +510,6 @@ pub fn raster_text_on_path(
         .as_ref()
         .map(|g| gradient_axis(bw, bh, g.angle));
     let path_len = path.length(0.5).max(1.0);
-    let sw_px = spec.stroke_w.round() as i32;
     for p in &placed {
         // Glyph center rides the path at pen-distance / path-length.
         let ratio = (p.pen / path_len).clamp(0.0, 1.0);
@@ -443,10 +530,14 @@ pub fn raster_text_on_path(
             (Some(grad), Some(axis)) => Px::from_color(sample_fill_gradient(grad, ax, ay, axis)),
             _ => spec.stroke_col,
         };
-        let (gw, gh) = ((p.mask.w + 8) as i32, (p.mask.h + 8) as i32);
+        // Temp holds the glyph plus the outward band (rotation margin
+        // aside, same as before); the inward band lives inside the glyph.
+        let spad = layout.outer.ceil().max(0.0) as i32 + 2;
+        let spad = spad.max(4);
+        let (gw, gh) = (p.mask.w as i32 + spad * 2, p.mask.h as i32 + spad * 2);
         let mut tmp = FloatBuf::clear(gw as u32, gh as u32);
-        let gx = 4i32;
-        let gy = 4i32;
+        let gx = spad;
+        let gy = spad;
         let shifted = GlyphMask { x: gx, y: gy, w: p.mask.w, h: p.mask.h, data: p.mask.data.clone() };
         if let Some((strength, _)) = spec.bevel {
             if strength > 0.5 {
@@ -455,7 +546,7 @@ pub fn raster_text_on_path(
                 draw_mask(&mut tmp, &shifted, 1, 1, Px { r: k * 0.9, g: k * 0.9, b: k * 0.9, a: k * 0.9 });
             }
         }
-        if sw_px >= 1 {
+        if layout.active() {
             // Dilation outline in the temp buffer (same as straight text:
             // exact width, no gaps or detachment).
             let white = Px { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
@@ -465,28 +556,30 @@ pub fn raster_text_on_path(
                 draw_mask(&mut alpha, &shifted, 1, 0, white);
             }
             let flat: Vec<f32> = alpha.px.iter().map(|p| p.a).collect();
-            let grown = super::mask::box_extremum(
-                &flat,
-                tmp.w,
-                tmp.h,
-                spec.stroke_w.clamp(1.0, 128.0),
-                true,
-            );
-            for (i, dst) in tmp.px.iter_mut().enumerate() {
-                let ring = (grown[i] - flat[i]).clamp(0.0, 1.0);
-                if ring <= 0.003 {
-                    continue;
+            let grown = (layout.outer >= 0.5).then(|| {
+                super::mask::box_extremum(&flat, tmp.w, tmp.h, layout.outer.clamp(1.0, 128.0), true)
+            });
+            let eroded = (layout.inner >= 0.5).then(|| {
+                super::mask::box_extremum(&flat, tmp.w, tmp.h, layout.inner.clamp(1.0, 128.0), false)
+            });
+            if !layout.fill_over {
+                draw_mask(&mut tmp, &shifted, 0, 0, glyph_fill);
+                if spec.weight >= 700 {
+                    draw_mask(&mut tmp, &shifted, 1, 0, glyph_fill);
                 }
-                let mut p = glyph_stroke;
-                p.scale(ring);
-                let mut out = *dst;
-                out.over(p);
-                *dst = out;
             }
-        }
-        draw_mask(&mut tmp, &shifted, 0, 0, glyph_fill);
-        if spec.weight >= 700 {
-            draw_mask(&mut tmp, &shifted, 1, 0, glyph_fill);
+            paint_stroke_bands(&mut tmp, &flat, grown.as_deref(), eroded.as_deref(), |_, _| glyph_stroke);
+            if layout.fill_over {
+                draw_mask(&mut tmp, &shifted, 0, 0, glyph_fill);
+                if spec.weight >= 700 {
+                    draw_mask(&mut tmp, &shifted, 1, 0, glyph_fill);
+                }
+            }
+        } else {
+            draw_mask(&mut tmp, &shifted, 0, 0, glyph_fill);
+            if spec.weight >= 700 {
+                draw_mask(&mut tmp, &shifted, 1, 0, glyph_fill);
+            }
         }
         // Rotate about the glyph center onto the path point.
         let (cx, cy) = (gw as f32 * 0.5, gh as f32 * 0.5);
@@ -756,8 +849,9 @@ pub fn raster_text_split(
         total_max_y = total_max_y.max(t.bounds.3);
     }
 
-    let pad_w = (params.offset_position.x.abs() + size * 2.0 + 80.0).max(64.0);
-    let pad_h = (params.offset_position.y.abs() + size * 2.0 + 80.0).max(64.0);
+    let layout_split = StrokeLayout::new(spec.stroke_w, spec.stroke_offset, spec.stroke_pos, spec.stroke_fill_over);
+    let pad_w = (params.offset_position.x.abs() + size * 2.0 + 80.0 + layout_split.extent()).max(64.0);
+    let pad_h = (params.offset_position.y.abs() + size * 2.0 + 80.0 + layout_split.extent()).max(64.0);
     let out_ox = total_min_x - pad_w;
     let out_oy = total_min_y - pad_h;
     let out_w = ((total_max_x - total_min_x) + pad_w * 2.0).ceil().max(32.0) as u32;
@@ -765,7 +859,6 @@ pub fn raster_text_split(
 
     let mut buf = FloatBuf::clear(out_w, out_h);
 
-    let sw_px = spec.stroke_w.round() as i32;
     let fill_axis = spec.fill_gradient.as_ref().map(|g| gradient_axis(out_w as f32, out_h as f32, g.angle));
     let stroke_axis = spec.stroke_gradient.as_ref().map(|g| gradient_axis(out_w as f32, out_h as f32, g.angle));
 
@@ -793,8 +886,9 @@ pub fn raster_text_split(
         let anc_x = tw * 0.5 + params.anchor_alignment.x;
         let anc_y = th * 0.5 + params.anchor_alignment.y;
 
-        // Render token into a temporary sub-buffer
-        let tmp_pad = (sw_px.max(4) + 4) as f32;
+        // Render token into a temporary sub-buffer (padded for the
+        // outward band; the inward band lives inside the glyphs).
+        let tmp_pad = (layout_split.outer.ceil() as i32 + 4).max(8) as f32;
         let tmp_w = (tw + tmp_pad * 2.0).ceil() as u32;
         let tmp_h = (th + tmp_pad * 2.0).ceil() as u32;
         let mut tmp = FloatBuf::clear(tmp_w, tmp_h);
@@ -819,7 +913,11 @@ pub fn raster_text_split(
                 }
             }
 
-            if sw_px >= 1 {
+            if layout_split.active() {
+                let fill_col = match (&spec.fill_gradient, fill_axis) {
+                    (Some(grad), Some(axis)) => Px::from_color(sample_fill_gradient(grad, token.center.0 - out_ox, token.center.1 - out_oy, axis)),
+                    _ => spec.fill,
+                };
                 let white = Px { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
                 let mut a_buf = FloatBuf::clear(tmp.w, tmp.h);
                 draw_mask(&mut a_buf, &shifted, 0, 0, white);
@@ -827,31 +925,38 @@ pub fn raster_text_split(
                     draw_mask(&mut a_buf, &shifted, 1, 0, white);
                 }
                 let flat: Vec<f32> = a_buf.px.iter().map(|p| p.a).collect();
-                let grown = super::mask::box_extremum(&flat, tmp.w, tmp.h, spec.stroke_w.clamp(1.0, 128.0), true);
-                for (idx, dst) in tmp.px.iter_mut().enumerate() {
-                    let ring = (grown[idx] - flat[idx]).clamp(0.0, 1.0);
-                    if ring <= 0.003 {
-                        continue;
+                let grown = (layout_split.outer >= 0.5).then(|| {
+                    super::mask::box_extremum(&flat, tmp.w, tmp.h, layout_split.outer.clamp(1.0, 128.0), true)
+                });
+                let eroded = (layout_split.inner >= 0.5).then(|| {
+                    super::mask::box_extremum(&flat, tmp.w, tmp.h, layout_split.inner.clamp(1.0, 128.0), false)
+                });
+                if !layout_split.fill_over {
+                    draw_mask(&mut tmp, &shifted, 0, 0, fill_col);
+                    if spec.weight >= 700 {
+                        draw_mask(&mut tmp, &shifted, 1, 0, fill_col);
                     }
-                    let col = match (&spec.stroke_gradient, stroke_axis) {
-                        (Some(grad), Some(axis)) => Px::from_color(sample_fill_gradient(grad, token.center.0 - out_ox, token.center.1 - out_oy, axis)),
-                        _ => spec.stroke_col,
-                    };
-                    let mut p = col;
-                    p.scale(ring);
-                    let mut out = *dst;
-                    out.over(p);
-                    *dst = out;
                 }
-            }
-
-            let fill_col = match (&spec.fill_gradient, fill_axis) {
-                (Some(grad), Some(axis)) => Px::from_color(sample_fill_gradient(grad, token.center.0 - out_ox, token.center.1 - out_oy, axis)),
-                _ => spec.fill,
-            };
-            draw_mask(&mut tmp, &shifted, 0, 0, fill_col);
-            if spec.weight >= 700 {
-                draw_mask(&mut tmp, &shifted, 1, 0, fill_col);
+                let tcol = match (&spec.stroke_gradient, stroke_axis) {
+                    (Some(grad), Some(axis)) => Px::from_color(sample_fill_gradient(grad, token.center.0 - out_ox, token.center.1 - out_oy, axis)),
+                    _ => spec.stroke_col,
+                };
+                paint_stroke_bands(&mut tmp, &flat, grown.as_deref(), eroded.as_deref(), |_, _| tcol);
+                if layout_split.fill_over {
+                    draw_mask(&mut tmp, &shifted, 0, 0, fill_col);
+                    if spec.weight >= 700 {
+                        draw_mask(&mut tmp, &shifted, 1, 0, fill_col);
+                    }
+                }
+            } else {
+                let fill_col = match (&spec.fill_gradient, fill_axis) {
+                    (Some(grad), Some(axis)) => Px::from_color(sample_fill_gradient(grad, token.center.0 - out_ox, token.center.1 - out_oy, axis)),
+                    _ => spec.fill,
+                };
+                draw_mask(&mut tmp, &shifted, 0, 0, fill_col);
+                if spec.weight >= 700 {
+                    draw_mask(&mut tmp, &shifted, 1, 0, fill_col);
+                }
             }
         }
 
@@ -930,6 +1035,9 @@ mod tests {
             stroke_w: 0.0,
             stroke_col: Px { r: 0.0, g: 0.0, b: 0.0, a: 0.0 },
             stroke_gradient: None,
+            stroke_pos: StrokePos::Outside,
+            stroke_fill_over: true,
+            stroke_offset: 0.0,
             baseline_shift: 0.0,
             box_w: 400.0,
             bevel: None,
@@ -969,6 +1077,9 @@ mod tests {
             stroke_w: 0.0,
             stroke_col: Px { r: 0.0, g: 0.0, b: 0.0, a: 0.0 },
             stroke_gradient: None,
+            stroke_pos: StrokePos::Outside,
+            stroke_fill_over: true,
+            stroke_offset: 0.0,
             baseline_shift: 0.0,
             box_w: 400.0,
             bevel: None,
@@ -1001,5 +1112,87 @@ mod tests {
         unlocked_hi.lock_layout = false;
         let (_, ink_hi) = raster_text_split(&spec, &unlocked_hi);
         assert!((ink_lo.2 - ink_lo.0) < (ink_hi.2 - ink_hi.0));
+    }
+
+    fn stroke_spec(pos: StrokePos, fill_over: bool, offset: f32) -> TextSpec<'static> {
+        TextSpec {
+            text: "H",
+            family: "Arial",
+            size: 48.0,
+            fill: Px { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+            fill_gradient: None,
+            weight: 400,
+            italic: false,
+            tracking: 0.0,
+            leading: 0.0,
+            align: TextAlign::Left,
+            all_caps: false,
+            stroke_w: 10.0,
+            stroke_col: Px { r: 1.0, g: 0.0, b: 0.0, a: 1.0 },
+            stroke_gradient: None,
+            stroke_pos: pos,
+            stroke_fill_over: fill_over,
+            stroke_offset: offset,
+            baseline_shift: 0.0,
+            box_w: 0.0,
+            bevel: None,
+        }
+    }
+
+    fn ink_width(spec: &TextSpec) -> f32 {
+        let (_, (x0, _, x1, _)) = raster_text(spec);
+        x1 - x0
+    }
+
+    #[test]
+    fn test_stroke_position_controls_ink_growth() {
+        // Fill-only baseline (no stroke).
+        let mut plain = stroke_spec(StrokePos::Outside, true, 0.0);
+        plain.stroke_w = 0.0;
+        let base = ink_width(&plain);
+        // Outside grows the ink by the full width on each side.
+        let outside = ink_width(&stroke_spec(StrokePos::Outside, true, 0.0));
+        assert!((outside - base - 20.0).abs() < 3.0, "outside grows +10/side: {outside} vs {base}");
+        // Center grows half the width per side (grows from the edge).
+        let center = ink_width(&stroke_spec(StrokePos::Center, false, 0.0));
+        assert!((center - base - 10.0).abs() < 3.0, "center grows +5/side: {center} vs {base}");
+        // Inside never grows past the fill ink.
+        let inside = ink_width(&stroke_spec(StrokePos::Inside, false, 0.0));
+        assert!((inside - base).abs() < 2.0, "inside stays inside: {inside} vs {base}");
+        // Offset pushes the whole band outward.
+        let pushed = ink_width(&stroke_spec(StrokePos::Outside, true, 6.0));
+        assert!((pushed - base - 32.0).abs() < 3.0, "offset +6 grows +16/side: {pushed} vs {base}");
+    }
+
+    #[test]
+    fn test_stroke_inside_paints_over_fill() {
+        // Inside + stroke-over-fill: pixels just inside the glyph edge are
+        // stroke red, and nothing spills outside the fill ink.
+        let spec = stroke_spec(StrokePos::Inside, false, 0.0);
+        let (buf, (x0, _, x1, _)) = raster_text(&spec);
+        let w = buf.w as usize;
+        let at = |x: i32, y: i32| buf.px[(y as usize) * w + x as usize];
+        // Left edge band must be red-dominant (stroke), not white fill.
+        // (The exact outermost column is an AA fringe; scan a few in.)
+        let mut red_edge = 0;
+        for y in 0..buf.h as i32 {
+            for x in x0 as i32..(x0 as i32 + 4) {
+                let p = at(x, y);
+                if p.a > 0.1 && p.r > 0.5 && p.g < 0.5 {
+                    red_edge += 1;
+                    break;
+                }
+            }
+        }
+        assert!(red_edge > 5, "inside stroke must edge the fill in red, got {red_edge}");
+        // Fill-only ink must be at least as wide (no outward spill).
+        // (Absolute origins differ by the scratch margin; compare widths.)
+        let mut plain = stroke_spec(StrokePos::Outside, true, 0.0);
+        plain.stroke_w = 0.0;
+        let (_, (px0, _, px1, _)) = raster_text(&plain);
+        assert!(
+            ((x1 - x0) - (px1 - px0)).abs() < 2.0,
+            "inside must not spill out: {x0},{x1} vs {px0},{px1}"
+        );
     }
 }

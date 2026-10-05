@@ -5560,6 +5560,158 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         });
     }
 
+    #[test]
+    fn test_puppet_pins_keyframe_through_property_tracks() {
+        use crate::state::EditorState;
+
+        let mut state = EditorState::new();
+        state.select_layer(Some("layer_accent".to_string()));
+        let fx = state
+            .add_effect_to_selected_layer(project::EffectType::puppet())
+            .unwrap();
+        // Declarations expose static sliders with no pins yet.
+        let fields0: Vec<String> = state
+            .active_composition()
+            .unwrap()
+            .get_layer("layer_accent")
+            .unwrap()
+            .get_effect(&fx)
+            .unwrap()
+            .declarations()
+            .iter()
+            .map(|d| d.field.clone())
+            .collect();
+        assert!(fields0.contains(&"expansion".to_string()));
+        assert!(!fields0.iter().any(|f| f.starts_with("pin_")));
+
+        // Add + move a pin.
+        let idx = state.add_puppet_pin("layer_accent", &fx, 10.0, 20.0).unwrap();
+        assert_eq!(idx, 0);
+        state.move_puppet_pin_live("layer_accent", &fx, 0, 5.0, -3.0).unwrap();
+        let layer = state.active_composition().unwrap().get_layer("layer_accent").unwrap();
+        let eff = layer.get_effect(&fx).unwrap();
+        // Dynamic per-pin declarations light up timeline lanes as usual.
+        let fields: Vec<String> = eff.declarations().iter().map(|d| d.field.clone()).collect();
+        assert!(fields.contains(&"pin_0_x".to_string()));
+        assert!(fields.contains(&"pin_0_y".to_string()));
+        assert!(eff.get_param_property("pin_0_x").unwrap().value == 5.0);
+
+        // Keyframing a pin component shows up in the spline editor.
+        state.toggle_layer_keyframe_at_current_time("layer_accent", &format!("effect:{fx}:pin_0_x"));
+        assert!(!state.graph_key_times("layer_accent", &format!("effect:{fx}:pin_0_x")).is_empty());
+        assert!(
+            state.graph_series("layer_accent").iter().any(|s| s.path == format!("effect:{fx}:pin_0_x")),
+            "pin tracks must reach the spline editor"
+        );
+
+        // Delete + out-of-range errors.
+        state.remove_puppet_pin("layer_accent", &fx, 0).unwrap();
+        assert!(state.remove_puppet_pin("layer_accent", &fx, 0).is_err());
+        assert!(state.move_puppet_pin_live("layer_accent", &fx, 0, 0.0, 0.0).is_err());
+    }
+
+    #[gpui_kit::test]
+    fn test_puppet_overlay_drags_and_deletes_pins(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+        use gpui_kit::point;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        // Puppet on the accent solid with one centered pin.
+        let puppet_id = app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, _| {
+                s.select_layer(Some("layer_accent".to_string()));
+                let fx = s.add_effect_to_selected_layer(project::EffectType::puppet()).unwrap();
+                s.add_puppet_pin("layer_accent", &fx, 150.0, 150.0).unwrap();
+                fx
+            })
+        });
+        let pin_id = SharedString::from(format!("puppet_pin_layer_accent_{puppet_id}_0"));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find(pin_id.clone()).visible());
+            // Drag the pin right: its x offset must follow.
+            let from = window.find(pin_id.clone()).bounds().center();
+            window.drag(from, from + point(px(60.0), px(0.0)), cx);
+        })
+        .expect("update_window failed");
+        let (dx, dy) = app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            let layer = s.active_composition().unwrap().get_layer("layer_accent").unwrap();
+            let eff = layer.get_effect(&puppet_id).unwrap();
+            match &eff.effect_type {
+                project::EffectType::Puppet { pins, .. } => {
+                    (pins[0].dx.value, pins[0].dy.value)
+                }
+                _ => panic!("expected puppet"),
+            }
+        });
+        assert!(dx > 1.0, "pin follows rightward drag: dx={dx}");
+        assert!(dy.abs() < dx.abs(), "flat drag stays flat: dx={dx} dy={dy}");
+        // Drag state fully releases (no stuck gesture leaks into later presses).
+        app_view.read_with(cx, |view, cx| {
+            view.panels().viewer.read_with(cx, |v, _| {
+                assert!(v.puppet_drag.is_none());
+                assert!(v.warp_drag.is_none());
+                assert!(!v.is_dragging_canvas);
+                assert!(!view.state().read(cx).preview_fast);
+            })
+        });
+        // Right-click deletes the pin.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.right_click(pin_id.clone(), cx);
+        })
+        .expect("update_window failed");
+        app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            let layer = s.active_composition().unwrap().get_layer("layer_accent").unwrap();
+            let eff = layer.get_effect(&puppet_id).unwrap();
+            match &eff.effect_type {
+                project::EffectType::Puppet { pins, .. } => {
+                    assert!(pins.is_empty(), "right-click deletes the pin");
+                }
+                _ => panic!("expected puppet"),
+            }
+        });
+        // Double-click placement through the panel entry point (the same
+        // logic the canvas press handler uses): first press arms, second
+        // places on the picked puppet layer; elsewhere only re-arms.
+        let (first, second) = app_view.update(cx, |view, cx| {
+            view.panels().viewer.update(cx, |p, cx| {
+                let first = p.puppet_double_click_at(-200.0, 0.0, 500.0, 300.0, cx);
+                let second = p.puppet_double_click_at(-200.0, 0.0, 500.0, 300.0, cx);
+                (first, second)
+            })
+        });
+        assert!(!first, "first press only arms");
+        assert!(second, "second press places the pin");
+        let third = app_view.update(cx, |view, cx| {
+            view.panels().viewer.update(cx, |p, cx| {
+                p.puppet_double_click_at(900.0, 500.0, 100.0, 100.0, cx)
+            })
+        });
+        assert!(!third, "press elsewhere only re-arms");
+        app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            let layer = s.active_composition().unwrap().get_layer("layer_accent").unwrap();
+            let eff = layer.get_effect(&puppet_id).unwrap();
+            match &eff.effect_type {
+                project::EffectType::Puppet { pins, .. } => {
+                    assert_eq!(pins.len(), 1, "double-click adds a pin");
+                }
+                _ => panic!("expected puppet"),
+            }
+        });
+    }
+
     #[gpui_kit::test]
     fn test_graph_key_selection_shows_compact_easing_bar(cx: &mut TestAppContext) {
         use gpui_kit::test::TestWindowExt;

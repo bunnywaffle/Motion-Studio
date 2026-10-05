@@ -5011,6 +5011,103 @@ impl EditorState {
         }
     }
 
+    /// Add a puppet pin at layer-local content coords (double-click).
+    /// Pin offsets start identity; keyframe tracks arm on first drag.
+    pub fn add_puppet_pin(
+        &mut self,
+        layer_id: &str,
+        effect_id: &str,
+        x: f32,
+        y: f32,
+    ) -> Result<usize, String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let effect = layer
+            .get_effect_mut(effect_id)
+            .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
+        match &mut effect.effect_type {
+            EffectType::Puppet { pins, .. } => {
+                pins.push(project::PuppetPin::new(x, y));
+                Ok(pins.len() - 1)
+            }
+            _ => Err(format!("Effect {effect_id} is not a Puppet warp")),
+        }
+    }
+
+    /// Delete a puppet pin by index (right-click).
+    pub fn remove_puppet_pin(
+        &mut self,
+        layer_id: &str,
+        effect_id: &str,
+        index: usize,
+    ) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let effect = layer
+            .get_effect_mut(effect_id)
+            .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
+        match &mut effect.effect_type {
+            EffectType::Puppet { pins, .. } => {
+                if index >= pins.len() {
+                    return Err(format!("Puppet pin {index} out of range on effect {effect_id}"));
+                }
+                pins.remove(index);
+                Ok(())
+            }
+            _ => Err(format!("Effect {effect_id} is not a Puppet warp")),
+        }
+    }
+
+    /// Move one puppet pin (live drag: the grab site checkpoints, mirroring
+    /// mask handle drags). Commits a playhead keyframe when animated, so
+    /// pins are keyframable through the standard property tracks.
+    pub fn move_puppet_pin_live(
+        &mut self,
+        layer_id: &str,
+        effect_id: &str,
+        index: usize,
+        dx: f32,
+        dy: f32,
+    ) -> Result<(), String> {
+        let current_tc = self.clock.timecode();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let effect = layer
+            .get_effect_mut(effect_id)
+            .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
+        match &mut effect.effect_type {
+            EffectType::Puppet { pins, .. } => {
+                let pin = pins.get_mut(index).ok_or_else(|| {
+                    format!("Puppet pin {index} out of range on effect {effect_id}")
+                })?;
+                pin.dx.set_value(dx);
+                if pin.dx.is_animated() {
+                    pin.dx.add_keyframe(Keyframe::new(current_tc, dx));
+                }
+                pin.dy.set_value(dy);
+                if pin.dy.is_animated() {
+                    pin.dy.add_keyframe(Keyframe::new(current_tc, dy));
+                }
+                Ok(())
+            }
+            _ => Err(format!("Effect {effect_id} is not a Puppet warp")),
+        }
+    }
+
     /// Read a Gradient Ramp's working stops (explicit stops, else the
     /// endpoint pair) for the shared gradient editor.
     pub fn effect_gradient_stops(

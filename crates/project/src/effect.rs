@@ -1,6 +1,7 @@
 use crate::color::Color;
 use crate::layer::{FillGradient, GradientStop, GradientType};
 use crate::property::Property;
+use crate::puppet::PuppetPin;
 use crate::shader::{parse_shader_params, ShaderParam, ShaderParamValue};
 use crate::stock::{stock_default_color, StockPlugin};
 use crate::warp::WarpPin;
@@ -57,6 +58,18 @@ fn default_text_split_pos_y() -> Property<f32> {
 
 fn default_text_split_rot() -> Property<f32> {
     Property::new("Rotation", -25.0)
+}
+
+fn default_text_outline_offset() -> Property<f32> {
+    Property::new("Offset", 0.0)
+}
+
+fn default_puppet_expansion() -> Property<f32> {
+    Property::new("Expansion", 0.0)
+}
+
+fn default_puppet_stiffness() -> Property<f32> {
+    Property::new("Stiffness", 2.0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -399,6 +412,8 @@ pub enum EffectType {
         width: Property<f32>,
         #[serde(deserialize_with = "crate::property::de_property_or_value", default)]
         color: Property<Color>,
+        #[serde(deserialize_with = "crate::property::de_property_or_value", default = "default_text_outline_offset")]
+        offset: Property<f32>,
     },
     /// Text bevel lighting (resolved by text renderers).
     TextBevel {
@@ -477,6 +492,18 @@ pub enum EffectType {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pins: Vec<WarpPin>,
     },
+    /// Puppet warp (spatial): free-placed pins deform by inverse-distance
+    /// weighting (`pins` + per-pin keyframable offsets, empty = identity,
+    /// positions in layer px). Pin components resolve as `pin_{i}_{x|y}`
+    /// scalar params, so timeline lanes and spline series work unchanged.
+    Puppet {
+        #[serde(default = "default_puppet_expansion")]
+        expansion: Property<f32>,
+        #[serde(default = "default_puppet_stiffness")]
+        stiffness: Property<f32>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pins: Vec<PuppetPin>,
+    },
     /// Exposure in EV stops (per-pixel gain).
     Exposure {
         exposure: Property<f32>,
@@ -552,6 +579,7 @@ impl EffectType {
             Self::Bloom { .. } => "Bloom",
             Self::Tiler { .. } => "Tiler",
             Self::Warp { .. } => "Warp",
+            Self::Puppet { .. } => "Puppet Warp",
             Self::Exposure { .. } => "Exposure",
             Self::Vibrance { .. } => "Vibrance",
             Self::Levels { .. } => "Levels",
@@ -834,6 +862,7 @@ impl EffectType {
         Self::TextOutline {
             width: Property::new("Width", width.clamp(0.0, 50.0)),
             color: Property::new("Color", color),
+            offset: default_text_outline_offset(),
         }
     }
 
@@ -894,6 +923,15 @@ impl EffectType {
             scale: Property::new("Scale", scale.clamp(0.1, 10.0)),
             cols: default_warp_cols(),
             rows: default_warp_rows(),
+            pins: Vec::new(),
+        }
+    }
+
+    /// Construct a Puppet warp effect type (no pins = identity).
+    pub fn puppet() -> Self {
+        Self::Puppet {
+            expansion: default_puppet_expansion(),
+            stiffness: default_puppet_stiffness(),
             pins: Vec::new(),
         }
     }
@@ -980,6 +1018,7 @@ impl EffectType {
             Self::Bloom { .. } => "net.sf.openfx.bloom",
             Self::Tiler { .. } => "net.sf.openfx.tiler",
             Self::Warp { .. } => "net.sf.openfx.warp",
+            Self::Puppet { .. } => "net.sf.openfx.puppet",
             Self::Exposure { .. } => "net.sf.openfx.exposure",
             Self::Vibrance { .. } => "net.sf.openfx.vibrance",
             Self::Levels { .. } => "net.sf.openfx.levels",
@@ -1920,9 +1959,12 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     return true;
                 }
             }
-            EffectType::TextOutline { width, .. } => {
+            EffectType::TextOutline { width, offset, .. } => {
                 if param_name.eq_ignore_ascii_case("width") {
                     width.set_value((width.value + delta).clamp(0.0, 50.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("offset") {
+                    offset.set_value((offset.value + delta).clamp(-50.0, 50.0));
                     return true;
                 }
             }
@@ -2023,6 +2065,18 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     return true;
                 }
             }
+            EffectType::Puppet { expansion, stiffness, pins } => {
+                if param_name.eq_ignore_ascii_case("expansion") {
+                    expansion.set_value((expansion.value + delta).max(0.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("stiffness") {
+                    stiffness.set_value((stiffness.value + delta).clamp(0.5, 8.0));
+                    return true;
+                } else if let Some(prop) = Self::pin_component_mut(pins, param_name) {
+                    prop.set_value(prop.value + delta);
+                    return true;
+                }
+            }
             EffectType::Exposure { exposure } => {
                 if param_name.eq_ignore_ascii_case("exposure") || param_name.eq_ignore_ascii_case("ev") {
                     exposure.set_value((exposure.value + delta).clamp(-10.0, 10.0));
@@ -2098,6 +2152,34 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
             EffectType::ShaderLab { .. } => {}
         }
         false
+    }
+    /// Resolve a dynamic puppet pin component (`pin_{i}_{x|y}`) to its
+    /// keyframable property. Backs both `get_param_property` variants so
+    /// pin tracks work in lanes, spline, nudges, and toggles unchanged.
+    fn pin_component<'a>(pins: &'a [PuppetPin], param_name: &str) -> Option<&'a Property<f32>> {
+        let rest = param_name.strip_prefix("pin_")?;
+        let mut parts = rest.split('_');
+        let idx: usize = parts.next()?.parse().ok()?;
+        match parts.next() {
+            Some("x") => pins.get(idx).map(|p| &p.dx),
+            Some("y") => pins.get(idx).map(|p| &p.dy),
+            _ => None,
+        }
+    }
+
+    /// Mutable variant of [`Self::pin_component`].
+    fn pin_component_mut<'a>(
+        pins: &'a mut [PuppetPin],
+        param_name: &str,
+    ) -> Option<&'a mut Property<f32>> {
+        let rest = param_name.strip_prefix("pin_")?;
+        let mut parts = rest.split('_');
+        let idx: usize = parts.next()?.parse().ok()?;
+        match parts.next() {
+            Some("x") => pins.get_mut(idx).map(|p| &mut p.dx),
+            Some("y") => pins.get_mut(idx).map(|p| &mut p.dy),
+            _ => None,
+        }
     }
 
     /// Retrieve an immutable reference to an animatable parameter property by name.
@@ -2259,9 +2341,11 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     None
                 }
             }
-            EffectType::TextOutline { width, .. } => {
+            EffectType::TextOutline { width, offset, .. } => {
                 if param_name.eq_ignore_ascii_case("width") {
                     Some(width)
+                } else if param_name.eq_ignore_ascii_case("offset") {
+                    Some(offset)
                 } else {
                     None
                 }
@@ -2416,6 +2500,8 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     .position(|p| param_name.eq_ignore_ascii_case(p.name))?;
                 params.get(idx)
             }
+            // Puppet pin components are dynamic (`pin_{i}_{x|y}`) tracks.
+            EffectType::Puppet { pins, .. } => Self::pin_component(pins, param_name),
             // Shader Lab values are dynamic, not `Property<f32>` tracks.
             EffectType::ShaderLab { .. } => None,
         }
@@ -2580,9 +2666,11 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     None
                 }
             }
-            EffectType::TextOutline { width, .. } => {
+            EffectType::TextOutline { width, offset, .. } => {
                 if param_name.eq_ignore_ascii_case("width") {
                     Some(width)
+                } else if param_name.eq_ignore_ascii_case("offset") {
+                    Some(offset)
                 } else {
                     None
                 }
@@ -2737,6 +2825,8 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     .position(|p| param_name.eq_ignore_ascii_case(p.name))?;
                 params.get_mut(idx)
             }
+            // Puppet pin components are dynamic (`pin_{i}_{x|y}`) tracks.
+            EffectType::Puppet { pins, .. } => Self::pin_component_mut(pins, param_name),
             // Shader Lab values are dynamic, not `Property<f32>` tracks.
             EffectType::ShaderLab { .. } => None,
         }
@@ -2914,9 +3004,10 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 scalar("skew_x", "Skew X", WidgetKind::Angle, ParamMeta::slider(-60.0, 60.0, 1.0, 1, "°", 100.0), skew_x),
                 scalar("skew_y", "Skew Y", WidgetKind::Angle, ParamMeta::slider(-60.0, 60.0, 1.0, 1, "°", 100.0), skew_y),
             ],
-            EffectType::TextOutline { width, color } => vec![
+            EffectType::TextOutline { width, color, offset } => vec![
                 PropDecl::color("color", "Color", color.value, color.is_animated()),
                 scalar("width", "Width", WidgetKind::Slider, px1(0.0, 64.0, 1.0, 100.0), width),
+                scalar("offset", "Offset", WidgetKind::Slider, ParamMeta { signed: true, ..ParamMeta::slider(-50.0, 50.0, 1.0, 1, " px", 100.0) }, offset),
             ],
             EffectType::TextBevel { strength, softness } => vec![
                 scalar("strength", "Strength", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), strength),
@@ -2999,6 +3090,27 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 scalar("cols", "Columns", WidgetKind::Integer, ParamMeta::slider(2.0, 8.0, 1.0, 0, "", 100.0), cols),
                 scalar("rows", "Rows", WidgetKind::Integer, ParamMeta::slider(2.0, 8.0, 1.0, 0, "", 100.0), rows),
             ],
+            EffectType::Puppet { expansion, stiffness, pins } => {
+                let mut decls = vec![
+                    scalar("expansion", "Expansion", WidgetKind::Slider, ParamMeta::slider(0.0, 2000.0, 10.0, 0, " px", 100.0), expansion),
+                    scalar("stiffness", "Stiffness", WidgetKind::Slider, ParamMeta::slider(0.5, 8.0, 0.1, 1, "", 100.0), stiffness),
+                ];
+                // Dynamic per-pin tracks: the timeline, spline, nudges, and
+                // keyframe toggles all resolve `pin_{i}_{x|y}` through the
+                // shared accessors, so pins need no dedicated UI code.
+                for (i, pin) in pins.iter().enumerate() {
+                    for (axis, prop) in [("x", &pin.dx), ("y", &pin.dy)] {
+                        decls.push(PropDecl {
+                            field: format!("pin_{i}_{axis}"),
+                            label: format!("Pin {} {}", i + 1, axis.to_uppercase()),
+                            widget: WidgetKind::Slider,
+                            meta: ParamMeta::slider(-1000.0, 1000.0, 1.0, 1, " px", 100.0),
+                            value: PropValue::Float { value: prop.value, animated: prop.is_animated() },
+                        });
+                    }
+                }
+                decls
+            }
             EffectType::Exposure { exposure } => vec![PropDecl {
                 field: "exposure".to_string(),
                 label: "Exposure".to_string(),

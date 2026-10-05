@@ -271,6 +271,16 @@ pub const OFX_SUITE: &[OfxEffectDescriptor] = &[
         spatial: true,
     },
     OfxEffectDescriptor {
+        id: "net.sf.openfx.puppet",
+        label: "Puppet Warp",
+        category: OfxCategory::Distort,
+        params: &[
+            OfxParamDescriptor { name: "expansion", label: "Expansion", min: 0.0, max: 2000.0, default: 0.0 },
+            OfxParamDescriptor { name: "stiffness", label: "Stiffness", min: 0.5, max: 8.0, default: 2.0 },
+        ],
+        spatial: true,
+    },
+    OfxEffectDescriptor {
         id: "net.sf.openfx.bloom",
         label: "Bloom",
         category: OfxCategory::Stylize,
@@ -315,7 +325,10 @@ pub const OFX_SUITE: &[OfxEffectDescriptor] = &[
         id: "net.sf.openfx.text_outline",
         label: "Text Outline",
         category: OfxCategory::Text,
-        params: &[OfxParamDescriptor { name: "width", label: "Width", min: 0.0, max: 50.0, default: 3.0 }],
+        params: &[
+            OfxParamDescriptor { name: "width", label: "Width", min: 0.0, max: 50.0, default: 3.0 },
+            OfxParamDescriptor { name: "offset", label: "Offset", min: -50.0, max: 50.0, default: 0.0 },
+        ],
         spatial: true,
     },
     OfxEffectDescriptor {

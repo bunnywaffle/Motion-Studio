@@ -19,6 +19,7 @@ use std::collections::HashSet;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::state::{AnimationPreset, EditorState, EditorTool, EasingPreset, GraphSeries, KeyEase};
 use project::shader::{presets as shader_presets, ShaderParamValue};
@@ -2883,6 +2884,11 @@ pub struct CompositionViewerPanel {
     pub warp_drag: Option<WarpDrag>,
     /// Active corner-pin drag (viewport corner overlay).
     pub corner_drag: Option<CornerDrag>,
+    /// Active puppet-pin drag (viewport puppet overlay).
+    pub puppet_drag: Option<PuppetDrag>,
+    /// Last canvas press for puppet double-click-to-add detection
+    /// (time + window px, mirrors the M/MM double-tap in EditorState).
+    pub puppet_click: Option<(Instant, f32, f32)>,
     /// Selected mask node index for handle display (viewport Path Editor).
     pub mask_edit_point: Option<usize>,
     /// True once the current mask drag moved (click without drag cycles
@@ -2965,6 +2971,20 @@ pub struct CornerDrag {
     pub grab_offset: (f32, f32),
 }
 
+/// Active puppet-pin drag in the viewport.
+#[derive(Clone, Debug)]
+pub struct PuppetDrag {
+    pub layer_id: String,
+    pub effect_id: String,
+    pub pin_index: usize,
+    /// Rest position of the pin in content coords at grab time.
+    pub rest: Vec2,
+    /// Content origin (layer-local) at grab time for content mapping.
+    pub origin: Vec2,
+    /// Cursor-minus-tip delta in comp px at grab time.
+    pub grab_offset: (f32, f32),
+}
+
 /// Corner-pin param names (x/y pairs, descriptor order) + identity defaults.
 const CORNER_PIN_PARAMS: [(&str, &str, f32, f32); 4] = [
     ("ul_x", "ul_y", 0.0, 0.0),
@@ -3043,6 +3063,8 @@ impl CompositionViewerPanel {
             mask_drag: None,
             warp_drag: None,
             corner_drag: None,
+            puppet_drag: None,
+            puppet_click: None,
             mask_edit_point: None,
             mask_down_moved: false,
             raster_cache: HashMap::new(),
@@ -3083,6 +3105,70 @@ impl CompositionViewerPanel {
                     .find(|b| x >= b.min_x && x <= b.max_x && y >= b.min_y && y <= b.max_y)
             })
             .map(|b| b.id.clone())
+    }
+
+    /// Puppet double-click-to-add for a canvas press at comp coords
+    /// (`curr` = window px for the double-click window). Drops a pin on
+    /// the picked layer's first enabled Puppet effect and returns true
+    /// (caller skips drag start). Separated from the event closure so
+    /// tests can drive placement without synthetic canvas presses.
+    pub fn puppet_double_click_at(
+        &mut self,
+        comp_x: f32,
+        comp_y: f32,
+        curr_x: f32,
+        curr_y: f32,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let picked = match self.pick_top_at(comp_x, comp_y) {
+            Some(p) => p,
+            None => return false,
+        };
+        let now = Instant::now();
+        let is_double = self.puppet_click.is_some_and(|(t, px, py)| {
+            now.duration_since(t).as_millis() < 400
+                && (curr_x - px).abs() + (curr_y - py).abs() < 16.0
+        });
+        // (Re)arm first so triple-clicks keep placing.
+        self.puppet_click = Some((now, curr_x, curr_y));
+        if !is_double {
+            cx.notify();
+            return false;
+        }
+        let target = self
+            .state
+            .read(cx)
+            .active_composition()
+            .and_then(|c| {
+                c.get_layer(&picked).and_then(|l| {
+                    l.effects
+                        .iter()
+                        .find(|e| {
+                            e.enabled
+                                && matches!(&e.effect_type, project::EffectType::Puppet { .. })
+                        })
+                        .map(|e| (l.id.clone(), e.id.clone(), l.source.clone()))
+                })
+            });
+        let Some((lid, eid, source)) = target else {
+            return false;
+        };
+        let loc = match self
+            .state
+            .read(cx)
+            .comp_to_layer_local(&picked, Vec2::new(comp_x, comp_y))
+        {
+            Some(v) => v,
+            None => return false,
+        };
+        let origin = crate::raster::layer_content_origin(&source);
+        self.state.update(cx, |s, cx| {
+            let ok = s
+                .add_puppet_pin(&lid, &eid, loc.x - origin.x, loc.y - origin.y)
+                .is_ok();
+            cx.notify();
+            ok
+        })
     }
 
     pub fn standalone(cx: &mut Context<Self>) -> Self {
@@ -4443,6 +4529,129 @@ impl Render for CompositionViewerPanel {
                                 }
                             }
 
+                            // --- Puppet-pin overlay: free pins for the selected
+                            // layer's first Puppet effect. Rest positions are
+                            // content-space (layer-local minus the box origin);
+                            // the kernel backward-maps, so dragged areas never
+                            // clip. Double-click the layer adds a pin,
+                            // right-click a pin deletes it.
+                            if is_selected {
+                                if let Some(fx) = layer.effects.iter().find(|e| {
+                                    matches!(
+                                        &e.effect_type,
+                                        compositor::EvaluatedEffectType::Puppet { .. }
+                                    )
+                                }) {
+                                    if let compositor::EvaluatedEffectType::Puppet { pins, .. } =
+                                        &fx.effect_type
+                                    {
+                                        let pfull = layer.world_matrix();
+                                        let p2c = |p: Vec2| {
+                                            let w = pfull.transform_point(p);
+                                            (
+                                                (w.x + giz_cw / 2.0) * giz_fit,
+                                                (w.y + giz_ch / 2.0) * giz_fit,
+                                            )
+                                        };
+                                        let puppet_col =
+                                            Rgba { r: 0.3, g: 0.9, b: 0.5, a: 0.95 };
+                                        let origin = local_box.min;
+                                        let tip_of = |p: &project::PuppetDeform| -> Vec2 {
+                                            Vec2::new(origin.x + p.x + p.dx, origin.y + p.y + p.dy)
+                                        };
+                                        let rest_of = |p: &project::PuppetDeform| -> Vec2 {
+                                            Vec2::new(origin.x + p.x, origin.y + p.y)
+                                        };
+                                        // Rest-to-tip spokes show the deformation.
+                                        for p in pins.iter() {
+                                            let (rx, ry) = p2c(rest_of(p));
+                                            let (tx, ty) = p2c(tip_of(p));
+                                            overlay_curves.push(OverlayCurve {
+                                                points: vec![
+                                                    gpui::point(gpui::px(rx), gpui::px(ry)),
+                                                    gpui::point(gpui::px(tx), gpui::px(ty)),
+                                                ],
+                                                color: puppet_col,
+                                                thickness: 1.5,
+                                            });
+                                        }
+                                        for (idx, p) in pins.iter().enumerate() {
+                                            let tip = tip_of(p);
+                                            let tip_w = pfull.transform_point(tip);
+                                            let (nx, ny) = p2c(tip);
+                                            let p_ph = giz_panel.clone();
+                                            let s_ph = giz_state.clone();
+                                            let lid_ph = giz_lid.clone();
+                                            let eid_ph = fx.id.clone();
+                                            let s_pr = giz_state.clone();
+                                            let lid_pr = giz_lid.clone();
+                                            let eid_pr = fx.id.clone();
+                                            let (h_frame, h_fit, h_cw, h_ch) =
+                                                (giz_frame, giz_fit, giz_cw, giz_ch);
+                                            let rest = Vec2::new(p.x, p.y);
+                                            overlay_dots.push(
+                                                gizmo_dot(
+                                                    format!("puppet_pin_{}_{}_{}", giz_lid, eid_ph, idx),
+                                                    nx,
+                                                    ny,
+                                                    10.0,
+                                                    puppet_col,
+                                                    white,
+                                                    true,
+                                                )
+                                                .test_support()
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    move |event, _window, cx| {
+                                                        let (mx, my) = (
+                                                            event.position.x / px(1.0),
+                                                            event.position.y / px(1.0),
+                                                        );
+                                                        s_ph.update(cx, |s, cx| {
+                                                            s.checkpoint();
+                                                            s.select_layer(Some(lid_ph.clone()));
+                                                            s.preview_fast = true;
+                                                            cx.notify();
+                                                        });
+                                                        let (cur_cmx, cur_cmy) = gizmo_to_comp(
+                                                            mx, my, h_frame, h_fit, h_cw, h_ch,
+                                                        );
+                                                        let grab = (
+                                                            cur_cmx - tip_w.x,
+                                                            cur_cmy - tip_w.y,
+                                                        );
+                                                        p_ph.update(cx, |this, cx| {
+                                                            this.mask_down_moved = false;
+                                                            this.puppet_drag = Some(PuppetDrag {
+                                                                layer_id: lid_ph.clone(),
+                                                                effect_id: eid_ph.clone(),
+                                                                pin_index: idx,
+                                                                rest,
+                                                                origin,
+                                                                grab_offset: grab,
+                                                            });
+                                                            cx.notify();
+                                                        });
+                                                    },
+                                                )
+                                                .on_mouse_down(
+                                                    MouseButton::Right,
+                                                    move |_event, _window, cx| {
+                                                        s_pr.update(cx, |s, cx| {
+                                                            let _ = s.remove_puppet_pin(
+                                                                &lid_pr, &eid_pr, idx,
+                                                            );
+                                                            cx.notify();
+                                                        });
+                                                    },
+                                                )
+                                                .into_any_element(),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+
                             // --- Pen/shape path overlay: continuous spline curves
                             // (+ nodes) for the selected layer's own paths, so
                             // pen work is always visible, not just masks.
@@ -4899,6 +5108,43 @@ impl Render for CompositionViewerPanel {
                     }
                     return;
                 }
+                // Puppet-pin drags (same grab-offset + layer-local mapping
+                // as warp drags; the offset is tip minus rest content pos).
+                if let Some(pdrag) = this.puppet_drag.clone() {
+                    let frame_org = frame_origin_or_center(
+                        this.frame_origin,
+                        this.viewport_px,
+                        this.viewport_origin,
+                        this.canvas_px,
+                    );
+                    let (fox, foy) = frame_org.unwrap_or((0.0, 0.0));
+                    let (cw, ch) = {
+                        let s = this.state.read(cx);
+                        match s.active_composition() {
+                            Some(c) => (c.width as f32, c.height as f32),
+                            None => (1920.0, 1080.0),
+                        }
+                    };
+                    let fit_here = canvas_scale(this.viewport_px, this.zoom_factor, cw, ch);
+                    let cmx = (curr_x - fox) / fit_here - cw / 2.0 - pdrag.grab_offset.0;
+                    let cmy = (curr_y - foy) / fit_here - ch / 2.0 - pdrag.grab_offset.1;
+                    let st = this.state.clone();
+                    if let Some(loc) =
+                        st.read(cx).comp_to_layer_local(&pdrag.layer_id, Vec2::new(cmx, cmy))
+                    {
+                        st.update(cx, |s, cx| {
+                            let _ = s.move_puppet_pin_live(
+                                &pdrag.layer_id,
+                                &pdrag.effect_id,
+                                pdrag.pin_index,
+                                loc.x - pdrag.origin.x - pdrag.rest.x,
+                                loc.y - pdrag.origin.y - pdrag.rest.y,
+                            );
+                            cx.notify();
+                        });
+                    }
+                    return;
+                }
                 // Transform-gizmo drags win over canvas drags.
                 if let Some(drag) = this.gizmo_drag.clone() {
                     // Window px -> composition px via the measured frame.
@@ -5040,6 +5286,7 @@ impl Render for CompositionViewerPanel {
                 this.gizmo_drag = None;
                 this.warp_drag = None;
                 this.corner_drag = None;
+                this.puppet_drag = None;
                 this.down_on_layer = false;
                 // Finalize Shape tool drag (creates shape layer or shaped mask)
                 if let Some(sdrag) = this.shape_drag.take() {
@@ -5111,6 +5358,7 @@ impl Render for CompositionViewerPanel {
                 this.mask_drag = None;
                 this.warp_drag = None;
                 this.corner_drag = None;
+                this.puppet_drag = None;
                 this.shape_drag = None;
                 this.mask_down_moved = false;
                 this.down_on_layer = false;
@@ -5281,13 +5529,28 @@ impl Render for CompositionViewerPanel {
                                                     });
                                                 }
                                             }
+                                            // Double-click a Puppet layer with the Move
+                                            // tool: drop a pin at the cursor instead of
+                                            // starting a drag (AE pin-placing). Skipped
+                                            // while a pin dot drag is active.
+                                            let mut puppet_placed = false;
+                                            if active_tool == EditorTool::Move
+                                                && !is_mask_or_pen
+                                                && p_drag.read(cx).puppet_drag.is_none()
+                                            {
+                                                p_drag.update(cx, |this, cx| {
+                                                    puppet_placed = this.puppet_double_click_at(
+                                                        comp_x, comp_y, curr_x, curr_y, cx,
+                                                    );
+                                                });
+                                            }
                                             p_drag.update(cx, |this, cx| {
                                                 this.down_on_layer = false;
-                                                if on_layer {
+                                                if on_layer && !puppet_placed {
                                                     this.is_dragging_canvas = true;
                                                     this.last_canvas_mouse = Some((curr_x, curr_y));
                                                     this.empty_down = None;
-                                                } else {
+                                                } else if !puppet_placed {
                                                     this.is_dragging_canvas = false;
                                                     this.last_canvas_mouse = None;
                                                     this.empty_down = Some((curr_x, curr_y));
@@ -5295,9 +5558,12 @@ impl Render for CompositionViewerPanel {
                                                 cx.notify();
                                             });
                                             s_tool.update(cx, |s, cx| {
-                                                // Gesture start: one undo step per drag/create.
-                                                s.checkpoint();
-                                                if on_layer {
+                                                // Gesture start: one undo step per drag/create
+                                                // (a placed pin already checkpointed).
+                                                if !puppet_placed {
+                                                    s.checkpoint();
+                                                }
+                                                if on_layer && !puppet_placed {
                                                     s.preview_fast = true;
                                                 }
                                                 cx.notify();
@@ -10360,6 +10626,7 @@ fn render_applied_effects(
                 | EffectType::Tiler { .. }
                 | EffectType::SwapColor { .. }
                 | EffectType::Warp { .. }
+                | EffectType::Puppet { .. }
                 | EffectType::Exposure { .. }
                 | EffectType::Vibrance { .. }
                 | EffectType::Levels { .. }

@@ -271,6 +271,33 @@ pub fn apply_effect_pixels(
                 }
             }
         }
+        EvaluatedEffectType::Puppet { expansion, stiffness, pins } => {
+            // Puppet warp: backward-mapped IDW offsets. Pins live in
+            // layer px over the content box (the buffer may carry effect
+            // padding); unpinned areas sample themselves.
+            if pins.iter().any(|p| p.dx != 0.0 || p.dy != 0.0) {
+                let (bw, bh) = (base_w.max(1.0), base_h.max(1.0));
+                let (ox0, oy0) = ((buf.w as f32 - bw) / 2.0, (buf.h as f32 - bh) / 2.0);
+                let src = buf.px.clone();
+                let snap = FloatBuf { w: buf.w, h: buf.h, px: src };
+                for y in 0..buf.h {
+                    for x in 0..buf.w {
+                        let (ox, oy) = project::puppet::sample_offset(
+                            pins,
+                            *stiffness,
+                            *expansion,
+                            x as f32 - ox0,
+                            y as f32 - oy0,
+                        );
+                        if ox.abs() < 1e-6 && oy.abs() < 1e-6 {
+                            continue;
+                        }
+                        buf.px[(y * buf.w + x) as usize] =
+                            snap.sample(x as f32 - ox, y as f32 - oy);
+                    }
+                }
+            }
+        }
         EvaluatedEffectType::Perspective { .. } => {
             // Perspective skew folds into the blit map (affine).
         }
@@ -713,6 +740,52 @@ mod tests {
             .count();
         assert!(diff > 100, "pin must visibly displace pixels, got {diff}");
         // Bilinear resample keeps nearly all ink (edges go transparent).
+        let ink: f32 = buf.px.iter().map(|p| p.a).sum();
+        assert!(ink > 0.9 * 100.0 * 100.0, "ink preserved: {ink}");
+    }
+
+    fn puppet_fx(pins: Vec<project::PuppetDeform>) -> EvaluatedEffectType {
+        EvaluatedEffectType::Puppet { expansion: 0.0, stiffness: 2.0, pins }
+    }
+
+    #[test]
+    fn test_puppet_identity_pins_are_noop() {
+        let mut buf = warp_gradient_buf();
+        let before = buf.px.clone();
+        let eff = puppet_fx(Vec::new());
+        apply_effect_pixels(&mut buf, 100.0, 100.0, &eff, &warp_test_ctx());
+        assert!(
+            buf.px
+                .iter()
+                .zip(before.iter())
+                .all(|(a, b)| a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a),
+            "empty pins must not touch pixels"
+        );
+    }
+
+    #[test]
+    fn test_puppet_pin_drags_pixels() {
+        let ctx = warp_test_ctx();
+        let mut plain = warp_gradient_buf();
+        apply_effect_pixels(&mut plain, 100.0, 100.0, &puppet_fx(Vec::new()), &ctx);
+
+        // Center pin pushed +10x inside an expansion radius: nearby
+        // output(x) samples src(x-10); far pixels stay put.
+        let mut buf = warp_gradient_buf();
+        let eff = EvaluatedEffectType::Puppet {
+            expansion: 50.0,
+            stiffness: 2.0,
+            pins: vec![project::PuppetDeform { x: 50.0, y: 50.0, dx: 10.0, dy: 0.0 }],
+        };
+        apply_effect_pixels(&mut buf, 100.0, 100.0, &eff, &ctx);
+
+        let diff = buf
+            .px
+            .iter()
+            .zip(plain.px.iter())
+            .filter(|(a, b)| (a.r - b.r).abs() > 1e-3)
+            .count();
+        assert!(diff > 100, "pin must visibly displace pixels, got {diff}");
         let ink: f32 = buf.px.iter().map(|p| p.a).sum();
         assert!(ink > 0.9 * 100.0 * 100.0, "ink preserved: {ink}");
     }

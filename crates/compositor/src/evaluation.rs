@@ -446,6 +446,7 @@ pub enum EvaluatedEffectType {
     TextOutline {
         width: f32,
         color: Color,
+        offset: f32,
     },
     TextBevel {
         strength: f32,
@@ -485,6 +486,11 @@ pub enum EvaluatedEffectType {
         cols: f32,
         rows: f32,
         pins: Vec<project::WarpPin>,
+    },
+    Puppet {
+        expansion: f32,
+        stiffness: f32,
+        pins: Vec<project::PuppetDeform>,
     },
     Exposure {
         exposure: f32,
@@ -545,6 +551,7 @@ impl EvaluatedEffectType {
             Self::Bloom { .. } => "Bloom",
             Self::Tiler { .. } => "Tiler",
             Self::Warp { .. } => "Warp",
+            Self::Puppet { .. } => "Puppet Warp",
             Self::Exposure { .. } => "Exposure",
             Self::Vibrance { .. } => "Vibrance",
             Self::Levels { .. } => "Levels",
@@ -580,6 +587,7 @@ impl EvaluatedEffectType {
             Self::Bloom { .. } => "net.sf.openfx.bloom",
             Self::Tiler { .. } => "net.sf.openfx.tiler",
             Self::Warp { .. } => "net.sf.openfx.warp",
+            Self::Puppet { .. } => "net.sf.openfx.puppet",
             Self::Exposure { .. } => "net.sf.openfx.exposure",
             Self::Vibrance { .. } => "net.sf.openfx.vibrance",
             Self::Levels { .. } => "net.sf.openfx.levels",
@@ -614,6 +622,7 @@ impl EvaluatedEffectType {
                     | Self::TextSplitAnimator { .. }
                     | Self::Tiler { .. }
                     | Self::Warp { .. }
+                    | Self::Puppet { .. }
                     | Self::Sharpen { .. }
                     | Self::Vignette { .. }
             ),
@@ -639,6 +648,7 @@ impl EvaluatedEffectType {
     pub fn process_color(&self, c: Color) -> Color {
         match self {
             Self::GaussianBlur { .. } => c,
+            Self::Puppet { .. } => c,
             Self::BrightnessContrast { brightness, contrast } => {
                 let b = *brightness / 100.0;
                 let k = (1.0 + *contrast / 100.0).max(0.0);
@@ -1873,10 +1883,11 @@ impl LayerStackEvaluator {
                                 skew_y: skew_y.evaluate_at(time),
                             }
                         }
-                        EffectType::TextOutline { width, color } => {
+                        EffectType::TextOutline { width, color, offset } => {
                             EvaluatedEffectType::TextOutline {
                                 width: width.evaluate_at(time),
                                 color: color.evaluate_at(time),
+                                offset: offset.evaluate_at(time),
                             }
                         }
                         EffectType::TextBevel { strength, softness } => {
@@ -1946,6 +1957,21 @@ impl LayerStackEvaluator {
                                 cols: cols.evaluate_at(time),
                                 rows: rows.evaluate_at(time),
                                 pins: pins.clone(),
+                            }
+                        }
+                        EffectType::Puppet { expansion, stiffness, pins } => {
+                            EvaluatedEffectType::Puppet {
+                                expansion: expansion.evaluate_at(time),
+                                stiffness: stiffness.evaluate_at(time),
+                                pins: pins
+                                    .iter()
+                                    .map(|p| project::PuppetDeform {
+                                        x: p.x,
+                                        y: p.y,
+                                        dx: p.dx.evaluate_at(time),
+                                        dy: p.dy.evaluate_at(time),
+                                    })
+                                    .collect(),
                             }
                         }
                         EffectType::Exposure { exposure } => {

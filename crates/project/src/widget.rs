@@ -275,7 +275,7 @@ mod tests {
             fx(EffectType::Checkerboard { size: p(32.0), color_a: c(Color::BLACK), color_b: c(Color::WHITE) }),
             fx(EffectType::GradientRamp { color_a: c(Color::BLACK), color_b: c(Color::WHITE), angle: p(90.0), stops: Vec::new(), gradient_type: crate::layer::GradientType::Linear }),
             fx(EffectType::Perspective { skew_x: p(0.0), skew_y: p(0.0) }),
-            fx(EffectType::TextOutline { width: p(3.0), color: c(Color::BLACK) }),
+            fx(EffectType::TextOutline { width: p(3.0), color: c(Color::BLACK), offset: p(0.0) }),
             fx(EffectType::TextBevel { strength: p(50.0), softness: p(10.0) }),
             fx(EffectType::Bloom { intensity: p(50.0), radius: p(5.0) }),
             fx(EffectType::Tiler { tiles_x: p(4.0), tiles_y: p(4.0), mode: TileMode::Grid, mirror: b(false), offset_x: p(0.0), offset_y: p(0.0), cell: TileCell::Square, seed: p(1.0), amount: p(0.0) }),
