@@ -5712,6 +5712,24 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         });
     }
 
+    #[test]
+    fn test_every_listed_effect_has_a_template() {
+        // The Effects panel silently skips descriptors without a template
+        // (Puppet Warp shipped invisible this way): every hand-rolled OFX
+        // entry must construct.
+        for desc in project::OFX_SUITE {
+            assert!(
+                crate::panels::effect_template_for(desc.id).is_some(),
+                "effects panel has no template for {}",
+                desc.id
+            );
+        }
+        assert!(
+            crate::panels::effect_template_for("net.sf.openfx.puppet").is_some(),
+            "puppet warp must be addable from the panel"
+        );
+    }
+
     #[gpui_kit::test]
     fn test_graph_key_selection_shows_compact_easing_bar(cx: &mut TestAppContext) {
         use gpui_kit::test::TestWindowExt;

@@ -14461,7 +14461,7 @@ fn ofx_category_icon(cat: project::OfxCategory) -> IconName {
 
 /// Default-constructed template for a registry plug-in id: legacy ctors
 /// for the hand-rolled suite, descriptor-built stock for everything else.
-fn effect_template_for(plugin_id: &str) -> Option<EffectType> {
+pub(crate) fn effect_template_for(plugin_id: &str) -> Option<EffectType> {
     if let Some(plugin) = project::stock_from_id(plugin_id) {
         return Some(EffectType::Stock {
             plugin,
@@ -14496,6 +14496,7 @@ fn effect_template_for(plugin_id: &str) -> Option<EffectType> {
         "net.sf.openfx.perspective" => EffectType::perspective(0.0, 0.0),
         "net.sf.openfx.tiler" => EffectType::tiler(2.0, 2.0),
         "net.sf.openfx.warp" => EffectType::warp(30.0, 1.0),
+        "net.sf.openfx.puppet" => EffectType::puppet(),
         "net.sf.openfx.bloom" => EffectType::bloom(40.0, 10.0),
         "net.sf.openfx.vignette" => EffectType::vignette(50.0, 50.0),
         "net.sf.openfx.noise" => EffectType::noise_generator(25.0, true),
