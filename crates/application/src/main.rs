@@ -5731,6 +5731,70 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
     }
 
     #[gpui_kit::test]
+    fn test_puppet_empty_state_shows_ghost_and_hint(cx: &mut TestAppContext) {
+        // No pins: the overlay shows a ghost add-dot and the effect card
+        // shows a placement hint, so the tool is never a blank panel.
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        let puppet_id = app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, _| {
+                s.select_layer(Some("layer_accent".to_string()));
+                s.add_effect_to_selected_layer(project::EffectType::puppet()).unwrap()
+            })
+        });
+        let ghost_id = SharedString::from(format!("puppet_add_layer_accent_{puppet_id}"));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find(ghost_id.clone()).visible());
+            window.click(ghost_id.clone(), cx);
+        })
+        .expect("update_window failed");
+        app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            let layer = s.active_composition().unwrap().get_layer("layer_accent").unwrap();
+            let eff = layer.get_effect(&puppet_id).unwrap();
+            match &eff.effect_type {
+                project::EffectType::Puppet { pins, .. } => {
+                    assert_eq!(pins.len(), 1, "ghost click materializes a pin");
+                    assert!((pins[0].x - 150.0).abs() < 1.0 && (pins[0].y - 150.0).abs() < 1.0);
+                }
+                _ => panic!("expected puppet"),
+            }
+        });
+        // Effect card carries the placement hint (scroll it into view).
+        let disc_id = SharedString::from(format!("effect_disclosure_{puppet_id}"));
+        let hint_id = SharedString::from(format!("puppet_hint_{puppet_id}"));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            for _ in 0..8 {
+                window.scroll(
+                    "properties_inspector",
+                    gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(-400.))),
+                    cx,
+                );
+                window.render_frame(cx);
+                if window.try_find(disc_id.clone()).map(|e| e.visible()).unwrap_or(false) {
+                    break;
+                }
+            }
+            assert!(window.find(disc_id.clone()).visible());
+            window.click(disc_id.clone(), cx);
+            window.render_frame(cx);
+            assert!(window.find(hint_id.clone()).visible());
+        })
+        .expect("update_window failed");
+    }
+
+    #[gpui_kit::test]
     fn test_graph_key_selection_shows_compact_easing_bar(cx: &mut TestAppContext) {
         use gpui_kit::test::TestWindowExt;
 

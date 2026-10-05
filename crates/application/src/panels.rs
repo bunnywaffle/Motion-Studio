@@ -4575,6 +4575,49 @@ impl Render for CompositionViewerPanel {
                                                 thickness: 1.5,
                                             });
                                         }
+                                        // No pins yet: a ghost dot at the content center;
+                                        // clicking it materializes the first pin there
+                                        // (same as double-clicking the layer).
+                                        if pins.is_empty() {
+                                            let center = Vec2::new(
+                                                origin.x + base_w / 2.0,
+                                                origin.y + base_h / 2.0,
+                                            );
+                                            let (nx, ny) = p2c(center);
+                                            let s_add = giz_state.clone();
+                                            let lid_add = giz_lid.clone();
+                                            let eid_add = fx.id.clone();
+                                            let (ccx, ccy) = (base_w / 2.0, base_h / 2.0);
+                                            overlay_dots.push(
+                                                gizmo_dot(
+                                                    format!("puppet_add_{}_{}", giz_lid, eid_add),
+                                                    nx,
+                                                    ny,
+                                                    12.0,
+                                                    white,
+                                                    puppet_col,
+                                                    true,
+                                                )
+                                                .test_support()
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    move |_event, _window, cx| {
+                                                        s_add.update(cx, |s, cx| {
+                                                            s.checkpoint();
+                                                            s.select_layer(Some(lid_add.clone()));
+                                                            cx.notify();
+                                                        });
+                                                        let lid = lid_add.clone();
+                                                        let eid = eid_add.clone();
+                                                        s_add.update(cx, |s, cx| {
+                                                            let _ = s.add_puppet_pin(&lid, &eid, ccx, ccy);
+                                                            cx.notify();
+                                                        });
+                                                    },
+                                                )
+                                                .into_any_element(),
+                                            );
+                                        }
                                         for (idx, p) in pins.iter().enumerate() {
                                             let tip = tip_of(p);
                                             let tip_w = pfull.transform_point(tip);
@@ -10626,13 +10669,28 @@ fn render_applied_effects(
                 | EffectType::Tiler { .. }
                 | EffectType::SwapColor { .. }
                 | EffectType::Warp { .. }
-                | EffectType::Puppet { .. }
                 | EffectType::Exposure { .. }
                 | EffectType::Vibrance { .. }
                 | EffectType::Levels { .. }
                 | EffectType::HueSaturation { .. }
                 | EffectType::Sharpen { .. }
                 | EffectType::Vignette { .. } => {
+                    for decl in effect.declarations() {
+                        effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, enums, cx));
+                    }
+                }
+                // Puppet Warp renders its declarations plus a placement
+                // hint (pins live in the viewport overlay; an empty pin
+                // list would otherwise show nothing at all).
+                EffectType::Puppet { .. } => {
+                    effect_box = effect_box.child(
+                        div()
+                            .id(SharedString::from(format!("puppet_hint_{eff_id}")))
+                            .test_support()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Double-click the layer to add pins · drag to move · right-click deletes"),
+                    );
                     for decl in effect.declarations() {
                         effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, enums, cx));
                     }
