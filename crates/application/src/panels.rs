@@ -3645,10 +3645,15 @@ impl Render for CompositionViewerPanel {
                         .h(px(l_h))
                         .cursor_pointer()
                         .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                            // If a mask drag, gizmo drag, or active mask edit is in progress, or tool is Pen/Shape,
-                            // NEVER switch the selection to an underlying layer!
+                            // If a mask/gizmo/effect drag, or active mask edit is in progress,
+                            // or tool is Pen/Shape, NEVER switch the selection to an
+                            // underlying layer! (Effect dots near a box edge can land
+                            // just outside their own layer's box on float dust.)
                             let skip = p_drag_layer.read(cx).mask_drag.is_some()
                                 || p_drag_layer.read(cx).gizmo_drag.is_some()
+                                || p_drag_layer.read(cx).warp_drag.is_some()
+                                || p_drag_layer.read(cx).corner_drag.is_some()
+                                || p_drag_layer.read(cx).puppet_drag.is_some()
                                 || p_drag_layer.read(cx).mask_edit_point.is_some()
                                 || sel_state.read(cx).active_tool == EditorTool::Pen
                                 || sel_state.read(cx).active_tool == EditorTool::ShapeRect
@@ -3807,6 +3812,22 @@ impl Render for CompositionViewerPanel {
                             }
                         });
 
+                        // An effect gizmo (warp / corner-pin / puppet) takes over
+                        // the selected layer: hide the transform handles so
+                        // overlapping dots never fight. Mask editing keeps
+                        // its own handles (effects-only scope).
+                        let fx_gizmo_active = layer.effects.iter().any(|e| {
+                            matches!(
+                                &e.effect_type,
+                                compositor::EvaluatedEffectType::Warp { .. }
+                                    | compositor::EvaluatedEffectType::Puppet { .. }
+                                    | compositor::EvaluatedEffectType::Stock {
+                                        plugin: project::StockPlugin::CornerPin,
+                                        ..
+                                    }
+                            )
+                        });
+                        if !fx_gizmo_active {
                         // --- Scale handles: 4 corners (both axes) + 4 edges.
                         let corners = [("nw", c00), ("ne", c10), ("se", c11), ("sw", c01)];
                         for (tag, pos) in corners {
@@ -3857,7 +3878,7 @@ impl Render for CompositionViewerPanel {
                                             });
                                         }
                                     }
-                                }).into_any_element());
+                                }).test_support().into_any_element());
                         }
                         let edges = [
                             ("n", mid(c00, c10), false, true),
@@ -3913,7 +3934,7 @@ impl Render for CompositionViewerPanel {
                                             });
                                         }
                                     }
-                                }).into_any_element());
+                                }).test_support().into_any_element());
                         }
 
                         // --- Rotate handle above the top edge.
@@ -3973,7 +3994,7 @@ impl Render for CompositionViewerPanel {
                                             cx.notify();
                                         });
                                     }
-                                }).into_any_element());
+                                }).test_support().into_any_element());
                         }
 
                         // --- Pivot diamond (amber): drag to move the anchor.
@@ -4015,7 +4036,8 @@ impl Render for CompositionViewerPanel {
                                             });
                                         }
                                     }
-                                }).into_any_element());
+                                }).test_support().into_any_element());
+                        }
                         }
 
                         // --- Mask Path Editor overlay: continuous vector curves for
@@ -5532,9 +5554,17 @@ impl Render for CompositionViewerPanel {
                                         let comp_pw = comp_w;
                                         let comp_ph = comp_h;
                                         move |event, _window, cx| {
-                                            // Gizmo handles or mask handles set their own drag first (they
+                                            // Gizmo/effect handles set their own drag first (they
                                             // bubble through here); never start a canvas op or re-pick.
-                                            if p_drag.read(cx).gizmo_drag.is_some() || p_drag.read(cx).mask_drag.is_some() {
+                                            // (Without this, pressing an effect dot near a box edge
+                                            // can re-pick the background on float dust and steal
+                                            // selection mid-drag.)
+                                            if p_drag.read(cx).gizmo_drag.is_some()
+                                                || p_drag.read(cx).mask_drag.is_some()
+                                                || p_drag.read(cx).warp_drag.is_some()
+                                                || p_drag.read(cx).corner_drag.is_some()
+                                                || p_drag.read(cx).puppet_drag.is_some()
+                                            {
                                                 p_drag.update(cx, |this, cx| {
                                                     this.down_on_layer = false;
                                                     this.empty_down = None;

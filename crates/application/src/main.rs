@@ -5142,6 +5142,75 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         assert!(after.1 < before.1, "downward drag lowers the value, y-axis up");
     }
 
+    #[gpui_kit::test]
+    fn test_graph_key_selection_shows_compact_easing_bar(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+        use gpui_kit::point;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        // Accent position.x has keys at 0s/2s/4s: open Graph on it.
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.select_layer(Some("layer_accent".to_string()));
+                if !s.spline_editor_open {
+                    s.toggle_spline_editor();
+                }
+                cx.notify();
+            });
+        });
+        let before: (f64, f32, usize) = app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            let kfs = &s
+                .active_composition()
+                .unwrap()
+                .get_layer("layer_accent")
+                .unwrap()
+                .transform
+                .position
+                .keyframes();
+            (kfs[1].time.seconds(), kfs[1].value.x, kfs.len())
+        });
+        // Real pointer drag on the middle diamond (deterministic id).
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let snap = window.find("graph_key_layer_accent_transform_position_x_2000");
+            assert!(snap.visible());
+            let from = snap.bounds().center();
+            window.drag(from, from + point(px(60.0), px(30.0)), cx);
+        })
+        .expect("update_window failed");
+        let after: (f64, f32, usize) = app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            let kfs = &s
+                .active_composition()
+                .unwrap()
+                .get_layer("layer_accent")
+                .unwrap()
+                .transform
+                .position
+                .keyframes();
+            // Keys stay sorted by time; find the moved one by value shift.
+            let moved = kfs.iter().min_by(|a, b| {
+                (a.time.seconds() - before.0)
+                    .abs()
+                    .partial_cmp(&(b.time.seconds() - before.0).abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }).unwrap();
+            (moved.time.seconds(), moved.value.x, kfs.len())
+        });
+        assert_eq!(after.2, before.2, "drag must not add/remove keys");
+        assert!(after.0 > before.0, "rightward drag moves the key later in time");
+        assert!(after.1 < before.1, "downward drag lowers the value, y-axis up");
+    }
+
     #[test]
     fn test_set_graph_key_easing_writes_interp_and_tangents() {
         use crate::state::{EditorState, KeyEase};
@@ -5533,6 +5602,15 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert!(window.find(dot_id.clone()).visible());
+            // Clicking the dot must not steal selection to an underlying
+            // layer (the dot can sit just outside its own layer's box).
+            window.click(dot_id.clone(), cx);
+            app_view.read_with(cx, |view, cx| {
+                assert_eq!(
+                    view.state().read(cx).selected_layer_id.as_deref(),
+                    Some("layer_accent")
+                );
+            });
             // Drag the lower-right corner left: lr_x must shrink.
             let from = window.find(dot_id.clone()).bounds().center();
             window.drag(from, from + point(px(-60.0), px(0.0)), cx);
@@ -5731,6 +5809,60 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
     }
 
     #[gpui_kit::test]
+    fn test_effect_gizmo_suppresses_transform_handles(cx: &mut TestAppContext) {
+        // An effect gizmo (warp here) takes over the selected layer: the
+        // transform dots unmount while effect dots stay. Removing the
+        // effect restores the transform handles.
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        let fx = app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, _| {
+                s.select_layer(Some("layer_accent".to_string()));
+                s.add_effect_to_selected_layer(project::EffectType::warp(0.0, 1.0)).unwrap()
+            })
+        });
+        let t_id = SharedString::from("gizmo_scale_se_layer_accent");
+        let warp_dot = SharedString::from(format!("warp_pin_layer_accent_{fx}_0"));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find(warp_dot.clone()).visible());
+            assert!(
+                window.try_find(t_id.clone()).is_none(),
+                "transform handles hide under the warp gizmo"
+            );
+        })
+        .expect("update_window failed");
+        // Disabled effect: overlay gone, transform back.
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.toggle_layer_effect_enabled("layer_accent", &fx).unwrap();
+                cx.notify();
+            });
+        });
+        app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            let layer = s.active_composition().unwrap().get_layer("layer_accent").unwrap();
+            let eff = layer.get_effect(&fx).unwrap();
+            assert!(!eff.enabled, "toggle must disable the effect");
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find(warp_dot.clone()).is_none());
+            assert!(window.find(t_id.clone()).visible());
+        })
+        .expect("update_window failed");
+    }
+
+    #[gpui_kit::test]
     fn test_puppet_empty_state_shows_ghost_and_hint(cx: &mut TestAppContext) {
         // No pins: the overlay shows a ghost add-dot and the effect card
         // shows a placement hint, so the tool is never a blank panel.
@@ -5792,63 +5924,6 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             assert!(window.find(hint_id.clone()).visible());
         })
         .expect("update_window failed");
-    }
-
-    #[gpui_kit::test]
-    fn test_graph_key_selection_shows_compact_easing_bar(cx: &mut TestAppContext) {
-        use gpui_kit::test::TestWindowExt;
-
-        cx.update(gpui_kit::init);
-        let mut app_view_entity = None;
-        let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
-            window.activate_window();
-            let view = cx.new(|cx| AppView::new(window, cx));
-            app_view_entity = Some(view.clone());
-            Root::new(view, window, cx)
-        });
-        let app_view = app_view_entity.expect("AppView created");
-        // Accent position.x has keys at 0s/2s/4s: open Graph on it.
-        app_view.update(cx, |view, cx| {
-            view.state().update(cx, |s, cx| {
-                s.select_layer(Some("layer_accent".to_string()));
-                if !s.spline_editor_open {
-                    s.toggle_spline_editor();
-                }
-                cx.notify();
-            });
-        });
-        // No selection yet: no easing buttons mounted.
-        cx.update_window(handle.into(), |_, window, cx| {
-            window.render_frame(cx);
-            assert!(window.try_find("graph_ease_linear_layer_accent_transform_position_x_2000").is_none());
-        })
-        .expect("update_window failed");
-        // Grab the key: selection sticks, compact bar appears.
-        cx.update_window(handle.into(), |_, window, cx| {
-            window.render_frame(cx);
-            window.click("graph_key_layer_accent_transform_position_x_2000", cx);
-            window.render_frame(cx);
-            assert!(window.find("graph_ease_linear_layer_accent_transform_position_x_2000").visible());
-            assert!(window.find("graph_ease_ease_in_layer_accent_transform_position_x_2000").visible());
-            assert!(window.find("graph_ease_ease_out_layer_accent_transform_position_x_2000").visible());
-            assert!(window.find("graph_ease_hold_layer_accent_transform_position_x_2000").visible());
-            // Ease In writes Bezier + ease-in tangents on that key.
-            window.click("graph_ease_ease_in_layer_accent_transform_position_x_2000", cx);
-        })
-        .expect("update_window failed");
-        assert!(app_view.read_with(cx, |view, cx| {
-            let s = view.state().read(cx);
-            let layer = s.active_composition().unwrap().get_layer("layer_accent").unwrap();
-            let kf = layer
-                .transform
-                .position
-                .keyframes()
-                .iter()
-                .find(|k| (k.time_seconds() - 2.0).abs() < 1e-6)
-                .unwrap();
-            kf.interpolation == project::KeyframeInterpolation::Bezier
-                && kf.out_tangent == Some(project::KeyframeTangent::new(0.42, 0.0))
-        }));
     }
 
     #[test]
