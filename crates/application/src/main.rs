@@ -3998,7 +3998,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             assert!(window.find("effects_filter_gpu").visible());
 
             // Enabling the GPU filter shows only GPU-backed rows:
-            // blur keeps its badge, a CPU-only row disappears.
+            // blur and tint keep their badges, a CPU-only row disappears.
             panels.effects.update(cx, |this, cx| {
                 this.gpu_only = true;
                 cx.notify();
@@ -4006,7 +4006,9 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             window.render_frame(cx);
             assert!(window.find("effect_item_blur").visible());
             assert!(window.find("effect_gpu_blur").visible());
-            assert!(window.try_find("effect_item_tint").is_none());
+            assert!(window.find("effect_item_tint").visible());
+            assert!(window.find("effect_gpu_tint").visible());
+            assert!(window.try_find("effect_item_puppet").is_none());
 
             // Category headers carry live counts of their listed rows.
             assert!(window.find("effect_category_count_blur").visible());
@@ -4014,12 +4016,12 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             // Back to All plus a query shows the CPU-only row with no badge.
             panels.effects.update(cx, |this, cx| {
                 this.gpu_only = false;
-                this.search_query = "tint".to_string();
+                this.search_query = "puppet".to_string();
                 cx.notify();
             });
             window.render_frame(cx);
-            assert!(window.find("effect_item_tint").visible());
-            assert!(window.try_find("effect_gpu_tint").is_none());
+            assert!(window.find("effect_item_puppet").visible());
+            assert!(window.try_find("effect_gpu_puppet").is_none());
         })
         .expect("update_window failed");
     }

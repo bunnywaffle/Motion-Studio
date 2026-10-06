@@ -24,6 +24,7 @@ pub struct GpuEffectEngine {
     targets: Option<DoubleBufferedTarget>,
     intermediate_target: Option<RenderTarget>,
     fx_pass_cache: std::collections::HashMap<StockPlugin, FxPass>,
+    builtin_pass_cache: std::collections::HashMap<&'static str, FxPass>,
     /// Pooled readback staging buffer (avoids a GPU buffer alloc + destroy
     /// on every blur/readback call; recreated only when dims change).
     readback: Option<PooledReadback>,
@@ -48,6 +49,7 @@ impl GpuEffectEngine {
             targets: None,
             intermediate_target: None,
             fx_pass_cache: std::collections::HashMap::new(),
+            builtin_pass_cache: std::collections::HashMap::new(),
             readback: None,
         })
     }
@@ -91,6 +93,17 @@ impl GpuEffectEngine {
             self.fx_pass_cache.insert(plugin, pass);
         }
         Ok(&self.fx_pass_cache[&plugin])
+    }
+
+    /// Get or create an FxPass for a built-in (non-stock) effect id.
+    fn get_or_create_builtin_pass(&mut self, id: &'static str) -> Result<&FxPass, GpuError> {
+        if !self.builtin_pass_cache.contains_key(id) {
+            let format = wgpu::TextureFormat::Rgba8Unorm;
+            let pass = FxPass::for_builtin(&self.gpu, id, format)
+                .map_err(GpuError::ShaderCompilation)?;
+            self.builtin_pass_cache.insert(id, pass);
+        }
+        Ok(&self.builtin_pass_cache[id])
     }
 
     /// Read a render target back reusing the pooled staging buffer
@@ -171,11 +184,12 @@ impl GpuEffectEngine {
     /// True when every enabled effect in the chain has a native GPU pass,
     /// so `process_rgba_frame` reproduces the CPU chain instead of
     /// silently skipping stages. Membership is the parity-audited
-    /// [`crate::fx_pass::CHAIN_SAFE_STOCK`] set; compilability probes the
-    /// same `for_stock` constructors the chain itself uses. GaussianBlur
-    /// is deliberately excluded: blur runs in its own raster stage via
-    /// `blur_buffer`, which already picks the GPU compute path when
-    /// hardware exists.
+    /// [`crate::fx_pass::CHAIN_SAFE_STOCK`] set for stock plug-ins and
+    /// [`crate::fx_pass::CHAIN_SAFE_BUILTIN`] for built-in color ops;
+    /// compilability probes the same `for_stock` / `for_builtin`
+    /// constructors the chain itself uses. GaussianBlur is deliberately
+    /// excluded: blur runs in its own raster stage via `blur_buffer`,
+    /// which already picks the GPU compute path when hardware exists.
     pub fn supports_fx_chain(&mut self, effects: &[compositor::EvaluatedEffect]) -> bool {
         let mut any = false;
         for eff in effects {
@@ -191,7 +205,27 @@ impl GpuEffectEngine {
                         return false;
                     }
                 }
-                _ => return false,
+                eff_type => {
+                    let Some(id) = crate::fx_pass::builtin_gpu_id(eff_type) else {
+                        return false;
+                    };
+                    if !crate::fx_pass::CHAIN_SAFE_BUILTIN.contains(&id) {
+                        return false;
+                    }
+                    // Degenerate levels spans step per channel, which
+                    // amplifies u8 inter-pass rounding into full 0/1 flips:
+                    // keep those on the exact CPU path.
+                    if let compositor::EvaluatedEffectType::Levels { input_black, input_white, .. } = eff_type {
+                        let ib = (input_black / 255.0).clamp(0.0, 1.0);
+                        let iw = (input_white / 255.0).clamp(0.0, 1.0);
+                        if (iw - ib).abs() < 1e-5 {
+                            return false;
+                        }
+                    }
+                    if self.get_or_create_builtin_pass(id).is_err() {
+                        return false;
+                    }
+                }
             }
             any = true;
         }
@@ -216,10 +250,12 @@ impl GpuEffectEngine {
 
         self.ensure_targets(width, height)?;
 
-        // Pre-create any required stock passes before borrowing targets
+        // Pre-create any required passes before borrowing targets
         for eff in &active_effects {
             if let EvaluatedEffectType::Stock { plugin, .. } = &eff.effect_type {
                 let _ = self.get_or_create_fx_pass(*plugin);
+            } else if let Some(id) = crate::fx_pass::builtin_gpu_id(&eff.effect_type) {
+                let _ = self.get_or_create_builtin_pass(id);
             }
         }
 
@@ -262,7 +298,40 @@ impl GpuEffectEngine {
                         targets.swap();
                     }
                 }
-                _ => {}
+                eff_type => {
+                    // Built-in color ops: pack evaluated fields exactly as
+                    // the WGSL twin's call site expects (see
+                    // `FxPass::for_builtin`).
+                    let (id, params): (&'static str, [f32; 7]) = match eff_type {
+                        EvaluatedEffectType::BrightnessContrast { brightness, contrast } => {
+                            ("brightness_contrast", [*brightness, *contrast, 0.0, 0.0, 0.0, 0.0, 0.0])
+                        }
+                        EvaluatedEffectType::Tint { map_black, map_white, amount } => (
+                            "tint",
+                            [*amount, map_black.r, map_black.g, map_black.b, map_white.r, map_white.g, map_white.b],
+                        ),
+                        EvaluatedEffectType::Levels { input_black, input_white, gamma, output_black, output_white } => (
+                            "levels",
+                            [*input_black, *input_white, *gamma, *output_black, *output_white, 0.0, 0.0],
+                        ),
+                        EvaluatedEffectType::HueSaturation { hue_shift, saturation, lightness } => (
+                            "hue_saturation",
+                            [*hue_shift, *saturation, *lightness, 0.0, 0.0, 0.0, 0.0],
+                        ),
+                        _ => continue,
+                    };
+                    if let Some(pass) = self.builtin_pass_cache.get(id) {
+                        let uniforms = FxUniforms::pack(&params, time_s, width as f32, height as f32, 0.0);
+                        pass.record_into(
+                            &self.gpu,
+                            &mut encoder,
+                            targets.read_target().view(),
+                            targets.write_target(),
+                            uniforms,
+                        );
+                        targets.swap();
+                    }
+                }
             }
         }
 

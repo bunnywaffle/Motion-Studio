@@ -156,8 +156,9 @@ fn write_straight_rgba8(buf: &mut FloatBuf, rgba: &[u8]) {
 
 /// Run a layer's whole `apply_layer_fx` chain on the GPU when every
 /// enabled effect is in the parity-audited [`renderer::CHAIN_SAFE_STOCK`]
-/// set (gentle point/rect twins; blur runs in its own stage via
-/// `blur_buffer`, steep-curve and time-seeded kernels stay CPU).
+/// / [`renderer::CHAIN_SAFE_BUILTIN`] sets (gentle point/rect twins; blur
+/// runs in its own stage via `blur_buffer`, steep-curve and time-seeded
+/// kernels stay CPU).
 /// Params are descriptor-resolved first so packed uniforms match exactly
 /// what the CPU kernels see. Returns false for the transparent CPU
 /// fallback (no hardware, unsupported chain, any GPU error).

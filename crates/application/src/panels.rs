@@ -14448,10 +14448,20 @@ impl Focusable for EffectsPanel {
 }
 
 /// True when the plug-in has a real GPU fast path in this build:
-/// Gaussian blur (compute shader) plus the parity-audited stock chain
-/// (`renderer::CHAIN_SAFE_STOCK`). Everything else previews on CPU.
+/// Gaussian blur (compute shader), the parity-audited stock chain
+/// (`renderer::CHAIN_SAFE_STOCK`), and the ported built-in color ops
+/// (`renderer::CHAIN_SAFE_BUILTIN`). Everything else previews on CPU.
 fn effect_gpu_accelerated(plugin_id: &str) -> bool {
     if plugin_id == "net.sf.openfx.blur" {
+        return true;
+    }
+    if matches!(
+        plugin_id,
+        "net.sf.openfx.tint"
+            | "net.sf.openfx.brightness_contrast"
+            | "net.sf.openfx.levels"
+            | "net.sf.openfx.hue_saturation"
+    ) {
         return true;
     }
     project::stock_from_id(plugin_id)

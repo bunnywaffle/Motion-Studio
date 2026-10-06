@@ -2309,4 +2309,68 @@ mod tests {
         }
         assert!(worst < 0.02, "GPU chain must match CPU within u8 rounding: {worst}");
     }
+
+    #[test]
+    fn gpu_color_chain_matches_cpu_within_tolerance() {
+        use compositor::{EvaluatedEffect, EvaluatedEffectType};
+        // Same hardware gate as the stock parity test above.
+        if !crate::raster::buffer::gpu_accelerated() {
+            return;
+        }
+        // Opaque gradient + a transparent corner (alpha must survive both).
+        let mut base = FloatBuf::clear(64, 64);
+        for y in 0..64 {
+            for x in 0..64 {
+                let (r, g, b) = (x as f32 / 63.0, y as f32 / 63.0, 0.4);
+                let a = if x > 48 && y > 48 { 0.0 } else { 1.0 };
+                base.put(x, y, Px { r: r * a, g: g * a, b: b * a, a });
+            }
+        }
+        let fx = |id: &str, name: &str, effect_type: EvaluatedEffectType| EvaluatedEffect {
+            id: id.to_string(),
+            name: name.to_string(),
+            enabled: true,
+            effect_type,
+        };
+        let effects = vec![
+            fx("bc", "Brightness & Contrast", EvaluatedEffectType::BrightnessContrast {
+                brightness: 12.0,
+                contrast: 25.0,
+            }),
+            // Non-default tint colors exercise the packed color uniforms.
+            fx("tint", "Tint", EvaluatedEffectType::Tint {
+                map_black: Color::rgba(0.05, 0.1, 0.35, 1.0),
+                map_white: Color::rgba(1.0, 0.9, 0.7, 1.0),
+                amount: 80.0,
+            }),
+            fx("levels", "Levels", EvaluatedEffectType::Levels {
+                input_black: 16.0,
+                input_white: 235.0,
+                gamma: 1.4,
+                output_black: 0.0,
+                output_white: 255.0,
+            }),
+            // No degenerate-span levels here: the chain declines those to
+            // CPU (step would amplify u8 rounding); the renderer gate test
+            // locks that behavior.
+            // Negative shift exercises rem_euclid vs remainder parity.
+            fx("hsl", "Hue / Saturation", EvaluatedEffectType::HueSaturation {
+                hue_shift: -45.0,
+                saturation: 30.0,
+                lightness: -10.0,
+            }),
+        ];
+        let ctx = RasterFx { time_s: 0.0, frame: 0, res_w: 64.0, res_h: 64.0, duration_s: 0.0, playing: false };
+        let mut cpu = base.clone();
+        apply_layer_fx(&mut cpu, 64.0, 64.0, &effects, &ctx, false);
+        let mut gpu = base.clone();
+        apply_layer_fx(&mut gpu, 64.0, 64.0, &effects, &ctx, true);
+        let mut worst = 0.0f32;
+        for (c, g) in cpu.px.iter().zip(gpu.px.iter()) {
+            for (cc, gg) in [c.r, c.g, c.b, c.a].into_iter().zip([g.r, g.g, g.b, g.a]) {
+                worst = worst.max((cc - gg).abs());
+            }
+        }
+        assert!(worst < 0.02, "GPU color chain must match CPU within u8 rounding: {worst}");
+    }
 }

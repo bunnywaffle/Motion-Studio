@@ -284,8 +284,15 @@ pub fn levels() -> ColorFilter {
     let iw = clamp(in_white / 255.0, 0.0, 1.0);
     let ob = clamp(out_black / 255.0, 0.0, 1.0);
     let ow = clamp(out_white / 255.0, 0.0, 1.0);
-    let span = max(iw - ib, 0.001);
-    let t = clamp((color.rgb - vec3<f32>(ib)) / vec3<f32>(span), vec3<f32>(0.0), vec3<f32>(1.0));
+    // CPU twin (`process_color::Levels`) steps to 0/1 per channel when the
+    // input span degenerates instead of dividing: replicate exactly.
+    let span = iw - ib;
+    var t: vec3<f32>;
+    if (abs(span) < 0.00001) {
+        t = vec3<f32>(select(0.0, 1.0, color.r > ib), select(0.0, 1.0, color.g > ib), select(0.0, 1.0, color.b > ib));
+    } else {
+        t = clamp((color.rgb - vec3<f32>(ib)) / vec3<f32>(span), vec3<f32>(0.0), vec3<f32>(1.0));
+    }
     let g = pow(t, vec3<f32>(1.0 / clamp(gamma, 0.1, 9.9)));
     let rgb = clamp(vec3<f32>(ob) + g * (vec3<f32>(ow) - vec3<f32>(ob)), vec3<f32>(0.0), vec3<f32>(1.0));
     return vec4<f32>(rgb, color.a);

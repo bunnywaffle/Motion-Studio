@@ -251,10 +251,53 @@ impl FxPass {
                 return Err(format!("No native WGSL pass implemented for stock plugin {:?}", plugin));
             }
         };
+        Self::compile(gpu, &format!("FxPass_{:?}", plugin), target_format, body, call, uv_calls)
+    }
+
+    /// Compile a pass for a built-in (non-stock) evaluated effect by its
+    /// stable id (`"tint"`, `"brightness_contrast"`, `"levels"`,
+    /// `"hue_saturation"`): same fullscreen-triangle shape as
+    /// [`Self::for_stock`], WGSL twins from [`crate::effect_filters`].
+    pub fn for_builtin(
+        gpu: &GpuContext,
+        id: &str,
+        target_format: wgpu::TextureFormat,
+    ) -> Result<Self, String> {
+        let (body, call): (&str, &str) = match id {
+            "brightness_contrast" => (
+                crate::effect_filters::brightness_contrast().wgsl,
+                "fx_brightness_contrast(uv, color, u.params[0].x, u.params[0].y)",
+            ),
+            "tint" => (
+                crate::effect_filters::tint().wgsl,
+                "fx_tint(uv, color, u.params[0].yzw, u.params[1].xyz, u.params[0].x)",
+            ),
+            "levels" => (
+                crate::effect_filters::levels().wgsl,
+                "fx_levels(uv, color, u.params[0].x, u.params[0].y, u.params[0].z, u.params[0].w, u.params[1].x)",
+            ),
+            "hue_saturation" => (
+                crate::effect_filters::hue_saturation().wgsl,
+                "fx_hue_saturation(uv, color, u.params[0].x, u.params[0].y, u.params[0].z)",
+            ),
+            _ => {
+                return Err(format!("No native WGSL pass implemented for built-in effect {id}"));
+            }
+        };
+        Self::compile(gpu, &format!("FxPass_builtin_{id}"), target_format, body, call, &[])
+    }
+
+    fn compile(
+        gpu: &GpuContext,
+        label: &str,
+        target_format: wgpu::TextureFormat,
+        body: &str,
+        call: &str,
+        uv_calls: &[&str],
+    ) -> Result<Self, String> {
         let fragment_src = fx_fragment_src(body, uv_calls, call);
         let full_src = format!("{FX_VERT}\n{fragment_src}");
-        let label = format!("FxPass_{:?}", plugin);
-        Self::new(gpu, target_format, &label, &full_src)
+        Self::new(gpu, target_format, label, &full_src)
     }
 
     /// Record the pass into `encoder`: `source_view` -> `target` with packed uniforms.
@@ -342,6 +385,29 @@ pub const CHAIN_SAFE_STOCK: [StockPlugin; 5] = [
     StockPlugin::Crop,
     StockPlugin::Scanlines,
 ];
+
+/// Built-in (non-stock) evaluated effects whose WGSL twin reproduces the
+/// CPU kernel within u8 rounding (gentle point math, no time seeds, no
+/// spatial resampling): the set the live GPU chain may take without
+/// visual change. Same audit bar as [`CHAIN_SAFE_STOCK`].
+pub const CHAIN_SAFE_BUILTIN: [&str; 4] = [
+    "brightness_contrast",
+    "tint",
+    "levels",
+    "hue_saturation",
+];
+
+/// Stable built-in id for a GPU-ported evaluated effect, if any.
+pub fn builtin_gpu_id(effect: &compositor::EvaluatedEffectType) -> Option<&'static str> {
+    use compositor::EvaluatedEffectType as E;
+    match effect {
+        E::BrightnessContrast { .. } => Some("brightness_contrast"),
+        E::Tint { .. } => Some("tint"),
+        E::Levels { .. } => Some("levels"),
+        E::HueSaturation { .. } => Some("hue_saturation"),
+        _ => None,
+    }
+}
 
 /// Which stock plug-ins have native WGSL twins (the rest are multi-tap
 /// spatial passes that run on the CPU convolution path, like blur).
@@ -449,6 +515,17 @@ mod tests {
         ] {
             FxPass::for_stock(&gpu, plugin, wgpu::TextureFormat::Rgba8Unorm)
                 .unwrap_or_else(|e| panic!("for_stock {plugin:?} failed: {e}"));
+        }
+    }
+
+    /// Every `for_builtin` arm must compile to a real pipeline, same
+    /// bar as the stock arms above. Skips where no wgpu device exists.
+    #[test]
+    fn every_for_builtin_arm_compiles() {
+        let Ok(gpu) = GpuContext::new_headless() else { return };
+        for id in CHAIN_SAFE_BUILTIN {
+            FxPass::for_builtin(&gpu, id, wgpu::TextureFormat::Rgba8Unorm)
+                .unwrap_or_else(|e| panic!("for_builtin {id} failed: {e}"));
         }
     }
 

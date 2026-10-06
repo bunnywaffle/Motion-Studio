@@ -12,7 +12,7 @@ pub mod shader_lab;
 pub use blit::{BlitPipeline, BlitUniforms};
 pub use blur::{gaussian_blur_rgba, gaussian_kernel_1d, BLUR_WGSL};
 pub use compute_blur::{ComputeBlurPipeline, ComputeBlurUniforms, COMPUTE_BLUR_WGSL};
-pub use fx_pass::{FxPass, FxUniforms, CHAIN_SAFE_STOCK, fx_fragment_src, stock_wgsl_plugins, FX_VERT};
+pub use fx_pass::{FxPass, FxUniforms, CHAIN_SAFE_STOCK, CHAIN_SAFE_BUILTIN, builtin_gpu_id, fx_fragment_src, stock_wgsl_plugins, FX_VERT};
 pub use gpu_effect_engine::GpuEffectEngine;
 pub use shader_lab::{
     build_uniform_buffer, compile_source, hash_source, CachedShader, ShaderLabCache,
@@ -236,6 +236,38 @@ mod tests {
             };
             let res = engine.process_rgba_frame(&img, 16, 16, &[eff], 0.0).expect("process frame");
             assert_eq!(res.len(), 16 * 16 * 4);
+        }
+    }
+
+    /// Degenerate levels spans (input black == white) step per channel and
+    /// would amplify u8 inter-pass rounding into 0/1 flips: the chain must
+    /// decline them to the exact CPU path while taking sane spans.
+    #[test]
+    fn degenerate_levels_declines_gpu_chain() {
+        if let Ok(gpu) = GpuContext::new_headless() {
+            let mut engine = GpuEffectEngine::new(gpu).expect("create gpu effect engine");
+            let eff = |effect_type| compositor::EvaluatedEffect {
+                id: "levels".to_string(),
+                name: "Levels".to_string(),
+                enabled: true,
+                effect_type,
+            };
+            let sane = eff(compositor::EvaluatedEffectType::Levels {
+                input_black: 16.0,
+                input_white: 235.0,
+                gamma: 1.4,
+                output_black: 0.0,
+                output_white: 255.0,
+            });
+            assert!(engine.supports_fx_chain(&[sane]));
+            let flat = eff(compositor::EvaluatedEffectType::Levels {
+                input_black: 128.0,
+                input_white: 128.0,
+                gamma: 1.0,
+                output_black: 0.0,
+                output_white: 255.0,
+            });
+            assert!(!engine.supports_fx_chain(&[flat]));
         }
     }
 }
