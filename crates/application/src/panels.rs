@@ -14368,12 +14368,26 @@ pub struct EffectsPanel {
 
 impl EffectsPanel {
     /// Category keys in display order (all start collapsed).
-    const CATEGORIES: &[&'static str] = &[
-        "blur", "color", "distort", "generate", "transition", "keying", "text", "custom",
-    ];
-
+    /// Derived from the live `OfxCategory` list so new categories
+    /// default to collapsed too — never a stale hard-coded set.
     fn all_collapsed() -> HashSet<&'static str> {
-        Self::CATEGORIES.iter().copied().collect()
+        [
+            project::OfxCategory::Blur,
+            project::OfxCategory::Color,
+            project::OfxCategory::Light,
+            project::OfxCategory::Key,
+            project::OfxCategory::Distort,
+            project::OfxCategory::Stylize,
+            project::OfxCategory::Noise,
+            project::OfxCategory::Generate,
+            project::OfxCategory::Spatial,
+            project::OfxCategory::Cleanup,
+            project::OfxCategory::Text,
+            project::OfxCategory::Custom,
+        ]
+        .iter()
+        .map(|c| ofx_category_key(*c))
+        .collect()
     }
 
     pub fn new(cx: &mut Context<Self>) -> Self {
@@ -14557,7 +14571,6 @@ fn category_header(
             });
         })
         .child(icon_box(icon))
-        .child(if expanded { "▼" } else { "▶" })
         .child(title)
         .child(
             div()
@@ -14568,6 +14581,13 @@ fn category_header(
                 .font_normal()
                 .text_color(cx.theme().muted_foreground)
                 .child(format!("{count}")),
+        )
+        .child(
+            div()
+                .w_4()
+                .text_right()
+                .text_color(cx.theme().muted_foreground)
+                .child(if expanded { "⌄" } else { "›" }),
         )
 }
 

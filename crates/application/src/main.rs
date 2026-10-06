@@ -3938,6 +3938,9 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             // Search field is present; categories start collapsed (no rows).
             assert!(window.find("effects_search_input").visible());
             assert!(window.try_find("effect_item_blur").is_none());
+            // Every category defaults to collapsed — including ones added
+            // after the legacy key list (Light, Stylize, Noise, ...).
+            assert!(window.try_find("effect_item_glow").is_none());
 
             // A query auto-opens matching categories and filters rows.
             panels.effects.update(cx, |this, cx| {
