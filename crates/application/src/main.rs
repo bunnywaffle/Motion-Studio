@@ -3960,6 +3960,68 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
     }
 
     #[gpui_kit::test]
+    fn test_effects_browser_pills_counts_and_gpu_badges(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            Theme::change(ThemeMode::Dark, None, cx);
+        });
+
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
+            window.activate_window();
+            window.set_window_title("Motion Compositor");
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+
+        let app_view = app_view_entity.expect("AppView created");
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+
+            let dock_area = app_view.read(cx).dock_area().clone();
+            let panels = app_view.read(cx).panels().clone();
+            let effects_id = PanelId::from(panels.effects.entity_id());
+            dock_area.update(cx, |dock, cx| {
+                dock.select_panel(effects_id, window, cx);
+            });
+            window.render_frame(cx);
+
+            // Filter pills are present; All is the default.
+            assert!(window.find("effects_filter_all").visible());
+            assert!(window.find("effects_filter_gpu").visible());
+
+            // Enabling the GPU filter shows only GPU-backed rows:
+            // blur keeps its badge, a CPU-only row disappears.
+            panels.effects.update(cx, |this, cx| {
+                this.gpu_only = true;
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert!(window.find("effect_item_blur").visible());
+            assert!(window.find("effect_gpu_blur").visible());
+            assert!(window.try_find("effect_item_tint").is_none());
+
+            // Category headers carry live counts of their listed rows.
+            assert!(window.find("effect_category_count_blur").visible());
+
+            // Back to All plus a query shows the CPU-only row with no badge.
+            panels.effects.update(cx, |this, cx| {
+                this.gpu_only = false;
+                this.search_query = "tint".to_string();
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert!(window.find("effect_item_tint").visible());
+            assert!(window.try_find("effect_gpu_tint").is_none());
+        })
+        .expect("update_window failed");
+    }
+
+    #[gpui_kit::test]
     fn test_editor_state_initialization(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let (_root, app_view) = setup_test_window(cx);

@@ -14360,6 +14360,10 @@ pub struct EffectsPanel {
     pub last_selected_id: Option<String>,
     /// Live search query filtering the browser list below.
     pub search_query: String,
+    /// When true, only GPU-backed effects are listed.
+    pub gpu_only: bool,
+    /// Last applied plug-in id (selected-row highlight).
+    pub last_applied_id: Option<String>,
 }
 
 impl EffectsPanel {
@@ -14380,6 +14384,8 @@ impl EffectsPanel {
             collapsed: Self::all_collapsed(),
             last_selected_id: None,
             search_query: String::new(),
+            gpu_only: false,
+            last_applied_id: None,
         }
     }
 
@@ -14399,6 +14405,8 @@ impl EffectsPanel {
             collapsed: Self::all_collapsed(),
             last_selected_id,
             search_query: String::new(),
+            gpu_only: false,
+            last_applied_id: None,
         }
     }
 
@@ -14425,14 +14433,29 @@ impl Focusable for EffectsPanel {
     }
 }
 
+/// True when the plug-in has a real GPU fast path in this build:
+/// Gaussian blur (compute shader) plus the parity-audited stock chain
+/// (`renderer::CHAIN_SAFE_STOCK`). Everything else previews on CPU.
+fn effect_gpu_accelerated(plugin_id: &str) -> bool {
+    if plugin_id == "net.sf.openfx.blur" {
+        return true;
+    }
+    project::stock_from_id(plugin_id)
+        .is_some_and(|p| renderer::CHAIN_SAFE_STOCK.contains(&p))
+}
+
+// Row needs both entity handles for its apply + highlight click handler.
+#[allow(clippy::too_many_arguments)]
 fn effect_item_row(
     id_str: &str,
     title: &str,
     effect_type: EffectType,
     state: &Option<Entity<EditorState>>,
+    panel: &Entity<EffectsPanel>,
+    plugin_id: &str,
+    selected: bool,
     cx: &App,
-) -> impl IntoElement {
-    let mut row = h_flex()
+) -> impl IntoElement {    let mut row = h_flex()
         .id(SharedString::from(format!("effect_item_{id_str}")))
         .test_support()
         .px_3()
@@ -14440,15 +14463,25 @@ fn effect_item_row(
         .rounded_sm()
         .items_center()
         .justify_between()
-        .cursor_pointer()
-        .hover(|s| s.bg(cx.theme().muted));
+        .cursor_pointer();
+    if selected {
+        row = row.bg(cx.theme().accent).text_color(cx.theme().accent_foreground);
+    } else {
+        row = row.hover(|s| s.bg(cx.theme().muted));
+    }
 
     if let Some(state) = state {
         let state = state.clone();
+        let panel = panel.clone();
         let et = effect_type.clone();
+        let pid = plugin_id.to_string();
         row = row.on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
             state.update(cx, |s, cx| {
                 let _ = s.add_effect_to_selected_layer(et.clone());
+                cx.notify();
+            });
+            panel.update(cx, |this, cx| {
+                this.last_applied_id = Some(pid.clone());
                 cx.notify();
             });
         });
@@ -14466,18 +14499,35 @@ fn effect_item_row(
             .gap_1()
             .items_center()
             .text_xs()
-            .text_color(cx.theme().primary)
-            .child(icon_box(IconName::Plus))
-            .child("Add"),
+            .children(effect_gpu_accelerated(plugin_id).then(|| {
+                div()
+                    .id(SharedString::from(format!("effect_gpu_{id_str}")))
+                    .test_support()
+                    .px_1()
+                    .rounded_sm()
+                    .bg(rgb(0x1d4ed8))
+                    .text_color(rgb(0xffffff))
+                    .child("GPU")
+            }))
+            .child(
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .text_color(cx.theme().primary)
+                    .child(icon_box(IconName::Plus))
+                    .child("Add"),
+            ),
     )
 }
 
-/// Collapsible category header (After Effects-style accordion). Clicking
-/// toggles the category; categories start collapsed.
+/// Collapsible category header (After Effects-style accordion): icon,
+/// label, live effect count, chevron. Clicking toggles the category;
+/// categories start collapsed.
 fn category_header(
     key: &'static str,
     title: &'static str,
     icon: IconName,
+    count: usize,
     expanded: bool,
     panel: &Entity<EffectsPanel>,
     cx: &App,
@@ -14509,6 +14559,16 @@ fn category_header(
         .child(icon_box(icon))
         .child(if expanded { "▼" } else { "▶" })
         .child(title)
+        .child(
+            div()
+                .id(SharedString::from(format!("effect_category_count_{key}")))
+                .test_support()
+                .flex_1()
+                .text_right()
+                .font_normal()
+                .text_color(cx.theme().muted_foreground)
+                .child(format!("{count}")),
+        )
 }
 
 /// Stable accordion key per OFX category (matches the test hooks).
@@ -14638,6 +14698,40 @@ impl Render for EffectsPanel {
                 || label.to_lowercase().contains(&query)
                 || id.to_lowercase().contains(&query)
         };
+        let gpu_only = self.gpu_only;
+        let last_applied = self.last_applied_id.clone();
+        const CATS: [project::OfxCategory; 12] = [
+            project::OfxCategory::Blur,
+            project::OfxCategory::Color,
+            project::OfxCategory::Light,
+            project::OfxCategory::Key,
+            project::OfxCategory::Distort,
+            project::OfxCategory::Stylize,
+            project::OfxCategory::Noise,
+            project::OfxCategory::Generate,
+            project::OfxCategory::Spatial,
+            project::OfxCategory::Cleanup,
+            project::OfxCategory::Text,
+            project::OfxCategory::Custom,
+        ];
+        // An entry is listable when it has a template (same rule as the
+        // coverage test) and passes the active query + GPU filters.
+        let visible_in =
+            |cat: project::OfxCategory| -> Vec<(&'static project::OfxEffectDescriptor, EffectType)> {
+                project::ofx_in_category(cat)
+                    .into_iter()
+                    .filter_map(|desc| effect_template_for(desc.id).map(|t| (desc, t)))
+                    .filter(|(desc, _)| {
+                        matches_query(desc.label, desc.id)
+                            && (!gpu_only || effect_gpu_accelerated(desc.id))
+                    })
+                    .collect()
+            };
+        let total_count: usize = CATS
+            .iter()
+            .flat_map(|c| project::ofx_in_category(*c))
+            .filter(|desc| effect_template_for(desc.id).is_some())
+            .count();
 
         // Registry-driven accordion: every row comes from the OFX suites
         // (`project::ofx`), so new plug-ins appear with zero panel code.
@@ -14651,48 +14745,67 @@ impl Render for EffectsPanel {
             .p_2()
             .gap_1();
 
-        for cat in [
-            project::OfxCategory::Blur,
-            project::OfxCategory::Color,
-            project::OfxCategory::Light,
-            project::OfxCategory::Key,
-            project::OfxCategory::Distort,
-            project::OfxCategory::Stylize,
-            project::OfxCategory::Noise,
-            project::OfxCategory::Generate,
-            project::OfxCategory::Spatial,
-            project::OfxCategory::Cleanup,
-            project::OfxCategory::Text,
-            project::OfxCategory::Custom,
-        ] {
+        for cat in CATS {
             let key = ofx_category_key(cat);
-            // A non-empty query auto-opens categories that contain hits.
-            let has_hit = !query.is_empty()
-                && project::ofx_in_category(cat).iter().any(|desc| {
-                    effect_template_for(desc.id).is_some()
-                        && matches_query(desc.label, desc.id)
-                });
-            let open = is_open(key) || has_hit;
+            let visible = visible_in(cat);
+            // A non-empty query (or the GPU filter) auto-opens categories
+            // that contain hits; categories with no visible rows are hidden.
+            if visible.is_empty() {
+                continue;
+            }
+            let open = is_open(key) || !query.is_empty() || gpu_only;
+            let count = visible.len();
             cats = cats.child(category_header(
                 key,
                 cat.label(),
                 ofx_category_icon(cat),
+                count,
                 open,
                 &panel,
                 cx,
             ));
             if open {
-                for desc in project::ofx_in_category(cat) {
-                    if !matches_query(desc.label, desc.id) {
-                        continue;
-                    }
-                    if let Some(template) = effect_template_for(desc.id) {
-                        let slug = desc.id.rsplit('.').next().unwrap_or(desc.id);
-                        cats = cats.child(effect_item_row(slug, desc.label, template, &self.state, cx));
-                    }
+                for (desc, template) in visible {
+                    let slug = desc.id.rsplit('.').next().unwrap_or(desc.id);
+                    cats = cats.child(effect_item_row(
+                        slug,
+                        desc.label,
+                        template,
+                        &self.state,
+                        &panel,
+                        desc.id,
+                        last_applied.as_deref() == Some(desc.id),
+                        cx,
+                    ));
                 }
             }
         }
+
+        let gpu_pill = |active: bool, id: &'static str, label: &'static str| {
+            let p = panel.clone();
+            let mut pill = h_flex()
+                .id(id)
+                .test_support()
+                .px_2()
+                .py_0p5()
+                .rounded_full()
+                .text_xs()
+                .cursor_pointer();
+            if active {
+                pill = pill.bg(cx.theme().primary).text_color(rgb(0xffffff));
+            } else {
+                pill = pill
+                    .bg(cx.theme().muted)
+                    .text_color(cx.theme().muted_foreground)
+                    .hover(|s| s.text_color(cx.theme().foreground));
+            }
+            pill.child(label).on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                p.update(cx, |this, cx| {
+                    this.gpu_only = id == "effects_filter_gpu" && !active;
+                    cx.notify();
+                });
+            })
+        };
 
         div()
             .id("effects_panel")
@@ -14706,9 +14819,10 @@ impl Render for EffectsPanel {
             .text_color(cx.theme().foreground)
             // Search / Filter
             .child(
-                h_flex()
+                v_flex()
                     .px_3()
                     .py_2()
+                    .gap_1p5()
                     .border_b_1()
                     .border_color(cx.theme().border)
                     .bg(cx.theme().secondary)
@@ -14718,11 +14832,18 @@ impl Render for EffectsPanel {
                             .id("effects_search_input")
                             .test_support()
                             .child(Input::new(&search_input.read(cx).0)),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .items_center()
+                            .child(gpu_pill(!gpu_only, "effects_filter_all", "All"))
+                            .child(gpu_pill(gpu_only, "effects_filter_gpu", "GPU")),
                     ),
             )
             // Effects Category List (collapsible accordion)
             .child(cats)
-            // Footer
+            // Footer: live count of applicable built-ins.
             .child(
                 h_flex()
                     .px_3()
@@ -14734,7 +14855,7 @@ impl Render for EffectsPanel {
                     .gap_1p5()
                     .items_center()
                     .child(icon_box(IconName::Sparkles))
-                    .child("31 real built-in effects available • Click a category to expand • Click to apply"),
+                    .child(format!("{total_count} built-in effects • click to apply")),
             )
     }
 }
