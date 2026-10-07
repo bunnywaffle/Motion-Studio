@@ -7,7 +7,6 @@ use gpui_kit::component::collapsible::Collapsible;
 use gpui_kit::component::combobox::{Combobox, ComboboxEvent, ComboboxState};
 use gpui_kit::component::Selectable;
 use gpui_kit::component::Sizable;
-use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::searchable_list::SearchableVec;
 use gpui_kit::base::{h_flex, v_flex, ElementExt as _, Positioner, StyledExt, TestSupportExt};
@@ -6304,10 +6303,7 @@ struct TextInspectorInputs {
     _subscriptions: Vec<Subscription>,
 }
 
-pub(crate) struct InspectorColorPicker {
-    state: Entity<ColorPickerState>,
-    _subscription: Subscription,
-}
+pub(crate) use crate::color_editor::InspectorColorPicker;
 
 impl PropertiesPanel {
     pub fn new(state: Entity<EditorState>, cx: &mut Context<Self>) -> Self {
@@ -7214,13 +7210,15 @@ where
 }
 
 /// Three-mode color picker dialog / popover: None, Color, Gradient.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_three_mode_color_picker(
     key: &str,
     current_color: Color,
     panel_self: &PropertiesPanel,
     panel_entity: &Entity<PropertiesPanel>,
     state: &Entity<EditorState>,
-    inspector_color: &Entity<InspectorColorPicker>,
+    fill_editor: &Entity<InspectorColorPicker>,
+    grad_editor: &Entity<InspectorColorPicker>,
     cx: &App,
 ) -> Div {
     // Explicit mode wins; otherwise infer from the committed model
@@ -7478,12 +7476,18 @@ pub(crate) fn render_three_mode_color_picker(
                                     });
                                 }),
                         );
-                    // Selected-stop wheel (shared inspector picker; its
-                    // subscription routes to the stop in gradient mode).
+                    // Selected-stop editor (reference-styled, no presets;
+                    // commits through the gradient-stop editor entity).
+                    let stop_color = gradient.stops.get(sel).map(|s| s.color).unwrap_or(Color::WHITE);
                     let wheel = div()
                         .id(SharedString::from(format!("{key}_grad_wheel")))
                         .test_support()
-                        .child(ColorPicker::new(&inspector_color.read(cx).state).label("Stop"));
+                        .child(crate::color_editor::render_color_editor(
+                            grad_editor,
+                            &format!("{key}_grad_stop"),
+                            stop_color,
+                            cx,
+                        ));
                     v_flex()
                         .gap_2()
                         .p_1()
@@ -7514,71 +7518,14 @@ pub(crate) fn render_three_mode_color_picker(
             }
         }
         _ => {
-            // Solid Color mode: GPUI Kit ColorPicker + Swatch Palette + Hex Code
-            let hex_str = format!(
-                "#{:02X}{:02X}{:02X}",
-                (current_color.r * 255.0).round() as u8,
-                (current_color.g * 255.0).round() as u8,
-                (current_color.b * 255.0).round() as u8
-            );
-
-            let mut palette = h_flex().gap_1p5().items_center().flex_wrap();
-            for hex in ["#FFFFFF", "#000000", "#EF4444", "#F59E0B", "#10B981", "#3B82F6", "#8B5CF6", "#EC4899"] {
-                let col = Color::from_hex(hex).unwrap();
-                let s_p = state.clone();
-                let k_p = key.to_string();
-                let sel = (current_color.r - col.r).abs() < 0.02
-                    && (current_color.g - col.g).abs() < 0.02
-                    && (current_color.b - col.b).abs() < 0.02;
-                palette = palette.child(
-                    div()
-                        .id(SharedString::from(format!("{key}_palette_{hex}")))
-                        .test_support()
-                        .cursor_pointer()
-                        .w(px(16.))
-                        .h(px(16.))
-                        .rounded_sm()
-                        .bg(Rgba { r: col.r, g: col.g, b: col.b, a: 1.0 })
-                        .border_1()
-                        .border_color(if sel { cx.theme().primary } else { cx.theme().border })
-                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                            let k = k_p.clone();
-                            s_p.update(cx, |s, cx| {
-                                if let Some(lid) = s.selected_layer_id.clone() {
-                                    match k.as_str() {
-                                        "text_fill" => { let _ = s.set_layer_text_color(&lid, col); }
-                                        "text_stroke" => { let _ = s.set_layer_stroke_color(&lid, col); }
-                                        "solid_color" => { let _ = s.set_layer_solid_color(&lid, col); }
-                                        "shape_fill" => { let _ = s.set_layer_shape_fill(&lid, col); }
-                                        _ => {}
-                                    }
-                                    cx.notify();
-                                }
-                            });
-                        }),
-                );
-            }
-
-            v_flex()
-                .gap_2()
-                .p_1()
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(ColorPicker::new(&inspector_color.read(cx).state).label("Pick Color"))
-                        .child(
-                            div()
-                                .px_2()
-                                .py_0p5()
-                                .rounded_sm()
-                                .bg(cx.theme().muted)
-                                .text_xs()
-                                .child(hex_str),
-                        ),
-                )
-                .child(palette)
-                .into_any_element()
+            // Solid Color mode: reference-styled editor (SV field,
+            // sliders, numeric fields, hex, NEW/ORIG) with zero presets.
+            crate::color_editor::render_color_editor(
+                fill_editor,
+                key,
+                current_color,
+                cx,
+            )
         }
     };
 
@@ -8107,8 +8054,8 @@ fn fx_color_fields(effect: &project::Effect) -> Vec<&'static str> {
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn fx_swatch_row(
-    state: &Entity<EditorState>,
-    layer_id: &str,
+    _state: &Entity<EditorState>,
+    _layer_id: &str,
     eff_id: &str,
     field: &str,
     label: &str,
@@ -8116,95 +8063,76 @@ pub(crate) fn fx_swatch_row(
     wheel: Option<&Entity<InspectorColorPicker>>,
     cx: &App,
 ) -> AnyElement {
-    let field_owned = field.to_string();
-    let mut row = h_flex().gap_1().items_center();
-    for (hex_str, col_val) in [
-        ("#FFFFFF", Color::WHITE),
-        ("#121316", Color::from_hex("#121316").unwrap()),
-        ("#EF4444", Color::from_hex("#EF4444").unwrap()),
-        ("#10B981", Color::from_hex("#10B981").unwrap()),
-        ("#3B82F6", Color::from_hex("#3B82F6").unwrap()),
-        ("#F59E0B", Color::from_hex("#F59E0B").unwrap()),
-        ("#00FF00", Color::from_hex("#00FF00").unwrap()),
-        ("#0000FF", Color::from_hex("#0000FF").unwrap()),
-    ] {
-        let s_p = state.clone();
-        let lid_p = layer_id.to_string();
-        let eid_p = eff_id.to_string();
-        let fld = field_owned.clone();
-        let is_sel = (current.r - col_val.r).abs() < 0.01
-            && (current.g - col_val.g).abs() < 0.01
-            && (current.b - col_val.b).abs() < 0.01;
-        row = row.child(
-            div()
-                .id(SharedString::from(format!("fx_{field}_{hex_str}_{eff_id}")))
-                .test_support()
-                .cursor_pointer()
-                .w(px(14.))
-                .h(px(14.))
-                .rounded_sm()
-                .bg(Rgba { r: col_val.r, g: col_val.g, b: col_val.b, a: 1.0 })
-                .border_1()
-                .border_color(if is_sel { cx.theme().primary } else { cx.theme().border })
-                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                    s_p.update(cx, |s, cx| {
-                        let _ = s.set_effect_color(&lid_p, &eid_p, &fld, col_val);
-                        cx.notify();
-                    });
-                }),
-        );
-    }
     let cur_hex = format!(
         "#{:02X}{:02X}{:02X}",
-        (current.r * 255.0) as u8,
-        (current.g * 255.0) as u8,
-        (current.b * 255.0) as u8
+        (current.r * 255.0).round() as u8,
+        (current.g * 255.0).round() as u8,
+        (current.b * 255.0).round() as u8
     );
-    // Full color wheel for arbitrary custom colors (same control as the
-    // solid/text inspectors). The keyed picker state is created by the
-    // Properties render before the state read-guard (see fx wheels).
-    let wheel_el: AnyElement = match wheel {
-        Some(picker) => fx_wheel_el(field, eff_id, picker, cx),
-        None => div().into_any_element(),
-    };
-    h_flex()
-        .items_center()
-        .justify_between()
-        .text_xs()
-        .child(
-            h_flex()
-                .gap_1p5()
-                .items_center()
-                .child(div().text_color(cx.theme().muted_foreground).child(label.to_string()))
-                .child(
+    // Expandable reference-styled editor (no presets): the toggle keeps the
+    // stable `fx_wheel_btn_` id; the editor renders below when open.
+    let mut stack = v_flex().gap_1p5();
+    stack = stack.child(
+        h_flex()
+            .items_center()
+            .justify_between()
+            .text_xs()
+            .child(
+                h_flex()
+                    .gap_1p5()
+                    .items_center()
+                    .child(div().text_color(cx.theme().muted_foreground).child(label.to_string()))
+                    .child(
+                        div()
+                            .w(px(20.))
+                            .h(px(14.))
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .bg(Rgba { r: current.r, g: current.g, b: current.b, a: 1.0 }),
+                    )
+                    .child(div().text_color(cx.theme().foreground).child(cur_hex)),
+            )
+            .child(match wheel {
+                Some(picker) => {
+                    let ed = picker.clone();
+                    let open = picker.read(cx).expanded;
                     div()
-                        .w(px(20.))
-                        .h(px(14.))
+                        .id(SharedString::from(format!("fx_wheel_btn_{field}_{eff_id}")))
+                        .test_support()
+                        .px_2()
+                        .py_0p5()
                         .rounded_sm()
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .bg(Rgba { r: current.r, g: current.g, b: current.b, a: 1.0 }),
-                )
-                .child(div().text_color(cx.theme().foreground).child(cur_hex))
-                .child(wheel_el),
-        )
-        .child(row)
-        .into_any_element()
-}
-
-/// Effect color wheel element (shared by swatch rows and the gradient
-/// editor): full color wheel with the stable `fx_wheel_btn_` id.
-pub(crate) fn fx_wheel_el(
-    field: &str,
-    eff_id: &str,
-    picker: &Entity<InspectorColorPicker>,
-    cx: &App,
-) -> AnyElement {
-    div()
-        .id(SharedString::from(format!("fx_wheel_btn_{field}_{eff_id}")))
-        .test_support()
-        .child(ColorPicker::new(&picker.read(cx).state).label("Pick"))
-        .into_any_element()
+                        .cursor_pointer()
+                        .text_xs()
+                        .text_color(if open { cx.theme().accent_foreground } else { cx.theme().muted_foreground })
+                        .bg(if open { cx.theme().accent } else { cx.theme().muted })
+                        .child(if open { "Close" } else { "Edit" })
+                        .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                            ed.update(cx, |this, cx| {
+                                this.set_expanded(!open, current);
+                                cx.notify();
+                            });
+                            if !open {
+                                InspectorColorPicker::sync_inputs(&ed, None, window, cx);
+                            }
+                        })
+                        .into_any_element()
+                }
+                None => div().into_any_element(),
+            }),
+    );
+    if let Some(picker) = wheel {
+        if picker.read(cx).expanded {
+            stack = stack.child(crate::color_editor::render_color_editor(
+                picker,
+                &format!("fx_{field}_{eff_id}"),
+                current,
+                cx,
+            ));
+        }
+    }
+    stack.into_any_element()
 }
 
 /// Toolbar tool settings (Properties > Tool Settings): defaults that new
@@ -9681,10 +9609,10 @@ fn render_applied_effects(
     state: &Entity<EditorState>,
     layer: &project::Layer,
     panel_entity: &Entity<PropertiesPanel>,
-    chroma_color_picker: &Entity<ColorPickerState>,
-    tint_black_color_picker: &Entity<ColorPickerState>,
-    tint_white_color_picker: &Entity<ColorPickerState>,
-    shadow_color_picker: &Entity<ColorPickerState>,
+    chroma_color_picker: &Entity<InspectorColorPicker>,
+    tint_black_color_picker: &Entity<InspectorColorPicker>,
+    tint_white_color_picker: &Entity<InspectorColorPicker>,
+    shadow_color_picker: &Entity<InspectorColorPicker>,
     shader_editor_open: Option<String>,
     shader_editor: Option<Entity<TextareaState>>,
     wheels: &HashMap<(String, String), Entity<InspectorColorPicker>>,
@@ -9821,73 +9749,17 @@ fn render_applied_effects(
                     let mw = map_white.value;
                     let mb_hex = format!("#{:02X}{:02X}{:02X}", (mb.r * 255.0) as u8, (mb.g * 255.0) as u8, (mb.b * 255.0) as u8);
                     let mw_hex = format!("#{:02X}{:02X}{:02X}", (mw.r * 255.0) as u8, (mw.g * 255.0) as u8, (mw.b * 255.0) as u8);
-                    let s_tb = state.clone();
-                    let s_tw = state.clone();
-                    let id_tb = eff_id.clone();
-                    let id_tw = eff_id.clone();
 
-                    let black_presets = [
-                        ("#000000", Color::from_hex("#000000").unwrap()),
-                        ("#1A1A2E", Color::from_hex("#1A1A2E").unwrap()),
-                        ("#1B262C", Color::from_hex("#1B262C").unwrap()),
-                        ("#2C061F", Color::from_hex("#2C061F").unwrap()),
-                    ];
-                    let mut black_swatches = h_flex().gap_1().items_center();
-                    for (hex_str, col_val) in black_presets {
-                        let s_p = s_tb.clone();
-                        let id_p = id_tb.clone();
-                        black_swatches = black_swatches.child(
-                            div()
-                                .id(SharedString::from(format!("tint_black_preset_{hex_str}_{id_p}")))
-                                .test_support()
-                                .cursor_pointer()
-                                .w(px(14.))
-                                .h(px(14.))
-                                .rounded_sm()
-                                .bg(Rgba { r: col_val.r, g: col_val.g, b: col_val.b, a: 1.0 })
-                                .border_1()
-                                .border_color(if hex_str == mb_hex { cx.theme().primary } else { cx.theme().border })
-                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                    s_p.update(cx, |s, cx| {
-                                        let _ = s.set_tint_colors(&id_p, Some(col_val), None);
-                                        cx.notify();
-                                    });
-                                })
-                        );
-                    }
-
-                    let white_presets = [
-                        ("#FFFFFF", Color::WHITE),
-                        ("#F59E0B", Color::from_hex("#F59E0B").unwrap()),
-                        ("#38BDF8", Color::from_hex("#38BDF8").unwrap()),
-                        ("#EF4444", Color::from_hex("#EF4444").unwrap()),
-                    ];
-                    let mut white_swatches = h_flex().gap_1().items_center();
-                    for (hex_str, col_val) in white_presets {
-                        let s_p = s_tw.clone();
-                        let id_p = id_tw.clone();
-                        white_swatches = white_swatches.child(
-                            div()
-                                .id(SharedString::from(format!("tint_white_preset_{hex_str}_{id_p}")))
-                                .test_support()
-                                .cursor_pointer()
-                                .w(px(14.))
-                                .h(px(14.))
-                                .rounded_sm()
-                                .bg(Rgba { r: col_val.r, g: col_val.g, b: col_val.b, a: 1.0 })
-                                .border_1()
-                                .border_color(if hex_str == mw_hex { cx.theme().primary } else { cx.theme().border })
-                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                    s_p.update(cx, |s, cx| {
-                                        let _ = s.set_tint_colors(&id_p, None, Some(col_val));
-                                        cx.notify();
-                                    });
-                                })
-                        );
-                    }
-
-                    effect_box = effect_box
-                        .child(
+                    // Expandable reference-styled editors, zero presets.
+                    let mut tint_stack = v_flex().gap_1p5();
+                    for (ed, label, color, hex, swatch_id, toggle_id, eid) in [
+                        (&tint_black_color_picker, "Map Black", mb, mb_hex.as_str(), "tint_black_swatch", "tint_black_color_wheel", "tint_black"),
+                        (&tint_white_color_picker, "Map White", mw, mw_hex.as_str(), "tint_white_swatch", "tint_white_color_wheel", "tint_white"),
+                    ] {
+                        let open = ed.read(cx).expanded;
+                        let ed_toggle: Entity<InspectorColorPicker> = (**ed).clone();
+                        let ed_render: Entity<InspectorColorPicker> = (**ed).clone();
+                        tint_stack = tint_stack.child(
                             h_flex()
                                 .items_center()
                                 .justify_between()
@@ -9896,61 +9768,55 @@ fn render_applied_effects(
                                     h_flex()
                                         .gap_1p5()
                                         .items_center()
-                                        .child(div().text_color(cx.theme().muted_foreground).child("Map Black"))
+                                        .child(div().text_color(cx.theme().muted_foreground).child(label))
                                         .child(
                                             div()
-                                                .id("tint_black_swatch")
+                                                .id(swatch_id)
                                                 .test_support()
                                                 .w(px(20.))
                                                 .h(px(14.))
                                                 .rounded_sm()
                                                 .border_1()
                                                 .border_color(cx.theme().border)
-                                                .bg(Rgba { r: mb.r, g: mb.g, b: mb.b, a: mb.a }),
+                                                .bg(Rgba { r: color.r, g: color.g, b: color.b, a: color.a }),
                                         )
-                                        .child(div().text_xs().text_color(cx.theme().foreground).child(mb_hex))
+                                        .child(div().text_xs().text_color(cx.theme().foreground).child(hex.to_string()))
                                         .child(
                                             div()
-                                                .id("tint_black_color_wheel")
+                                                .id(toggle_id)
                                                 .test_support()
-                                                .child(ColorPicker::new(tint_black_color_picker).label("Black"))
-                                        ),
-                                )
-                                .child(black_swatches),
-                        )
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .justify_between()
-                                .text_xs()
-                                .child(
-                                    h_flex()
-                                        .gap_1p5()
-                                        .items_center()
-                                        .child(div().text_color(cx.theme().muted_foreground).child("Map White"))
-                                        .child(
-                                            div()
-                                                .id("tint_white_swatch")
-                                                .test_support()
-                                                .w(px(20.))
-                                                .h(px(14.))
+                                                .px_2()
+                                                .py_0p5()
                                                 .rounded_sm()
-                                                .border_1()
-                                                .border_color(cx.theme().border)
-                                                .bg(Rgba { r: mw.r, g: mw.g, b: mw.b, a: mw.a }),
-                                        )
-                                        .child(div().text_xs().text_color(cx.theme().foreground).child(mw_hex))
-                                        .child(
-                                            div()
-                                                .id("tint_white_color_wheel")
-                                                .test_support()
-                                                .child(ColorPicker::new(tint_white_color_picker).label("White"))
+                                                .cursor_pointer()
+                                                .text_xs()
+                                                .text_color(if open { cx.theme().accent_foreground } else { cx.theme().muted_foreground })
+                                                .bg(if open { cx.theme().accent } else { cx.theme().muted })
+                                                .child(if open { "Close" } else { "Edit" })
+                                                .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                                                    ed_toggle.update(cx, |this, cx| {
+                                                        this.set_expanded(!open, color);
+                                                        cx.notify();
+                                                    });
+                                                    if !open {
+                                                        InspectorColorPicker::sync_inputs(&ed_toggle, None, window, cx);
+                                                    }
+                                                }),
                                         ),
-                                )
-                                .child(white_swatches),
+                                ),
                         );
+                        if open {
+                            tint_stack = tint_stack.child(crate::color_editor::render_color_editor(
+                                &ed_render,
+                                eid,
+                                color,
+                                cx,
+                            ));
+                        }
+                    }
+                    effect_box = effect_box.child(tint_stack);
                     // Amount rides the declaration (scalar widget); the
-                    // bespoke rows above keep the fixed Black/White pickers.
+                    // bespoke rows above keep the fixed Black/White editors.
                     for decl in effect.declarations() {
                         if decl.is_scalar() {
                             effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, enums, cx));
@@ -9967,40 +9833,9 @@ fn render_applied_effects(
                 EffectType::DropShadow { color, .. } => {
                     let sc = color.value;
                     let sc_hex = format!("#{:02X}{:02X}{:02X}", (sc.r * 255.0) as u8, (sc.g * 255.0) as u8, (sc.b * 255.0) as u8);
-                    let s_sc = state.clone();
-                    let id_sc = eff_id.clone();
-
-                    let shadow_presets = [
-                        ("#000000", Color::from_hex("#000000").unwrap()),
-                        ("#1E293B", Color::from_hex("#1E293B").unwrap()),
-                        ("#0F172A", Color::from_hex("#0F172A").unwrap()),
-                        ("#450A0A", Color::from_hex("#450A0A").unwrap()),
-                        ("#1E1B4B", Color::from_hex("#1E1B4B").unwrap()),
-                    ];
-                    let mut shadow_swatches = h_flex().gap_1().items_center();
-                    for (hex_str, col_val) in shadow_presets {
-                        let s_p = s_sc.clone();
-                        let id_p = id_sc.clone();
-                        shadow_swatches = shadow_swatches.child(
-                            div()
-                                .id(SharedString::from(format!("shadow_preset_{hex_str}_{id_p}")))
-                                .test_support()
-                                .cursor_pointer()
-                                .w(px(14.))
-                                .h(px(14.))
-                                .rounded_sm()
-                                .bg(Rgba { r: col_val.r, g: col_val.g, b: col_val.b, a: 1.0 })
-                                .border_1()
-                                .border_color(if hex_str == sc_hex { cx.theme().primary } else { cx.theme().border })
-                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                    s_p.update(cx, |s, cx| {
-                                        let _ = s.set_drop_shadow_color(&id_p, col_val);
-                                        cx.notify();
-                                    });
-                                })
-                        );
-                    }
-
+                    let open = shadow_color_picker.read(cx).expanded;
+                    let ed_toggle = shadow_color_picker.clone();
+                    let ed_render = shadow_color_picker.clone();
                     effect_box = effect_box
                         .child(
                             h_flex()
@@ -10028,11 +9863,34 @@ fn render_applied_effects(
                                             div()
                                                 .id("shadow_color_wheel")
                                                 .test_support()
-                                                .child(ColorPicker::new(shadow_color_picker).label("Color"))
+                                                .px_2()
+                                                .py_0p5()
+                                                .rounded_sm()
+                                                .cursor_pointer()
+                                                .text_xs()
+                                                .text_color(if open { cx.theme().accent_foreground } else { cx.theme().muted_foreground })
+                                                .bg(if open { cx.theme().accent } else { cx.theme().muted })
+                                                .child(if open { "Close" } else { "Edit" })
+                                                .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                                                    ed_toggle.update(cx, |this, cx| {
+                                                        this.set_expanded(!open, sc);
+                                                        cx.notify();
+                                                    });
+                                                    if !open {
+                                                        InspectorColorPicker::sync_inputs(&ed_toggle, None, window, cx);
+                                                    }
+                                                }),
                                         ),
-                                )
-                                .child(shadow_swatches),
+                                ),
                         );
+                    if open {
+                        effect_box = effect_box.child(crate::color_editor::render_color_editor(
+                            &ed_render,
+                            "shadow_color",
+                            sc,
+                            cx,
+                        ));
+                    }
                     // Distance / Angle / Softness / Opacity ride their
                     // declarations (scalar widgets); the bespoke Color row
                     // above keeps the fixed shadow picker.
@@ -10507,42 +10365,11 @@ fn render_applied_effects(
                     }
                 }
                 EffectType::ChromaKey { key_color, .. } => {
-                    let s_ck = state.clone();
-                    let id_ck = eff_id.clone();
                     let kc = key_color.value;
                     let ck_hex = format!("#{:02X}{:02X}{:02X}", (kc.r * 255.0) as u8, (kc.g * 255.0) as u8, (kc.b * 255.0) as u8);
-
-                    let chroma_presets = [
-                        ("#00FF00", Color::from_hex("#00FF00").unwrap()),
-                        ("#0000FF", Color::from_hex("#0000FF").unwrap()),
-                        ("#00BFFF", Color::from_hex("#00BFFF").unwrap()),
-                        ("#FF00FF", Color::from_hex("#FF00FF").unwrap()),
-                        ("#000000", Color::from_hex("#000000").unwrap()),
-                        ("#FFFFFF", Color::WHITE),
-                    ];
-                    let mut ck_swatches = h_flex().gap_1().items_center();
-                    for (hex_str, col_val) in chroma_presets {
-                        let s_p = s_ck.clone();
-                        let id_p = id_ck.clone();
-                        ck_swatches = ck_swatches.child(
-                            div()
-                                .id(SharedString::from(format!("chroma_preset_{hex_str}_{id_p}")))
-                                .test_support()
-                                .cursor_pointer()
-                                .w(px(14.))
-                                .h(px(14.))
-                                .rounded_sm()
-                                .bg(Rgba { r: col_val.r, g: col_val.g, b: col_val.b, a: 1.0 })
-                                .border_1()
-                                .border_color(if hex_str == ck_hex { cx.theme().primary } else { cx.theme().border })
-                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                    s_p.update(cx, |s, cx| {
-                                        let _ = s.set_chroma_key_color(&id_p, col_val);
-                                        cx.notify();
-                                    });
-                                })
-                        );
-                    }
+                    let open = chroma_color_picker.read(cx).expanded;
+                    let ed_toggle = chroma_color_picker.clone();
+                    let ed_render = chroma_color_picker.clone();
 
                     effect_box = effect_box
                         .child(
@@ -10578,11 +10405,34 @@ fn render_applied_effects(
                                             div()
                                                 .id("chroma_color_wheel")
                                                 .test_support()
-                                                .child(ColorPicker::new(chroma_color_picker).label("Pick"))
+                                                .px_2()
+                                                .py_0p5()
+                                                .rounded_sm()
+                                                .cursor_pointer()
+                                                .text_xs()
+                                                .text_color(if open { cx.theme().accent_foreground } else { cx.theme().muted_foreground })
+                                                .bg(if open { cx.theme().accent } else { cx.theme().muted })
+                                                .child(if open { "Close" } else { "Edit" })
+                                                .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                                                    ed_toggle.update(cx, |this, cx| {
+                                                        this.set_expanded(!open, kc);
+                                                        cx.notify();
+                                                    });
+                                                    if !open {
+                                                        InspectorColorPicker::sync_inputs(&ed_toggle, None, window, cx);
+                                                    }
+                                                })
                                         ),
-                                )
-                                .child(ck_swatches),
+                                ),
                         );
+                    if open {
+                        effect_box = effect_box.child(crate::color_editor::render_color_editor(
+                            &ed_render,
+                            "chroma_color",
+                            kc,
+                            cx,
+                        ));
+                    }
                     // Tolerance / Feather ride their declarations (scalar
                     // widgets); the bespoke Key Color row above keeps the
                     // fixed chroma picker.
@@ -10843,18 +10693,43 @@ impl Render for PropertiesPanel {
             }
             TextInspectorInputs { text, font_family, font_size, _subscriptions: subscriptions }
         });
-        let editor_for_color = self.state.clone();
-        let panel_for_color = cx.entity().clone();
-        let inspector_color = window.use_keyed_state("properties_color_picker", cx, move |window, cx| {
-            let picker = cx.new(|cx| ColorPickerState::new(window, cx));
-            let editor = editor_for_color.clone();
-            let panel_ent = panel_for_color.clone();
-            let subscription = cx.subscribe(&picker, move |_, _, event: &ColorPickerEvent, cx| {
-                let ColorPickerEvent::Change(Some(hsla)) = event else { return; };
-                let rgba: Rgba = (*hsla).into();
-                let color = Color::rgba(rgba.r, rgba.g, rgba.b, rgba.a);
-                // Gradient mode: the wheel drives the selected stop of the
-                // open fill picker.
+        let editor_for_fills = self.state.clone();
+        // One color editor per fill usage (solid / text fill / text stroke /
+        // shape fill): each owns its tab, inputs, drag bounds, and ORIG
+        // snapshot, so concurrent sections never share field text.
+        let fill_editor = |window: &mut Window, cx: &mut App, key: &'static str| {
+            let editor = editor_for_fills.clone();
+            let k = key.to_string();
+            window.use_keyed_state(format!("fill_color_editor_{key}"), cx, move |window, cx| {
+                let editor = editor.clone();
+                InspectorColorPicker::new(window, cx, move |color, cx| {
+                    let k = k.clone();
+                    editor.update(cx, |state, cx| {
+                        let Some(layer_id) = state.selected_layer_id.clone() else { return; };
+                        let _ = match k.as_str() {
+                            "text_fill" => state.set_layer_text_color(&layer_id, color),
+                            "text_stroke" => state.set_layer_stroke_color(&layer_id, color),
+                            "shape_fill" => state.set_layer_shape_fill(&layer_id, color),
+                            _ => state.set_layer_solid_color(&layer_id, color),
+                        };
+                        cx.notify();
+                    });
+                })
+            })
+        };
+        let solid_color_editor = fill_editor(window, cx, "solid_color");
+        let text_fill_editor = fill_editor(window, cx, "text_fill");
+        let text_stroke_editor = fill_editor(window, cx, "text_stroke");
+        let shape_fill_editor = fill_editor(window, cx, "shape_fill");
+
+        // Gradient stop editor: drives the selected stop of the open fill
+        // picker (same routing the shared wheel used to do).
+        let editor_for_grad = self.state.clone();
+        let panel_for_grad = cx.entity().clone();
+        let grad_stop_editor = window.use_keyed_state("grad_stop_color_editor", cx, move |window, cx| {
+            let editor = editor_for_grad.clone();
+            let panel_ent = panel_for_grad.clone();
+            InspectorColorPicker::new(window, cx, move |color, cx| {
                 let grad_target: Option<(String, usize)> = (|| {
                     let p = panel_ent.read(cx);
                     let key = p.active_color_picker.clone()?;
@@ -10864,30 +10739,20 @@ impl Render for PropertiesPanel {
                         Some((key.clone(), p.color_picker_gradient_stop.get(&key).copied().unwrap_or(0)))
                     }
                 })();
-                editor.update(cx, |state, _cx| {
+                editor.update(cx, |state, cx| {
                     let Some(layer_id) = state.selected_layer_id.clone() else { return; };
                     if let Some((gkey, gsel)) = grad_target {
                         let _ = state.set_fill_gradient_stop_color(&layer_id, &gkey, gsel, color);
-                        return;
                     }
-                    let _ = match state.selected_layer().map(|layer| &layer.source) {
-                        Some(LayerSource::Text { .. }) => state.set_layer_text_color(&layer_id, color),
-                        Some(LayerSource::Solid { .. }) => state.set_layer_solid_color(&layer_id, color),
-                        _ => Ok(()),
-                    };
+                    cx.notify();
                 });
-            });
-            InspectorColorPicker { state: picker, _subscription: subscription }
+            })
         });
 
         let editor_for_chroma = self.state.clone();
         let chroma_color_picker = window.use_keyed_state("properties_chroma_color_picker", cx, move |window, cx| {
-            let picker = cx.new(|cx| ColorPickerState::new(window, cx));
             let editor = editor_for_chroma.clone();
-            let subscription = cx.subscribe(&picker, move |_, _, event: &ColorPickerEvent, cx| {
-                let ColorPickerEvent::Change(Some(hsla)) = event else { return; };
-                let rgba: Rgba = (*hsla).into();
-                let color = Color::rgba(rgba.r, rgba.g, rgba.b, rgba.a);
+            InspectorColorPicker::new(window, cx, move |color, cx| {
                 editor.update(cx, |state, cx| {
                     let eff_id = state.selected_layer().and_then(|layer| {
                         layer.effects.iter().find(|e| matches!(e.effect_type, EffectType::ChromaKey { .. })).map(|e| e.id.clone())
@@ -10897,18 +10762,13 @@ impl Render for PropertiesPanel {
                         cx.notify();
                     }
                 });
-            });
-            InspectorColorPicker { state: picker, _subscription: subscription }
+            })
         });
 
         let editor_for_tb = self.state.clone();
         let tint_black_color_picker = window.use_keyed_state("properties_tint_black_color_picker", cx, move |window, cx| {
-            let picker = cx.new(|cx| ColorPickerState::new(window, cx));
             let editor = editor_for_tb.clone();
-            let subscription = cx.subscribe(&picker, move |_, _, event: &ColorPickerEvent, cx| {
-                let ColorPickerEvent::Change(Some(hsla)) = event else { return; };
-                let rgba: Rgba = (*hsla).into();
-                let color = Color::rgba(rgba.r, rgba.g, rgba.b, rgba.a);
+            InspectorColorPicker::new(window, cx, move |color, cx| {
                 editor.update(cx, |state, cx| {
                     let eff_id = state.selected_layer().and_then(|layer| {
                         layer.effects.iter().find(|e| matches!(e.effect_type, EffectType::Tint { .. })).map(|e| e.id.clone())
@@ -10918,18 +10778,13 @@ impl Render for PropertiesPanel {
                         cx.notify();
                     }
                 });
-            });
-            InspectorColorPicker { state: picker, _subscription: subscription }
+            })
         });
 
         let editor_for_tw = self.state.clone();
         let tint_white_color_picker = window.use_keyed_state("properties_tint_white_color_picker", cx, move |window, cx| {
-            let picker = cx.new(|cx| ColorPickerState::new(window, cx));
             let editor = editor_for_tw.clone();
-            let subscription = cx.subscribe(&picker, move |_, _, event: &ColorPickerEvent, cx| {
-                let ColorPickerEvent::Change(Some(hsla)) = event else { return; };
-                let rgba: Rgba = (*hsla).into();
-                let color = Color::rgba(rgba.r, rgba.g, rgba.b, rgba.a);
+            InspectorColorPicker::new(window, cx, move |color, cx| {
                 editor.update(cx, |state, cx| {
                     let eff_id = state.selected_layer().and_then(|layer| {
                         layer.effects.iter().find(|e| matches!(e.effect_type, EffectType::Tint { .. })).map(|e| e.id.clone())
@@ -10939,18 +10794,13 @@ impl Render for PropertiesPanel {
                         cx.notify();
                     }
                 });
-            });
-            InspectorColorPicker { state: picker, _subscription: subscription }
+            })
         });
 
         let editor_for_shadow = self.state.clone();
         let shadow_color_picker = window.use_keyed_state("properties_shadow_color_picker", cx, move |window, cx| {
-            let picker = cx.new(|cx| ColorPickerState::new(window, cx));
             let editor = editor_for_shadow.clone();
-            let subscription = cx.subscribe(&picker, move |_, _, event: &ColorPickerEvent, cx| {
-                let ColorPickerEvent::Change(Some(hsla)) = event else { return; };
-                let rgba: Rgba = (*hsla).into();
-                let color = Color::rgba(rgba.r, rgba.g, rgba.b, rgba.a);
+            InspectorColorPicker::new(window, cx, move |color, cx| {
                 editor.update(cx, |state, cx| {
                     let eff_id = state.selected_layer().and_then(|layer| {
                         layer.effects.iter().find(|e| matches!(e.effect_type, EffectType::DropShadow { .. })).map(|e| e.id.clone())
@@ -10960,45 +10810,14 @@ impl Render for PropertiesPanel {
                         cx.notify();
                     }
                 });
-            });
-            InspectorColorPicker { state: picker, _subscription: subscription }
+            })
         });
 
-        // Sync inspector color, effect colors, and text inputs with current selected layer before reading state
-        let (layer_info, effect_colors, is_open) = {
+        // Sync text inputs with current selected layer before reading state
+        // (effect colors flow straight into the inline editors each render).
+        let layer_info = {
             let state = self.state.read(cx);
-            let layer_info = state.selected_layer().map(|l| (l.id.clone(), l.source.clone()));
-            let mut chroma_col = None;
-            let mut tint_b = None;
-            let mut tint_w = None;
-            let mut shadow_col = None;
-            if let Some(layer) = state.selected_layer() {
-                for eff in &layer.effects {
-                    match &eff.effect_type {
-                        EffectType::ChromaKey { key_color, .. } => {
-                            chroma_col = Some(key_color.value);
-                        }
-                        EffectType::Tint { map_black, map_white, .. } => {
-                            tint_b = Some(map_black.value);
-                            tint_w = Some(map_white.value);
-                        }
-                        EffectType::DropShadow { color, .. } => {
-                            shadow_col = Some(color.value);
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            let is_open = inspector_color.read(cx).state.read(cx).is_open();
-            let chroma_open = chroma_color_picker.read(cx).state.read(cx).is_open();
-            let tb_open = tint_black_color_picker.read(cx).state.read(cx).is_open();
-            let tw_open = tint_white_color_picker.read(cx).state.read(cx).is_open();
-            let shadow_open = shadow_color_picker.read(cx).state.read(cx).is_open();
-            (
-                layer_info,
-                (chroma_col, tint_b, tint_w, shadow_col, chroma_open, tb_open, tw_open, shadow_open),
-                is_open,
-            )
+            state.selected_layer().map(|l| (l.id.clone(), l.source.clone()))
         };
 
         // Sync the single Shader Lab source editor slot. The key embeds the
@@ -11030,126 +10849,30 @@ impl Render for PropertiesPanel {
             }
         }
 
-        if let Some((_lid, ref src)) = layer_info {
-            match src {
-                LayerSource::Text { text, font_family, font_size, fill_color, .. } => {
-                    let text_in = text_inputs.read(cx).text.clone();
-                    let font_in = text_inputs.read(cx).font_family.clone();
-                    let size_in = text_inputs.read(cx).font_size.clone();
+        if let Some((_, LayerSource::Text { text, font_family, font_size, .. })) = layer_info.as_ref() {
+            let text_in = text_inputs.read(cx).text.clone();
+            let font_in = text_inputs.read(cx).font_family.clone();
+            let size_in = text_inputs.read(cx).font_size.clone();
 
-                    let target_text = text.value.clone();
-                    let target_font = font_family.clone();
-                    let target_size = format!("{:.0}", font_size.value);
+            let target_text = text.value.clone();
+            let target_font = font_family.clone();
+            let target_size = format!("{:.0}", font_size.value);
 
-                    text_in.update(cx, |inp, cx| {
-                        if inp.value() != target_text.as_str() {
-                            inp.set_value(target_text.as_str(), window, cx);
-                        }
-                    });
-                    font_in.update(cx, |inp, cx| {
-                        if inp.value() != target_font.as_str() {
-                            inp.set_value(target_font.as_str(), window, cx);
-                        }
-                    });
-                    size_in.update(cx, |inp, cx| {
-                        if inp.value() != target_size.as_str() {
-                            inp.set_value(target_size.as_str(), window, cx);
-                        }
-                    });
-
-                    if !is_open {
-                        let c = fill_color.value;
-                        let hsla: Hsla = Rgba { r: c.r, g: c.g, b: c.b, a: c.a }.into();
-                        let picker_ent = inspector_color.read(cx).state.clone();
-                        picker_ent.update(cx, |p, cx| {
-                            p.set_value(hsla, window, cx);
-                        });
-                    }
+            text_in.update(cx, |inp, cx| {
+                if inp.value() != target_text.as_str() {
+                    inp.set_value(target_text.as_str(), window, cx);
                 }
-                LayerSource::Solid { color, .. }
-                    if !is_open => {
-                        let c = color.value;
-                        let hsla: Hsla = Rgba { r: c.r, g: c.g, b: c.b, a: c.a }.into();
-                        let picker_ent = inspector_color.read(cx).state.clone();
-                        picker_ent.update(cx, |p, cx| {
-                            p.set_value(hsla, window, cx);
-                        });
-                    }
-                _ => {}
-            }
-        }
-
-        // Gradient mode: the shared wheel follows the selected stop of the
-        // open fill picker.
-        if !is_open {
-            if let Some(active_key) = self.active_color_picker.clone() {
-                let in_gradient = self
-                    .color_picker_mode
-                    .get(&active_key)
-                    .map(|s| s.as_str())
-                    == Some("gradient");
-                if in_gradient {
-                    let sel = self
-                        .color_picker_gradient_stop
-                        .get(&active_key)
-                        .copied()
-                        .unwrap_or(0);
-                    let stop_col = self
-                        .state
-                        .read(cx)
-                        .selected_layer_id
-                        .clone()
-                        .and_then(|lid| {
-                            self.state.read(cx).layer_fill_gradient(&lid, &active_key)
-                        })
-                        .and_then(|g| g.stops.get(sel).map(|s| s.color));
-                    if let Some(c) = stop_col {
-                        let hsla: Hsla = Rgba { r: c.r, g: c.g, b: c.b, a: c.a }.into();
-                        let picker_ent = inspector_color.read(cx).state.clone();
-                        picker_ent.update(cx, |p, cx| {
-                            p.set_value(hsla, window, cx);
-                        });
-                    }
+            });
+            font_in.update(cx, |inp, cx| {
+                if inp.value() != target_font.as_str() {
+                    inp.set_value(target_font.as_str(), window, cx);
                 }
-            }
-        }
-
-        let (chroma_col, tint_b, tint_w, shadow_col, chroma_open, tb_open, tw_open, shadow_open) = effect_colors;
-        if let Some(c) = chroma_col {
-            if !chroma_open {
-                let hsla: Hsla = Rgba { r: c.r, g: c.g, b: c.b, a: c.a }.into();
-                let picker_ent = chroma_color_picker.read(cx).state.clone();
-                picker_ent.update(cx, |p, cx| {
-                    p.set_value(hsla, window, cx);
-                });
-            }
-        }
-        if let Some(c) = tint_b {
-            if !tb_open {
-                let hsla: Hsla = Rgba { r: c.r, g: c.g, b: c.b, a: c.a }.into();
-                let picker_ent = tint_black_color_picker.read(cx).state.clone();
-                picker_ent.update(cx, |p, cx| {
-                    p.set_value(hsla, window, cx);
-                });
-            }
-        }
-        if let Some(c) = tint_w {
-            if !tw_open {
-                let hsla: Hsla = Rgba { r: c.r, g: c.g, b: c.b, a: c.a }.into();
-                let picker_ent = tint_white_color_picker.read(cx).state.clone();
-                picker_ent.update(cx, |p, cx| {
-                    p.set_value(hsla, window, cx);
-                });
-            }
-        }
-        if let Some(c) = shadow_col {
-            if !shadow_open {
-                let hsla: Hsla = Rgba { r: c.r, g: c.g, b: c.b, a: c.a }.into();
-                let picker_ent = shadow_color_picker.read(cx).state.clone();
-                picker_ent.update(cx, |p, cx| {
-                    p.set_value(hsla, window, cx);
-                });
-            }
+            });
+            size_in.update(cx, |inp, cx| {
+                if inp.value() != target_size.as_str() {
+                    inp.set_value(target_size.as_str(), window, cx);
+                }
+            });
         }
 
         // Dynamic color wheels, one per effect color field on the selected
@@ -11181,36 +10904,29 @@ impl Render for PropertiesPanel {
         for (eid, field) in fx_color_targets {
             let editor = fx_editor.clone();
             let eid_w = eid.clone();
+            let field_w = field.to_string();
             let picker = window.use_keyed_state(
                 SharedString::from(format!("fx_wheel_{eid}_{field}")),
                 cx,
                 move |window, cx| {
-                    let picker = cx.new(|cx| ColorPickerState::new(window, cx));
                     let editor = editor.clone();
-                    let subscription = cx.subscribe(
-                        &picker,
-                        move |_, _, event: &ColorPickerEvent, cx| {
-                            let ColorPickerEvent::Change(Some(hsla)) = event else {
-                                return;
-                            };
-                            let rgba: Rgba = (*hsla).into();
-                            let color = Color::rgba(rgba.r, rgba.g, rgba.b, rgba.a);
-                            editor.update(cx, |state, cx| {
-                                if let Some(lid) = state.selected_layer_id.clone() {
-                                    let present = state
-                                        .active_composition()
-                                        .and_then(|c| c.get_layer(&lid))
-                                        .and_then(|l| l.get_effect(&eid_w))
-                                        .is_some();
-                                    if present {
-                                        let _ = state.set_effect_color(&lid, &eid_w, field, color);
-                                        cx.notify();
-                                    }
+                    InspectorColorPicker::new(window, cx, move |color, cx| {
+                        let eid_c = eid_w.clone();
+                        let field_c = field_w.clone();
+                        editor.update(cx, |state, cx| {
+                            if let Some(lid) = state.selected_layer_id.clone() {
+                                let present = state
+                                    .active_composition()
+                                    .and_then(|c| c.get_layer(&lid))
+                                    .and_then(|l| l.get_effect(&eid_c))
+                                    .is_some();
+                                if present {
+                                    let _ = state.set_effect_color(&lid, &eid_c, &field_c, color);
+                                    cx.notify();
                                 }
-                            });
-                        },
-                    );
-                    InspectorColorPicker { state: picker, _subscription: subscription }
+                            }
+                        });
+                    })
                 },
             );
             fx_wheels.insert((eid, field.to_string()), picker);
@@ -12211,10 +11927,10 @@ impl Render for PropertiesPanel {
                         let s_vis = self.state.clone();
                         let s_solo = self.state.clone();
 
-                        let chroma_picker_state = chroma_color_picker.read(cx).state.clone();
-                        let tint_black_picker_state = tint_black_color_picker.read(cx).state.clone();
-                        let tint_white_picker_state = tint_white_color_picker.read(cx).state.clone();
-                        let shadow_picker_state = shadow_color_picker.read(cx).state.clone();
+                        let chroma_picker_state = chroma_color_picker.clone();
+                        let tint_black_picker_state = tint_black_color_picker.clone();
+                        let tint_white_picker_state = tint_white_color_picker.clone();
+                        let shadow_picker_state = shadow_color_picker.clone();
                         // Applied-effect cards start collapsed: seed ids never
                         // seen before into fx_collapsed (insert returns true
                         // only for new ids, so user toggles stick).
@@ -12301,7 +12017,7 @@ impl Render for PropertiesPanel {
                                 let p_src = panel_entity.clone();
 
                                 let solid_dialog: Option<AnyElement> = if is_solid_active {
-                                    Some(render_three_mode_color_picker("solid_color", c, self, &panel_entity, &self.state, &inspector_color, cx).into_any_element())
+                                    Some(render_three_mode_color_picker("solid_color", c, self, &panel_entity, &self.state, &solid_color_editor, &grad_stop_editor, cx).into_any_element())
                                 } else {
                                     None
                                 };
@@ -12321,7 +12037,8 @@ impl Render for PropertiesPanel {
                                                     .items_center()
                                                     .child(property_stopwatch(&self.state, &layer.id, "solid.color", color.is_animated(), cx))
                                                     .child(div().text_color(ae::dim()).child("Color:"))
-                                                    .child(
+                                                    .child({
+                                                        let solid_ed = solid_color_editor.clone();
                                                         render_color_swatch(
                                                             "solid_color_swatch",
                                                             c,
@@ -12329,18 +12046,26 @@ impl Render for PropertiesPanel {
                                                             solid_model_grad.clone(),
                                                             is_solid_active,
                                                             cx,
-                                                            move |_event, _window, cx| {
+                                                            move |_event, window, cx| {
+                                                                let opening = p_solid_picker.read(cx).active_color_picker.as_deref() != Some("solid_color");
                                                                 p_solid_picker.update(cx, |this, cx| {
-                                                                    this.active_color_picker = if this.active_color_picker.as_deref() == Some("solid_color") {
-                                                                        None
-                                                                    } else {
+                                                                    this.active_color_picker = if opening {
                                                                         Some("solid_color".to_string())
+                                                                    } else {
+                                                                        None
                                                                     };
                                                                     cx.notify();
                                                                 });
+                                                                if opening {
+                                                                    solid_ed.update(cx, |ed, cx| {
+                                                                        ed.snapshot_orig(c);
+                                                                        cx.notify();
+                                                                    });
+                                                                    InspectorColorPicker::sync_inputs(&solid_ed, None, window, cx);
+                                                                }
                                                             },
                                                         )
-                                                    )
+                                                    })
                                                     .child(
                                                         div()
                                                             .id("solid_color_hex")
@@ -12349,7 +12074,6 @@ impl Render for PropertiesPanel {
                                                             .text_color(ae::text())
                                                             .child(hex_code),
                                                     )
-                                                    .child(div().id("solid_color_wheel").test_support().child(ColorPicker::new(&inspector_color.read(cx).state).label("Color")))
                                             )
                                     )
                                     .children(solid_dialog)
@@ -12800,7 +12524,8 @@ impl Render for PropertiesPanel {
                                     .items_center()
                                     .child(property_stopwatch(&self.state, &layer.id, "text.fill_color", fill_color.is_animated(), cx))
                                     .child(property_stopwatch(&self.state, &layer.id, "text.stroke_color", stroke_color.is_animated(), cx))
-                                    .child(
+                                    .child({
+                                        let fill_ed = text_fill_editor.clone();
                                         render_color_swatch(
                                             "text_fill_swatch",
                                             cur_col,
@@ -12808,19 +12533,28 @@ impl Render for PropertiesPanel {
                                             fill_model_grad.clone(),
                                             is_fill_active,
                                             cx,
-                                            move |_event, _window, cx| {
+                                            move |_event, window, cx| {
+                                                let opening = p_swatch_fill.read(cx).active_color_picker.as_deref() != Some("text_fill");
                                                 p_swatch_fill.update(cx, |this, cx| {
-                                                    this.active_color_picker = if this.active_color_picker.as_deref() == Some("text_fill") {
-                                                        None
-                                                    } else {
+                                                    this.active_color_picker = if opening {
                                                         Some("text_fill".to_string())
+                                                    } else {
+                                                        None
                                                     };
                                                     cx.notify();
                                                 });
+                                                if opening {
+                                                    fill_ed.update(cx, |ed, cx| {
+                                                        ed.snapshot_orig(cur_col);
+                                                        cx.notify();
+                                                    });
+                                                    InspectorColorPicker::sync_inputs(&fill_ed, None, window, cx);
+                                                }
                                             },
                                         )
-                                    )
-                                    .child(
+                                    })
+                                    .child({
+                                        let stroke_ed = text_stroke_editor.clone();
                                         render_color_swatch(
                                             "text_stroke_swatch",
                                             cur_stroke,
@@ -12828,23 +12562,31 @@ impl Render for PropertiesPanel {
                                             stroke_model_grad.clone(),
                                             is_stroke_active,
                                             cx,
-                                            move |_event, _window, cx| {
+                                            move |_event, window, cx| {
+                                                let opening = p_swatch_stroke.read(cx).active_color_picker.as_deref() != Some("text_stroke");
                                                 p_swatch_stroke.update(cx, |this, cx| {
-                                                    this.active_color_picker = if this.active_color_picker.as_deref() == Some("text_stroke") {
-                                                        None
-                                                    } else {
+                                                    this.active_color_picker = if opening {
                                                         Some("text_stroke".to_string())
+                                                    } else {
+                                                        None
                                                     };
                                                     cx.notify();
                                                 });
+                                                if opening {
+                                                    stroke_ed.update(cx, |ed, cx| {
+                                                        ed.snapshot_orig(cur_stroke);
+                                                        cx.notify();
+                                                    });
+                                                    InspectorColorPicker::sync_inputs(&stroke_ed, None, window, cx);
+                                                }
                                             },
                                         )
-                                    );
+                                    });
 
                                 let color_dialog: Option<AnyElement> = if is_fill_active {
-                                    Some(render_three_mode_color_picker("text_fill", cur_col, self, &panel_entity, &self.state, &inspector_color, cx).into_any_element())
+                                    Some(render_three_mode_color_picker("text_fill", cur_col, self, &panel_entity, &self.state, &text_fill_editor, &grad_stop_editor, cx).into_any_element())
                                 } else if is_stroke_active {
-                                    Some(render_three_mode_color_picker("text_stroke", cur_stroke, self, &panel_entity, &self.state, &inspector_color, cx).into_any_element())
+                                    Some(render_three_mode_color_picker("text_stroke", cur_stroke, self, &panel_entity, &self.state, &text_stroke_editor, &grad_stop_editor, cx).into_any_element())
                                 } else {
                                     None
                                 };
@@ -13131,41 +12873,13 @@ impl Render for PropertiesPanel {
                                         let h = height.value;
                                         let cr = corner_radius.value;
                                         let fill_col = fill.value;
-                                        let s_fill = self.state.clone();
                                         let lid_fill = layer.id.clone();
-                                        let mut fill_row = h_flex().gap_1().items_center();
-                                        for (hex_str, col_val) in [
-                                            ("#FFFFFF", Color::WHITE),
-                                            ("#121316", Color::from_hex("#121316").unwrap()),
-                                            ("#EF4444", Color::from_hex("#EF4444").unwrap()),
-                                            ("#10B981", Color::from_hex("#10B981").unwrap()),
-                                            ("#3B82F6", Color::from_hex("#3B82F6").unwrap()),
-                                            ("#F59E0B", Color::from_hex("#F59E0B").unwrap()),
-                                        ] {
-                                            let s_p = s_fill.clone();
-                                            let lid_p = lid_fill.clone();
-                                            let is_sel = (fill_col.r - col_val.r).abs() < 0.01
-                                                && (fill_col.g - col_val.g).abs() < 0.01
-                                                && (fill_col.b - col_val.b).abs() < 0.01;
-                                            fill_row = fill_row.child(
-                                                div()
-                                                    .id(SharedString::from(format!("shape_fill_{hex_str}")))
-                                                    .test_support()
-                                                    .cursor_pointer()
-                                                    .w(px(14.))
-                                                    .h(px(14.))
-                                                    .rounded_sm()
-                                                    .bg(Rgba { r: col_val.r, g: col_val.g, b: col_val.b, a: 1.0 })
-                                                    .border_1()
-                                                    .border_color(if is_sel { cx.theme().primary } else { cx.theme().border })
-                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                        s_p.update(cx, |s, cx| {
-                                                            let _ = s.set_layer_shape_fill(&lid_p, col_val);
-                                                            cx.notify();
-                                                        });
-                                                    }),
-                                            );
-                                        }
+                                        let shape_hex = format!(
+                                            "#{:02X}{:02X}{:02X}",
+                                            (fill_col.r * 255.0).round() as u8,
+                                            (fill_col.g * 255.0).round() as u8,
+                                            (fill_col.b * 255.0).round() as u8
+                                        );
                                         let shape_model_grad = self.state.read(cx).layer_fill_gradient(&lid_fill, "shape_fill");
                                         let shape_mode = self.color_picker_mode.get("shape_fill").map(|s| s.as_str()).unwrap_or(if shape_model_grad.is_some() { "gradient" } else if fill_col.a <= 0.0 { "none" } else { "color" });
                                         
@@ -13173,7 +12887,7 @@ impl Render for PropertiesPanel {
                                         let p_shape_picker = panel_entity.clone();
 
                                         let shape_dialog: Option<AnyElement> = if is_shape_active {
-                                            Some(render_three_mode_color_picker("shape_fill", fill_col, self, &panel_entity, &self.state, &inspector_color, cx).into_any_element())
+                                            Some(render_three_mode_color_picker("shape_fill", fill_col, self, &panel_entity, &self.state, &shape_fill_editor, &grad_stop_editor, cx).into_any_element())
                                         } else {
                                             None
                                         };
@@ -13206,19 +12920,32 @@ impl Render for PropertiesPanel {
                                                                     shape_model_grad.clone(),
                                                                     is_shape_active,
                                                                     cx,
-                                                                    move |_event, _window, cx| {
+                                                                    move |_event, window, cx| {
+                                                                        let opening = p_shape_picker.read(cx).active_color_picker.as_deref() != Some("shape_fill");
                                                                         p_shape_picker.update(cx, |this, cx| {
-                                                                            this.active_color_picker = if this.active_color_picker.as_deref() == Some("shape_fill") {
-                                                                                None
-                                                                            } else {
+                                                                            this.active_color_picker = if opening {
                                                                                 Some("shape_fill".to_string())
+                                                                            } else {
+                                                                                None
                                                                             };
                                                                             cx.notify();
                                                                         });
+                                                                        if opening {
+                                                                            shape_fill_editor.update(cx, |ed, cx| {
+                                                                                ed.snapshot_orig(fill_col);
+                                                                                cx.notify();
+                                                                            });
+                                                                            InspectorColorPicker::sync_inputs(&shape_fill_editor, None, window, cx);
+                                                                        }
                                                                     },
                                                                 )
                                                             )
-                                                            .child(fill_row),
+                                                            .child(
+                                                                div()
+                                                                    .text_xs()
+                                                                    .text_color(cx.theme().muted_foreground)
+                                                                    .child(shape_hex),
+                                                            ),
                                                     ),
                                             )
                                             .children(shape_dialog)
@@ -13301,41 +13028,13 @@ impl Render for PropertiesPanel {
                                         let rx = radius_x.value;
                                         let ry = radius_y.value;
                                         let fill_col = fill.value;
-                                        let s_fill = self.state.clone();
                                         let lid_fill = layer.id.clone();
-                                        let mut fill_row = h_flex().gap_1().items_center();
-                                        for (hex_str, col_val) in [
-                                            ("#FFFFFF", Color::WHITE),
-                                            ("#121316", Color::from_hex("#121316").unwrap()),
-                                            ("#EF4444", Color::from_hex("#EF4444").unwrap()),
-                                            ("#10B981", Color::from_hex("#10B981").unwrap()),
-                                            ("#3B82F6", Color::from_hex("#3B82F6").unwrap()),
-                                            ("#F59E0B", Color::from_hex("#F59E0B").unwrap()),
-                                        ] {
-                                            let s_p = s_fill.clone();
-                                            let lid_p = lid_fill.clone();
-                                            let is_sel = (fill_col.r - col_val.r).abs() < 0.01
-                                                && (fill_col.g - col_val.g).abs() < 0.01
-                                                && (fill_col.b - col_val.b).abs() < 0.01;
-                                            fill_row = fill_row.child(
-                                                div()
-                                                    .id(SharedString::from(format!("shape_fill_{hex_str}")))
-                                                    .test_support()
-                                                    .cursor_pointer()
-                                                    .w(px(14.))
-                                                    .h(px(14.))
-                                                    .rounded_sm()
-                                                    .bg(Rgba { r: col_val.r, g: col_val.g, b: col_val.b, a: 1.0 })
-                                                    .border_1()
-                                                    .border_color(if is_sel { cx.theme().primary } else { cx.theme().border })
-                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                        s_p.update(cx, |s, cx| {
-                                                            let _ = s.set_layer_shape_fill(&lid_p, col_val);
-                                                            cx.notify();
-                                                        });
-                                                    }),
-                                            );
-                                        }
+                                        let shape_hex = format!(
+                                            "#{:02X}{:02X}{:02X}",
+                                            (fill_col.r * 255.0).round() as u8,
+                                            (fill_col.g * 255.0).round() as u8,
+                                            (fill_col.b * 255.0).round() as u8
+                                        );
                                         let shape_model_grad = self.state.read(cx).layer_fill_gradient(&lid_fill, "shape_fill");
                                         let shape_mode = self.color_picker_mode.get("shape_fill").map(|s| s.as_str()).unwrap_or(if shape_model_grad.is_some() { "gradient" } else if fill_col.a <= 0.0 { "none" } else { "color" });
                                         
@@ -13343,7 +13042,7 @@ impl Render for PropertiesPanel {
                                         let p_shape_picker = panel_entity.clone();
 
                                         let shape_dialog: Option<AnyElement> = if is_shape_active {
-                                            Some(render_three_mode_color_picker("shape_fill", fill_col, self, &panel_entity, &self.state, &inspector_color, cx).into_any_element())
+                                            Some(render_three_mode_color_picker("shape_fill", fill_col, self, &panel_entity, &self.state, &shape_fill_editor, &grad_stop_editor, cx).into_any_element())
                                         } else {
                                             None
                                         };
@@ -13376,19 +13075,32 @@ impl Render for PropertiesPanel {
                                                                     shape_model_grad.clone(),
                                                                     is_shape_active,
                                                                     cx,
-                                                                    move |_event, _window, cx| {
+                                                                    move |_event, window, cx| {
+                                                                        let opening = p_shape_picker.read(cx).active_color_picker.as_deref() != Some("shape_fill");
                                                                         p_shape_picker.update(cx, |this, cx| {
-                                                                            this.active_color_picker = if this.active_color_picker.as_deref() == Some("shape_fill") {
-                                                                                None
-                                                                            } else {
+                                                                            this.active_color_picker = if opening {
                                                                                 Some("shape_fill".to_string())
+                                                                            } else {
+                                                                                None
                                                                             };
                                                                             cx.notify();
                                                                         });
+                                                                        if opening {
+                                                                            shape_fill_editor.update(cx, |ed, cx| {
+                                                                                ed.snapshot_orig(fill_col);
+                                                                                cx.notify();
+                                                                            });
+                                                                            InspectorColorPicker::sync_inputs(&shape_fill_editor, None, window, cx);
+                                                                        }
                                                                     },
                                                                 )
                                                             )
-                                                            .child(fill_row),
+                                                            .child(
+                                                                div()
+                                                                    .text_xs()
+                                                                    .text_color(cx.theme().muted_foreground)
+                                                                    .child(shape_hex),
+                                                            ),
                                                     ),
                                             )
                                             .children(shape_dialog)

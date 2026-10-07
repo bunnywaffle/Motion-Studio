@@ -626,46 +626,6 @@ pub(crate) fn gradient_editor(
         }
         col = col.child(row);
     }
-    // Quick swatches recolor the selected stop.
-    {
-        let mut sprow = h_flex().gap_1().items_center();
-        for col_val in [
-            Color::WHITE,
-            Color::BLACK,
-            Color::from_hex("#EF4444").unwrap(),
-            Color::from_hex("#F59E0B").unwrap(),
-            Color::from_hex("#10B981").unwrap(),
-            Color::from_hex("#3B82F6").unwrap(),
-        ] {
-            let s_p = state.clone();
-            let target_sw = target.clone();
-            sprow = sprow.child(
-                div()
-                    .cursor_pointer()
-                    .w(px(14.))
-                    .h(px(14.))
-                    .rounded_sm()
-                    .bg(to_rgba(col_val))
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                        let target_do = target_sw.clone();
-                        let res = s_p.update(cx, |s, _| match &target_do {
-                            panels::GradientTarget::Effect { layer_id, eff_id } => {
-                                s.set_effect_gradient_stop_color(layer_id, eff_id, sel, col_val)
-                            }
-                            panels::GradientTarget::Fill { layer_id, key } => {
-                                s.set_fill_gradient_stop_color(layer_id, key, sel, col_val)
-                            }
-                        });
-                        if res.is_ok() {
-                            s_p.update(cx, |_, cx| cx.notify());
-                        }
-                    }),
-            );
-        }
-        col = col.child(sprow);
-    }
     col.into_any_element()
 }
 
@@ -690,8 +650,18 @@ pub(crate) fn widget_gradient(
     } else {
         None
     };
-    let wheel_el: AnyElement = match field.and_then(|f| wheels.get(&(eff_id.to_string(), f.to_string()))) {
-        Some(picker) => panels::fx_wheel_el(field.unwrap_or("color_a"), eff_id, picker, cx),
+    let stop_color = stops.get(sel).map(|s| s.color).unwrap_or(Color::WHITE);
+    let stop_editor: AnyElement = match field {
+        Some(f) => panels::fx_swatch_row(
+            state,
+            layer_id,
+            eff_id,
+            f,
+            "Stop",
+            stop_color,
+            wheels.get(&(eff_id.to_string(), f.to_string())),
+            cx,
+        ),
         None => div().into_any_element(),
     };
     gradient_editor(
@@ -703,7 +673,7 @@ pub(crate) fn widget_gradient(
         },
         stops,
         sel,
-        wheel_el,
+        stop_editor,
         cx,
     )
 }

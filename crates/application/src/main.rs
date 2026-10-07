@@ -1,5 +1,6 @@
 pub(crate) mod modifier_graph_view;
 pub(crate) mod panels;
+pub(crate) mod color_editor;
 pub mod raster;
 pub mod state;
 pub mod widgets;
@@ -6841,7 +6842,9 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
 
         cx.update(gpui_kit::init);
         let mut app_view_entity = None;
-        let handle = cx.open_window(size(px(1440.), px(1200.)), |window, cx| {
+        // Tall window: the inline stop editor lengthens the inspector, and
+        // the reverse button must stay on-screen to click.
+        let handle = cx.open_window(size(px(1440.), px(1600.)), |window, cx| {
             window.activate_window();
             let view = cx.new(|cx| AppView::new(window, cx));
             app_view_entity = Some(view.clone());
@@ -7105,6 +7108,102 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             assert!(window.find("gradient_bar_solid_color").visible());
         })
         .expect("update_window failed");
+    }
+
+    #[gpui_kit::test]
+    fn test_color_editor_layout_no_presets_and_commits(cx: &mut TestAppContext) {
+        // Reference-styled editor: tabs, SV field, sliders, numeric
+        // fields, hex, NEW/ORIG render; no preset swatches anywhere.
+        // Bar click commits to the model; ORIG reverts.
+        use gpui_kit::test::TestWindowExt;
+        use project::LayerSource;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1440.), px(1600.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.select_layer(Some("layer_bg".to_string()));
+                cx.notify();
+            });
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("solid_color_swatch", cx);
+        })
+        .expect("update_window failed");
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            // Reference layout elements are all present (RGB tab default).
+            for id in [
+                "solid_color_tab_rgb",
+                "solid_color_tab_hex",
+                "solid_color_tab_hsv",
+                "solid_color_sv_field",
+                "solid_color_hue_bar",
+                "solid_color_alpha_bar",
+                "solid_color_num_r",
+                "solid_color_num_g",
+                "solid_color_num_b",
+                "solid_color_orig_swatch",
+            ] {
+                assert!(window.find(id).visible(), "{id}");
+            }
+            // HEX tab swaps the numeric section for the hex field.
+            window.click("solid_color_tab_hex", cx);
+        })
+        .expect("update_window failed");
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("solid_color_hex_input").visible());
+            assert!(window.try_find("solid_color_num_r").is_none());
+            // Back to RGB for the commit checks below.
+            window.click("solid_color_tab_rgb", cx);
+            window.render_frame(cx);
+            // No preset swatches in the selector.
+            assert!(window.try_find("solid_color_palette_#FFFFFF").is_none());
+        })
+        .expect("update_window failed");
+        let solid_of = |app_view: &Entity<AppView>, cx: &mut TestAppContext| {
+            app_view.read_with(cx, |view, cx| {
+                let layer = view.state().read(cx).active_composition().unwrap()
+                    .get_layer("layer_bg").unwrap().clone();
+                match layer.source {
+                    LayerSource::Solid { color, .. } => color.value,
+                    _ => panic!("layer_bg must be solid"),
+                }
+            })
+        };
+        let before = solid_of(&app_view, cx);
+        // Click the R bar near full: red channel commits live.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let b = window.find("solid_color_r_bar").bounds();
+            let w = b.size.width / px(1.0);
+            window.click_at("solid_color_r_bar", gpui::point(px(w - 1.0), px(10.0)), cx);
+        })
+        .expect("update_window failed");
+        let picked = solid_of(&app_view, cx);
+        assert!(picked.r > 0.95, "R bar click must drive red, got {picked:?}");
+        // ORIG reverts to the snapshot taken when the section opened.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("solid_color_orig_swatch", cx);
+        })
+        .expect("update_window failed");
+        let reverted = solid_of(&app_view, cx);
+        assert!(
+            (reverted.r - before.r).abs() < 0.01
+                && (reverted.g - before.g).abs() < 0.01
+                && (reverted.b - before.b).abs() < 0.01,
+            "ORIG must revert, was {before:?} got {reverted:?}"
+        );
     }
 
     #[gpui_kit::test]
