@@ -6986,7 +6986,7 @@ where
     // target, render the live single-line editor instead of the value label.
     // (Drag-scrub and mouse-wheel still work on the label.)
     let edit_id = id.into();
-    let path_str = match prop_key.as_str() {
+    let raw_path = match prop_key.as_str() {
         "anchor_x" => "transform.anchor_point.x",
         "anchor_y" => "transform.anchor_point.y",
         "pos_x" => "transform.position.x",
@@ -6998,15 +6998,21 @@ where
         "opacity" => "opacity",
         other => other,
     };
+    let canonical_path = effect_path_for_value_key(raw_path);
     let sel_lid_opt = state.read(cx).selected_layer_id.clone();
     let is_linked = if let Some(ref lid) = sel_lid_opt {
-        state.read(cx).is_layer_property_linked(lid, path_str)
+        state.read(cx).is_layer_property_linked(lid, &canonical_path)
     } else {
         false
     };
-    let display_label = if is_linked {
+    let has_modifier = if let Some(ref lid) = sel_lid_opt {
+        state.read(cx).get_layer_modifier_graph(lid, &canonical_path).is_some()
+    } else {
+        false
+    };
+    let display_label = if is_linked || has_modifier {
         if let Some(ref lid) = sel_lid_opt {
-            let v = state.read(cx).get_layer_property_live_value(lid, path_str);
+            let v = state.read(cx).get_layer_property_live_value(lid, &canonical_path);
             match prop_key.as_str() {
                 "opacity" | "scale_x" | "scale_y" | "scale_u" => format!("{:.1}%", v),
                 "rotation" => format!("{:.1}°", v),
@@ -7059,6 +7065,13 @@ where
                     .border_color(rgb(0xef4444))
                     .text_color(rgb(0xef4444))
                     .cursor_not_allowed();
+            } else if has_modifier {
+                val_view = val_view
+                    .bg(rgba(0xa855f718))
+                    .border_color(rgb(0xa855f7))
+                    .text_color(rgb(0xc084fc))
+                    .hover(|s| s.bg(rgba(0xa855f730)))
+                    .cursor_col_resize();
             } else {
                 val_view = val_view
                     .bg(cx.theme().muted)
@@ -7178,6 +7191,39 @@ where
                             .child(display_label),
                     )
                     .into_any_element()
+            } else if has_modifier {
+                let mg_lid = sel_lid_opt.clone();
+                let mg_path = canonical_path.clone();
+                let mg_state = state.clone();
+                val_view
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .w(px(12.))
+                                    .h(px(12.))
+                                    .items_center()
+                                    .justify_center()
+                                    .text_color(rgb(0xa855f7))
+                                    .cursor_pointer()
+                                    .hover(|s| s.opacity(0.8))
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        if let Some(ref lid) = mg_lid {
+                                            crate::modifier_graph_view::open_modifier_graph_window(
+                                                mg_state.clone(),
+                                                lid.clone(),
+                                                mg_path.clone(),
+                                                cx,
+                                            );
+                                        }
+                                    })
+                                    .child(gpui_kit::assets::IconName::Workflow),
+                            )
+                            .child(display_label),
+                    )
+                    .into_any_element()
             } else {
                 val_view.child(display_label).into_any_element()
             }
@@ -7217,19 +7263,25 @@ where
     let prop_for_rclick = prop_key.clone();
 
     let edit_id = id.into();
-    let path_str = match prop_for_rclick.as_str() {
+    let raw_path = match prop_for_rclick.as_str() {
         "font_size" => "text.font_size",
         other => other,
     };
+    let canonical_path = effect_path_for_value_key(raw_path);
     let sel_lid_opt = state.read(cx).selected_layer_id.clone();
     let is_linked = if let Some(ref lid) = sel_lid_opt {
-        state.read(cx).is_layer_property_linked(lid, path_str)
+        state.read(cx).is_layer_property_linked(lid, &canonical_path)
     } else {
         false
     };
-    let display_label = if is_linked {
+    let has_modifier = if let Some(ref lid) = sel_lid_opt {
+        state.read(cx).get_layer_modifier_graph(lid, &canonical_path).is_some()
+    } else {
+        false
+    };
+    let display_label = if is_linked || has_modifier {
         if let Some(ref lid) = sel_lid_opt {
-            let v = state.read(cx).get_layer_property_live_value(lid, path_str);
+            let v = state.read(cx).get_layer_property_live_value(lid, &canonical_path);
             format!("{:.1}", v)
         } else {
             label
@@ -7275,6 +7327,12 @@ where
                     .text_color(rgb(0xef4444))
                     .bg(rgba(0xef444420))
                     .cursor_not_allowed();
+            } else if has_modifier {
+                val_view = val_view
+                    .text_color(rgb(0xa855f7))
+                    .bg(rgba(0xa855f720))
+                    .hover(|s| s.text_color(rgb(0xc084fc)).bg(rgba(0xa855f730)))
+                    .cursor_col_resize();
             } else {
                 val_view = val_view
                     .text_color(rgb(0x3b82f6))
@@ -7369,6 +7427,39 @@ where
                                     .justify_center()
                                     .text_color(rgb(0xef4444))
                                     .child(gpui_kit::assets::IconName::Link),
+                            )
+                            .child(display_label),
+                    )
+                    .into_any_element()
+            } else if has_modifier {
+                let mg_lid = sel_lid_opt.clone();
+                let mg_path = canonical_path.clone();
+                let mg_state = state.clone();
+                val_view
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .w(px(12.))
+                                    .h(px(12.))
+                                    .items_center()
+                                    .justify_center()
+                                    .text_color(rgb(0xa855f7))
+                                    .cursor_pointer()
+                                    .hover(|s| s.opacity(0.8))
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        if let Some(ref lid) = mg_lid {
+                                            crate::modifier_graph_view::open_modifier_graph_window(
+                                                mg_state.clone(),
+                                                lid.clone(),
+                                                mg_path.clone(),
+                                                cx,
+                                            );
+                                        }
+                                    })
+                                    .child(gpui_kit::assets::IconName::Workflow),
                             )
                             .child(display_label),
                     )
@@ -8097,12 +8188,39 @@ fn property_keyframe_controls(
         })
         .child(icon_box(IconName::Timer));
 
-
+    let has_modifier = state.read(cx).get_layer_modifier_graph(layer_id, prop_path).is_some();
+    let modifier_btn = if has_modifier {
+        let s_mg = editor.clone();
+        let lid_mg = layer_id_str.clone();
+        let p_mg = prop_path.to_string();
+        Some(
+            div()
+                .id(SharedString::from(format!("property_modifier_graph_{layer_id}_{prop_path}")))
+                .test_support()
+                .cursor_pointer()
+                .p_0p5()
+                .rounded_sm()
+                .text_color(rgb(0xa855f7))
+                .hover(|s| s.bg(rgba(0xa855f720)))
+                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    crate::modifier_graph_view::open_modifier_graph_window(
+                        s_mg.clone(),
+                        lid_mg.clone(),
+                        p_mg.clone(),
+                        cx,
+                    );
+                })
+                .child(icon_box(IconName::Workflow))
+        )
+    } else {
+        None
+    };
 
     h_flex()
         .gap_0p5()
         .items_center()
         .child(stopwatch_btn)
+        .children(modifier_btn)
         .child(
             div()
                 .cursor_pointer()
@@ -8237,12 +8355,39 @@ pub(crate) fn effect_param_keyframe_controls(
         })
         .child(icon_box(IconName::Timer));
 
-
+    let has_modifier = state.read(cx).get_layer_modifier_graph(layer_id, &prop_path).is_some();
+    let modifier_btn = if has_modifier {
+        let s_mg = editor.clone();
+        let lid_mg = layer_id_str.clone();
+        let p_mg = prop_path.clone();
+        Some(
+            div()
+                .id(SharedString::from(format!("property_modifier_graph_{layer_id}_{eff_id}_{param_name}")))
+                .test_support()
+                .cursor_pointer()
+                .p_0p5()
+                .rounded_sm()
+                .text_color(rgb(0xa855f7))
+                .hover(|s| s.bg(rgba(0xa855f720)))
+                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    crate::modifier_graph_view::open_modifier_graph_window(
+                        s_mg.clone(),
+                        lid_mg.clone(),
+                        p_mg.clone(),
+                        cx,
+                    );
+                })
+                .child(icon_box(IconName::Workflow))
+        )
+    } else {
+        None
+    };
 
     h_flex()
         .gap_0p5()
         .items_center()
         .child(stopwatch_btn)
+        .children(modifier_btn)
         .child(
             div()
                 .cursor_pointer()
@@ -9915,6 +10060,8 @@ fn render_applied_effects(
             // Parameter body (nested inside the collapsible card below).
             let mut effect_box = v_flex().gap_1p5();
 
+            let has_any_modifier = layer.modifier_graphs.keys().any(|k| k.starts_with(&format!("effect:{}:", effect.id)));
+
             let header_row = h_flex()
                 .items_center()
                 .justify_between()
@@ -9974,7 +10121,30 @@ fn render_applied_effects(
                                     cx.theme().muted_foreground
                                 })
                                 .child(effect.name.clone()),
-                        ),
+                        )
+                        .children(if has_any_modifier {
+                            Some(
+                                div()
+                                    .id(SharedString::from(format!("effect_graph_badge_{}", effect.id)))
+                                    .test_support()
+                                    .px_1p5()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .bg(rgba(0xa855f720))
+                                    .border_1()
+                                    .border_color(rgb(0xa855f7))
+                                    .text_color(rgb(0xa855f7))
+                                    .text_xs()
+                                    .font_medium()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(icon_box(IconName::Workflow))
+                                    .child("Graph")
+                            )
+                        } else {
+                            None
+                        }),
                 )
                 .child(
                     div()
@@ -14240,6 +14410,38 @@ impl Render for PropertiesPanel {
                 );
             }
 
+            // 5b. Remove Modifier Graph (if modifier present)
+            let pt_mod_check = effect_path_for_value_key(&path_str);
+            if s_menu.read(cx).get_layer_modifier_graph(&lid_str, &pt_mod_check).is_some() {
+                let s_rm_mg = s_menu.clone();
+                let p_rm_mg = p_close.clone();
+                let l_rm_mg = lid_str.clone();
+                let pt_rm_mg = pt_mod_check.clone();
+                menu_items = menu_items.child(
+                    div()
+                        .id("props_ctx_remove_modifier_graph")
+                        .test_support()
+                        .cursor_pointer()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .text_xs()
+                        .text_color(rgb(0xa855f7))
+                        .hover(|s| s.bg(cx.theme().accent))
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            s_rm_mg.update(cx, |s, cx| {
+                                s.remove_layer_modifier_graph(&l_rm_mg, &pt_rm_mg);
+                                cx.notify();
+                            });
+                            p_rm_mg.update(cx, |this, cx| {
+                                this.close_context_menu();
+                                cx.notify();
+                            });
+                        })
+                        .child("Remove Modifier Graph"),
+                );
+            }
+
             let p_cancel = p_close.clone();
             menu_items = menu_items.child(
                 div()
@@ -15398,9 +15600,22 @@ fn timeline_scrub(
         "opacity" => "opacity",
         _ => "transform.position",
     };
-    let is_linked = state.read(cx).is_layer_property_linked(&layer_id, prop_path_static);
-    let display_str = if is_linked {
-        let v = state.read(cx).get_layer_property_live_value(&layer_id, prop_path_static);
+    let raw_path = match value_key.as_str() {
+        "anchor_x" => "transform.anchor_point.x",
+        "anchor_y" => "transform.anchor_point.y",
+        "pos_x" => "transform.position.x",
+        "pos_y" => "transform.position.y",
+        "scale_x" => "transform.scale.x",
+        "scale_y" => "transform.scale.y",
+        "rotation" => "transform.rotation",
+        "opacity" => "opacity",
+        other => other,
+    };
+    let canonical_path = effect_path_for_value_key(raw_path);
+    let is_linked = state.read(cx).is_layer_property_linked(&layer_id, &canonical_path);
+    let has_modifier = state.read(cx).get_layer_modifier_graph(&layer_id, &canonical_path).is_some();
+    let display_str = if is_linked || has_modifier {
+        let v = state.read(cx).get_layer_property_live_value(&layer_id, &canonical_path);
         match value_key.as_str() {
             "rotation" => format!("{:.1}°", v),
             "scale_x" | "scale_y" | "opacity" => format!("{:.0}%", v),
@@ -15464,6 +15679,13 @@ fn timeline_scrub(
                     .border_color(rgb(0xef4444))
                     .text_color(rgb(0xef4444))
                     .cursor_not_allowed();
+            } else if has_modifier {
+                val_view = val_view
+                    .bg(rgba(0xa855f718))
+                    .border_color(rgb(0xa855f7))
+                    .text_color(rgb(0xc084fc))
+                    .cursor_col_resize()
+                    .hover(|s| s.bg(rgba(0xa855f730)));
             } else {
                 val_view = val_view
                     .bg(cx.theme().secondary)
@@ -15541,6 +15763,37 @@ fn timeline_scrub(
                                     .justify_center()
                                     .text_color(rgb(0xef4444))
                                     .child(gpui_kit::assets::IconName::Link),
+                            )
+                            .child(display_str),
+                    )
+                    .into_any_element()
+            } else if has_modifier {
+                let mg_lid = layer_id.clone();
+                let mg_path = canonical_path.clone();
+                let mg_state = state.clone();
+                val_view
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .w(px(12.))
+                                    .h(px(12.))
+                                    .items_center()
+                                    .justify_center()
+                                    .text_color(rgb(0xa855f7))
+                                    .cursor_pointer()
+                                    .hover(|s| s.opacity(0.8))
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        crate::modifier_graph_view::open_modifier_graph_window(
+                                            mg_state.clone(),
+                                            mg_lid.clone(),
+                                            mg_path.clone(),
+                                            cx,
+                                        );
+                                    })
+                                    .child(gpui_kit::assets::IconName::Workflow),
                             )
                             .child(display_str),
                     )
@@ -21342,6 +21595,36 @@ impl Render for TimelinePanel {
                                     });
                                 })
                                 .child("Remove Property Link"),
+                        );
+                    }
+
+                    // 4c. Remove Modifier Graph (if modifier present)
+                    if s_menu.read(cx).get_layer_modifier_graph(&lid, path).is_some() {
+                        let s_rm_mg = s_menu.clone();
+                        let p_rm_mg = p_close.clone();
+                        let l_rm_mg = lid.clone();
+                        menu_items = menu_items.child(
+                            div()
+                                .id("timeline_ctx_remove_modifier_graph")
+                                .test_support()
+                                .cursor_pointer()
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .text_xs()
+                                .text_color(rgb(0xa855f7))
+                                .hover(|s| s.bg(cx.theme().accent))
+                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                    s_rm_mg.update(cx, |s, cx| {
+                                        s.remove_layer_modifier_graph(&l_rm_mg, path);
+                                        cx.notify();
+                                    });
+                                    p_rm_mg.update(cx, |this, cx| {
+                                        this.close_context_menu();
+                                        cx.notify();
+                                    });
+                                })
+                                .child("Remove Modifier Graph"),
                         );
                     }
 

@@ -1790,8 +1790,8 @@ impl LayerStackEvaluator {
                             max_horizontal,
                             max_vertical,
                         } => EvaluatedEffectType::DisplacementMap {
-                            max_horizontal: max_horizontal.evaluate_at(time),
-                            max_vertical: max_vertical.evaluate_at(time),
+                            max_horizontal: eval_eff_prop("max_horizontal", max_horizontal.evaluate_at(time)),
+                            max_vertical: eval_eff_prop("max_vertical", max_vertical.evaluate_at(time)),
                         },
                         EffectType::ChromaKey {
                             key_color,
@@ -1799,28 +1799,28 @@ impl LayerStackEvaluator {
                             feather,
                         } => EvaluatedEffectType::ChromaKey {
                             key_color: key_color.evaluate_at(time),
-                            tolerance: tolerance.evaluate_at(time),
-                            feather: feather.evaluate_at(time),
+                            tolerance: eval_eff_prop("tolerance", tolerance.evaluate_at(time)),
+                            feather: eval_eff_prop("feather", feather.evaluate_at(time)),
                         },
                         EffectType::LumaKey { threshold, feather } => {
                             EvaluatedEffectType::LumaKey {
-                                threshold: threshold.evaluate_at(time),
-                                feather: feather.evaluate_at(time),
+                                threshold: eval_eff_prop("threshold", threshold.evaluate_at(time)),
+                                feather: eval_eff_prop("feather", feather.evaluate_at(time)),
                             }
                         }
                         EffectType::SwapColor { from_color, to_color, tolerance, feather } => {
                             EvaluatedEffectType::SwapColor {
                                 from_color: from_color.evaluate_at(time),
                                 to_color: to_color.evaluate_at(time),
-                                tolerance: tolerance.evaluate_at(time),
-                                feather: feather.evaluate_at(time),
+                                tolerance: eval_eff_prop("tolerance", tolerance.evaluate_at(time)),
+                                feather: eval_eff_prop("feather", feather.evaluate_at(time)),
                             }
                         }
                         EffectType::NoiseGenerator {
                             amount,
                             monochrome,
                         } => EvaluatedEffectType::NoiseGenerator {
-                            amount: amount.evaluate_at(time),
+                            amount: eval_eff_prop("amount", amount.evaluate_at(time)),
                             monochrome: monochrome.evaluate_at(time),
                         },
                         EffectType::ShaderLab { source, params, values, .. } => {
@@ -1832,10 +1832,17 @@ impl LayerStackEvaluator {
                             let resolved: HashMap<String, project::ShaderParamValue> = params
                                 .iter()
                                 .map(|p| {
-                                    (
-                                        p.name.clone(),
-                                        values.get(&p.name).cloned().unwrap_or_else(|| p.default.clone()),
-                                    )
+                                    let base = values.get(&p.name).cloned().unwrap_or_else(|| p.default.clone());
+                                    let modified = match base {
+                                        project::ShaderParamValue::Float(f) => {
+                                            project::ShaderParamValue::Float(eval_eff_prop(&p.name, f))
+                                        }
+                                        project::ShaderParamValue::Int(i) => {
+                                            project::ShaderParamValue::Int(eval_eff_prop(&p.name, i as f32).round() as i32)
+                                        }
+                                        other => other,
+                                    };
+                                    (p.name.clone(), modified)
                                 })
                                 .collect();
                             // Pre-parse for the viewport CPU probe (cached by
@@ -1852,13 +1859,13 @@ impl LayerStackEvaluator {
                         }
                         EffectType::Checkerboard { size, color_a, color_b } => {
                             EvaluatedEffectType::Checkerboard {
-                                size: size.evaluate_at(time),
+                                size: eval_eff_prop("size", size.evaluate_at(time)),
                                 color_a: color_a.evaluate_at(time),
                                 color_b: color_b.evaluate_at(time),
                             }
                         }
                         EffectType::GradientRamp { color_a, color_b, angle, stops, gradient_type } => {
-                            let angle = angle.evaluate_at(time);
+                            let angle = eval_eff_prop("angle", angle.evaluate_at(time));
                             let stops = if stops.len() >= 2 {
                                 let mut sorted = stops.clone();
                                 sorted.sort_by(|a, b| {
@@ -1879,21 +1886,21 @@ impl LayerStackEvaluator {
                         }
                         EffectType::Perspective { skew_x, skew_y } => {
                             EvaluatedEffectType::Perspective {
-                                skew_x: skew_x.evaluate_at(time),
-                                skew_y: skew_y.evaluate_at(time),
+                                skew_x: eval_eff_prop("skew_x", skew_x.evaluate_at(time)),
+                                skew_y: eval_eff_prop("skew_y", skew_y.evaluate_at(time)),
                             }
                         }
                         EffectType::TextOutline { width, color, offset } => {
                             EvaluatedEffectType::TextOutline {
-                                width: width.evaluate_at(time),
+                                width: eval_eff_prop("width", width.evaluate_at(time)),
                                 color: color.evaluate_at(time),
-                                offset: offset.evaluate_at(time),
+                                offset: eval_eff_prop("offset", offset.evaluate_at(time)),
                             }
                         }
                         EffectType::TextBevel { strength, softness } => {
                             EvaluatedEffectType::TextBevel {
-                                strength: strength.evaluate_at(time),
-                                softness: softness.evaluate_at(time),
+                                strength: eval_eff_prop("strength", strength.evaluate_at(time)),
+                                softness: eval_eff_prop("softness", softness.evaluate_at(time)),
                             }
                         }
                         EffectType::TextSplitAnimator {
@@ -1915,107 +1922,121 @@ impl LayerStackEvaluator {
                                 split_by: *split_by,
                                 order: *order,
                                 random_seed: random_seed.evaluate_at(time) as i32,
-                                progress: progress.evaluate_at(time),
-                                spread: spread.evaluate_at(time),
+                                progress: eval_eff_prop("progress", progress.evaluate_at(time)),
+                                spread: eval_eff_prop("spread", spread.evaluate_at(time)),
                                 lock_layout: lock_layout.evaluate_at(time),
                                 easing: *easing,
                                 offset_position: Vec2::new(
-                                    position_x.evaluate_at(time),
-                                    position_y.evaluate_at(time),
+                                    eval_eff_prop("position_x", position_x.evaluate_at(time)),
+                                    eval_eff_prop("position_y", position_y.evaluate_at(time)),
                                 ),
-                                offset_rotation: rotation.evaluate_at(time),
-                                offset_opacity: opacity.evaluate_at(time),
+                                offset_rotation: eval_eff_prop("rotation", rotation.evaluate_at(time)),
+                                offset_opacity: eval_eff_prop("opacity", opacity.evaluate_at(time)),
                                 anchor_alignment: Vec2::new(
-                                    anchor_x.evaluate_at(time),
-                                    anchor_y.evaluate_at(time),
+                                    eval_eff_prop("anchor_x", anchor_x.evaluate_at(time)),
+                                    eval_eff_prop("anchor_y", anchor_y.evaluate_at(time)),
                                 ),
                             }
                         }
                         EffectType::Bloom { intensity, radius } => {
                             EvaluatedEffectType::Bloom {
-                                intensity: intensity.evaluate_at(time),
-                                radius: radius.evaluate_at(time),
+                                intensity: eval_eff_prop("intensity", intensity.evaluate_at(time)),
+                                radius: eval_eff_prop("radius", radius.evaluate_at(time)),
                             }
                         }
                         EffectType::Tiler { tiles_x, tiles_y, mode, mirror, offset_x, offset_y, cell, seed, amount } => {
                             EvaluatedEffectType::Tiler {
-                                tiles_x: tiles_x.evaluate_at(time),
-                                tiles_y: tiles_y.evaluate_at(time),
+                                tiles_x: eval_eff_prop("tiles_x", tiles_x.evaluate_at(time)),
+                                tiles_y: eval_eff_prop("tiles_y", tiles_y.evaluate_at(time)),
                                 mode: *mode,
                                 mirror: mirror.evaluate_at(time),
-                                offset_x: offset_x.evaluate_at(time),
-                                offset_y: offset_y.evaluate_at(time),
+                                offset_x: eval_eff_prop("offset_x", offset_x.evaluate_at(time)),
+                                offset_y: eval_eff_prop("offset_y", offset_y.evaluate_at(time)),
                                 cell: *cell,
-                                seed: seed.evaluate_at(time),
-                                amount: amount.evaluate_at(time),
+                                seed: eval_eff_prop("seed", seed.evaluate_at(time)),
+                                amount: eval_eff_prop("amount", amount.evaluate_at(time)),
                             }
                         }
                         EffectType::Warp { amount, scale, cols, rows, pins } => {
                             EvaluatedEffectType::Warp {
-                                amount: amount.evaluate_at(time),
-                                scale: scale.evaluate_at(time),
-                                cols: cols.evaluate_at(time),
-                                rows: rows.evaluate_at(time),
+                                amount: eval_eff_prop("amount", amount.evaluate_at(time)),
+                                scale: eval_eff_prop("scale", scale.evaluate_at(time)),
+                                cols: eval_eff_prop("cols", cols.evaluate_at(time)),
+                                rows: eval_eff_prop("rows", rows.evaluate_at(time)),
                                 pins: pins.clone(),
                             }
                         }
                         EffectType::Puppet { expansion, stiffness, pins } => {
                             EvaluatedEffectType::Puppet {
-                                expansion: expansion.evaluate_at(time),
-                                stiffness: stiffness.evaluate_at(time),
+                                expansion: eval_eff_prop("expansion", expansion.evaluate_at(time)),
+                                stiffness: eval_eff_prop("stiffness", stiffness.evaluate_at(time)),
                                 pins: pins
                                     .iter()
-                                    .map(|p| project::PuppetDeform {
+                                    .enumerate()
+                                    .map(|(i, p)| project::PuppetDeform {
                                         x: p.x,
                                         y: p.y,
-                                        dx: p.dx.evaluate_at(time),
-                                        dy: p.dy.evaluate_at(time),
+                                        dx: eval_eff_prop(&format!("pin_{i}_x"), p.dx.evaluate_at(time)),
+                                        dy: eval_eff_prop(&format!("pin_{i}_y"), p.dy.evaluate_at(time)),
                                     })
                                     .collect(),
                             }
                         }
                         EffectType::Exposure { exposure } => {
                             EvaluatedEffectType::Exposure {
-                                exposure: exposure.evaluate_at(time),
+                                exposure: eval_eff_prop("exposure", exposure.evaluate_at(time)),
                             }
                         }
                         EffectType::Vibrance { vibrance } => {
                             EvaluatedEffectType::Vibrance {
-                                vibrance: vibrance.evaluate_at(time),
+                                vibrance: eval_eff_prop("vibrance", vibrance.evaluate_at(time)),
                             }
                         }
                         EffectType::Levels { input_black, input_white, gamma, output_black, output_white } => {
                             EvaluatedEffectType::Levels {
-                                input_black: input_black.evaluate_at(time),
-                                input_white: input_white.evaluate_at(time),
-                                gamma: gamma.evaluate_at(time),
-                                output_black: output_black.evaluate_at(time),
-                                output_white: output_white.evaluate_at(time),
+                                input_black: eval_eff_prop("input_black", input_black.evaluate_at(time)),
+                                input_white: eval_eff_prop("input_white", input_white.evaluate_at(time)),
+                                gamma: eval_eff_prop("gamma", gamma.evaluate_at(time)),
+                                output_black: eval_eff_prop("output_black", output_black.evaluate_at(time)),
+                                output_white: eval_eff_prop("output_white", output_white.evaluate_at(time)),
                             }
                         }
                         EffectType::HueSaturation { hue_shift, saturation, lightness } => {
                             EvaluatedEffectType::HueSaturation {
-                                hue_shift: hue_shift.evaluate_at(time),
-                                saturation: saturation.evaluate_at(time),
-                                lightness: lightness.evaluate_at(time),
+                                hue_shift: eval_eff_prop("hue_shift", hue_shift.evaluate_at(time)),
+                                saturation: eval_eff_prop("saturation", saturation.evaluate_at(time)),
+                                lightness: eval_eff_prop("lightness", lightness.evaluate_at(time)),
                             }
                         }
                         EffectType::Sharpen { amount, radius } => {
                             EvaluatedEffectType::Sharpen {
-                                amount: amount.evaluate_at(time),
-                                radius: radius.evaluate_at(time),
+                                amount: eval_eff_prop("amount", amount.evaluate_at(time)),
+                                radius: eval_eff_prop("radius", radius.evaluate_at(time)),
                             }
                         }
                         EffectType::Vignette { amount, softness } => {
                             EvaluatedEffectType::Vignette {
-                                amount: amount.evaluate_at(time),
-                                softness: softness.evaluate_at(time),
+                                amount: eval_eff_prop("amount", amount.evaluate_at(time)),
+                                softness: eval_eff_prop("softness", softness.evaluate_at(time)),
                             }
                         }
                         EffectType::Stock { plugin, params, colors } => {
+                            let desc = plugin.descriptor();
+                            let evaluated_params = params
+                                .iter()
+                                .enumerate()
+                                .map(|(i, p)| {
+                                    let base = p.evaluate_at(time);
+                                    if let Some(p_desc) = desc.params.get(i) {
+                                        eval_eff_prop(p_desc.name, base)
+                                    } else {
+                                        base
+                                    }
+                                })
+                                .collect();
                             EvaluatedEffectType::Stock {
                                 plugin: *plugin,
-                                params: params.iter().map(|p| p.evaluate_at(time)).collect(),
+                                params: evaluated_params,
                                 colors: colors.iter().map(|p| p.evaluate_at(time)).collect(),
                             }
                         }

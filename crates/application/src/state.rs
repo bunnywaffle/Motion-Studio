@@ -6812,10 +6812,30 @@ impl EditorState {
 
     /// Retrieve the modifier graph attached to a property path on a layer.
     pub fn get_layer_modifier_graph(&self, layer_id: &str, prop_path: &str) -> Option<project::ModifierGraph> {
-        self.active_composition()?
-            .get_layer(layer_id)?
-            .get_modifier_graph(prop_path)
-            .cloned()
+        let comp = self.active_composition()?;
+        let layer = comp.get_layer(layer_id)?;
+        if let Some(mg) = layer.get_modifier_graph(prop_path) {
+            return Some(mg.clone());
+        }
+        let alias = match prop_path {
+            "anchor_x" => "transform.anchor_point.x",
+            "anchor_y" => "transform.anchor_point.y",
+            "pos_x" => "transform.position.x",
+            "pos_y" => "transform.position.y",
+            "scale_x" => "transform.scale.x",
+            "scale_y" => "transform.scale.y",
+            "scale_u" => "transform.scale.x",
+            "rotation" => "transform.rotation",
+            "transform.anchor_point.x" => "anchor_x",
+            "transform.anchor_point.y" => "anchor_y",
+            "transform.position.x" => "pos_x",
+            "transform.position.y" => "pos_y",
+            "transform.scale.x" => "scale_x",
+            "transform.scale.y" => "scale_y",
+            "transform.rotation" => "rotation",
+            _ => return None,
+        };
+        layer.get_modifier_graph(alias).cloned()
     }
 
     /// Set or update the modifier graph for a property path on a layer.
@@ -6876,6 +6896,16 @@ impl EditorState {
                         if let Some(fx) = layer.get_effect(parts[0]) {
                             if let Some(prop) = fx.get_param_property(parts[1]) {
                                 return prop.evaluate_at(&tc);
+                            }
+                            if let project::EffectType::ShaderLab { params, values, .. } = &fx.effect_type {
+                                if let Some(p) = params.iter().find(|p| p.name.eq_ignore_ascii_case(parts[1])) {
+                                    let v = values.get(&p.name).cloned().unwrap_or_else(|| p.default.clone());
+                                    match v {
+                                        project::ShaderParamValue::Float(f) => return f,
+                                        project::ShaderParamValue::Int(i) => return i as f32,
+                                        _ => {}
+                                    }
+                                }
                             }
                         }
                     }
@@ -7369,11 +7399,11 @@ impl EditorState {
         visited: &mut std::collections::HashSet<(String, String)>,
     ) -> f32 {
         let key = (layer_id.to_string(), prop_path.to_string());
-        if !visited.insert(key) {
+        if !visited.insert(key.clone()) {
             return self.get_layer_property_base_value(layer_id, prop_path);
         }
 
-        if let Some(link) = self.get_layer_property_link(layer_id, prop_path) {
+        let base = if let Some(link) = self.get_layer_property_link(layer_id, prop_path) {
             self.resolve_layer_property_live_value_recursive(
                 &link.driver_layer_id,
                 &link.driver_prop_path,
@@ -7381,7 +7411,24 @@ impl EditorState {
             )
         } else {
             self.get_layer_property_base_value(layer_id, prop_path)
-        }
+        };
+
+        let result = if let Some(mg) = self.get_layer_modifier_graph(layer_id, prop_path) {
+            let factor = self.get_layer_progression_factor(layer_id);
+            let visited_cell = std::cell::RefCell::new(visited.clone());
+            let resolver = |drv_layer: &str, drv_prop: &str| -> f32 {
+                self.resolve_layer_property_live_value_recursive(
+                    drv_layer,
+                    drv_prop,
+                    &mut visited_cell.borrow_mut(),
+                )
+            };
+            mg.evaluate_with_resolver(base, factor, &resolver)
+        } else {
+            base
+        };
+        visited.remove(&key);
+        result
     }
 
     /// Delete all keyframes across all animatable properties of a layer.

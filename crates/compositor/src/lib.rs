@@ -2614,6 +2614,73 @@ mod tests {
     }
 
     #[test]
+    fn test_modifier_graph_all_effect_types_evaluation() {
+        use project::{Effect, ModifierGraph, ModifierNode, NodeConnection, NodeKind};
+
+        let mut comp = Composition::hd_1080p_30fps("comp_all_fx", "All FX Graph Test", 5.0);
+        let tc0 = TimeCode::zero(30.0);
+        let tc150 = TimeCode::from_frames(150, 30.0);
+
+        let mut layer = Layer::solid("l_all_fx", "All FX Layer", Color::RED, 100, 100, tc0, tc150);
+        layer.add_effect(Effect::exposure("fx_exp", 0.0));
+        layer.add_effect(Effect::vignette("fx_vig", 0.5, 0.5));
+        layer.add_effect(Effect::displacement("fx_disp", 0.0, 0.0));
+        layer.add_effect(Effect::hue_saturation("fx_huesat", 0.0, 100.0, 0.0));
+
+        let make_const_graph = |val: f32| ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("c", 0.0, 0.0, NodeKind::Constant { value: val }),
+                ModifierNode::new("out", 200.0, 0.0, NodeKind::Output),
+            ],
+            connections: vec![NodeConnection::new("c", "value", "out", "result")],
+        };
+
+        layer.set_modifier_graph("effect:fx_exp:exposure", make_const_graph(2.5));
+        layer.set_modifier_graph("effect:fx_vig:amount", make_const_graph(0.85));
+        layer.set_modifier_graph("effect:fx_disp:max_horizontal", make_const_graph(64.0));
+        layer.set_modifier_graph("effect:fx_huesat:hue_shift", make_const_graph(180.0));
+
+        comp.add_layer(layer).unwrap();
+        let graph = SceneGraph::from_composition(&comp).unwrap();
+        let evaluator = LayerStackEvaluator::new();
+
+        let eval = evaluator.evaluate(&graph, &tc0);
+        let l = eval.get_layer("l_all_fx").unwrap();
+
+        // 1. Exposure
+        match &l.effects[0].effect_type {
+            EvaluatedEffectType::Exposure { exposure } => {
+                assert_eq!(*exposure, 2.5);
+            }
+            _ => panic!("Expected Exposure"),
+        }
+
+        // 2. Vignette
+        match &l.effects[1].effect_type {
+            EvaluatedEffectType::Vignette { amount, .. } => {
+                assert_eq!(*amount, 0.85);
+            }
+            _ => panic!("Expected Vignette"),
+        }
+
+        // 3. DisplacementMap
+        match &l.effects[2].effect_type {
+            EvaluatedEffectType::DisplacementMap { max_horizontal, .. } => {
+                assert_eq!(*max_horizontal, 64.0);
+            }
+            _ => panic!("Expected DisplacementMap"),
+        }
+
+        // 4. HueSaturation
+        match &l.effects[3].effect_type {
+            EvaluatedEffectType::HueSaturation { hue_shift, .. } => {
+                assert_eq!(*hue_shift, 180.0);
+            }
+            _ => panic!("Expected HueSaturation"),
+        }
+    }
+
+    #[test]
     fn test_property_links_live_synchronization() {
         let mut comp = Composition::hd_1080p_30fps("comp_link", "Links Test", 5.0);
         let tc0 = TimeCode::zero(30.0);

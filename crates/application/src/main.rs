@@ -11221,6 +11221,66 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
     }
 
     #[gpui_kit::test]
+    fn test_universal_modifier_graph_evaluation_and_ui_indicators(cx: &mut TestAppContext) {
+        let (_root, app_view) = setup_test_window(cx);
+        let state_entity = app_view.read_with(cx, |view, _| view.state().clone());
+
+        // 1. Add effects and modifier graphs to layer_accent
+        state_entity.update(cx, |s, _| {
+            s.selected_layer_id = Some("layer_accent".to_string());
+            let comp = s.active_composition_mut().unwrap();
+            let layer = comp.get_layer_mut("layer_accent").unwrap();
+            layer.add_effect(project::Effect::vignette("fx_vig_test", 0.5, 0.5));
+            layer.add_effect(project::Effect::exposure("fx_exp_test", 0.0));
+
+            let make_const_graph = |val: f32| project::modifier::ModifierGraph {
+                nodes: vec![
+                    project::modifier::ModifierNode::new("c", 0.0, 0.0, project::modifier::NodeKind::Constant { value: val }),
+                    project::modifier::ModifierNode::new("out", 200.0, 0.0, project::modifier::NodeKind::Output),
+                ],
+                connections: vec![project::modifier::NodeConnection::new("c", "value", "out", "result")],
+            };
+
+            layer.set_modifier_graph("effect:fx_vig_test:amount", make_const_graph(0.92));
+            layer.set_modifier_graph("effect:fx_exp_test:exposure", make_const_graph(3.25));
+        });
+
+        // 2. Verify live value resolution evaluates the modifier graphs!
+        state_entity.read_with(cx, |s, _| {
+            let vig_live = s.get_layer_property_live_value("layer_accent", "effect:fx_vig_test:amount");
+            assert!((vig_live - 0.92).abs() < 1e-4, "Live value must evaluate modifier graph on vignette amount: got {}", vig_live);
+
+            let exp_live = s.get_layer_property_live_value("layer_accent", "effect:fx_exp_test:exposure");
+            assert!((exp_live - 3.25).abs() < 1e-4, "Live value must evaluate modifier graph on exposure: got {}", exp_live);
+
+            assert!(s.get_layer_modifier_graph("layer_accent", "effect:fx_vig_test:amount").is_some());
+            assert!(s.get_layer_modifier_graph("layer_accent", "effect:fx_exp_test:exposure").is_some());
+        });
+
+        // 3. Render and check that the effect graph badges exist
+        let window_handle = cx.windows()[0];
+        let _ = cx.update_window(window_handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("effect_graph_badge_fx_vig_test").visible(), "Vignette graph badge must exist in properties panel");
+            assert!(window.find("effect_graph_badge_fx_exp_test").visible(), "Exposure graph badge must exist in properties panel");
+        });
+
+        // 4. Test removal
+        state_entity.update(cx, |s, _| {
+            s.remove_layer_modifier_graph("layer_accent", "effect:fx_vig_test:amount");
+            assert!(s.get_layer_modifier_graph("layer_accent", "effect:fx_vig_test:amount").is_none());
+            // Live value falls back to base
+            let vig_fallback = s.get_layer_property_live_value("layer_accent", "effect:fx_vig_test:amount");
+            assert_eq!(vig_fallback, 0.5);
+        });
+
+        let _ = cx.update_window(window_handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("effect_graph_badge_fx_vig_test").is_none(), "Badge must disappear when modifier graph is removed");
+        });
+    }
+
+    #[gpui_kit::test]
     fn test_layer_and_value_context_menu_operations(cx: &mut TestAppContext) {
         let (_root, app_view) = setup_test_window(cx);
         let state_entity = app_view.read_with(cx, |view, _| view.state().clone());
