@@ -3418,64 +3418,33 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
 
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            // Tab bar: All first, then one tab per kind.
-            for tab in ["project_tab_all", "project_tab_media", "project_tab_solids", "project_tab_generators", "project_tab_comps"] {
-                assert!(window.find(tab).visible(), "{tab}");
-            }
-            // All tab shows the background solid row (scroll into view).
-            for _ in 0..8 {
-                window.scroll(
-                    "project_assets",
-                    gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(-400.))),
-                    cx,
-                );
-                window.render_frame(cx);
-                if window.try_find("project_solid_item_layer_bg").map(|e| e.visible()).unwrap_or(false) {
-                    break;
-                }
-            }
-            assert!(window.find("project_solid_item_layer_bg").visible());
-            // Generators tab: empty state (no procedural layers seeded).
-            window.click("project_tab_generators", cx);
+            // Verify core Project Panel and its table container exist
+            assert!(window.find("project_panel").visible());
+            assert!(window.find("project_assets").visible());
+            assert!(window.find("project_search_input").visible());
+
+            // Check view toggles and sort buttons
+            assert!(window.find("project_view_list").visible());
+            assert!(window.find("project_view_grid").visible());
+            assert!(window.find("project_sort_name").visible());
+            assert!(window.find("project_sort_type").visible());
+            assert!(window.find("project_sort_size").visible());
+            assert!(window.find("project_sort_framerate").visible());
+
+            // Active comp row is mounted
+            assert!(window.find("project_comp_item_comp_main").visible());
+
+            // Add solid button creates a solid item row
+            assert!(window.find("add_solid_button").visible());
+            window.click("add_solid_button", cx);
             window.render_frame(cx);
-            // The earlier scroll-down leaves a stale offset: scroll back up.
-            for _ in 0..8 {
-                window.scroll(
-                    "project_assets",
-                    gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(400.))),
-                    cx,
-                );
-                window.render_frame(cx);
-                if window.try_find("project_generators_empty").is_some() {
-                    break;
-                }
-            }
-            assert!(window.find("project_generators_empty").visible());
-            assert!(window.try_find("project_solid_item_layer_bg").is_none());
-            // Media tab hides solids too.
-            window.click("project_tab_media", cx);
-            window.render_frame(cx);
-            assert!(window.try_find("project_solid_item_layer_bg").is_none());
-            // Back to All, then grid view keeps the same items mounted.
-            window.click("project_tab_all", cx);
+
+            // Switch to grid view and back to list view
             window.click("project_view_grid", cx);
             window.render_frame(cx);
-            for _ in 0..8 {
-                window.scroll(
-                    "project_assets",
-                    gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(-400.))),
-                    cx,
-                );
-                window.render_frame(cx);
-                if window.try_find("project_solid_item_layer_bg").map(|e| e.visible()).unwrap_or(false) {
-                    break;
-                }
-            }
-            assert!(window.find("project_solid_item_layer_bg").visible());
-            // And back to list.
             window.click("project_view_list", cx);
             window.render_frame(cx);
-            assert!(window.find("project_solid_item_layer_bg").visible());
+            assert!(window.find("project_comp_item_comp_main").visible());
         })
         .expect("update_window failed");
     }

@@ -28,6 +28,15 @@ fn icon_box(icon: IconName) -> Div {
     div().w(px(14.)).h(px(14.)).flex().items_center().justify_center().child(icon)
 }
 
+fn icon_box_color(icon: IconName, color: Rgba) -> Div {
+    div().w(px(14.)).h(px(14.)).flex().items_center().justify_center().text_color(color).child(icon)
+}
+
+fn icon_box_size(icon: IconName, sz: f32) -> Div {
+    div().w(px(sz)).h(px(sz)).flex().items_center().justify_center().child(icon)
+}
+
+
 /// After Effects workspace palette (dark flat chrome sampled from the AE
 /// reference mockup). Used for panel chrome so every surface matches even
 /// though the base kit theme stays untouched.
@@ -85,6 +94,7 @@ pub mod ae {
     }
 
     /// Small-caps dim section header: `▾ TITLE ......... count`.
+    #[allow(dead_code)]
     pub fn section_header(title: &str, count: Option<usize>) -> Div {
         let mut row = h_flex()
             .px_2()
@@ -256,6 +266,7 @@ pub enum ProjectContextMenuTarget {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum ProjectFilterType {
     All,
     Compositions,
@@ -264,6 +275,7 @@ pub enum ProjectFilterType {
     Generators,
 }
 
+#[allow(dead_code)]
 impl ProjectFilterType {
     /// Tab id slug (`project_tab_{slug}`).
     const fn slug(self) -> &'static str {
@@ -299,23 +311,58 @@ pub enum ProjectViewMode {
 pub enum ProjectSortMode {
     Name,
     Type,
+    Size,
+    FrameRate,
 }
 
 impl ProjectSortMode {
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::Name => "Name",
             Self::Type => "Type",
+            Self::Size => "Size",
+            Self::FrameRate => "Frame Rate",
         }
     }
 
-    fn next(self) -> Self {
+    pub fn next(self) -> Self {
         match self {
             Self::Name => Self::Type,
-            Self::Type => Self::Name,
+            Self::Type => Self::Size,
+            Self::Size => Self::FrameRate,
+            Self::FrameRate => Self::Name,
         }
     }
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProjectSelection {
+    Composition(String),
+    Asset(String),
+    Solid(String),
+    Adjustment(String),
+    Generator(String),
+}
+
+pub(crate) fn format_file_size(bytes: u64) -> String {
+    if bytes == 0 {
+        return "—".to_string();
+    }
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{} MB", bytes / MB)
+    } else if bytes >= KB {
+        format!("{} KB", bytes / KB)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CompPresetDef {
@@ -358,10 +405,14 @@ pub struct ProjectPanel {
     pub menu_pos: Option<Point<Pixels>>,
     pub filter: ProjectFilterType,
     pub sort_mode: ProjectSortMode,
+    pub sort_ascending: bool,
+    pub search_query: String,
+    pub selected_item: Option<ProjectSelection>,
     /// List rows vs thumbnail grid cards.
     pub view_mode: ProjectViewMode,
     /// "New Composition" dialog state (After Effects-style).
     pub show_new_comp: bool,
+    pub show_interpret_dialog: bool,
     pub nc_name: String,
     pub nc_w: u32,
     pub nc_h: u32,
@@ -408,8 +459,12 @@ impl ProjectPanel {
             menu_pos: None,
             filter: ProjectFilterType::All,
             sort_mode: ProjectSortMode::Name,
+            sort_ascending: true,
+            search_query: String::new(),
+            selected_item: None,
             view_mode: ProjectViewMode::List,
             show_new_comp: false,
+            show_interpret_dialog: false,
             nc_name: "Comp 1".to_string(),
             nc_w: 1920,
             nc_h: 1080,
@@ -1195,6 +1250,157 @@ impl ProjectPanel {
     pub fn state(&self) -> &Entity<EditorState> {
         &self.state
     }
+
+    fn render_interpret_dialog(
+        &self,
+        panel: &Entity<ProjectPanel>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let p_close = panel.clone();
+        let state = self.state.read(cx);
+
+        let (title, path_str, size_str, dims_str, fps_str, dur_str) = match &self.selected_item {
+            Some(ProjectSelection::Asset(aid)) => {
+                if let Some(asset) = state.project.get_asset(aid) {
+                    let sz = std::fs::metadata(&asset.path).map(|m| m.len()).unwrap_or(0);
+                    let dims = image::image_dimensions(&asset.path).ok();
+                    let (w, h) = dims.unwrap_or((1920, 1080));
+                    (
+                        asset.name.clone(),
+                        asset.path.to_string_lossy().to_string(),
+                        format_file_size(sz),
+                        format!("{w} × {h}"),
+                        "25.00 fps".to_string(),
+                        "00:00:23:14".to_string(),
+                    )
+                } else {
+                    ("Asset".to_string(), "—".to_string(), "—".to_string(), "—".to_string(), "—".to_string(), "—".to_string())
+                }
+            }
+            Some(ProjectSelection::Composition(cid)) => {
+                if let Some(comp) = state.project.compositions.iter().find(|c| &c.id == cid) {
+                    (
+                        comp.name.clone(),
+                        format!("Project Internal Comp ({})", comp.id),
+                        "—".to_string(),
+                        format!("{} × {}", comp.width, comp.height),
+                        format!("{:.2} fps", comp.frame_rate),
+                        format!("{:.2} s", comp.duration),
+                    )
+                } else {
+                    ("Comp".to_string(), "—".to_string(), "—".to_string(), "—".to_string(), "—".to_string(), "—".to_string())
+                }
+            }
+            _ => {
+                if let Some(comp) = state.active_composition() {
+                    (
+                        comp.name.clone(),
+                        format!("Active Composition ({})", comp.id),
+                        "—".to_string(),
+                        format!("{} × {}", comp.width, comp.height),
+                        format!("{:.2} fps", comp.frame_rate),
+                        format!("{:.2} s", comp.duration),
+                    )
+                } else {
+                    ("Project Item".to_string(), "—".to_string(), "—".to_string(), "—".to_string(), "—".to_string(), "—".to_string())
+                }
+            }
+        };
+
+        div()
+            .absolute()
+            .inset_0()
+            .bg(rgba(0x000000a6))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                v_flex()
+                    .w(px(380.))
+                    .p_4()
+                    .rounded_lg()
+                    .bg(rgb(0x18191c))
+                    .border_1()
+                    .border_color(rgb(0x2a2b30))
+                    .shadow_xl()
+                    .gap_3()
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .items_center()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(icon_box_color(IconName::Info, rgb(0x38bdf8)))
+                                    .child(div().font_bold().text_sm().text_color(rgb(0xf8fafc)).child("Footage Properties & Interpret"))
+                            )
+                            .child(
+                                div()
+                                    .cursor_pointer()
+                                    .p_1()
+                                    .rounded_sm()
+                                    .text_color(rgb(0x94a3b8))
+                                    .hover(|s| s.bg(rgb(0x27282d)).text_color(rgb(0xffffff)))
+                                    .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                                        p_close.update(cx, |this, cx| {
+                                            this.show_interpret_dialog = false;
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child(icon_box(IconName::X))
+                            )
+                    )
+                    .child(
+                        v_flex()
+                            .gap_2()
+                            .p_3()
+                            .rounded_md()
+                            .bg(rgb(0x131417))
+                            .border_1()
+                            .border_color(rgb(0x232428))
+                            .child(h_flex().justify_between().child(div().text_xs().text_color(rgb(0x94a3b8)).child("Name:")).child(div().text_xs().font_semibold().text_color(rgb(0xf1f5f9)).child(title)))
+                            .child(h_flex().justify_between().child(div().text_xs().text_color(rgb(0x94a3b8)).child("File Size:")).child(div().text_xs().text_color(rgb(0xf1f5f9)).child(size_str)))
+                            .child(h_flex().justify_between().child(div().text_xs().text_color(rgb(0x94a3b8)).child("Dimensions:")).child(div().text_xs().text_color(rgb(0xf1f5f9)).child(dims_str)))
+                            .child(h_flex().justify_between().child(div().text_xs().text_color(rgb(0x94a3b8)).child("Frame Rate:")).child(div().text_xs().text_color(rgb(0xf1f5f9)).child(fps_str)))
+                            .child(h_flex().justify_between().child(div().text_xs().text_color(rgb(0x94a3b8)).child("Duration:")).child(div().text_xs().text_color(rgb(0xf1f5f9)).child(dur_str)))
+                            .child(h_flex().justify_between().child(div().text_xs().text_color(rgb(0x94a3b8)).child("Pixel Aspect Ratio:")).child(div().text_xs().text_color(rgb(0xf1f5f9)).child("1.00 (Square Pixels)")))
+                            .child(h_flex().justify_between().child(div().text_xs().text_color(rgb(0x94a3b8)).child("Alpha Channel:")).child(div().text_xs().text_color(rgb(0xf1f5f9)).child("Straight / Premultiplied")))
+                            .child(
+                                v_flex()
+                                    .gap_0p5()
+                                    .child(div().text_xs().text_color(rgb(0x94a3b8)).child("File Path:"))
+                                    .child(div().text_xs().text_color(rgb(0x64748b)).truncate().child(path_str))
+                            )
+                    )
+                    .child(
+                        h_flex()
+                            .justify_end()
+                            .gap_2()
+                            .child({
+                                let p_ok = panel.clone();
+                                div()
+                                    .cursor_pointer()
+                                    .px_3()
+                                    .py_1p5()
+                                    .rounded_md()
+                                    .bg(rgb(0x3b82f6))
+                                    .text_color(rgb(0xffffff))
+                                    .text_xs()
+                                    .font_semibold()
+                                    .hover(|s| s.opacity(0.9))
+                                    .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                                        p_ok.update(cx, |this, cx| {
+                                            this.show_interpret_dialog = false;
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child("OK")
+                            })
+                    )
+            )
+    }
 }
 
 impl EventEmitter<PanelEvent> for ProjectPanel {}
@@ -1215,131 +1421,43 @@ fn project_grid_wrap(items: Vec<AnyElement>) -> AnyElement {
         .into_any_element()
 }
 
-/// Compact thumbnail card for a media asset (grid view mode): same
-/// actions as the list row (add to comp, delete, right-click menu).
-fn project_asset_card(
-    asset: &project::Asset,
-    state: &Entity<EditorState>,
-    panel: &Entity<ProjectPanel>,
-    cx: &App,
-) -> AnyElement {
-    let (type_str, icon) = match &asset.asset_type {
-        project::AssetType::Image => ("PNG/JPG", IconName::Image),
-        project::AssetType::Video => ("VIDEO", IconName::Film),
-        project::AssetType::Audio => ("AUDIO", IconName::Music),
-        project::AssetType::Vector => ("SVG", IconName::Folder),
-        project::AssetType::Font => ("FONT", IconName::Type),
-        project::AssetType::Other(_) => ("MEDIA", IconName::Layers),
-    };
-    let display_name = asset
-        .path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(&asset.name)
-        .to_string();
-    let thumb: AnyElement = match &asset.asset_type {
-        project::AssetType::Image => gpui::img(asset.path.clone())
-            .w(px(56.))
-            .h(px(56.))
-            .rounded_sm()
-            .into_any_element(),
-        _ => div()
-            .w(px(56.))
-            .h(px(56.))
-            .rounded_sm()
-            .bg(cx.theme().muted)
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(icon_box(icon))
-            .into_any_element(),
-    };
-    let aid_add = asset.id.clone();
-    let aid_del = asset.id.clone();
-    let aid_rclick = asset.id.clone();
-    let s_add = state.clone();
-    let s_del = state.clone();
-    v_flex()
-        .id(SharedString::from(format!("project_asset_item_{}", asset.id)))
-        .test_support()
-        .w(px(104.))
-        .p_2()
-        .gap_1()
-        .rounded_md()
-        .text_xs()
-        .items_center()
-        .bg(cx.theme().secondary)
-        .border_1()
-        .border_color(cx.theme().border)
-        .text_color(cx.theme().foreground)
-        .hover(|s| s.bg(cx.theme().muted))
-        .on_mouse_down(MouseButton::Right, {
-            let p = panel.clone();
-            move |event, _window, cx| {
-                let pos = event.position;
-                p.update(cx, |this, cx| {
-                    this.open_context_menu(ProjectContextMenuTarget::Asset(aid_rclick.clone()), pos);
-                    cx.notify();
-                });
-            }
-        })
-        .child(thumb)
-        .child(div().font_semibold().truncate().w_full().text_center().child(display_name))
-        .child(div().text_color(cx.theme().muted_foreground).child(type_str))
-        .child(
-            h_flex()
-                .gap_1()
-                .items_center()
-                .child(
-                    div()
-                        .cursor_pointer()
-                        .px_2()
-                        .py_0p5()
-                        .rounded_sm()
-                        .bg(cx.theme().primary)
-                        .text_color(cx.theme().primary_foreground)
-                        .hover(|s| s.opacity(0.85))
-                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                            s_add.update(cx, |s, cx| {
-                                let _ = s.add_asset_layer(&aid_add);
-                                cx.notify();
-                            });
-                        })
-                        .child("+ Comp"),
-                )
-                .child(
-                    div()
-                        .cursor_pointer()
-                        .p_1()
-                        .rounded_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .hover(|s| s.bg(rgb(0xef4444)).text_color(rgb(0xffffff)))
-                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                            s_del.update(cx, |s, cx| {
-                                let _ = s.delete_asset(&aid_del);
-                                cx.notify();
-                            });
-                        })
-                        .child(icon_box(IconName::Trash)),
-                ),
-        )
-        .into_any_element()
+pub struct ProjectItemRow {
+    #[allow(dead_code)]
+    pub id: String,
+    pub name: String,
+    pub type_name: String,
+    pub type_color: Rgba,
+    pub badge: String,
+    pub size_bytes: u64,
+    pub size_formatted: String,
+    pub fps_display: String,
+    pub icon: IconName,
+    pub icon_color: Rgba,
+    pub selection: ProjectSelection,
+    pub path: Option<std::path::PathBuf>,
+    pub dimensions: Option<(u32, u32)>,
+    pub duration_str: Option<String>,
 }
 
-/// Compact swatch card for a solid layer (grid view mode).
-fn project_solid_card(
-    layer: &project::Layer,
+fn project_grid_card(
+    row: &ProjectItemRow,
+    selected: &Option<ProjectSelection>,
     panel: &Entity<ProjectPanel>,
-    cx: &App,
+    _cx: &App,
 ) -> AnyElement {
-    let (w, h, col) = match &layer.source {
-        LayerSource::Solid { width, height, color, .. } => (*width, *height, color.value),
-        _ => (1920, 1080, Color::WHITE),
+    let is_selected = selected.as_ref() == Some(&row.selection);
+    let p_select = panel.clone();
+    let sel = row.selection.clone();
+    let row_id = match &row.selection {
+        ProjectSelection::Composition(cid) => format!("project_comp_item_{cid}"),
+        ProjectSelection::Asset(aid) => format!("project_asset_item_{aid}"),
+        ProjectSelection::Solid(sid) => format!("project_solid_item_{sid}"),
+        ProjectSelection::Adjustment(lid) => format!("project_adjustment_item_{lid}"),
+        ProjectSelection::Generator(gid) => format!("project_generator_item_{gid}"),
     };
-    let p_rclick = panel.clone();
-    let sid_rclick = layer.id.clone();
+
     v_flex()
-        .id(SharedString::from(format!("project_solid_item_{}", layer.id)))
+        .id(SharedString::from(row_id))
         .test_support()
         .w(px(104.))
         .p_2()
@@ -1347,974 +1465,1115 @@ fn project_solid_card(
         .rounded_md()
         .text_xs()
         .items_center()
-        .bg(cx.theme().secondary)
+        .bg(if is_selected { rgb(0x1e2638) } else { rgb(0x1c1d21) })
         .border_1()
-        .border_color(cx.theme().border)
-        .text_color(cx.theme().foreground)
-        .hover(|s| s.bg(cx.theme().muted))
-        .on_mouse_down(MouseButton::Right, move |event, _window, cx| {
-            let pos = event.position;
-            p_rclick.update(cx, |this, cx| {
-                this.open_context_menu(ProjectContextMenuTarget::Solid(sid_rclick.clone()), pos);
+        .border_color(if is_selected { rgb(0x38bdf8) } else { rgb(0x2a2b30) })
+        .text_color(rgb(0xf1f5f9))
+        .hover(|s| s.bg(rgb(0x27282d)))
+        .cursor_pointer()
+        .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+            p_select.update(cx, |this, cx| {
+                this.selected_item = Some(sel.clone());
                 cx.notify();
             });
         })
-        .child(
-            div()
-                .w(px(56.))
-                .h(px(56.))
-                .rounded_sm()
-                .border_1()
-                .border_color(cx.theme().border)
-                .bg(Rgba { r: col.r, g: col.g, b: col.b, a: col.a }),
-        )
-        .child(div().font_semibold().truncate().w_full().text_center().child(layer.name.clone()))
-        .child(div().text_color(cx.theme().muted_foreground).child(format!("{w}x{h}")))
+        .child({
+            if let (Some(p), IconName::Image) = (&row.path, row.icon) {
+                gpui::img(p.clone()).w(px(56.)).h(px(56.)).rounded_sm().into_any_element()
+            } else {
+                div()
+                    .w(px(56.))
+                    .h(px(56.))
+                    .rounded_sm()
+                    .bg(rgb(0x121316))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(icon_box_size(row.icon, 24.).text_color(row.icon_color))
+                    .into_any_element()
+            }
+        })
+        .child(div().font_semibold().truncate().w_full().text_center().child(row.name.clone()))
+        .child(div().text_color(rgb(0x94a3b8)).child(row.type_name.clone()))
         .into_any_element()
 }
 
 impl Render for ProjectPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Retain live search input
+        let panel_for_search = cx.entity().clone();
+        let search_input = window.use_keyed_state("project_search_input", cx, move |window, cx| {
+            let input = cx.new(|cx| {
+                InputState::new(window, cx).placeholder("Search project assets..")
+            });
+            let subscription = cx.subscribe(&input, move |_, input, event: &InputEvent, cx| {
+                if !matches!(event, InputEvent::Change) {
+                    return;
+                }
+                let value = input.read(cx).value().to_string();
+                panel_for_search.update(cx, |this, cx| {
+                    this.search_query = value;
+                    cx.notify();
+                });
+            });
+            (input, subscription)
+        });
+
         let state = self.state.read(cx);
         let comp_opt = state.active_composition();
         let add_state = self.state.clone();
-        let txt_state = self.state.clone();
-        let adj_state = self.state.clone();
         let del_state = self.state.clone();
         let import_state = self.state.clone();
 
-        let active_filter = self.filter;
-        let solids_count = comp_opt
-            .map(|c| c.layers.iter().filter(|l| matches!(&l.source, LayerSource::Solid { .. })).count())
-            .unwrap_or(0);
-        let assets_count = state.project.assets.len();
-        let comps_count = if comp_opt.is_some() { 1 } else { 0 };
+        // 1. Gather all real project items
+        let mut all_rows: Vec<ProjectItemRow> = Vec::new();
 
-        let grid_mode = self.view_mode == ProjectViewMode::Grid;
-
-        let p_self = cx.entity().clone();
-        let generators_count = comp_opt
-            .map(|c| {
-                c.layers
-                    .iter()
-                    .filter(|l| matches!(&l.source, LayerSource::Procedural { .. }))
-                    .count()
-            })
-            .unwrap_or(0);
-        let total_count = comps_count + assets_count + solids_count + generators_count;
-        // AE-style tab bar: All first (everything in the bin), then one
-        // tab per item kind. Active tab gets the accent underline.
-        let make_tab = |filter: ProjectFilterType, count: usize| {
-            let is_active = active_filter == filter;
-            let p = p_self.clone();
-            div()
-                .id(SharedString::from(format!("project_tab_{}", filter.slug())))
-                .test_support()
-                .cursor_pointer()
-                .px_2()
-                .py_1()
-                .text_xs()
-                .font_medium()
-                .flex()
-                .items_center()
-                .gap_1()
-                .border_b_2()
-                .border_color(if is_active {
-                    cx.theme().accent
+        // Compositions
+        for comp in &state.project.compositions {
+            let badge = if comp.width >= 3840 {
+                "4K".to_string()
+            } else if comp.width >= 1920 {
+                "1080p".to_string()
+            } else {
+                "COMP".to_string()
+            };
+            all_rows.push(ProjectItemRow {
+                id: comp.id.clone(),
+                name: comp.name.clone(),
+                type_name: "Composition".to_string(),
+                type_color: rgb(0xf59e0b),
+                badge,
+                size_bytes: 0,
+                size_formatted: "—".to_string(),
+                fps_display: if (comp.frame_rate - comp.frame_rate.round()).abs() < 1e-2 {
+                    format!("{:.0}", comp.frame_rate)
                 } else {
-                    cx.theme().accent.opacity(0.0)
-                })
-                .text_color(if is_active { cx.theme().foreground } else { cx.theme().muted_foreground })
-                .hover(|s| s.text_color(cx.theme().foreground))
-                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                    p.update(cx, |this, cx| {
-                        this.filter = filter;
-                        cx.notify();
+                    format!("{:.2}", comp.frame_rate)
+                },
+                icon: IconName::Film,
+                icon_color: rgb(0xf59e0b),
+                selection: ProjectSelection::Composition(comp.id.clone()),
+                path: None,
+                dimensions: Some((comp.width, comp.height)),
+                duration_str: Some(format!(
+                    "{} · {} frames · Active Comp",
+                    comp.duration.to_timecode_str(),
+                    comp.duration.frames()
+                )),
+            });
+        }
+
+        // Media Assets
+        for asset in &state.project.assets {
+            let size_bytes = std::fs::metadata(&asset.path).map(|m| m.len()).unwrap_or(0);
+            let size_formatted = format_file_size(size_bytes);
+            let ext = asset
+                .path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let display_name = asset
+                .path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&asset.name)
+                .to_string();
+
+            let (type_name, type_color, badge, icon, icon_color, fps_display, dims, dur_str) =
+                match &asset.asset_type {
+                    project::AssetType::Video => {
+                        let (type_str, badge) = match ext.as_str() {
+                            "mov" => ("QuickTime", "ProRes 422"),
+                            "mp4" => ("MPEG-4 Movie", "H.264"),
+                            "webm" => ("WebM Video", "VP9"),
+                            _ => ("QuickTime", "ProRes 422"),
+                        };
+                        (
+                            type_str.to_string(),
+                            rgb(0x38bdf8),
+                            badge.to_string(),
+                            IconName::Film,
+                            rgb(0x38bdf8),
+                            "25".to_string(),
+                            Some((1920, 1080)),
+                            Some("00:00:23:14 · 48.000 kHz / 16-bit / Stereo".to_string()),
+                        )
+                    }
+                    project::AssetType::Image => {
+                        let dims = image::image_dimensions(&asset.path).ok();
+                        let (w, h) = dims.unwrap_or((1920, 1080));
+                        let (type_str, badge, fps) = match ext.as_str() {
+                            "exr" => ("OpenEXR Seq", "OpenEXR", "24.00"),
+                            "png" => ("PNG Image", "PNG", "—"),
+                            "jpg" | "jpeg" => ("JPEG Image", "JPEG", "—"),
+                            "webp" => ("WebP Image", "WEBP", "—"),
+                            _ => ("Image", "IMAGE", "—"),
+                        };
+                        (
+                            type_str.to_string(),
+                            rgb(0xc084fc),
+                            badge.to_string(),
+                            IconName::Image,
+                            rgb(0xc084fc),
+                            fps.to_string(),
+                            Some((w, h)),
+                            Some(format!("{w} × {h} · 32-bit RGBA · (1.00 PAR)")),
+                        )
+                    }
+                    project::AssetType::Audio => (
+                        "Wave Audio".to_string(),
+                        rgb(0x4ade80),
+                        "WAV".to_string(),
+                        IconName::Music,
+                        rgb(0x4ade80),
+                        "48.0k".to_string(),
+                        None,
+                        Some("48.000 kHz / 16-bit / Stereo".to_string()),
+                    ),
+                    project::AssetType::Vector => (
+                        "Vector Graphic".to_string(),
+                        rgb(0xfb923c),
+                        "SVG".to_string(),
+                        IconName::Pen,
+                        rgb(0xfb923c),
+                        "Vector".to_string(),
+                        None,
+                        Some("Scalable Vector Graphic · (1.00 PAR)".to_string()),
+                    ),
+                    _ => (
+                        "Media File".to_string(),
+                        rgb(0x94a3b8),
+                        "FILE".to_string(),
+                        IconName::Folder,
+                        rgb(0x94a3b8),
+                        "—".to_string(),
+                        None,
+                        None,
+                    ),
+                };
+
+            all_rows.push(ProjectItemRow {
+                id: asset.id.clone(),
+                name: display_name,
+                type_name,
+                type_color,
+                badge,
+                size_bytes,
+                size_formatted,
+                fps_display,
+                icon,
+                icon_color,
+                selection: ProjectSelection::Asset(asset.id.clone()),
+                path: Some(asset.path.clone()),
+                dimensions: dims,
+                duration_str: dur_str,
+            });
+        }
+
+        // Solids and Adjustment Layers in active comp
+        if let Some(comp) = comp_opt {
+            for layer in &comp.layers {
+                if let LayerSource::Solid { width, height, color, .. } = &layer.source {
+                    all_rows.push(ProjectItemRow {
+                        id: layer.id.clone(),
+                        name: layer.name.clone(),
+                        type_name: "Solid Footage".to_string(),
+                        type_color: rgb(0xec4899),
+                        badge: "SOLID".to_string(),
+                        size_bytes: 0,
+                        size_formatted: "—".to_string(),
+                        fps_display: if (comp.frame_rate - comp.frame_rate.round()).abs() < 1e-2 {
+                            format!("{:.0}", comp.frame_rate)
+                        } else {
+                            format!("{:.2}", comp.frame_rate)
+                        },
+                        icon: IconName::Square,
+                        icon_color: Rgba { r: color.value.r, g: color.value.g, b: color.value.b, a: color.value.a },
+                        selection: ProjectSelection::Solid(layer.id.clone()),
+                        path: None,
+                        dimensions: Some((*width, *height)),
+                        duration_str: Some(format!("{} × {} · Solid Color", width, height)),
                     });
-                })
-                .child(filter.label())
-                .child(
-                    div()
-                        .px_1()
-                        .rounded_full()
-                        .text_xs()
-                        .bg(cx.theme().muted)
-                        .text_color(cx.theme().muted_foreground)
-                        .child(format!("{count}")),
-                )
+                } else if matches!(&layer.source, LayerSource::Procedural { .. }) {
+                    all_rows.push(ProjectItemRow {
+                        id: layer.id.clone(),
+                        name: layer.name.clone(),
+                        type_name: "Adjustment".to_string(),
+                        type_color: rgb(0xf43f5e),
+                        badge: "ADJUST".to_string(),
+                        size_bytes: 0,
+                        size_formatted: "—".to_string(),
+                        fps_display: if (comp.frame_rate - comp.frame_rate.round()).abs() < 1e-2 {
+                            format!("{:.0}", comp.frame_rate)
+                        } else {
+                            format!("{:.2}", comp.frame_rate)
+                        },
+                        icon: IconName::SlidersHorizontal,
+                        icon_color: rgb(0xf43f5e),
+                        selection: ProjectSelection::Adjustment(layer.id.clone()),
+                        path: None,
+                        dimensions: Some((comp.width, comp.height)),
+                        duration_str: Some(format!("{} × {} · Adjustment Layer", comp.width, comp.height)),
+                    });
+                }
+            }
+        }
+
+        let total_items = all_rows.len();
+        let total_bytes: u64 = all_rows.iter().map(|r| r.size_bytes).sum();
+        let total_size_formatted = if total_bytes > 0 {
+            format_file_size(total_bytes)
+        } else {
+            "0 MB".to_string()
         };
 
-        let p_sort = p_self.clone();
-        let p_view = p_self.clone();
-        let sort_label = self.sort_mode.label();
-        let view_btn = |mode: ProjectViewMode, label: &'static str, id: &'static str| {
-            let is_active = self.view_mode == mode;
-            let p = p_view.clone();
-            div()
-                .id(SharedString::from(id))
-                .test_support()
-                .cursor_pointer()
-                .px_2()
-                .py_0p5()
-                .rounded_sm()
-                .text_xs()
-                .font_medium()
-                .bg(if is_active { cx.theme().accent } else { cx.theme().muted })
-                .text_color(if is_active { cx.theme().accent_foreground } else { cx.theme().muted_foreground })
-                .hover(|s| s.opacity(0.85))
-                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                    p.update(cx, |this, cx| {
-                        this.view_mode = mode;
-                        cx.notify();
-                    });
-                })
-                .child(label)
+        // 2. Filter and sort rows
+        let query = self.search_query.trim().to_lowercase();
+        let mut rows: Vec<ProjectItemRow> = all_rows
+            .into_iter()
+            .filter(|r| {
+                query.is_empty()
+                    || r.name.to_lowercase().contains(&query)
+                    || r.type_name.to_lowercase().contains(&query)
+            })
+            .collect();
+
+        match self.sort_mode {
+            ProjectSortMode::Name => {
+                rows.sort_by(|a, b| {
+                    let cmp = a.name.to_lowercase().cmp(&b.name.to_lowercase());
+                    if self.sort_ascending { cmp } else { cmp.reverse() }
+                });
+            }
+            ProjectSortMode::Type => {
+                rows.sort_by(|a, b| {
+                    let cmp = a.type_name.cmp(&b.type_name).then(a.name.cmp(&b.name));
+                    if self.sort_ascending { cmp } else { cmp.reverse() }
+                });
+            }
+            ProjectSortMode::Size => {
+                rows.sort_by(|a, b| {
+                    let cmp = a.size_bytes.cmp(&b.size_bytes).then(a.name.cmp(&b.name));
+                    if self.sort_ascending { cmp } else { cmp.reverse() }
+                });
+            }
+            ProjectSortMode::FrameRate => {
+                rows.sort_by(|a, b| {
+                    let cmp = a.fps_display.cmp(&b.fps_display).then(a.name.cmp(&b.name));
+                    if self.sort_ascending { cmp } else { cmp.reverse() }
+                });
+            }
+        }
+
+        // Selected item
+        let selected_row: Option<&ProjectItemRow> = if let Some(ref sel) = self.selected_item {
+            rows.iter().find(|r| &r.selection == sel).or_else(|| rows.first())
+        } else {
+            rows.first()
         };
-        let filter_row = h_flex()
-            .px_2()
+
+        // 3. Top Panel Header: [::] [📁 Project •]    [🗗] [⋮]
+        let p_more_menu = cx.entity().clone();
+        let panel_header = h_flex()
+            .px_3()
+            .py_2()
             .border_b_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().background)
-            .gap_1()
+            .border_color(rgb(0x232428))
+            .bg(rgb(0x18191c))
             .items_center()
             .justify_between()
-            .flex_wrap()
             .child(
                 h_flex()
-                    .gap_1()
+                    .gap_2()
                     .items_center()
-                    .flex_wrap()
-                    .child(make_tab(ProjectFilterType::All, total_count))
-                    .child(make_tab(ProjectFilterType::Footage, assets_count))
-                    .child(make_tab(ProjectFilterType::Solids, solids_count))
-                    .child(make_tab(ProjectFilterType::Generators, generators_count))
-                    .child(make_tab(ProjectFilterType::Compositions, comps_count)),
+                    .child(icon_box_color(IconName::GripVertical, rgb(0x64748b)))
+                    .child(icon_box_color(IconName::Folder, rgb(0x38bdf8)))
+                    .child(
+                        div()
+                            .font_bold()
+                            .text_sm()
+                            .text_color(rgb(0xf8fafc))
+                            .child("Project")
+                    )
+                    .child(
+                        div()
+                            .w(px(6.))
+                            .h(px(6.))
+                            .rounded_full()
+                            .bg(rgb(0x10b981))
+                    )
             )
             .child(
                 h_flex()
-                    .gap_1()
+                    .gap_1p5()
                     .items_center()
                     .child(
                         div()
                             .cursor_pointer()
-                            .px_2()
-                            .py_0p5()
+                            .p_1()
                             .rounded_sm()
-                            .text_xs()
-                            .bg(cx.theme().secondary)
-                            .text_color(cx.theme().muted_foreground)
-                            .hover(|s| s.opacity(0.85))
-                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                p_sort.update(cx, |this, cx| {
-                                    this.sort_mode = this.sort_mode.next();
+                            .text_color(rgb(0x94a3b8))
+                            .hover(|s| s.bg(rgb(0x27282d)).text_color(rgb(0xffffff)))
+                            .child(icon_box(IconName::Copy))
+                    )
+                    .child(
+                        div()
+                            .cursor_pointer()
+                            .p_1()
+                            .rounded_sm()
+                            .text_color(rgb(0x94a3b8))
+                            .hover(|s| s.bg(rgb(0x27282d)).text_color(rgb(0xffffff)))
+                            .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+                                let pos = event.position;
+                                p_more_menu.update(cx, |this, cx| {
+                                    this.open_context_menu(ProjectContextMenuTarget::BinBackground, pos);
                                     cx.notify();
                                 });
                             })
-                            .child(format!("Sort: {sort_label}")),
+                            .child(icon_box(IconName::EllipsisVertical))
                     )
-                    .child(view_btn(ProjectViewMode::List, "List", "project_view_list"))
-                    .child(view_btn(ProjectViewMode::Grid, "Grid", "project_view_grid")),
             );
 
-        let mut bin_items: Vec<AnyElement> = Vec::new();
+        // 4. Selected Item Info Card
+        let preview_card = if let Some(item) = selected_row {
+            let dims_line = if let Some((w, h)) = item.dimensions {
+                let fps = if item.fps_display == "—" { "25.00 fps".to_string() } else { format!("{} fps", item.fps_display) };
+                format!("{w} × {h}  ·  (1.00 PAR)  ·  {fps}")
+            } else {
+                format!("(1.00 PAR)  ·  {} fps", item.fps_display)
+            };
+            let dur_line = item.duration_str.clone().unwrap_or_else(|| "00:00:23:14 · 48.000 kHz / 16-bit / Stereo".to_string());
+            let thumb_badge = if item.dimensions.map(|(w, _)| w >= 3840).unwrap_or(false) {
+                "4K"
+            } else if item.dimensions.map(|(w, _)| w >= 1280).unwrap_or(false) {
+                "HD"
+            } else if item.type_name.contains("Audio") {
+                "AUDIO"
+            } else if item.type_name.contains("Vector") {
+                "VEC"
+            } else {
+                "HD"
+            };
 
-        if let Some(comp) = comp_opt {
-            // --- Section 1: Compositions ---
-            if active_filter == ProjectFilterType::All || active_filter == ProjectFilterType::Compositions {
-                bin_items.push(ae::section_header("COMPOSITIONS", Some(1)).into_any_element());
-
-                // Active comp card
-                bin_items.push(
+            h_flex()
+                .mx_2p5()
+                .my_2()
+                .p_2p5()
+                .rounded_lg()
+                .bg(rgb(0x1c1d21))
+                .border_1()
+                .border_color(rgb(0x2a2b30))
+                .items_center()
+                .justify_between()
+                .gap_2p5()
+                .child(
                     h_flex()
-                        .px_2()
-                        .py_1p5()
-                        .rounded_md()
-                        .bg(cx.theme().muted)
-                        .text_xs()
+                        .gap_2p5()
                         .items_center()
-                        .justify_between()
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .items_center()
-                                .child(
-                                    div()
-                                        .w(px(24.))
-                                        .h(px(24.))
-                                        .rounded_sm()
-                                        .bg(cx.theme().accent)
-                                        .text_color(cx.theme().accent_foreground)
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .child(icon_box(IconName::Film)),
-                                )
-                                .child(
-                                    v_flex()
-                                        .child(div().font_semibold().child(comp.name.clone()))
-                                        .child(
-                                            h_flex()
-                                                .gap_1p5()
-                                                .text_xs()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(format!("{}x{}", comp.width, comp.height))
-                                                .child("•")
-                                                .child(format!("{:.0}fps", comp.frame_rate))
-                                                .child("•")
-                                                .child(format!("{}", comp.duration)),
-                                        ),
-                                ),
-                        )
+                        .flex_1()
+                        .overflow_hidden()
                         .child(
                             div()
-                                .px_2()
-                                .py_0p5()
-                                .rounded_sm()
-                                .bg(cx.theme().primary)
-                                .text_color(cx.theme().primary_foreground)
-                                .font_medium()
-                                .child("Active"),
-                        )
-                        .into_any_element(),
-                );
-            }
-
-            // --- Section 2: Project Media & Bins ---
-            if active_filter == ProjectFilterType::All || active_filter == ProjectFilterType::Footage {
-                bin_items.push(
-                    ae::section_header("PROJECT MEDIA", Some(state.project.assets.len()))
-                        .into_any_element(),
-                );
-
-                if state.project.assets.is_empty() {
-                    bin_items.push(
-                        div()
-                            .id("project_media_empty")
-                            .test_support()
-                            .px_3()
-                            .py_3()
-                            .border_1()
-                            .border_dashed()
-                            .border_color(cx.theme().border)
-                            .rounded_md()
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .justify_center()
-                            .gap_1()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(div().child(icon_box(IconName::FolderOpen)))
-                            .child(div().child("No external media imported yet."))
-                            .child(div().text_color(cx.theme().muted_foreground).child("Click 'Import Media' or '+ Sample' to add assets."))
-                            .into_any_element(),
-                    );
-                } else {
-                    let mut ordered: Vec<&project::Asset> =
-                        state.project.assets.iter().collect();
-                    match self.sort_mode {
-                        ProjectSortMode::Name => ordered.sort_by(|a, b| {
-                            a.name.to_lowercase().cmp(&b.name.to_lowercase())
-                        }),
-                        ProjectSortMode::Type => ordered.sort_by(|a, b| {
-                            format!("{:?}", a.asset_type)
-                                .cmp(&format!("{:?}", b.asset_type))
-                                .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-                        }),
-                    }
-                    let mut grid_cards: Vec<AnyElement> = Vec::new();
-                    for asset in ordered {
-                        let (type_str, icon) = match &asset.asset_type {
-                            project::AssetType::Image => ("PNG/JPG", IconName::Image),
-                            project::AssetType::Video => ("VIDEO", IconName::Film),
-                            project::AssetType::Audio => ("AUDIO", IconName::Music),
-                            project::AssetType::Vector => ("SVG", IconName::Folder),
-                            project::AssetType::Font => ("FONT", IconName::Type),
-                            project::AssetType::Other(_) => ("MEDIA", IconName::Layers),
-                        };
-
-                        let display_name = asset
-                            .path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or(&asset.name)
-                            .to_string();
-
-                        let asset_id_del = asset.id.clone();
-                        let asset_id_add = asset.id.clone();
-                        let s_del = self.state.clone();
-                        let s_add = self.state.clone();
-                        let p_asset_rclick = cx.entity().clone();
-                        let aid_rclick = asset.id.clone();
-
-                        if grid_mode {
-                            grid_cards.push(project_asset_card(
-                                asset,
-                                &self.state,
-                                &cx.entity().clone(),
-                                cx,
-                            ));
-                            continue;
-                        }
-
-                        bin_items.push(
-                            h_flex()
-                                .id(SharedString::from(format!("project_asset_item_{}", asset.id)))
-                                .test_support()
-                                .px_2()
-                                .py_1p5()
+                                .w(px(58.))
+                                .h(px(52.))
                                 .rounded_md()
-                                .text_xs()
-                                .items_center()
-                                .justify_between()
-                                .bg(cx.theme().secondary)
+                                .bg(rgb(0x121316))
                                 .border_1()
-                                .border_color(cx.theme().border)
-                                .text_color(cx.theme().foreground)
-                                .hover(|s| s.bg(cx.theme().muted))
-                                .on_mouse_down(MouseButton::Right, move |event, _window, cx| {
-                                    let pos = event.position;
-                                    p_asset_rclick.update(cx, |this, cx| {
-                                        this.open_context_menu(ProjectContextMenuTarget::Asset(aid_rclick.clone()), pos);
-                                        cx.notify();
-                                    });
+                                .border_color(rgb(0x27282d))
+                                .relative()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child({
+                                    if let (Some(p), IconName::Image) = (&item.path, item.icon) {
+                                        gpui::img(p.clone()).size_full().rounded_md().into_any_element()
+                                    } else {
+                                        icon_box_size(item.icon, 22.).text_color(item.icon_color).into_any_element()
+                                    }
                                 })
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .bottom(px(2.))
+                                        .right(px(3.))
+                                        .text_xs()
+                                        .font_bold()
+                                        .text_color(rgb(0x71717a))
+                                        .child(thumb_badge)
+                                )
+                        )
+                        .child(
+                            v_flex()
+                                .gap_0p5()
+                                .flex_1()
+                                .overflow_hidden()
                                 .child(
                                     h_flex()
                                         .gap_2()
                                         .items_center()
-                                        .child({
-                                            let thumb_path =
-                                                match &asset.asset_type {
-                                                    project::AssetType::Image => {
-                                                        Some(asset.path.clone())
-                                                    }
-                                                    _ => None,
-                                                };
-                                            match thumb_path {
-                                                Some(p) => gpui::img(p)
-                                                    .w(px(28.))
-                                                    .h(px(28.))
-                                                    .rounded_sm()
-                                                    .into_any_element(),
-                                                None => div()
-                                                    .w(px(28.))
-                                                    .h(px(28.))
-                                                    .rounded_sm()
-                                                    .bg(cx.theme().muted)
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .child(icon_box(icon))
-                                                    .into_any_element(),
-                                            }
-                                        })
-                                        .child(
-                                            v_flex()
-                                                .child(div().font_semibold().child(display_name))
-                                                .child(div().text_color(cx.theme().muted_foreground).child(type_str)),
-                                        ),
-                                )
-                                .child(
-                                    h_flex()
-                                        .gap_1p5()
-                                        .items_center()
+                                        .overflow_hidden()
                                         .child(
                                             div()
-                                                .cursor_pointer()
-                                                .px_2()
-                                                .py_0p5()
-                                                .rounded_sm()
-                                                .bg(cx.theme().primary)
-                                                .text_color(cx.theme().primary_foreground)
-                                                .hover(|s| s.opacity(0.85))
-                                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                    let aid = asset_id_add.clone();
-                                                    s_add.update(cx, |s, cx| {
-                                                        let _ = s.add_asset_layer(&aid);
-                                                        cx.notify();
-                                                    });
-                                                })
-                                                .child("+ Comp"),
+                                                .font_bold()
+                                                .text_sm()
+                                                .text_color(rgb(0xf8fafc))
+                                                .truncate()
+                                                .child(item.name.clone())
                                         )
                                         .child(
                                             div()
-                                                .cursor_pointer()
-                                                .p_1()
+                                                .px_1p5()
+                                                .py_0p5()
                                                 .rounded_sm()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .hover(|s| s.bg(rgb(0xef4444)).text_color(rgb(0xffffff)))
-                                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                    s_del.update(cx, |s, cx| {
-                                                        let _ = s.delete_asset(&asset_id_del);
-                                                        cx.notify();
-                                                    });
-                                                })
-                                                .child(icon_box(IconName::Trash)),
-                                        ),
+                                                .text_xs()
+                                                .font_semibold()
+                                                .bg(rgba(0x0ea5e926))
+                                                .border_1()
+                                                .border_color(rgba(0x0ea5e966))
+                                                .text_color(rgb(0x38bdf8))
+                                                .child(item.badge.clone())
+                                        )
                                 )
-                                .into_any_element(),
-                        );
-                    }
-                    if grid_mode && !grid_cards.is_empty() {
-                        bin_items.push(project_grid_wrap(grid_cards));
-                    }
-                }
-            }
-
-            // --- Section 3: Project Solids & Footage Bin ---
-            if active_filter == ProjectFilterType::All || active_filter == ProjectFilterType::Solids {
-                let mut solids: Vec<_> = comp
-                    .layers
-                    .iter()
-                    .filter(|l| matches!(&l.source, LayerSource::Solid { .. }))
-                    .collect();
-                if self.sort_mode == ProjectSortMode::Name {
-                    solids.sort_by_key(|a| a.name.to_lowercase());
-                }
-
-                bin_items.push(
-                    h_flex()
-                        .px_2()
-                        .py_1()
-                        .mt_2()
-                        .bg(cx.theme().secondary)
-                        .rounded_sm()
-                        .items_center()
-                        .justify_between()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(0x94a3b8))
+                                        .truncate()
+                                        .child(dims_line)
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(0x64748b))
+                                        .truncate()
+                                        .child(dur_line)
+                                )
+                        )
+                )
+                .child(
+                    div()
                         .text_xs()
-                        .font_semibold()
-                        .text_color(cx.theme().foreground)
-                        .child(
-                            h_flex()
-                                .gap_1p5()
-                                .items_center()
-                                .child(icon_box(IconName::Folder))
-                                .child("SOLIDS BIN"),
-                        )
-                        .child(
-                            div()
-                                .px_1p5()
-                                .rounded_sm()
-                                .bg(cx.theme().muted)
-                                .text_color(cx.theme().muted_foreground)
-                                .child(format!("{}", solids.len())),
-                        )
-                        .into_any_element(),
-                );
+                        .font_medium()
+                        .text_color(rgb(0x94a3b8))
+                        .child(item.size_formatted.clone())
+                )
+                .into_any_element()
+        } else {
+            h_flex()
+                .mx_2p5()
+                .my_2()
+                .p_2p5()
+                .rounded_lg()
+                .bg(rgb(0x1c1d21))
+                .border_1()
+                .border_color(rgb(0x2a2b30))
+                .items_center()
+                .justify_between()
+                .child(
+                    div().text_xs().text_color(rgb(0x94a3b8)).child("No media selected · Import media to start")
+                )
+                .into_any_element()
+        };
 
-                if solids.is_empty() {
-                    bin_items.push(
+        // 5. Search Bar & View Mode Toggle
+        let p_search_clear = cx.entity().clone();
+        let p_view_list = cx.entity().clone();
+        let p_view_grid = cx.entity().clone();
+        let is_grid = self.view_mode == ProjectViewMode::Grid;
+
+        let search_bar = h_flex()
+            .px_2p5()
+            .pb_2()
+            .gap_2()
+            .items_center()
+            .child(
+                h_flex()
+                    .flex_1()
+                    .h(px(28.))
+                    .px_2()
+                    .rounded_md()
+                    .bg(rgb(0x16171a))
+                    .border_1()
+                    .border_color(rgb(0x28292e))
+                    .items_center()
+                    .gap_1p5()
+                    .child(icon_box_color(IconName::Search, rgb(0x64748b)))
+                    .child(
+                        Input::new(&search_input.read(cx).0)
+                            .id("project_search_input")
+                            .w_full()
+                    )
+                    .child(if !query.is_empty() {
+                        let s_inp = search_input.read(cx).0.clone();
                         div()
-                            .id("project_solids_empty")
-                            .test_support()
-                            .px_2()
-                            .py_2()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("No solid footage items. Click '+ Solid' to create one.")
-                            .into_any_element(),
-                    );
-                } else {
-                    let mut solid_cards: Vec<AnyElement> = Vec::new();
-                    for solid in solids {
-                        if grid_mode {
-                            solid_cards.push(project_solid_card(
-                                solid,
-                                &cx.entity().clone(),
-                                cx,
-                            ));
-                            continue;
-                        }
-                        let (w, h, col) = match &solid.source {
-                            LayerSource::Solid { width, height, color, .. } => (*width, *height, color.value),
-                            _ => (1920, 1080, Color::WHITE),
-                        };
-
-                        let p_solid_rclick = cx.entity().clone();
-                        let sid_rclick = solid.id.clone();
-                        let row = h_flex()
-                            .id(SharedString::from(format!("project_solid_item_{}", solid.id)))
-                            .test_support()
-                            .px_2()
-                            .py_1p5()
-                            .rounded_md()
-                            .text_xs()
-                            .items_center()
-                            .justify_between()
-                            .bg(cx.theme().secondary)
-                            .border_1()
-                            .border_color(cx.theme().border)
-                            .text_color(cx.theme().foreground)
-                            .hover(|s| s.bg(cx.theme().muted))
-                            .on_mouse_down(MouseButton::Right, move |event, _window, cx| {
-                                let pos = event.position;
-                                p_solid_rclick.update(cx, |this, cx| {
-                                    this.open_context_menu(ProjectContextMenuTarget::Solid(sid_rclick.clone()), pos);
+                            .cursor_pointer()
+                            .p_0p5()
+                            .text_color(rgb(0x94a3b8))
+                            .hover(|s| s.text_color(rgb(0xffffff)))
+                            .on_mouse_down(MouseButton::Left, move |_e, window, cx| {
+                                s_inp.update(cx, |inp, cx| inp.set_value("", window, cx));
+                                p_search_clear.update(cx, |this, cx| {
+                                    this.search_query.clear();
                                     cx.notify();
                                 });
                             })
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .items_center()
-                                    .child(
-                                        div()
-                                            .w(px(20.))
-                                            .h(px(20.))
-                                            .rounded_sm()
-                                            .border_1()
-                                            .border_color(cx.theme().border)
-                                            .bg(Rgba { r: col.r, g: col.g, b: col.b, a: col.a }),
-                                    )
-                                    .child(
-                                        v_flex()
-                                            .child(div().font_semibold().child(format!("{} (Footage)", solid.name)))
-                                            .child(div().text_color(cx.theme().muted_foreground).child(format!("{}x{}", w, h))),
-                                    ),
-                            );
-                        bin_items.push(row.into_any_element());
-                    }
-                    if grid_mode && !solid_cards.is_empty() {
-                        bin_items.push(project_grid_wrap(solid_cards));
-                    }
-                }
-            }
-
-            // --- Section 4: Generators Bin (procedural layers) ---
-                if active_filter == ProjectFilterType::All
-                    || active_filter == ProjectFilterType::Generators
-                {
-                    let mut generators: Vec<_> = comp
-                        .layers
-                        .iter()
-                        .filter(|l| matches!(&l.source, LayerSource::Procedural { .. }))
-                        .collect();
-                    if self.sort_mode == ProjectSortMode::Name {
-                        generators.sort_by_key(|a| a.name.to_lowercase());
-                    }
-
-                    bin_items.push(
-                        ae::section_header("GENERATORS", Some(generators.len())).into_any_element(),
-                    );
-
-                    if generators.is_empty() {
-                        bin_items.push(
-                            div()
-                                .id("project_generators_empty")
-                                .test_support()
-                                .px_2()
-                                .py_2()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("No generator layers. Add one from the Effects browser.")
-                                .into_any_element(),
-                        );
+                            .child(icon_box(IconName::X))
+                            .into_any_element()
                     } else {
-                        let mut generator_cards: Vec<AnyElement> = Vec::new();
-                        for gen in generators {
-                            let gen_type = match &gen.source {
-                                LayerSource::Procedural { generator_type, .. } => {
-                                    generator_type.clone()
-                                }
-                                _ => String::new(),
-                            };
-                            if grid_mode {
-                                let p_gen_rclick = cx.entity().clone();
-                                let gid_rclick = gen.id.clone();
-                                generator_cards.push(
-                                    v_flex()
-                                        .id(SharedString::from(format!(
-                                            "project_generator_item_{}",
-                                            gen.id
-                                        )))
-                                        .test_support()
-                                        .w(px(104.))
-                                        .p_2()
-                                        .gap_1()
-                                        .rounded_md()
-                                        .text_xs()
-                                        .items_center()
-                                        .bg(cx.theme().secondary)
-                                        .border_1()
-                                        .border_color(cx.theme().border)
-                                        .text_color(cx.theme().foreground)
-                                        .hover(|s| s.bg(cx.theme().muted))
-                                        .on_mouse_down(
-                                            MouseButton::Right,
-                                            move |event, _window, cx| {
-                                                let pos = event.position;
-                                                p_gen_rclick.update(cx, |this, cx| {
-                                                    this.open_context_menu(
-                                                        ProjectContextMenuTarget::Generator(
-                                                            gid_rclick.clone(),
-                                                        ),
-                                                        pos,
-                                                    );
-                                                    cx.notify();
-                                                });
-                                            },
-                                        )
-                                        .child(
-                                            div()
-                                                .w(px(56.))
-                                                .h(px(56.))
-                                                .rounded_sm()
-                                                .bg(cx.theme().muted)
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .child(icon_box(IconName::Sparkles)),
-                                        )
-                                        .child(
-                                            div()
-                                                .font_semibold()
-                                                .truncate()
-                                                .w_full()
-                                                .text_center()
-                                                .child(gen.name.clone()),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .truncate()
-                                                .w_full()
-                                                .text_center()
-                                                .child(gen_type),
-                                        )
-                                        .into_any_element(),
-                                );
-                                continue;
+                        div().into_any_element()
+                    })
+            )
+            .child(
+                h_flex()
+                    .h(px(28.))
+                    .rounded_md()
+                    .bg(rgb(0x16171a))
+                    .border_1()
+                    .border_color(rgb(0x28292e))
+                    .p_0p5()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .id("project_view_list")
+                            .test_support()
+                            .cursor_pointer()
+                            .px_1p5()
+                            .py_0p5()
+                            .rounded_sm()
+                            .bg(if !is_grid { rgb(0x27282d) } else { rgba(0x00000000) })
+                            .text_color(if !is_grid { rgb(0xf1f5f9) } else { rgb(0x64748b) })
+                            .hover(|s| s.text_color(rgb(0xffffff)))
+                            .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                                p_view_list.update(cx, |this, cx| {
+                                    this.view_mode = ProjectViewMode::List;
+                                    cx.notify();
+                                });
+                            })
+                            .child(icon_box(IconName::List))
+                    )
+                    .child(
+                        div()
+                            .id("project_view_grid")
+                            .test_support()
+                            .cursor_pointer()
+                            .px_1p5()
+                            .py_0p5()
+                            .rounded_sm()
+                            .bg(if is_grid { rgb(0x27282d) } else { rgba(0x00000000) })
+                            .text_color(if is_grid { rgb(0xf1f5f9) } else { rgb(0x64748b) })
+                            .hover(|s| s.text_color(rgb(0xffffff)))
+                            .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                                p_view_grid.update(cx, |this, cx| {
+                                    this.view_mode = ProjectViewMode::Grid;
+                                    cx.notify();
+                                });
+                            })
+                            .child(icon_box(IconName::LayoutGrid))
+                    )
+            );
+
+        // 6. Table Header: Name ▲ | 🏷 Type | Size | Frame Ra..
+        let p_sort_name = cx.entity().clone();
+        let p_sort_type = cx.entity().clone();
+        let p_sort_size = cx.entity().clone();
+        let p_sort_fps = cx.entity().clone();
+
+        let name_arrow = if self.sort_mode == ProjectSortMode::Name {
+            if self.sort_ascending { "▲" } else { "▼" }
+        } else { "" };
+        let type_arrow = if self.sort_mode == ProjectSortMode::Type {
+            if self.sort_ascending { "▲" } else { "▼" }
+        } else { "" };
+        let size_arrow = if self.sort_mode == ProjectSortMode::Size {
+            if self.sort_ascending { "▲" } else { "▼" }
+        } else { "" };
+        let fps_arrow = if self.sort_mode == ProjectSortMode::FrameRate {
+            if self.sort_ascending { "▲" } else { "▼" }
+        } else { "" };
+
+        let table_header = h_flex()
+            .h(px(24.))
+            .px_2p5()
+            .bg(rgb(0x141518))
+            .border_y_1()
+            .border_color(rgb(0x232428))
+            .text_xs()
+            .font_medium()
+            .text_color(rgb(0x94a3b8))
+            .items_center()
+            .child(
+                h_flex()
+                    .id("project_sort_name")
+                    .test_support()
+                    .flex_1()
+                    .gap_1()
+                    .cursor_pointer()
+                    .items_center()
+                    .hover(|s| s.text_color(rgb(0xffffff)))
+                    .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                        p_sort_name.update(cx, |this, cx| {
+                            if this.sort_mode == ProjectSortMode::Name {
+                                this.sort_ascending = !this.sort_ascending;
+                            } else {
+                                this.sort_mode = ProjectSortMode::Name;
+                                this.sort_ascending = true;
                             }
-                            let p_gen_rclick = cx.entity().clone();
-                            let gid_rclick = gen.id.clone();
-                            let row = h_flex()
-                                .id(SharedString::from(format!(
-                                    "project_generator_item_{}",
-                                    gen.id
-                                )))
-                                .test_support()
-                                .px_2()
-                                .py_1p5()
-                                .rounded_md()
-                                .text_xs()
-                                .items_center()
-                                .justify_between()
-                                .bg(cx.theme().secondary)
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .text_color(cx.theme().foreground)
-                                .hover(|s| s.bg(cx.theme().muted))
-                                .on_mouse_down(MouseButton::Right, move |event, _window, cx| {
-                                    let pos = event.position;
-                                    p_gen_rclick.update(cx, |this, cx| {
-                                        this.open_context_menu(
-                                            ProjectContextMenuTarget::Generator(gid_rclick.clone()),
-                                            pos,
-                                        );
-                                        cx.notify();
-                                    });
-                                })
-                                .child(
-                                    h_flex()
-                                        .gap_2()
-                                        .items_center()
-                                        .child(
-                                            div()
-                                                .w(px(28.))
-                                                .h(px(28.))
-                                                .rounded_sm()
-                                                .bg(cx.theme().muted)
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .child(icon_box(IconName::Sparkles)),
-                                        )
-                                        .child(
-                                            v_flex()
-                                                .child(div().font_semibold().child(gen.name.clone()))
-                                                .child(
-                                                    div()
-                                                        .text_color(cx.theme().muted_foreground)
-                                                        .child(gen_type),
-                                                ),
-                                        ),
-                                );
-                            generator_cards.push(row.into_any_element());
-                        }
-                        if grid_mode {
-                            bin_items.push(project_grid_wrap(generator_cards));
-                        } else {
-                            bin_items.extend(generator_cards);
+                            cx.notify();
+                        });
+                    })
+                    .child(format!("Name {name_arrow}"))
+            )
+            .child(div().w(px(1.)).h(px(12.)).bg(rgb(0x27282d)).mx_1())
+            .child(
+                h_flex()
+                    .id("project_sort_type")
+                    .test_support()
+                    .w(px(110.))
+                    .gap_1()
+                    .cursor_pointer()
+                    .items_center()
+                    .hover(|s| s.text_color(rgb(0xffffff)))
+                    .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                        p_sort_type.update(cx, |this, cx| {
+                            if this.sort_mode == ProjectSortMode::Type {
+                                this.sort_ascending = !this.sort_ascending;
+                            } else {
+                                this.sort_mode = ProjectSortMode::Type;
+                                this.sort_ascending = true;
+                            }
+                            cx.notify();
+                        });
+                    })
+                    .child(icon_box_color(IconName::Tag, rgb(0x64748b)))
+                    .child(format!("Type {type_arrow}"))
+            )
+            .child(div().w(px(1.)).h(px(12.)).bg(rgb(0x27282d)).mx_1())
+            .child(
+                div()
+                    .id("project_sort_size")
+                    .test_support()
+                    .w(px(65.))
+                    .text_right()
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(rgb(0xffffff)))
+                    .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                        p_sort_size.update(cx, |this, cx| {
+                            if this.sort_mode == ProjectSortMode::Size {
+                                this.sort_ascending = !this.sort_ascending;
+                            } else {
+                                this.sort_mode = ProjectSortMode::Size;
+                                this.sort_ascending = true;
+                            }
+                            cx.notify();
+                        });
+                    })
+                    .child(format!("Size {size_arrow}"))
+            )
+            .child(div().w(px(1.)).h(px(12.)).bg(rgb(0x27282d)).mx_1())
+            .child(
+                div()
+                    .id("project_sort_framerate")
+                    .test_support()
+                    .w(px(70.))
+                    .text_right()
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(rgb(0xffffff)))
+                    .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                        p_sort_fps.update(cx, |this, cx| {
+                            if this.sort_mode == ProjectSortMode::FrameRate {
+                                this.sort_ascending = !this.sort_ascending;
+                            } else {
+                                this.sort_mode = ProjectSortMode::FrameRate;
+                                this.sort_ascending = true;
+                            }
+                            cx.notify();
+                        });
+                    })
+                    .child(format!("Frame Ra.. {fps_arrow}"))
+            );
+
+        // 7. Table rows in list mode
+        let mut row_elements: Vec<AnyElement> = Vec::new();
+        for row in &rows {
+            let row_id = match &row.selection {
+                ProjectSelection::Composition(cid) => format!("project_comp_item_{cid}"),
+                ProjectSelection::Asset(aid) => format!("project_asset_item_{aid}"),
+                ProjectSelection::Solid(sid) => format!("project_solid_item_{sid}"),
+                ProjectSelection::Adjustment(lid) => format!("project_adjustment_item_{lid}"),
+                ProjectSelection::Generator(gid) => format!("project_generator_item_{gid}"),
+            };
+            let is_selected = self.selected_item.as_ref() == Some(&row.selection);
+            let p_select = cx.entity().clone();
+            let sel_for_click = row.selection.clone();
+            let s_double = self.state.clone();
+            let sel_for_double = row.selection.clone();
+            let p_rclick = cx.entity().clone();
+            let rclick_target = match &row.selection {
+                ProjectSelection::Composition(_) => ProjectContextMenuTarget::BinBackground,
+                ProjectSelection::Asset(aid) => ProjectContextMenuTarget::Asset(aid.clone()),
+                ProjectSelection::Solid(sid) => ProjectContextMenuTarget::Solid(sid.clone()),
+                ProjectSelection::Adjustment(lid) | ProjectSelection::Generator(lid) => ProjectContextMenuTarget::Generator(lid.clone()),
+            };
+
+            let el = h_flex()
+                .id(SharedString::from(row_id))
+                .test_support()
+                .h(px(28.))
+                .px_2p5()
+                .rounded_sm()
+                .cursor_pointer()
+                .items_center()
+                .bg(if is_selected { rgb(0x1e2638) } else { rgba(0x00000000) })
+                .hover(|s| if is_selected { s } else { s.bg(rgb(0x1a1b20)) })
+                .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+                    p_select.update(cx, |this, cx| {
+                        this.selected_item = Some(sel_for_click.clone());
+                        cx.notify();
+                    });
+                    if event.click_count >= 2 {
+                        match &sel_for_double {
+                            ProjectSelection::Composition(cid) => {
+                                s_double.update(cx, |s, cx| {
+                                    s.set_active_composition(cid);
+                                    cx.notify();
+                                });
+                            }
+                            ProjectSelection::Asset(aid) => {
+                                s_double.update(cx, |s, cx| {
+                                    let _ = s.add_asset_layer(aid);
+                                    cx.notify();
+                                });
+                            }
+                            _ => {}
                         }
                     }
-                }
-            }
-
-        let sample_state = self.state.clone();
-
-            let p_bin_rclick = cx.entity().clone();
-            let mut root = div()
-                .id("project_panel")
-                .test_support()
-                .track_focus(&self.focus_handle)
-                .size_full()
-                .flex()
-                .flex_col()
-                .relative()
-                .overflow_hidden()
-                .bg(cx.theme().background)
-                .text_color(cx.theme().foreground)
-                // Header / Actions toolbar
+                })
+                .on_mouse_down(MouseButton::Right, move |event, _window, cx| {
+                    let pos = event.position;
+                    p_rclick.update(cx, |this, cx| {
+                        this.open_context_menu(rclick_target.clone(), pos);
+                        cx.notify();
+                    });
+                })
                 .child(
                     h_flex()
-                        .px_3()
-                        .py_2()
-                        .gap_1p5()
-                        .border_b_1()
-                        .border_color(cx.theme().border)
-                        .bg(cx.theme().secondary)
+                        .flex_1()
+                        .gap_2()
                         .items_center()
-                        .justify_between()
+                        .overflow_hidden()
+                        .child(icon_box_color(row.icon, row.icon_color))
                         .child(
-                            h_flex()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .id("new_comp_button")
-                                        .test_support()
-                                        .px_2()
-                                        .py_1()
-                                        .rounded_sm()
-                                        .bg(cx.theme().muted)
-                                        .hover(|s| s.bg(cx.theme().accent))
-                                        .text_color(cx.theme().foreground)
-                                        .text_xs()
-                                        .cursor_pointer()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .on_mouse_down(MouseButton::Left, {
-                                            let p = cx.entity().clone();
-                                            move |_event, _window, cx| {
-                                                p.update(cx, |this, cx| {
-                                                    this.show_new_comp = true;
-                                                    let num = this.state.read(cx).project.compositions.len() + 1;
-                                                    this.nc_name = format!("Comp {num}");
-                                                    cx.notify();
-                                                });
-                                            }
-                                        })
-                                        .child(icon_box(IconName::Film))
-                                        .child("+ Comp"),
-                                )
-                                .child(
-                                    div()
-                                        .id("import_media_button")
-                                        .test_support()
-                                        .px_2()
-                                        .py_1()
-                                        .rounded_sm()
-                                        .bg(cx.theme().muted)
-                                        .hover(|s| s.bg(cx.theme().accent))
-                                        .text_color(cx.theme().foreground)
-                                        .text_xs()
-                                        .cursor_pointer()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                            let s_import = import_state.clone();
-                                            cx.spawn(|cx: &mut AsyncApp| {
-                                                let cx = cx.clone();
-                                                async move {
-                                                    let (tx, rx) = std::sync::mpsc::channel();
-                                                    let _ = std::thread::Builder::new()
-                                                        .name("file-dialog-worker".to_string())
-                                                        .stack_size(8 * 1024 * 1024)
-                                                        .spawn(move || {
-                                                            let file = rfd::FileDialog::new()
-                                                                .add_filter("Media Files", &["png", "jpg", "jpeg", "mp4", "mov", "webm"])
-                                                                .pick_file();
-                                                            let _ = tx.send(file);
-                                                        });
-                                                    if let Ok(Some(path)) = rx.recv() {
-                                                        cx.update(|cx| {
-                                                            s_import.update(cx, |s, cx| {
-                                                                let _ = s.import_media_file(path);
-                                                                cx.notify();
+                            div()
+                                .truncate()
+                                .font_medium()
+                                .text_xs()
+                                .text_color(if is_selected { rgb(0xffffff) } else { rgb(0xe2e8f0) })
+                                .child(row.name.clone())
+                        )
+                )
+                .child(
+                    h_flex()
+                        .w(px(110.))
+                        .gap_1p5()
+                        .items_center()
+                        .overflow_hidden()
+                        .child(
+                            div().w(px(7.)).h(px(7.)).rounded_xs().bg(row.type_color)
+                        )
+                        .child(
+                            div()
+                                .truncate()
+                                .text_xs()
+                                .text_color(rgb(0x94a3b8))
+                                .child(row.type_name.clone())
+                        )
+                )
+                .child(
+                    div()
+                        .w(px(65.))
+                        .text_right()
+                        .text_xs()
+                        .text_color(if is_selected { rgb(0xffffff) } else { rgb(0x94a3b8) })
+                        .child(row.size_formatted.clone())
+                )
+                .child(
+                    div()
+                        .w(px(70.))
+                        .text_right()
+                        .text_xs()
+                        .text_color(rgb(0x94a3b8))
+                        .child(row.fps_display.clone())
+                );
+
+            row_elements.push(el.into_any_element());
+        }
+
+        // 8. Drag media anywhere to import zone
+        let p_drop_import = import_state.clone();
+        let drop_zone = div()
+            .id("import_media_button")
+            .test_support()
+            .w_full()
+            .py_6()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                let s_imp = p_drop_import.clone();
+                cx.spawn(|cx: &mut AsyncApp| {
+                    let cx = cx.clone();
+                    async move {
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        let _ = std::thread::Builder::new()
+                            .name("file-dialog-worker".to_string())
+                            .stack_size(8 * 1024 * 1024)
+                            .spawn(move || {
+                                let file = rfd::FileDialog::new()
+                                    .add_filter("Media Files", &["png", "jpg", "jpeg", "mp4", "mov", "webm", "svg", "wav", "mp3", "exr"])
+                                    .pick_file();
+                                let _ = tx.send(file);
+                            });
+                        if let Ok(Some(path)) = rx.recv() {
+                            cx.update(|cx| {
+                                s_imp.update(cx, |s, cx| {
+                                    let _ = s.import_media_file(path);
+                                    cx.notify();
+                                });
+                            });
+                        }
+                    }
+                }).detach();
+            })
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x555a64))
+                    .hover(|s| s.text_color(rgb(0x94a3b8)))
+                    .child("+ Drag media anywhere to import")
+            );
+
+        // 9. Bottom status & action toolbar
+        let p_bottom_folder = import_state.clone();
+        let p_bottom_comp = cx.entity().clone();
+        let p_bottom_solid = add_state.clone();
+        let p_bottom_info = cx.entity().clone();
+        let p_bottom_del = del_state.clone();
+        let current_sel = self.selected_item.clone();
+
+        let bottom_bar = h_flex()
+            .h(px(32.))
+            .px_3()
+            .bg(rgb(0x141518))
+            .border_t_1()
+            .border_color(rgb(0x232428))
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .font_bold()
+                    .text_xs()
+                    .text_color(rgb(0xe2e8f0))
+                    .child(format!("{total_items} items  ·  {total_size_formatted}"))
+            )
+            .child(
+                h_flex()
+                    .gap_1p5()
+                    .items_center()
+                    .child(
+                        div()
+                            .id("new_folder_button")
+                            .test_support()
+                            .cursor_pointer()
+                            .p_1()
+                            .rounded_sm()
+                            .text_color(rgb(0x94a3b8))
+                            .hover(|s| s.bg(rgb(0x27282d)).text_color(rgb(0xffffff)))
+                            .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                                let s_imp = p_bottom_folder.clone();
+                                cx.spawn(|cx: &mut AsyncApp| {
+                                    let cx = cx.clone();
+                                    async move {
+                                        let (tx, rx) = std::sync::mpsc::channel();
+                                        let _ = std::thread::Builder::new()
+                                            .name("folder-dialog-worker".to_string())
+                                            .stack_size(8 * 1024 * 1024)
+                                            .spawn(move || {
+                                                let dir = rfd::FileDialog::new().pick_folder();
+                                                let _ = tx.send(dir);
+                                            });
+                                        if let Ok(Some(dir)) = rx.recv() {
+                                            if let Ok(entries) = std::fs::read_dir(&dir) {
+                                                for entry in entries.flatten() {
+                                                    let p = entry.path();
+                                                    if p.is_file() {
+                                                        let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+                                                        if ["png", "jpg", "jpeg", "mp4", "mov", "webm", "svg", "wav", "mp3", "exr"].contains(&ext.as_str()) {
+                                                            let p_clone = p.clone();
+                                                            cx.update(|cx| {
+                                                                s_imp.update(cx, |s, cx| {
+                                                                    let _ = s.import_media_file(p_clone);
+                                                                    cx.notify();
+                                                                });
                                                             });
-                                                        });
+                                                        }
                                                     }
                                                 }
-                                            }).detach();
-                                        })
-                                        .child(icon_box(IconName::FolderOpen))
-                                        .child("Import Media..."),
-                                )
-                                .child(
-                                    div()
-                                        .id("add_solid_button")
-                                        .test_support()
-                                        .px_2()
-                                        .py_1()
-                                        .rounded_sm()
-                                        .bg(cx.theme().muted)
-                                        .hover(|s| s.bg(cx.theme().accent))
-                                        .text_color(cx.theme().foreground)
-                                        .text_xs()
-                                        .cursor_pointer()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                            add_state.update(cx, |s, cx| {
-                                                let color = Color::from_rgba_u8(245, 158, 11, 255);
-                                                let _ = s.add_solid_layer("New Solid", color, 0, 0);
-                                                cx.notify();
-                                            });
-                                        })
-                                        .child(icon_box(IconName::Plus))
-                                        .child("Solid"),
-                                )
-                                .child(
-                                    div()
-                                        .id("add_text_button")
-                                        .test_support()
-                                        .px_2()
-                                        .py_1()
-                                        .rounded_sm()
-                                        .bg(cx.theme().muted)
-                                        .hover(|s| s.bg(cx.theme().accent))
-                                        .text_color(cx.theme().foreground)
-                                        .text_xs()
-                                        .cursor_pointer()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                            txt_state.update(cx, |s, cx| {
-                                                let _ = s.add_text_layer("New Text", None);
-                                                cx.notify();
-                                            });
-                                        })
-                                        .child(icon_box(IconName::Type))
-                                        .child("Text"),
-                                )
-                                .child(
-                                    div()
-                                        .id("add_adjustment_button")
-                                        .test_support()
-                                        .px_2()
-                                        .py_1()
-                                        .rounded_sm()
-                                        .bg(cx.theme().muted)
-                                        .hover(|s| s.bg(cx.theme().accent))
-                                        .text_color(cx.theme().foreground)
-                                        .text_xs()
-                                        .cursor_pointer()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                            adj_state.update(cx, |s, cx| {
-                                                let _ = s.add_adjustment_layer(None);
-                                                cx.notify();
-                                            });
-                                        })
-                                        .child(icon_box(IconName::SlidersHorizontal))
-                                        .child("Adj Layer"),
-                                )
-                                .child(
-                                    div()
-                                        .id("sample_media_button")
-                                        .test_support()
-                                        .px_2()
-                                        .py_1()
-                                        .rounded_sm()
-                                        .bg(cx.theme().muted)
-                                        .hover(|s| s.bg(cx.theme().accent))
-                                        .text_color(cx.theme().foreground)
-                                        .text_xs()
-                                        .cursor_pointer()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                            sample_state.update(cx, |s, cx| {
-                                                let _ = s.import_sample_image();
-                                                cx.notify();
-                                            });
-                                        })
-                                        .child(icon_box(IconName::Image))
-                                        .child("Sample"),
-                                )
-                                .child(
-                                    div()
-                                        .id("delete_asset_button")
-                                        .test_support()
-                                        .px_2()
-                                        .py_1()
-                                        .rounded_sm()
-                                        .bg(cx.theme().muted)
-                                        .hover(|s| s.bg(rgb(0xef4444)).text_color(rgb(0xffffff)))
-                                        .text_color(cx.theme().foreground)
-                                        .text_xs()
-                                        .cursor_pointer()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                            del_state.update(cx, |s, cx| {
-                                                let _ = s.delete_selected_layer();
-                                                cx.notify();
-                                            });
-                                        })
-                                        .child(icon_box(IconName::Trash))
-                                        .child("Delete"),
-                                ),
-                        ),
-                )
-                // Filter bar
-                .child(filter_row)
-                // Organized Bins and Assets List
-                .child(
-                    v_flex()
-                        .id("project_assets")
-                        .test_support()
-                        .flex_1()
-                        .overflow_y_scroll()
-                        .px_2()
-                        .py_1()
-                        .gap_1()
-                        .on_mouse_down(MouseButton::Right, move |event, _window, cx| {
-                            let pos = event.position;
-                            p_bin_rclick.update(cx, |this, cx| {
-                                this.open_context_menu(ProjectContextMenuTarget::BinBackground, pos);
-                                cx.notify();
-                            });
-                        })
-                        .children(bin_items),
-                )
-                // Footer summary
-                .child(
-                    h_flex()
-                        .px_3()
-                        .py_1()
-                        .border_t_1()
-                        .border_color(cx.theme().border)
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(match comp_opt {
-                            Some(comp) => format!(
-                                "1 Comp • {} Assets • {} Layers • {:.2} fps",
-                                state.project.assets.len(),
-                                comp.layers.len(),
-                                comp.frame_rate
-                            ),
-                            None => "0 items".to_string(),
-                        }),
-                );
+                                            }
+                                        }
+                                    }
+                                }).detach();
+                            })
+                            .child(icon_box(IconName::FolderPlus))
+                    )
+                    .child(
+                        div()
+                            .id("new_comp_button")
+                            .test_support()
+                            .cursor_pointer()
+                            .p_1()
+                            .rounded_sm()
+                            .text_color(rgb(0x94a3b8))
+                            .hover(|s| s.bg(rgb(0x27282d)).text_color(rgb(0xffffff)))
+                            .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                                p_bottom_comp.update(cx, |this, cx| {
+                                    this.show_new_comp = true;
+                                    let num = this.state.read(cx).project.compositions.len() + 1;
+                                    this.nc_name = format!("Comp {num}");
+                                    cx.notify();
+                                });
+                            })
+                            .child(icon_box(IconName::Film))
+                    )
+                    .child(
+                        div()
+                            .id("add_solid_button")
+                            .test_support()
+                            .cursor_pointer()
+                            .p_1()
+                            .rounded_sm()
+                            .text_color(rgb(0x94a3b8))
+                            .hover(|s| s.bg(rgb(0x27282d)).text_color(rgb(0xffffff)))
+                            .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                                p_bottom_solid.update(cx, |s, cx| {
+                                    let color = Color::from_rgba_u8(245, 158, 11, 255);
+                                    let _ = s.add_solid_layer("New Solid", color, 0, 0);
+                                    cx.notify();
+                                });
+                            })
+                            .child(icon_box(IconName::Plus))
+                    )
+                    .child(
+                        div()
+                            .id("project_info_button")
+                            .test_support()
+                            .cursor_pointer()
+                            .p_1()
+                            .rounded_sm()
+                            .text_color(rgb(0x94a3b8))
+                            .hover(|s| s.bg(rgb(0x27282d)).text_color(rgb(0xffffff)))
+                            .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                                p_bottom_info.update(cx, |this, cx| {
+                                    this.show_interpret_dialog = !this.show_interpret_dialog;
+                                    cx.notify();
+                                });
+                            })
+                            .child(icon_box(IconName::Info))
+                    )
+                    .child(
+                        div()
+                            .id("delete_asset_button")
+                            .test_support()
+                            .cursor_pointer()
+                            .p_1()
+                            .rounded_sm()
+                            .text_color(rgb(0x94a3b8))
+                            .hover(|s| s.bg(rgb(0xef4444)).text_color(rgb(0xffffff)))
+                            .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                                let sel = current_sel.clone();
+                                p_bottom_del.update(cx, |s, cx| {
+                                    match sel {
+                                        Some(ProjectSelection::Asset(aid)) => {
+                                            let _ = s.delete_asset(&aid);
+                                        }
+                                        Some(ProjectSelection::Solid(lid)) | Some(ProjectSelection::Adjustment(lid)) | Some(ProjectSelection::Generator(lid)) => {
+                                            let _ = s.remove_layer_by_id(&lid);
+                                        }
+                                        _ => {
+                                            let _ = s.delete_selected_layer();
+                                        }
+                                    }
+                                    cx.notify();
+                                });
+                            })
+                            .child(icon_box(IconName::Trash))
+                    )
+            );
+
+        // 10. Root container assembly
+        let p_bin_rclick = cx.entity().clone();
+        let mut root = div()
+            .id("project_panel")
+            .test_support()
+            .track_focus(&self.focus_handle)
+            .size_full()
+            .flex()
+            .flex_col()
+            .relative()
+            .overflow_hidden()
+            .bg(rgb(0x141517))
+            .text_color(cx.theme().foreground)
+            .child(panel_header)
+            .child(preview_card)
+            .child(search_bar);
+
+        if !is_grid {
+            root = root.child(table_header).child(
+                v_flex()
+                    .id("project_assets")
+                    .test_support()
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .px_1()
+                    .py_1()
+                    .gap_0p5()
+                    .on_mouse_down(MouseButton::Right, move |event, _window, cx| {
+                        let pos = event.position;
+                        p_bin_rclick.update(cx, |this, cx| {
+                            this.open_context_menu(ProjectContextMenuTarget::BinBackground, pos);
+                            cx.notify();
+                        });
+                    })
+                    .children(row_elements)
+                    .child(drop_zone)
+            );
+        } else {
+            let mut grid_cards: Vec<AnyElement> = Vec::new();
+            for row in &rows {
+                grid_cards.push(project_grid_card(row, &self.selected_item, &cx.entity().clone(), cx));
+            }
+            root = root.child(
+                v_flex()
+                    .id("project_assets")
+                    .test_support()
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .px_2()
+                    .py_2()
+                    .on_mouse_down(MouseButton::Right, move |event, _window, cx| {
+                        let pos = event.position;
+                        p_bin_rclick.update(cx, |this, cx| {
+                            this.open_context_menu(ProjectContextMenuTarget::BinBackground, pos);
+                            cx.notify();
+                        });
+                    })
+                    .child(project_grid_wrap(grid_cards))
+                    .child(drop_zone)
+            );
+        }
+
+        root = root.child(bottom_bar);
 
             if let Some(ref target) = self.context_menu {
                 let p_close = cx.entity().clone();
@@ -2819,6 +3078,11 @@ impl Render for ProjectPanel {
             if self.show_new_comp {
                 let panel_self = cx.entity().clone();
                 root = root.child(self.render_new_comp_dialog(&panel_self, window, cx));
+            }
+
+            if self.show_interpret_dialog {
+                let panel_self = cx.entity().clone();
+                root = root.child(self.render_interpret_dialog(&panel_self, window, cx));
             }
 
             root
