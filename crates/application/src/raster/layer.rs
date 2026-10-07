@@ -2373,4 +2373,120 @@ mod tests {
         }
         assert!(worst < 0.02, "GPU color chain must match CPU within u8 rounding: {worst}");
     }
+
+    fn gpu_parity_base() -> FloatBuf {
+        // Opaque gradient + a transparent corner (alpha must survive both).
+        let mut base = FloatBuf::clear(64, 64);
+        for y in 0..64 {
+            for x in 0..64 {
+                let (r, g, b) = (x as f32 / 63.0, y as f32 / 63.0, 0.4);
+                let a = if x > 48 && y > 48 { 0.0 } else { 1.0 };
+                base.put(x, y, Px { r: r * a, g: g * a, b: b * a, a });
+            }
+        }
+        base
+    }
+
+    fn gpu_parity_worst(base: &FloatBuf, effects: &[compositor::EvaluatedEffect]) -> f32 {
+        let ctx = RasterFx { time_s: 0.0, frame: 0, res_w: 64.0, res_h: 64.0, duration_s: 0.0, playing: false };
+        let mut cpu = base.clone();
+        apply_layer_fx(&mut cpu, 64.0, 64.0, effects, &ctx, false);
+        let mut gpu = base.clone();
+        apply_layer_fx(&mut gpu, 64.0, 64.0, effects, &ctx, true);
+        let mut worst = 0.0f32;
+        for (c, g) in cpu.px.iter().zip(gpu.px.iter()) {
+            for (cc, gg) in [c.r, c.g, c.b, c.a].into_iter().zip([g.r, g.g, g.b, g.a]) {
+                worst = worst.max((cc - gg).abs());
+            }
+        }
+        worst
+    }
+
+    #[test]
+    fn gpu_point_batch_matches_cpu_within_tolerance() {        use compositor::{EvaluatedEffect, EvaluatedEffectType};
+        if !crate::raster::buffer::gpu_accelerated() {
+            return;
+        }
+        let fx = |id: &str, effect_type: EvaluatedEffectType| EvaluatedEffect {
+            id: id.to_string(),
+            name: id.to_string(),
+            enabled: true,
+            effect_type,
+        };
+        let effects = vec![
+            fx("invert", EvaluatedEffectType::Invert { amount: 60.0 }),
+            fx("exposure", EvaluatedEffectType::Exposure { exposure: 1.5 }),
+            fx("vibrance", EvaluatedEffectType::Vibrance { vibrance: 40.0 }),
+            fx("chroma", EvaluatedEffectType::ChromaKey {
+                key_color: Color::rgba(0.0, 1.0, 0.0, 1.0),
+                tolerance: 30.0,
+                feather: 10.0,
+            }),
+            fx("luma", EvaluatedEffectType::LumaKey { threshold: 20.0, feather: 10.0 }),
+            fx("swap", EvaluatedEffectType::SwapColor {
+                from_color: Color::rgba(0.4, 0.2, 0.2, 1.0),
+                to_color: Color::rgba(0.2, 0.2, 0.8, 1.0),
+                tolerance: 30.0,
+                feather: 10.0,
+            }),
+            fx("vignette", EvaluatedEffectType::Vignette { amount: 50.0, softness: 50.0 }),
+            fx("diffkey", EvaluatedEffectType::Stock {
+                plugin: StockPlugin::DifferenceKey,
+                params: vec![50.0, 15.0, 10.0],
+                colors: Vec::new(),
+            }),
+        ];
+        let worst = gpu_parity_worst(&gpu_parity_base(), &effects);
+        // Eight passes × u8 inter-pass rounding, steepened by key-ramp
+        // slopes (luma/diffkey singles already reach ≈0.018): the per-pass
+        // rounding invariant holds, the batch bar covers the cascade.
+        assert!(worst < 0.03, "GPU point batch must match CPU within cascade rounding: {worst}");
+    }
+
+    #[test]
+    fn gpu_resample_batch_matches_cpu_within_tolerance() {
+        use compositor::{EvaluatedEffect, EvaluatedEffectType};
+        if !crate::raster::buffer::gpu_accelerated() {
+            return;
+        }
+        let fx = |id: &str, effect_type: EvaluatedEffectType| EvaluatedEffect {
+            id: id.to_string(),
+            name: id.to_string(),
+            enabled: true,
+            effect_type,
+        };
+        let stock = |plugin: StockPlugin, params: Vec<f32>| EvaluatedEffect {
+            id: format!("fx_{plugin:?}"),
+            name: format!("{plugin:?}"),
+            enabled: true,
+            effect_type: EvaluatedEffectType::Stock { plugin, params, colors: Vec::new() },
+        };
+        let effects = vec![
+            fx("displace", EvaluatedEffectType::DisplacementMap {
+                max_horizontal: 6.0,
+                max_vertical: -5.0,
+            }),
+            // Identity pins: wave part only, mesh path stays CPU.
+            fx("warp", EvaluatedEffectType::Warp {
+                amount: 30.0,
+                scale: 1.0,
+                cols: 4.0,
+                rows: 4.0,
+                pins: Vec::new(),
+            }),
+            stock(StockPlugin::Wave, vec![12.0, 64.0, 90.0]),
+            stock(StockPlugin::Ripple, vec![10.0, 48.0]),
+            stock(StockPlugin::Twirl, vec![120.0, 40.0]),
+            stock(StockPlugin::Bulge, vec![60.0, 40.0]),
+            stock(StockPlugin::Spherize, vec![70.0, 40.0]),
+            stock(StockPlugin::LensDistortion, vec![25.0, 100.0]),
+            stock(StockPlugin::Mirror, vec![0.0, 50.0]),
+            stock(StockPlugin::Repeat, vec![2.0, 2.0]),
+            stock(StockPlugin::Offset, vec![25.0, 12.0]),
+            stock(StockPlugin::Pixelate, vec![12.0]),
+            stock(StockPlugin::Mosaic, vec![12.0, 6.0]),
+        ];
+        let worst = gpu_parity_worst(&gpu_parity_base(), &effects);
+        assert!(worst < 0.02, "GPU resample batch must match CPU within u8 rounding: {worst}");
+    }
 }

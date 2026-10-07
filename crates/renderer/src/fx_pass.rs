@@ -201,90 +201,194 @@ impl FxPass {
         plugin: StockPlugin,
         target_format: wgpu::TextureFormat,
     ) -> Result<Self, String> {
-        let (body, call, uv_calls): (&str, &str, &[&str]) = match plugin {
+        use crate::effect_filters as ef;
+        let res = "vec2<f32>(u.misc.y, u.misc.z)";
+        let (body, call, resample): (&str, &str, bool) = match plugin {
             StockPlugin::Posterize => (
-                crate::effect_filters::stock_posterize().wgsl,
+                ef::stock_posterize().wgsl,
                 "fx_stock_posterize(uv, color, u.params[0].x)",
-                &[],
+                false,
             ),
             StockPlugin::Threshold => (
-                crate::effect_filters::stock_threshold().wgsl,
+                ef::stock_threshold().wgsl,
                 "fx_stock_threshold(uv, color, u.params[0].x, u.params[0].y)",
-                &[],
+                false,
             ),
             StockPlugin::FilmGrain => (
-                crate::effect_filters::stock_film_grain().wgsl,
+                ef::stock_film_grain().wgsl,
                 "fx_stock_film_grain(uv, color, u.params[0].x, u.misc.x, u.params[0].y)",
-                &[],
+                false,
             ),
             StockPlugin::Scanlines => (
-                crate::effect_filters::stock_scanlines().wgsl,
+                ef::stock_scanlines().wgsl,
                 "fx_stock_scanlines(uv, color, u.params[0].x, u.params[0].y, u.misc.z)",
-                &[],
-            ),
-            StockPlugin::Mosaic => (
-                crate::effect_filters::stock_mosaic().wgsl,
-                "fx_stock_mosaic(uv, color, u.params[0].x)",
-                &[],
+                false,
             ),
             StockPlugin::Crop => (
-                crate::effect_filters::stock_crop().wgsl,
+                ef::stock_crop().wgsl,
                 "fx_stock_crop(uv, color, u.params[0], vec2<f32>(u.misc.y, u.misc.z))",
-                &[],
+                false,
             ),
             StockPlugin::TemperatureTint => (
-                crate::effect_filters::stock_temperature_tint().wgsl,
+                ef::stock_temperature_tint().wgsl,
                 "fx_stock_temperature_tint(uv, color, u.params[0].xy)",
-                &[],
+                false,
             ),
             StockPlugin::SpillSuppress => (
-                crate::effect_filters::stock_spill_suppress().wgsl,
+                ef::stock_spill_suppress().wgsl,
                 "fx_stock_spill_suppress(uv, color, u.params[0].x)",
-                &[],
+                false,
             ),
             StockPlugin::DifferenceKey => (
-                crate::effect_filters::stock_difference_key().wgsl,
+                ef::stock_difference_key().wgsl,
                 "fx_stock_difference_key(uv, color, u.params[0].x, u.params[0].y, u.params[0].z)",
-                &[],
+                false,
+            ),
+            StockPlugin::Wave => (
+                ef::stock_wave_resample().wgsl,
+                "fx_stock_wave_c(uv, color, u.params[0].x, u.params[0].y, u.params[0].z, RES)",
+                true,
+            ),
+            StockPlugin::Ripple => (
+                ef::stock_ripple_resample().wgsl,
+                "fx_stock_ripple_c(uv, color, u.params[0].x, u.params[0].y, RES)",
+                true,
+            ),
+            StockPlugin::Twirl => (
+                ef::stock_twirl_resample().wgsl,
+                "fx_stock_twirl_c(uv, color, u.params[0].x, u.params[0].y, RES)",
+                true,
+            ),
+            StockPlugin::Bulge => (
+                ef::stock_bulge_resample().wgsl,
+                "fx_stock_bulge_c(uv, color, u.params[0].x, u.params[0].y, RES)",
+                true,
+            ),
+            StockPlugin::Spherize => (
+                ef::stock_spherize_resample().wgsl,
+                "fx_stock_spherize_c(uv, color, u.params[0].x, u.params[0].y, RES)",
+                true,
+            ),
+            StockPlugin::LensDistortion => (
+                ef::stock_lens_distortion_resample().wgsl,
+                "fx_stock_lens_distortion_c(uv, color, u.params[0].x, u.params[0].y, RES)",
+                true,
+            ),
+            StockPlugin::Mirror => (
+                ef::stock_mirror_resample().wgsl,
+                "fx_stock_mirror_c(uv, color, u.params[0].x, u.params[0].y, RES)",
+                true,
+            ),
+            StockPlugin::Repeat => (
+                ef::stock_repeat_resample().wgsl,
+                "fx_stock_repeat_c(uv, color, u.params[0].x, u.params[0].y, RES)",
+                false,
+            ),
+            StockPlugin::Offset => (
+                ef::stock_offset_resample().wgsl,
+                "fx_stock_offset_c(uv, color, u.params[0].x, u.params[0].y, RES)",
+                true,
+            ),
+            StockPlugin::Pixelate => (
+                ef::stock_pixelate_resample().wgsl,
+                "fx_stock_pixelate_c(uv, color, u.params[0].x, RES)",
+                true,
+            ),
+            StockPlugin::Mosaic => (
+                ef::stock_mosaic_resample().wgsl,
+                "fx_stock_mosaic_c(uv, color, u.params[0].x, u.params[0].y, RES)",
+                true,
             ),
             _ => {
                 return Err(format!("No native WGSL pass implemented for stock plugin {:?}", plugin));
             }
         };
-        Self::compile(gpu, &format!("FxPass_{:?}", plugin), target_format, body, call, uv_calls)
+        let label = format!("FxPass_{:?}", plugin);
+        let call = call.replace("RES", res);
+        Self::compile_resample(gpu, &label, target_format, body, &call, resample)
     }
 
     /// Compile a pass for a built-in (non-stock) evaluated effect by its
-    /// stable id (`"tint"`, `"brightness_contrast"`, `"levels"`,
-    /// `"hue_saturation"`): same fullscreen-triangle shape as
-    /// [`Self::for_stock`], WGSL twins from [`crate::effect_filters`].
+    /// stable id: point color ops plus the CPU-exact resampling twins
+    /// (`displacement`, `warp`) from [`crate::effect_filters`].
     pub fn for_builtin(
         gpu: &GpuContext,
         id: &str,
         target_format: wgpu::TextureFormat,
     ) -> Result<Self, String> {
-        let (body, call): (&str, &str) = match id {
+        use crate::effect_filters as ef;
+        // Fourth element: prepend the bilinear-exact resampling helper.
+        let (body, call, resample): (&str, &str, bool) = match id {
             "brightness_contrast" => (
-                crate::effect_filters::brightness_contrast().wgsl,
+                ef::brightness_contrast().wgsl,
                 "fx_brightness_contrast(uv, color, u.params[0].x, u.params[0].y)",
+                false,
             ),
             "tint" => (
-                crate::effect_filters::tint().wgsl,
+                ef::tint().wgsl,
                 "fx_tint(uv, color, u.params[0].yzw, u.params[1].xyz, u.params[0].x)",
+                false,
             ),
             "levels" => (
-                crate::effect_filters::levels().wgsl,
+                ef::levels().wgsl,
                 "fx_levels(uv, color, u.params[0].x, u.params[0].y, u.params[0].z, u.params[0].w, u.params[1].x)",
+                false,
             ),
             "hue_saturation" => (
-                crate::effect_filters::hue_saturation().wgsl,
+                ef::hue_saturation().wgsl,
                 "fx_hue_saturation(uv, color, u.params[0].x, u.params[0].y, u.params[0].z)",
+                false,
+            ),
+            "invert" => (
+                ef::invert().wgsl,
+                "fx_invert(uv, color, u.params[0].x)",
+                false,
+            ),
+            "exposure" => (
+                ef::exposure().wgsl,
+                "fx_exposure(uv, color, u.params[0].x)",
+                false,
+            ),
+            "vibrance" => (
+                ef::vibrance().wgsl,
+                "fx_vibrance(uv, color, u.params[0].x)",
+                false,
+            ),
+            "chroma_key" => (
+                ef::chroma_key().wgsl,
+                "fx_chroma_key(uv, color, u.params[0].xyz, u.params[0].w, u.params[1].x)",
+                false,
+            ),
+            "luma_key" => (
+                ef::luma_key().wgsl,
+                "fx_luma_key(uv, color, u.params[0].x, u.params[0].y)",
+                false,
+            ),
+            "swap_color" => (
+                ef::swap_color().wgsl,
+                "fx_swap_color(uv, color, u.params[0].xyz, u.params[1].xyz, u.params[2].x, u.params[2].y)",
+                false,
+            ),
+            "vignette" => (
+                ef::vignette().wgsl,
+                "fx_vignette(uv, color, u.params[0].x, u.params[0].y)",
+                false,
+            ),
+            "displacement" => (
+                ef::displacement_resample().wgsl,
+                "fx_displacement_c(uv, color, u.params[0].x, u.params[0].y, vec2<f32>(u.misc.y, u.misc.z))",
+                true,
+            ),
+            "warp" => (
+                ef::warp_wave().wgsl,
+                "fx_warp_wave_c(uv, color, u.params[0].x, u.params[0].y, vec2<f32>(u.misc.y, u.misc.z))",
+                true,
             ),
             _ => {
                 return Err(format!("No native WGSL pass implemented for built-in effect {id}"));
             }
         };
-        Self::compile(gpu, &format!("FxPass_builtin_{id}"), target_format, body, call, &[])
+        Self::compile_resample(gpu, &format!("FxPass_builtin_{id}"), target_format, body, call, resample)
     }
 
     fn compile(
@@ -298,6 +402,23 @@ impl FxPass {
         let fragment_src = fx_fragment_src(body, uv_calls, call);
         let full_src = format!("{FX_VERT}\n{fragment_src}");
         Self::new(gpu, target_format, label, &full_src)
+    }
+
+    /// Compile with the bilinear-exact resampling helper prepended when
+    /// `resample` is set (sampling twins need it; point twins omit it).
+    fn compile_resample(
+        gpu: &GpuContext,
+        label: &str,
+        target_format: wgpu::TextureFormat,
+        body: &str,
+        call: &str,
+        resample: bool,
+    ) -> Result<Self, String> {
+        if !resample {
+            return Self::compile(gpu, label, target_format, body, call, &[]);
+        }
+        let owned = format!("{}\n{body}", crate::effect_filters::FX_RESAMPLE_WGSL);
+        Self::compile(gpu, label, target_format, &owned, call, &[])
     }
 
     /// Record the pass into `encoder`: `source_view` -> `target` with packed uniforms.
@@ -372,29 +493,52 @@ impl FxPass {
 }
 
 /// Stock plug-ins whose native pass reproduces the CPU kernel within u8
-/// rounding (gentle point/rect math, no time seeds, no spatial
-/// resampling): the set the live GPU chain may take without visual change.
-/// Excluded despite compiling: Mosaic (spatial pixelate vs color-step
-/// twin), FilmGrain (frame-seeded CPU vs time-seeded twin), Threshold and
-/// DifferenceKey (steep smoothstep transfer curves amplify u8 rounding
-/// through cascades; they stay on the exact CPU path, as does export).
-pub const CHAIN_SAFE_STOCK: [StockPlugin; 5] = [
+/// rounding (gentle point/rect math, no time seeds, plus the bilinear-
+/// exact resampling twins): the set the live GPU chain may take without
+/// visual change. Excluded despite compiling: FilmGrain (frame-seeded CPU
+/// vs time-seeded twin) and Threshold (steep smoothstep transfer curves
+/// amplify u8 rounding through cascades; they stay on the exact CPU path,
+/// as does export). DifferenceKey is included pending the parity gate
+/// below: its ramp is continuous from the threshold, so default feathers
+/// stay within rounding.
+pub const CHAIN_SAFE_STOCK: [StockPlugin; 17] = [
     StockPlugin::Posterize,
     StockPlugin::TemperatureTint,
     StockPlugin::SpillSuppress,
     StockPlugin::Crop,
     StockPlugin::Scanlines,
+    StockPlugin::DifferenceKey,
+    StockPlugin::Wave,
+    StockPlugin::Ripple,
+    StockPlugin::Twirl,
+    StockPlugin::Bulge,
+    StockPlugin::Spherize,
+    StockPlugin::LensDistortion,
+    StockPlugin::Mirror,
+    StockPlugin::Repeat,
+    StockPlugin::Offset,
+    StockPlugin::Pixelate,
+    StockPlugin::Mosaic,
 ];
 
 /// Built-in (non-stock) evaluated effects whose WGSL twin reproduces the
 /// CPU kernel within u8 rounding (gentle point math, no time seeds, no
 /// spatial resampling): the set the live GPU chain may take without
 /// visual change. Same audit bar as [`CHAIN_SAFE_STOCK`].
-pub const CHAIN_SAFE_BUILTIN: [&str; 4] = [
+pub const CHAIN_SAFE_BUILTIN: [&str; 13] = [
     "brightness_contrast",
     "tint",
     "levels",
     "hue_saturation",
+    "invert",
+    "exposure",
+    "vibrance",
+    "chroma_key",
+    "luma_key",
+    "swap_color",
+    "vignette",
+    "displacement",
+    "warp",
 ];
 
 /// Stable built-in id for a GPU-ported evaluated effect, if any.
@@ -405,6 +549,15 @@ pub fn builtin_gpu_id(effect: &compositor::EvaluatedEffectType) -> Option<&'stat
         E::Tint { .. } => Some("tint"),
         E::Levels { .. } => Some("levels"),
         E::HueSaturation { .. } => Some("hue_saturation"),
+        E::Invert { .. } => Some("invert"),
+        E::Exposure { .. } => Some("exposure"),
+        E::Vibrance { .. } => Some("vibrance"),
+        E::ChromaKey { .. } => Some("chroma_key"),
+        E::LumaKey { .. } => Some("luma_key"),
+        E::SwapColor { .. } => Some("swap_color"),
+        E::Vignette { .. } => Some("vignette"),
+        E::DisplacementMap { .. } => Some("displacement"),
+        E::Warp { .. } => Some("warp"),
         _ => None,
     }
 }
@@ -507,11 +660,21 @@ mod tests {
             S::Threshold,
             S::FilmGrain,
             S::Scanlines,
-            S::Mosaic,
             S::Crop,
             S::TemperatureTint,
             S::SpillSuppress,
             S::DifferenceKey,
+            S::Wave,
+            S::Ripple,
+            S::Twirl,
+            S::Bulge,
+            S::Spherize,
+            S::LensDistortion,
+            S::Mirror,
+            S::Repeat,
+            S::Offset,
+            S::Pixelate,
+            S::Mosaic,
         ] {
             FxPass::for_stock(&gpu, plugin, wgpu::TextureFormat::Rgba8Unorm)
                 .unwrap_or_else(|e| panic!("for_stock {plugin:?} failed: {e}"));

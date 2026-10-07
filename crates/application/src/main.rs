@@ -4009,9 +4009,18 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             assert!(window.find("effect_item_tint").visible());
             assert!(window.find("effect_gpu_tint").visible());
             assert!(window.try_find("effect_item_puppet").is_none());
+            // Resampling ports badge too (stock wave): narrow with a query
+            // since the full GPU-filtered list scrolls past the fold.
+            panels.effects.update(cx, |this, cx| {
+                this.search_query = "wave".to_string();
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert!(window.find("effect_item_wave").visible());
+            assert!(window.find("effect_gpu_wave").visible());
 
             // Category headers carry live counts of their listed rows.
-            assert!(window.find("effect_category_count_blur").visible());
+            assert!(window.find("effect_category_count_distort").visible());
 
             // Back to All plus a query shows the CPU-only row with no badge.
             panels.effects.update(cx, |this, cx| {

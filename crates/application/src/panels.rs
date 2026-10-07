@@ -14461,6 +14461,15 @@ fn effect_gpu_accelerated(plugin_id: &str) -> bool {
             | "net.sf.openfx.brightness_contrast"
             | "net.sf.openfx.levels"
             | "net.sf.openfx.hue_saturation"
+            | "net.sf.openfx.invert"
+            | "net.sf.openfx.exposure"
+            | "net.sf.openfx.vibrance"
+            | "net.sf.openfx.chroma_key"
+            | "net.sf.openfx.luma_key"
+            | "net.sf.openfx.swap_color"
+            | "net.sf.openfx.vignette"
+            | "net.sf.openfx.displacement"
+            | "net.sf.openfx.warp"
     ) {
         return true;
     }

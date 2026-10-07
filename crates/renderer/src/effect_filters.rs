@@ -1193,6 +1193,324 @@ pub fn stock_liquify() -> UvFilter {
 }
 
 // ---------------------------------------------------------------------------
+// Resampling twins (parity-audited live path).
+//
+// The pure `UvFilter` remaps above cannot reproduce the CPU rasterizer:
+// `FloatBuf::sample` is bilinear over transparent-outside pixels in
+// integer pixel space, while a pre-sample uv remap inherits the pass
+// sampler (clamp-to-edge) and cannot kill alpha per pixel. These twins
+// therefore sample explicitly: pixel-space remap (verbatim CPU math,
+// `X = uv * res - 0.5` recovers the integer coords the CPU closures see)
+// plus `fx_sample_cpu`, an exact port of `FloatBuf::sample` (premultiplied
+// mix, transparent outside, straight-alpha out to match chain textures).
+// Each source inlines the helper via `concat!` so it stays self-contained.
+// They live outside `all_color_filters` (which must parse standalone) and
+// are validated composed with the pass bindings instead.
+// ---------------------------------------------------------------------------
+
+/// Exact `FloatBuf::sample` port: bilinear over transparent-outside texels
+/// (premultiplied mix), straight-alpha out. Inlined into every resampling
+/// twin below via `concat!`.
+pub const FX_RESAMPLE_WGSL: &str = r#"
+fn fx_fetch_pm(px: vec2<i32>, res: vec2<i32>) -> vec4<f32> {
+    if (px.x < 0 || px.y < 0 || px.x >= res.x || px.y >= res.y) {
+        return vec4<f32>(0.0);
+    }
+    let t = textureLoad(src_tex, px, 0);
+    return vec4<f32>(t.rgb * t.a, t.a);
+}
+fn fx_sample_cpu(s: vec2<f32>, res: vec2<f32>) -> vec4<f32> {
+    let x0 = floor(s.x);
+    let y0 = floor(s.y);
+    let fx = clamp(s.x - x0, 0.0, 1.0);
+    let fy = clamp(s.y - y0, 0.0, 1.0);
+    let ri = vec2<i32>(i32(res.x), i32(res.y));
+    let a = fx_fetch_pm(vec2<i32>(i32(x0), i32(y0)), ri);
+    let b = fx_fetch_pm(vec2<i32>(i32(x0) + 1, i32(y0)), ri);
+    let c = fx_fetch_pm(vec2<i32>(i32(x0), i32(y0) + 1), ri);
+    let d = fx_fetch_pm(vec2<i32>(i32(x0) + 1, i32(y0) + 1), ri);
+    let m = mix(mix(a, b, fx), mix(c, d, fx), fy);
+    if (m.a <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    return vec4<f32>(m.rgb / m.a, m.a);
+}
+"#;
+
+/// Luminance-driven displacement (mirrors `apply_displacement`): forward
+/// shift by `(lum - 0.5) * max`, transparent pixels untouched.
+pub fn displacement_resample() -> ColorFilter {
+    color_filter!(
+        "displacement_resample",
+        r#"fn fx_displacement_c(uv: vec2<f32>, color: vec4<f32>, max_h: f32, max_v: f32, res: vec2<f32>) -> vec4<f32> {
+    if (color.a <= 0.0) {
+        return color;
+    }
+    let lum = dot(color.rgb, vec3<f32>(0.299, 0.587, 0.114));
+    let X = uv * res - vec2<f32>(0.5);
+    let s = X - vec2<f32>((lum - 0.5) * max_h, (lum - 0.5) * max_v);
+    return fx_sample_cpu(s, res);
+}"#
+    )
+}
+
+/// Sine-field warp, wave part only (mirrors the `Warp` rasterizer with
+/// identity pins): integer-truncated offsets, clamped edges. The engine
+/// declines pinned warps to the CPU mesh path.
+pub fn warp_wave() -> ColorFilter {
+    color_filter!(
+        "warp_wave",
+        r#"fn fx_warp_wave_c(uv: vec2<f32>, color: vec4<f32>, amount: f32, scale: f32, res: vec2<f32>) -> vec4<f32> {
+    let X = uv * res - vec2<f32>(0.5);
+    let m = min(res.x, res.y);
+    let amp = amount / 100.0 * m * 0.25;
+    let f = clamp(scale, 0.1, 10.0) * 0.05;
+    let ox = trunc(sin(X.y * f) * amp);
+    let oy = trunc(sin(X.x * f * 1.3 + 1.7) * amp);
+    let s = clamp(X + vec2<f32>(ox, oy), vec2<f32>(0.0), res - vec2<f32>(1.0));
+    return fx_sample_cpu(s, res);
+}"#
+    )
+}
+
+/// Stock wave displacement (mirrors `k_wave`).
+pub fn stock_wave_resample() -> ColorFilter {
+    color_filter!(
+        "stock_wave_resample",
+        r#"fn fx_stock_wave_c(uv: vec2<f32>, color: vec4<f32>, amplitude: f32, wavelength: f32, direction: f32, res: vec2<f32>) -> vec4<f32> {
+    let X = uv * res - vec2<f32>(0.5);
+    let rad = radians(direction);
+    let d = vec2<f32>(cos(rad), sin(rad));
+    let k = 6.28318530718 / max(wavelength, 2.0);
+    let ph = dot(X, d) * k;
+    let o = sin(ph) * amplitude;
+    return fx_sample_cpu(X + vec2<f32>(-d.y * o, d.x * o), res);
+}"#
+    )
+}
+
+/// Stock ripple rings (mirrors `k_ripple`).
+pub fn stock_ripple_resample() -> ColorFilter {
+    color_filter!(
+        "stock_ripple_resample",
+        r#"fn fx_stock_ripple_c(uv: vec2<f32>, color: vec4<f32>, amplitude: f32, wavelength: f32, res: vec2<f32>) -> vec4<f32> {
+    let X = uv * res - vec2<f32>(0.5);
+    let dx = X.x - res.x * 0.5;
+    let dy = X.y - res.y * 0.5;
+    let r = max(sqrt(dx * dx + dy * dy), 0.001);
+    let k = 6.28318530718 / max(wavelength, 2.0);
+    let off = sin(r * k) * amplitude * exp(-r / (min(res.x, res.y) * 0.75));
+    return fx_sample_cpu(X - vec2<f32>(dx / r * off, dy / r * off), res);
+}"#
+    )
+}
+
+/// Stock twirl (mirrors `k_twirl` via the `polar_remap` helper shape).
+pub fn stock_twirl_resample() -> ColorFilter {
+    color_filter!(
+        "stock_twirl_resample",
+        r#"fn fx_stock_twirl_c(uv: vec2<f32>, color: vec4<f32>, angle: f32, radius: f32, res: vec2<f32>) -> vec4<f32> {
+    let X = uv * res - vec2<f32>(0.5);
+    let c = res * 0.5;
+    let m = min(res.x, res.y) * 0.5;
+    let rmax = clamp(radius / 100.0, 0.02, 1.0);
+    let dx = X.x - c.x;
+    let dy = X.y - c.y;
+    let r = sqrt(dx * dx + dy * dy) / m;
+    if (r > rmax || r < 0.00001) {
+        return color;
+    }
+    let th = atan2(dy, dx);
+    let t = r / rmax;
+    let tht = th + radians(angle) * (1.0 - t);
+    let rn = min(t * rmax * m, m * 1.5);
+    return fx_sample_cpu(c + vec2<f32>(cos(tht), sin(tht)) * rn, res);
+}"#
+    )
+}
+
+/// Stock dome bulge / pinch (mirrors `k_bulge`).
+pub fn stock_bulge_resample() -> ColorFilter {
+    color_filter!(
+        "stock_bulge_resample",
+        r#"fn fx_stock_bulge_c(uv: vec2<f32>, color: vec4<f32>, amount: f32, radius: f32, res: vec2<f32>) -> vec4<f32> {
+    let X = uv * res - vec2<f32>(0.5);
+    let c = res * 0.5;
+    let m = min(res.x, res.y) * 0.5;
+    let rmax = clamp(radius / 100.0, 0.02, 1.0);
+    let dx = X.x - c.x;
+    let dy = X.y - c.y;
+    let r = sqrt(dx * dx + dy * dy) / m;
+    if (r > rmax || r < 0.00001) {
+        return color;
+    }
+    let th = atan2(dy, dx);
+    let t = r / rmax;
+    let amt = amount / 100.0;
+    let rt = max(t + amt * (1.0 - t * t) * 0.35 * (1.0 - t), 0.0);
+    let rn = min(rt * rmax * m, m * 1.5);
+    return fx_sample_cpu(c + vec2<f32>(cos(th), sin(th)) * rn, res);
+}"#
+    )
+}
+
+/// Stock spherical lens (mirrors `k_spherize`).
+pub fn stock_spherize_resample() -> ColorFilter {
+    color_filter!(
+        "stock_spherize_resample",
+        r#"fn fx_stock_spherize_c(uv: vec2<f32>, color: vec4<f32>, amount: f32, radius: f32, res: vec2<f32>) -> vec4<f32> {
+    let X = uv * res - vec2<f32>(0.5);
+    let c = res * 0.5;
+    let m = min(res.x, res.y) * 0.5;
+    let rmax = clamp(radius / 100.0, 0.02, 1.0);
+    let dx = X.x - c.x;
+    let dy = X.y - c.y;
+    let r = sqrt(dx * dx + dy * dy) / m;
+    if (r > rmax || r < 0.00001) {
+        return color;
+    }
+    let th = atan2(dy, dx);
+    let t = r / rmax;
+    let amt = amount / 100.0;
+    let rt = max(t * (1.0 - amt * 0.45 * (1.0 - t * t)), 0.0);
+    let rn = min(rt * rmax * m, m * 1.5);
+    return fx_sample_cpu(c + vec2<f32>(cos(th), sin(th)) * rn, res);
+}"#
+    )
+}
+
+/// Stock barrel / pincushion (mirrors `k_lens_distortion`).
+pub fn stock_lens_distortion_resample() -> ColorFilter {
+    color_filter!(
+        "stock_lens_distortion_resample",
+        r#"fn fx_stock_lens_distortion_c(uv: vec2<f32>, color: vec4<f32>, amount: f32, zoom: f32, res: vec2<f32>) -> vec4<f32> {
+    let X = uv * res - vec2<f32>(0.5);
+    let c = res * 0.5;
+    let m = min(res.x, res.y) * 0.5;
+    let n = (X - c) / vec2<f32>(m, m);
+    let r2 = dot(n, n);
+    let s = 1.0 / max(1.0 + amount / 100.0 * r2, 0.2) / max(zoom / 100.0, 0.5);
+    return fx_sample_cpu(c + n * s * m, res);
+}"#
+    )
+}
+
+/// Stock mirror (mirrors `k_mirror`).
+pub fn stock_mirror_resample() -> ColorFilter {
+    color_filter!(
+        "stock_mirror_resample",
+        r#"fn fx_stock_mirror_c(uv: vec2<f32>, color: vec4<f32>, mode: f32, center: f32, res: vec2<f32>) -> vec4<f32> {
+    let mi = i32(floor(mode + 0.5));
+    if (mi < 0 || mi > 2) {
+        return color;
+    }
+    let X = uv * res - vec2<f32>(0.5);
+    let cx = res.x * center / 100.0;
+    let cy = res.y * center / 100.0;
+    var s = X;
+    if (mi == 0 || mi == 2) {
+        s.x = 2.0 * cx - X.x;
+    }
+    if (mi == 1 || mi == 2) {
+        s.y = 2.0 * cy - X.y;
+    }
+    return fx_sample_cpu(s, res);
+}"#
+    )
+}
+
+/// Stock repeat (mirrors `k_repeat`): nearest-neighbor tile pick, so a raw
+/// `texelFetch` — no bilinear helper.
+pub fn stock_repeat_resample() -> ColorFilter {
+    color_filter!(
+        "stock_repeat_resample",
+        r#"fn fx_stock_repeat_c(uv: vec2<f32>, color: vec4<f32>, tiles_x: f32, tiles_y: f32, res: vec2<f32>) -> vec4<f32> {
+    let tx = max(floor(tiles_x + 0.5), 1.0);
+    let ty = max(floor(tiles_y + 0.5), 1.0);
+    if (tx <= 1.0 && ty <= 1.0) {
+        return color;
+    }
+    let X = uv * res - vec2<f32>(0.5);
+    let fx = X.x * tx / res.x - floor(X.x * tx / res.x);
+    let fy = X.y * ty / res.y - floor(X.y * ty / res.y);
+    let sx = i32(fx * res.x);
+    let sy = i32(fy * res.y);
+    return textureLoad(src_tex, vec2<i32>(sx, sy), 0);
+}"#
+    )
+}
+
+/// Stock offset (mirrors `k_offset`): wrapped bilinear via the CPU-exact
+/// sampler (the fringe mixes toward transparency like `FloatBuf::sample`).
+pub fn stock_offset_resample() -> ColorFilter {
+    color_filter!(
+        "stock_offset_resample",
+        r#"fn fx_stock_offset_c(uv: vec2<f32>, color: vec4<f32>, shift_x: f32, shift_y: f32, res: vec2<f32>) -> vec4<f32> {
+    let X = uv * res - vec2<f32>(0.5);
+    let sh = vec2<f32>(shift_x, shift_y) / 100.0 * res;
+    var s = X - sh;
+    s = s - floor(s / res) * res;
+    return fx_sample_cpu(s, res);
+}"#
+    )
+}
+
+/// Stock pixelate (mirrors `k_pixelate` without color quantization).
+pub fn stock_pixelate_resample() -> ColorFilter {
+    color_filter!(
+        "stock_pixelate_resample",
+        r#"fn fx_stock_pixelate_c(uv: vec2<f32>, color: vec4<f32>, size: f32, res: vec2<f32>) -> vec4<f32> {
+    let n = clamp(size, 1.0, 128.0);
+    let X = uv * res - vec2<f32>(0.5);
+    let bx = min(floor(X.x / n) * n + n * 0.5, res.x - 1.0);
+    let by = min(floor(X.y / n) * n + n * 0.5, res.y - 1.0);
+    return fx_sample_cpu(vec2<f32>(bx, by), res);
+}"#
+    )
+}
+
+/// Stock mosaic (mirrors `k_pixelate` with color quantization): straight-
+/// space quantization matches the CPU premultiplied-then-store math.
+pub fn stock_mosaic_resample() -> ColorFilter {
+    color_filter!(
+        "stock_mosaic_resample",
+        r#"fn fx_stock_mosaic_c(uv: vec2<f32>, color: vec4<f32>, size: f32, levels: f32, res: vec2<f32>) -> vec4<f32> {
+    let n = clamp(size, 1.0, 128.0);
+    let X = uv * res - vec2<f32>(0.5);
+    let bx = min(floor(X.x / n) * n + n * 0.5, res.x - 1.0);
+    let by = min(floor(X.y / n) * n + n * 0.5, res.y - 1.0);
+    let s = fx_sample_cpu(vec2<f32>(bx, by), res);
+    if (s.a <= 0.0) {
+        return s;
+    }
+    let qn = max(levels, 2.0);
+    let q = clamp(floor(s.rgb * (qn - 1.0) + vec3<f32>(0.5)) / (qn - 1.0), vec3<f32>(0.0), vec3<f32>(1.0));
+    return vec4<f32>(q, s.a);
+}"#
+    )
+}
+
+/// All resampling twins in stable order (kept out of `all_color_filters`:
+/// they sample `src_tex` and only parse composed with pass bindings).
+pub fn resample_filters() -> Vec<ColorFilter> {
+    vec![
+        displacement_resample(),
+        warp_wave(),
+        stock_wave_resample(),
+        stock_ripple_resample(),
+        stock_twirl_resample(),
+        stock_bulge_resample(),
+        stock_spherize_resample(),
+        stock_lens_distortion_resample(),
+        stock_mirror_resample(),
+        stock_repeat_resample(),
+        stock_offset_resample(),
+        stock_pixelate_resample(),
+        stock_mosaic_resample(),
+    ]
+}
+
+// ---------------------------------------------------------------------------
 // Registry + composer
 // ---------------------------------------------------------------------------
 
@@ -1329,6 +1647,42 @@ mod tests {
     #[test]
     fn all_snippets_validate() {
         validate_all().expect("all WGSL filters must parse");
+    }
+
+    /// Resampling twins sample `src_tex`, so they only parse composed with
+    /// the pass bindings: validate each exactly as `fx_pass` composes it
+    /// (helper + twin + fragment main).
+    #[test]
+    fn resample_twins_parse_composed() {
+        use crate::fx_pass::{FX_BINDINGS_WGSL, FX_VERT};
+        let res = "vec2<f32>(u.misc.y, u.misc.z)";
+        let calls = [
+            ("displacement_resample", "fx_displacement_c(uv, color, u.params[0].x, u.params[0].y, RES)"),
+            ("warp_wave", "fx_warp_wave_c(uv, color, u.params[0].x, u.params[0].y, RES)"),
+            ("stock_wave_resample", "fx_stock_wave_c(uv, color, u.params[0].x, u.params[0].y, u.params[0].z, RES)"),
+            ("stock_ripple_resample", "fx_stock_ripple_c(uv, color, u.params[0].x, u.params[0].y, RES)"),
+            ("stock_twirl_resample", "fx_stock_twirl_c(uv, color, u.params[0].x, u.params[0].y, RES)"),
+            ("stock_bulge_resample", "fx_stock_bulge_c(uv, color, u.params[0].x, u.params[0].y, RES)"),
+            ("stock_spherize_resample", "fx_stock_spherize_c(uv, color, u.params[0].x, u.params[0].y, RES)"),
+            ("stock_lens_distortion_resample", "fx_stock_lens_distortion_c(uv, color, u.params[0].x, u.params[0].y, RES)"),
+            ("stock_mirror_resample", "fx_stock_mirror_c(uv, color, u.params[0].x, u.params[0].y, RES)"),
+            ("stock_repeat_resample", "fx_stock_repeat_c(uv, color, u.params[0].x, u.params[0].y, RES)"),
+            ("stock_offset_resample", "fx_stock_offset_c(uv, color, u.params[0].x, u.params[0].y, RES)"),
+            ("stock_pixelate_resample", "fx_stock_pixelate_c(uv, color, u.params[0].x, RES)"),
+            ("stock_mosaic_resample", "fx_stock_mosaic_c(uv, color, u.params[0].x, u.params[0].y, RES)"),
+        ];
+        let twins = resample_filters();
+        let by_id: std::collections::HashMap<&str, &str> =
+            twins.iter().map(|f| (f.id, f.wgsl)).collect();
+        for (id, call) in calls {
+            let wgsl = by_id.get(id).unwrap_or_else(|| panic!("no resample twin {id}"));
+            let call = call.replace("RES", res);
+            let src = format!(
+                "{FX_VERT}\n{FX_BINDINGS_WGSL}\n{FX_RESAMPLE_WGSL}\n{wgsl}\n@fragment\nfn fs_main(in: VsOut) -> @location(0) vec4<f32> {{\n    var uv = in.uv;\n    var color = textureSample(src_tex, src_sampler, uv);\n    color = {call};\n    return color;\n}}\n"
+            );
+            naga::front::wgsl::parse_str(&src)
+                .unwrap_or_else(|e| panic!("resample twin {id} invalid: {e:?}"));
+        }
     }
 
     #[test]

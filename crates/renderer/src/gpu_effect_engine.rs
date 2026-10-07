@@ -222,6 +222,23 @@ impl GpuEffectEngine {
                             return false;
                         }
                     }
+                    // Displacement offsets derive from source luminance, so u8
+                    // source quantization (≈0.002) becomes a position error
+                    // that hard edges amplify into visible flips: keep large
+                    // offsets on the exact CPU path (empirically ≈0.0012
+                    // error per px of offset on hard-edge content).
+                    if let compositor::EvaluatedEffectType::DisplacementMap { max_horizontal, max_vertical } = eff_type {
+                        if max_horizontal.abs() > 8.0 || max_vertical.abs() > 8.0 {
+                            return false;
+                        }
+                    }
+                    // The warp twin covers the sine-wave part only; pinned
+                    // warps take the CPU mesh path.
+                    if let compositor::EvaluatedEffectType::Warp { pins, .. } = eff_type {
+                        if pins.iter().any(|p| !p.is_identity()) {
+                            return false;
+                        }
+                    }
                     if self.get_or_create_builtin_pass(id).is_err() {
                         return false;
                     }
@@ -301,23 +318,53 @@ impl GpuEffectEngine {
                 eff_type => {
                     // Built-in color ops: pack evaluated fields exactly as
                     // the WGSL twin's call site expects (see
-                    // `FxPass::for_builtin`).
-                    let (id, params): (&'static str, [f32; 7]) = match eff_type {
+                    // `FxPass::for_builtin`). Ten slots: two vec4s hold a
+                    // full RGB pair, so `params[1].xyz` stays addressable.
+                    let (id, params): (&'static str, [f32; 10]) = match eff_type {
                         EvaluatedEffectType::BrightnessContrast { brightness, contrast } => {
-                            ("brightness_contrast", [*brightness, *contrast, 0.0, 0.0, 0.0, 0.0, 0.0])
+                            ("brightness_contrast", [*brightness, *contrast, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
                         }
                         EvaluatedEffectType::Tint { map_black, map_white, amount } => (
                             "tint",
-                            [*amount, map_black.r, map_black.g, map_black.b, map_white.r, map_white.g, map_white.b],
+                            [*amount, map_black.r, map_black.g, map_black.b, map_white.r, map_white.g, map_white.b, 0.0, 0.0, 0.0],
                         ),
                         EvaluatedEffectType::Levels { input_black, input_white, gamma, output_black, output_white } => (
                             "levels",
-                            [*input_black, *input_white, *gamma, *output_black, *output_white, 0.0, 0.0],
+                            [*input_black, *input_white, *gamma, *output_black, *output_white, 0.0, 0.0, 0.0, 0.0, 0.0],
                         ),
                         EvaluatedEffectType::HueSaturation { hue_shift, saturation, lightness } => (
                             "hue_saturation",
-                            [*hue_shift, *saturation, *lightness, 0.0, 0.0, 0.0, 0.0],
+                            [*hue_shift, *saturation, *lightness, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
                         ),
+                        EvaluatedEffectType::Invert { amount } => {
+                            ("invert", [*amount, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+                        }
+                        EvaluatedEffectType::Exposure { exposure } => {
+                            ("exposure", [*exposure, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+                        }
+                        EvaluatedEffectType::Vibrance { vibrance } => {
+                            ("vibrance", [*vibrance, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+                        }
+                        EvaluatedEffectType::ChromaKey { key_color, tolerance, feather } => (
+                            "chroma_key",
+                            [key_color.r, key_color.g, key_color.b, *tolerance, *feather, 0.0, 0.0, 0.0, 0.0, 0.0],
+                        ),
+                        EvaluatedEffectType::LumaKey { threshold, feather } => {
+                            ("luma_key", [*threshold, *feather, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+                        }
+                        EvaluatedEffectType::SwapColor { from_color, to_color, tolerance, feather } => (
+                            "swap_color",
+                            [from_color.r, from_color.g, from_color.b, 0.0, to_color.r, to_color.g, to_color.b, 0.0, *tolerance, *feather],
+                        ),
+                        EvaluatedEffectType::Vignette { amount, softness } => {
+                            ("vignette", [*amount, *softness, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+                        }
+                        EvaluatedEffectType::DisplacementMap { max_horizontal, max_vertical } => {
+                            ("displacement", [*max_horizontal, *max_vertical, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+                        }
+                        EvaluatedEffectType::Warp { amount, scale, .. } => {
+                            ("warp", [*amount, *scale, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+                        }
                         _ => continue,
                     };
                     if let Some(pass) = self.builtin_pass_cache.get(id) {
