@@ -85,6 +85,8 @@ pub(crate) fn widget_scalar(
         .items_center()
         .justify_between()
         .text_xs()
+        .border_b_1()
+        .border_color(cx.theme().border)
         .child(label_row)
         .child(panels::scrub_field(
             id,
@@ -157,6 +159,8 @@ where
         .justify_between()
         .text_xs()
         .py_0p5()
+        .border_b_1()
+        .border_color(cx.theme().border)
         .child(label_cell)
         .child(
             div()
@@ -189,6 +193,8 @@ pub(crate) fn widget_dropdown(
         .items_center()
         .justify_between()
         .text_xs()
+        .border_b_1()
+        .border_color(cx.theme().border)
         .child(div().text_color(cx.theme().muted_foreground).child(label.to_string()))
         .child(match combo {
             Some(st) => div()

@@ -7785,6 +7785,8 @@ pub(crate) fn render_three_mode_color_picker(
                         .gap_2()
                         .items_center()
                         .text_xs()
+                        .border_b_1()
+                        .border_color(cx.theme().border)
                         .child(div().text_color(cx.theme().muted_foreground).child("Angle"))
                         .child(
                             div()
@@ -8486,6 +8488,8 @@ pub(crate) fn fx_swatch_row(
             .items_center()
             .justify_between()
             .text_xs()
+            .border_b_1()
+            .border_color(cx.theme().border)
             .child(
                 h_flex()
                     .gap_1p5()
@@ -8885,6 +8889,8 @@ fn mask_param_row(
         .items_center()
         .justify_between()
         .text_xs()
+        .border_b_1()
+        .border_color(cx.theme().border)
         .child(
             h_flex()
                 .gap_1()
@@ -8945,6 +8951,8 @@ fn text_param_row(
         .items_center()
         .justify_between()
         .text_xs()
+        .border_b_1()
+        .border_color(cx.theme().border)
         .child(
             h_flex()
                 .gap_1()
@@ -10198,6 +10206,8 @@ fn render_applied_effects(
                                 .items_center()
                                 .justify_between()
                                 .text_xs()
+                                .border_b_1()
+                                .border_color(cx.theme().border)
                                 .child(
                                     h_flex()
                                         .gap_1p5()
@@ -10276,6 +10286,8 @@ fn render_applied_effects(
                                 .items_center()
                                 .justify_between()
                                 .text_xs()
+                                .border_b_1()
+                                .border_color(cx.theme().border)
                                 .child(
                                     h_flex()
                                         .gap_1p5()
@@ -10811,6 +10823,8 @@ fn render_applied_effects(
                                 .items_center()
                                 .justify_between()
                                 .text_xs()
+                                .border_b_1()
+                                .border_color(cx.theme().border)
                                 .child(
                                     h_flex()
                                         .gap_1p5()
@@ -12467,6 +12481,8 @@ impl Render for PropertiesPanel {
                                             .items_center()
                                             .justify_between()
                                             .text_xs()
+                                            .border_b_1()
+                                            .border_color(cx.theme().border)
                                             .child(
                                                 h_flex()
                                                     .gap_2()
@@ -12958,6 +12974,8 @@ impl Render for PropertiesPanel {
                                 let swatches_row = h_flex()
                                     .gap_3()
                                     .items_center()
+                                    .border_b_1()
+                                    .border_color(cx.theme().border)
                                     .child(property_stopwatch(&self.state, &layer.id, "text.fill_color", fill_color.is_animated(), cx))
                                     .child(property_stopwatch(&self.state, &layer.id, "text.stroke_color", stroke_color.is_animated(), cx))
                                     .child({
@@ -13244,6 +13262,8 @@ impl Render for PropertiesPanel {
                                             .items_center()
                                             .justify_between()
                                             .text_xs()
+                                            .border_b_1()
+                                            .border_color(cx.theme().border)
                                             .child(
                                                 h_flex()
                                                     .gap_1p5()
@@ -13337,6 +13357,8 @@ impl Render for PropertiesPanel {
                                                     .items_center()
                                                     .justify_between()
                                                     .text_xs()
+                                                    .border_b_1()
+                                                    .border_color(cx.theme().border)
                                                     .child(
                                                         h_flex()
                                                             .gap_1()
@@ -13492,6 +13514,8 @@ impl Render for PropertiesPanel {
                                                     .items_center()
                                                     .justify_between()
                                                     .text_xs()
+                                                    .border_b_1()
+                                                    .border_color(cx.theme().border)
                                                     .child(
                                                         h_flex()
                                                             .gap_1()
@@ -13761,6 +13785,8 @@ impl Render for PropertiesPanel {
                                     .items_center()
                                     .justify_between()
                                     .text_xs()
+                                    .border_b_1()
+                                    .border_color(cx.theme().border)
                                     .child(
                                         h_flex()
                                             .w(px(70.))
@@ -13807,6 +13833,8 @@ impl Render for PropertiesPanel {
                                     .items_center()
                                     .justify_between()
                                     .text_xs()
+                                    .border_b_1()
+                                    .border_color(cx.theme().border)
                                     .child(
                                         h_flex()
                                             .w(px(70.))
@@ -13853,6 +13881,8 @@ impl Render for PropertiesPanel {
                                     .items_center()
                                     .justify_between()
                                     .text_xs()
+                                    .border_b_1()
+                                    .border_color(cx.theme().border)
                                     .child(
                                         h_flex()
                                             .w(px(70.))
@@ -13938,6 +13968,8 @@ impl Render for PropertiesPanel {
                                     .items_center()
                                     .justify_between()
                                     .text_xs()
+                                    .border_b_1()
+                                    .border_color(cx.theme().border)
                                     .child(
                                         h_flex()
                                             .w(px(70.))
@@ -13967,6 +13999,8 @@ impl Render for PropertiesPanel {
                                     .items_center()
                                     .justify_between()
                                     .text_xs()
+                                    .border_b_1()
+                                    .border_color(cx.theme().border)
                                     .child(
                                         h_flex()
                                             .w(px(70.))
