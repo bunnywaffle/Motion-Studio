@@ -12,7 +12,7 @@ pub mod shader_lab;
 pub use blit::{BlitPipeline, BlitUniforms};
 pub use blur::{gaussian_blur_rgba, gaussian_kernel_1d, BLUR_WGSL};
 pub use compute_blur::{ComputeBlurPipeline, ComputeBlurUniforms, COMPUTE_BLUR_WGSL};
-pub use fx_pass::{FxPass, FxUniforms, CHAIN_SAFE_STOCK, CHAIN_SAFE_BUILTIN, builtin_gpu_id, fx_fragment_src, stock_wgsl_plugins, FX_VERT};
+pub use fx_pass::{FxPass, FxMergePass, FxUniforms, CHAIN_SAFE_STOCK, CHAIN_SAFE_BUILTIN, builtin_gpu_id, fx_fragment_src, stock_wgsl_plugins, FX_VERT};
 pub use gpu_effect_engine::GpuEffectEngine;
 pub use shader_lab::{
     build_uniform_buffer, compile_source, hash_source, CachedShader, ShaderLabCache,
@@ -268,6 +268,48 @@ mod tests {
                 output_white: 255.0,
             });
             assert!(!engine.supports_fx_chain(&[flat]));
+        }
+    }
+
+    /// Luminance-thresholded binary dots flip on u8-quantized smooth
+    /// gradients, so halftone stays CPU even though its twin compiles.
+    #[test]
+    fn halftone_declines_gpu_chain() {
+        if let Ok(gpu) = GpuContext::new_headless() {
+            let mut engine = GpuEffectEngine::new(gpu).expect("create gpu effect engine");
+            let eff = compositor::EvaluatedEffect {
+                id: "halftone".to_string(),
+                name: "Halftone".to_string(),
+                enabled: true,
+                effect_type: compositor::EvaluatedEffectType::Stock {
+                    plugin: project::StockPlugin::Halftone,
+                    params: vec![6.0, 15.0],
+                    colors: Vec::new(),
+                },
+            };
+            assert!(!engine.supports_fx_chain(&[eff]));
+        }
+    }
+
+    /// Posterize-family after an edge map speckles (edge output sits on
+    /// posterize boundaries): those stacks decline, either order alone
+    /// and the reverse order still take the GPU path.
+    #[test]
+    fn edge_before_posterize_declines_gpu_chain() {
+        if let Ok(gpu) = GpuContext::new_headless() {
+            let mut engine = GpuEffectEngine::new(gpu).expect("create gpu effect engine");
+            let stock = |plugin: project::StockPlugin, params: Vec<f32>| compositor::EvaluatedEffect {
+                id: format!("fx_{plugin:?}"),
+                name: format!("{plugin:?}"),
+                enabled: true,
+                effect_type: compositor::EvaluatedEffectType::Stock { plugin, params, colors: Vec::new() },
+            };
+            let edge = stock(project::StockPlugin::EdgeDetect, vec![20.0, 0.0]);
+            let cartoon = stock(project::StockPlugin::Cartoon, vec![4.0, 50.0]);
+            assert!(engine.supports_fx_chain(std::slice::from_ref(&edge)));
+            assert!(engine.supports_fx_chain(std::slice::from_ref(&cartoon)));
+            assert!(engine.supports_fx_chain(&[cartoon.clone(), edge.clone()]));
+            assert!(!engine.supports_fx_chain(&[edge.clone(), cartoon]));
         }
     }
 }

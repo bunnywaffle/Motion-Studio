@@ -312,6 +312,12 @@ pub fn apply_effect_pixels(
         EvaluatedEffectType::Sharpen { amount, radius } => {
             apply_sharpen(buf, *amount, *radius);
         }
+        EvaluatedEffectType::CelShading { levels, edge } => {
+            apply_cel_shade(buf, *levels, *edge);
+        }
+        EvaluatedEffectType::OilPaint { radius, amount } => {
+            apply_oil_paint(buf, *radius, *amount);
+        }
         EvaluatedEffectType::Vignette { amount, softness } => {
             apply_vignette(buf, *amount, *softness);
         }
@@ -583,10 +589,169 @@ pub fn apply_vignette(buf: &mut FloatBuf, amount: f32, softness: f32) {
     }
 }
 
+/// Cel shading in place: luminance tone bands plus inked Sobel edges.
+/// `levels` 2..8 posterizes luminance into that many bands (anchored at
+/// 30% so shadows stay readable); `edge` 0..100 scales the ink.
+pub fn apply_cel_shade(buf: &mut FloatBuf, levels: f32, edge: f32) {
+    let n = levels.round().clamp(2.0, 8.0);
+    let ek = (edge / 100.0).clamp(0.0, 1.0);
+    if buf.w == 0 || buf.h == 0 {
+        return;
+    }
+    let src = buf.px.clone();
+    let snap = FloatBuf { w: buf.w, h: buf.h, px: src };
+    for y in 0..buf.h {
+        for x in 0..buf.w {
+            let idx = (y * buf.w + x) as usize;
+            let p = snap.px[idx];
+            if p.a <= 0.0 {
+                continue;
+            }
+            let c = p.to_color();
+            let lum = 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
+            let band = ((lum * (n - 1.0)).round() / (n - 1.0)).clamp(0.0, 1.0);
+            let shade = 0.3 + 0.7 * band;
+            let e = super::stock::sobel(&snap, x, y);
+            let ink = 1.0 - (e * ek * 2.0).clamp(0.0, 1.0);
+            let out = Color::rgba(
+                (c.r * shade * ink).clamp(0.0, 1.0),
+                (c.g * shade * ink).clamp(0.0, 1.0),
+                (c.b * shade * ink).clamp(0.0, 1.0),
+                c.a,
+            );
+            buf.px[idx] = Px::from_color(out);
+        }
+    }
+}
+
+/// Oil painting in place: classic Kuwahara smoothing — each pixel takes
+/// the mean of the lowest-variance quadrant in a `(radius+1)^2` window.
+/// `radius` 1..4 bounds the cost (81 taps max); `amount` 0..100 blends
+/// with the original.
+pub fn apply_oil_paint(buf: &mut FloatBuf, radius: f32, amount: f32) {
+    let r = radius.round().clamp(1.0, 4.0) as i32;
+    let k = (amount / 100.0).clamp(0.0, 1.0);
+    if k <= 0.0 || buf.w == 0 || buf.h == 0 {
+        return;
+    }
+    let src = buf.px.clone();
+    let snap = FloatBuf { w: buf.w, h: buf.h, px: src };
+    let straight = |x: i32, y: i32| -> (f32, f32, f32) {
+        if x < 0 || y < 0 || x >= snap.w as i32 || y >= snap.h as i32 {
+            return (0.0, 0.0, 0.0);
+        }
+        let c = snap.px[(y as u32 * snap.w + x as u32) as usize].to_color();
+        (c.r, c.g, c.b)
+    };
+    for y in 0..buf.h {
+        for x in 0..buf.w {
+            let idx = (y * buf.w + x) as usize;
+            let p = snap.px[idx];
+            if p.a <= 0.0 {
+                continue;
+            }
+            let base = p.to_color();
+            let mut best = (base.r, base.g, base.b);
+            let mut best_v = f32::INFINITY;
+            // Four overlapping quadrants around the pixel.
+            for q in 0..4 {
+                let (mut mr, mut mg, mut mb) = (0.0f32, 0.0f32, 0.0f32);
+                let (mut sr, mut sg, mut sb) = (0.0f32, 0.0f32, 0.0f32);
+                let mut n = 0.0f32;
+                for j in -r..=0 {
+                    for i in -r..=0 {
+                        let (ox, oy) = match q {
+                            0 => (i, j),
+                            1 => (-i, j),
+                            2 => (-i, -j),
+                            _ => (i, -j),
+                        };
+                        let (cr, cg, cb) = straight(x as i32 + ox, y as i32 + oy);
+                        mr += cr;
+                        mg += cg;
+                        mb += cb;
+                        sr += cr * cr;
+                        sg += cg * cg;
+                        sb += cb * cb;
+                        n += 1.0;
+                    }
+                }
+                mr /= n;
+                mg /= n;
+                mb /= n;
+                let vr = (sr / n - mr * mr).abs();
+                let vg = (sg / n - mg * mg).abs();
+                let vb = (sb / n - mb * mb).abs();
+                let v = vr + vg + vb;
+                if v < best_v {
+                    best_v = v;
+                    best = (mr, mg, mb);
+                }
+            }
+            let out = Color::rgba(
+                base.r + (best.0 - base.r) * k,
+                base.g + (best.1 - base.g) * k,
+                base.b + (best.2 - base.b) * k,
+                base.a,
+            );
+            buf.px[idx] = Px::from_color(out);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use compositor::evaluation::EvaluatedEffectType;
+
+    #[test]
+    fn cel_shade_bands_luminance_and_inks_edges() {
+        // Mid-gray bands to a flat tone; a hard black/white edge inks dark.
+        let mut buf = FloatBuf {
+            w: 8,
+            h: 2,
+            px: vec![Px { r: 0.5, g: 0.5, b: 0.5, a: 1.0 }; 16],
+        };
+        for x in 0..4 {
+            buf.px[x as usize] = Px { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
+            buf.px[(8 + x) as usize] = Px { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+        }
+        apply_cel_shade(&mut buf, 4.0, 60.0);
+        // Flat gray region (x=6,7 clear of the blocks): banded to one
+        // tone, no ink (no edges).
+        let g0 = buf.px[6 + 8].to_color();
+        let g1 = buf.px[7 + 8].to_color();
+        assert!((g0.r - g1.r).abs() < 1e-5, "flat area must band flat: {g0:?} vs {g1:?}");
+        // The black/white boundary pixel inks darker than either neighbor.
+        let edge = buf.px[3].to_color();
+        assert!(edge.r < 0.4, "edge must ink, got {edge:?}");
+    }
+
+    #[test]
+    fn oil_paint_smooths_noise_keeps_flat() {
+        // Flat color is a fixed point at any radius.
+        let mut buf = FloatBuf {
+            w: 8,
+            h: 8,
+            px: vec![Px { r: 0.2, g: 0.4, b: 0.6, a: 1.0 }; 64],
+        };
+        apply_oil_paint(&mut buf, 3.0, 100.0);
+        for p in &buf.px {
+            let c = p.to_color();
+            assert!((c.r - 0.2).abs() < 1e-5 && (c.g - 0.4).abs() < 1e-5 && (c.b - 0.6).abs() < 1e-5);
+        }
+        // Amount 0 is identity even on noise.
+        let mut noisy = FloatBuf {
+            w: 8,
+            h: 8,
+            px: (0..64).map(|i| Px { r: (i as f32 % 7.0) / 7.0, g: 0.5, b: 0.5, a: 1.0 }).collect(),
+        };
+        let before = noisy.px.clone();
+        apply_oil_paint(&mut noisy, 2.0, 0.0);
+        for (a, b) in noisy.px.iter().zip(before.iter()) {
+            assert!((a.r - b.r).abs() < 1e-6 && (a.g - b.g).abs() < 1e-6 && (a.b - b.b).abs() < 1e-6 && (a.a - b.a).abs() < 1e-6);
+        }
+    }
 
     #[test]
     fn test_tiler_grid_mirror_and_shapes() {

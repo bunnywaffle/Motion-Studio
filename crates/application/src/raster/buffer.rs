@@ -196,6 +196,29 @@ pub fn gpu_fx_chain(buf: &mut FloatBuf, effects: &[EvaluatedEffect], time_s: f32
     true
 }
 
+/// Full spatial bloom (bright-pass -> blur -> screen) on the GPU.
+/// Hardware-gated like the chain: wide radii (> 8px) stay on the CPU
+/// kernel, whose downsample path the compute apron cannot reproduce.
+/// Returns false for the transparent CPU fallback.
+pub fn bloom_buffer(buf: &mut FloatBuf, intensity: f32, radius_px: f32) -> bool {
+    let k = (intensity / 100.0).clamp(0.0, 1.0);
+    if k <= 0.0 || buf.w == 0 || buf.h == 0 || radius_px > 8.0 {
+        return false;
+    }
+    let Ok(mut lock) = get_gpu_engine().lock() else {
+        return false;
+    };
+    let Some(engine) = lock.as_mut() else {
+        return false;
+    };
+    let rgba = buf.to_rgba8();
+    let Ok(out) = engine.bloom_rgba(&rgba, buf.w, buf.h, intensity, radius_px) else {
+        return false;
+    };
+    write_straight_rgba8(buf, &out);
+    true
+}
+
 /// Gaussian blur a straight-alpha buffer in place.
 /// Uses GPU Compute Shader blur with workgroup shared memory tiles when available,
 /// falling back seamlessly to the CPU kernel.

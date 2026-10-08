@@ -752,7 +752,7 @@ fn k_liquify(buf: &mut FloatBuf, p: &[f32], plugin: StockPlugin) {
 // ---------------------------------------------------------------------------
 
 /// Sobel edge magnitude in [0, 1] on straight luma.
-fn sobel(src: &FloatBuf, x: u32, y: u32) -> f32 {
+pub(crate) fn sobel(src: &FloatBuf, x: u32, y: u32) -> f32 {
     let l = |dx: i32, dy: i32| -> f32 {
         let sx = (x as i32 + dx).clamp(0, src.w as i32 - 1);
         let sy = (y as i32 + dy).clamp(0, src.h as i32 - 1);

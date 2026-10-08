@@ -299,6 +299,36 @@ impl FxPass {
                 "fx_stock_mosaic_c(uv, color, u.params[0].x, u.params[0].y, RES)",
                 true,
             ),
+            StockPlugin::ChromaticAberration => (
+                ef::stock_chromatic_resample().wgsl,
+                "fx_stock_chromatic_c(uv, color, u.params[0].x, u.params[0].y, RES)",
+                true,
+            ),
+            StockPlugin::RgbSplit => (
+                ef::stock_rgb_split_resample().wgsl,
+                "fx_stock_rgb_split_c(uv, color, u.params[0].x, u.params[0].y, RES)",
+                true,
+            ),
+            StockPlugin::Emboss => (
+                ef::stock_emboss_resample().wgsl,
+                "fx_stock_emboss_c(uv, color, u.params[0].x, u.params[0].y, RES)",
+                true,
+            ),
+            StockPlugin::EdgeDetect => (
+                ef::stock_edge_resample().wgsl,
+                "fx_stock_edge_c(uv, color, u.params[0].x, u.params[0].y, RES)",
+                true,
+            ),
+            StockPlugin::Cartoon => (
+                ef::stock_cartoon_resample().wgsl,
+                "fx_stock_cartoon_c(uv, color, u.params[0].x, u.params[0].y, RES)",
+                true,
+            ),
+            StockPlugin::Halftone => (
+                ef::stock_halftone_resample().wgsl,
+                "fx_stock_halftone_c(uv, color, u.params[0].x, u.params[0].y, RES)",
+                true,
+            ),
             _ => {
                 return Err(format!("No native WGSL pass implemented for stock plugin {:?}", plugin));
             }
@@ -382,6 +412,16 @@ impl FxPass {
             "warp" => (
                 ef::warp_wave().wgsl,
                 "fx_warp_wave_c(uv, color, u.params[0].x, u.params[0].y, vec2<f32>(u.misc.y, u.misc.z))",
+                true,
+            ),
+            "cel_shading" => (
+                ef::cel_shade_resample().wgsl,
+                "fx_cel_shade(uv, color, u.params[0].x, u.params[0].y, vec2<f32>(u.misc.y, u.misc.z))",
+                true,
+            ),
+            "oil_paint" => (
+                ef::oil_paint_resample().wgsl,
+                "fx_oil_paint(uv, color, u.params[0].x, u.params[0].y, vec2<f32>(u.misc.y, u.misc.z))",
                 true,
             ),
             _ => {
@@ -490,18 +530,286 @@ impl FxPass {
         self.record_into(gpu, &mut encoder, source_view, target, uniforms);
         gpu.queue.submit(std::iter::once(encoder.finish()));
     }
+
+    /// Identity blit: copies one target into another inside a multi-stage
+    /// chain (landing a merge result back in the chain cursor).
+    pub fn blit(
+        gpu: &GpuContext,
+        target_format: wgpu::TextureFormat,
+    ) -> Result<Self, String> {
+        const BODY: &str = r#"fn fx_blit(uv: vec2<f32>, color: vec4<f32>) -> vec4<f32> {
+    return color;
+}"#;
+        Self::compile(
+            gpu,
+            "FxPass_blit",
+            target_format,
+            BODY,
+            "fx_blit(uv, color)",
+            &[],
+        )
+    }
+
+    /// Bright-pass extract shared by the spatial bloom stage: pixels whose
+    /// premultiplied luminance clears 0.45 pass through, everything else
+    /// goes transparent (mirrors `apply_bloom`).
+    pub fn bright_extract(
+        gpu: &GpuContext,
+        target_format: wgpu::TextureFormat,
+    ) -> Result<Self, String> {
+        const BODY: &str = r#"fn fx_bright_extract(uv: vec2<f32>, color: vec4<f32>) -> vec4<f32> {
+    let lum = dot(color.rgb, vec3<f32>(0.299, 0.587, 0.114)) * color.a;
+    if (lum > 0.45) {
+        return color;
+    }
+    return vec4<f32>(0.0);
+}"#;
+        Self::compile(
+            gpu,
+            "FxPass_bright_extract",
+            target_format,
+            BODY,
+            "fx_bright_extract(uv, color)",
+            &[],
+        )
+    }
+}
+
+/// Two-texture merge pass: binary fullscreen ops (unsharp mix, screen)
+/// that need the original AND a derived buffer side by side. Same
+/// fullscreen triangle + `FxUniforms` block as [`FxPass`]; bindings are
+/// `tex_a(0)`, `tex_b(1)`, sampler(2), uniforms(3).
+pub struct FxMergePass {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+}
+
+impl FxMergePass {
+    /// Build from a transparency gate plus the merge expression assigning
+    /// the output color (`o` is the primary sample, `b` the secondary).
+    fn from_calls(
+        gpu: &GpuContext,
+        target_format: wgpu::TextureFormat,
+        label: &str,
+        gate: &str,
+        merge_call: &str,
+    ) -> Result<Self, String> {
+        const BINDINGS: &str = r#"
+struct FxUniforms {
+    params: array<vec4<f32>, 4>,
+    misc: vec4<f32>,
+};
+
+@group(0) @binding(0) var tex_a: texture_2d<f32>;
+@group(0) @binding(1) var tex_b: texture_2d<f32>;
+@group(0) @binding(2) var samp: sampler;
+@group(0) @binding(3) var<uniform> u: FxUniforms;
+"#;
+        let src = format!(
+            "{FX_VERT}\n{BINDINGS}\n@fragment\nfn fs_main(in: VsOut) -> @location(0) vec4<f32> {{\n    let o = textureSample(tex_a, samp, in.uv);\n    let b = textureSample(tex_b, samp, in.uv);\n    if ({gate}) {{\n        return o;\n    }}\n    return {merge_call};\n}}\n"
+        );
+        naga::front::wgsl::parse_str(&src)
+            .map_err(|e| format!("fx merge pass {label} WGSL invalid: {e:?}"))?;
+        let shader = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(label),
+            source: wgpu::ShaderSource::Wgsl(src.into()),
+        });
+        let bind_group_layout =
+            gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some(label),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+        let pipeline_layout =
+            gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some(label),
+                bind_group_layouts: &[&bind_group_layout],
+                push_constant_ranges: &[],
+            });
+        let pipeline = gpu.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+        let sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some(label),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        Ok(Self { pipeline, bind_group_layout, sampler })
+    }
+
+    /// Unsharp-mask merge: `orig + (orig - blurred) * k`, alpha preserved
+    /// (mirrors `apply_sharpen`).
+    pub fn unsharp(
+        gpu: &GpuContext,
+        target_format: wgpu::TextureFormat,
+    ) -> Result<Self, String> {
+        Self::from_calls(
+            gpu,
+            target_format,
+            "FxMerge_unsharp",
+            "o.a <= 0.0",
+            "vec4<f32>(clamp(o.rgb + (o.rgb - b.rgb) * u.params[0].x, vec3<f32>(0.0), vec3<f32>(1.0)), o.a)",
+        )
+    }
+
+    /// Screen merge for the bloom stage: `1 - (1-o)(1-g*k)` with the glow
+    /// alpha gate (mirrors `apply_bloom`).
+    pub fn screen(
+        gpu: &GpuContext,
+        target_format: wgpu::TextureFormat,
+    ) -> Result<Self, String> {
+        Self::from_calls(
+            gpu,
+            target_format,
+            "FxMerge_screen",
+            "o.a <= 0.0 || b.a <= 0.0",
+            "vec4<f32>(clamp(vec3<f32>(1.0) - (vec3<f32>(1.0) - o.rgb) * (vec3<f32>(1.0) - b.rgb * u.params[0].x), vec3<f32>(0.0), vec3<f32>(1.0)), o.a)",
+        )
+    }
+
+    /// Record the merge into `encoder`: `(view_a, view_b)` -> `target`.
+    pub fn record_into(
+        &self,
+        gpu: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        view_a: &wgpu::TextureView,
+        view_b: &wgpu::TextureView,
+        target: &RenderTarget,
+        uniforms: FxUniforms,
+    ) {
+        let uniform_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Fx Merge Uniform Buffer"),
+            size: std::mem::size_of::<FxUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        gpu.queue.write_buffer(&uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Fx Merge Bind Group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(view_a),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(view_b),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Fx Merge Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target.view(),
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+    }
 }
 
 /// Stock plug-ins whose native pass reproduces the CPU kernel within u8
 /// rounding (gentle point/rect math, no time seeds, plus the bilinear-
 /// exact resampling twins): the set the live GPU chain may take without
 /// visual change. Excluded despite compiling: FilmGrain (frame-seeded CPU
-/// vs time-seeded twin) and Threshold (steep smoothstep transfer curves
-/// amplify u8 rounding through cascades; they stay on the exact CPU path,
-/// as does export). DifferenceKey is included pending the parity gate
-/// below: its ramp is continuous from the threshold, so default feathers
-/// stay within rounding.
-pub const CHAIN_SAFE_STOCK: [StockPlugin; 17] = [
+/// vs time-seeded twin), Threshold (steep smoothstep transfer curves
+/// amplify u8 rounding through cascades), and Halftone (luminance-
+/// thresholded binary dots flip on u8-quantized smooth gradients — the
+/// twin is exact, but the chain cannot bound it); those stay on the exact
+/// CPU path, as does export.
+pub const CHAIN_SAFE_STOCK: [StockPlugin; 22] = [
     StockPlugin::Posterize,
     StockPlugin::TemperatureTint,
     StockPlugin::SpillSuppress,
@@ -519,13 +827,18 @@ pub const CHAIN_SAFE_STOCK: [StockPlugin; 17] = [
     StockPlugin::Offset,
     StockPlugin::Pixelate,
     StockPlugin::Mosaic,
+    StockPlugin::ChromaticAberration,
+    StockPlugin::RgbSplit,
+    StockPlugin::Emboss,
+    StockPlugin::EdgeDetect,
+    StockPlugin::Cartoon,
 ];
 
 /// Built-in (non-stock) evaluated effects whose WGSL twin reproduces the
 /// CPU kernel within u8 rounding (gentle point math, no time seeds, no
 /// spatial resampling): the set the live GPU chain may take without
 /// visual change. Same audit bar as [`CHAIN_SAFE_STOCK`].
-pub const CHAIN_SAFE_BUILTIN: [&str; 13] = [
+pub const CHAIN_SAFE_BUILTIN: [&str; 14] = [
     "brightness_contrast",
     "tint",
     "levels",
@@ -539,6 +852,7 @@ pub const CHAIN_SAFE_BUILTIN: [&str; 13] = [
     "vignette",
     "displacement",
     "warp",
+    "oil_paint",
 ];
 
 /// Stable built-in id for a GPU-ported evaluated effect, if any.
@@ -558,6 +872,7 @@ pub fn builtin_gpu_id(effect: &compositor::EvaluatedEffectType) -> Option<&'stat
         E::Vignette { .. } => Some("vignette"),
         E::DisplacementMap { .. } => Some("displacement"),
         E::Warp { .. } => Some("warp"),
+        E::OilPaint { .. } => Some("oil_paint"),
         _ => None,
     }
 }
@@ -686,10 +1001,15 @@ mod tests {
     #[test]
     fn every_for_builtin_arm_compiles() {
         let Ok(gpu) = GpuContext::new_headless() else { return };
-        for id in CHAIN_SAFE_BUILTIN {
+        for id in CHAIN_SAFE_BUILTIN.into_iter().chain(["cel_shading"]) {
             FxPass::for_builtin(&gpu, id, wgpu::TextureFormat::Rgba8Unorm)
                 .unwrap_or_else(|e| panic!("for_builtin {id} failed: {e}"));
         }
+        // Merge machinery both variants compile.
+        FxMergePass::unsharp(&gpu, wgpu::TextureFormat::Rgba8Unorm).expect("unsharp compiles");
+        FxMergePass::screen(&gpu, wgpu::TextureFormat::Rgba8Unorm).expect("screen compiles");
+        FxPass::bright_extract(&gpu, wgpu::TextureFormat::Rgba8Unorm).expect("bright compiles");
+        FxPass::blit(&gpu, wgpu::TextureFormat::Rgba8Unorm).expect("blit compiles");
     }
 
     /// Fragment passes must agree with the CPU row convention (row 0 =

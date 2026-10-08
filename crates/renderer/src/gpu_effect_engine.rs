@@ -13,7 +13,7 @@
 
 use crate::compute_blur::ComputeBlurPipeline;
 use crate::device::{DoubleBufferedTarget, GpuContext, GpuError, RenderTarget};
-use crate::fx_pass::{FxPass, FxUniforms};
+use crate::fx_pass::{FxMergePass, FxPass, FxUniforms};
 use compositor::{EvaluatedEffect, EvaluatedEffectType};
 use project::StockPlugin;
 
@@ -25,6 +25,12 @@ pub struct GpuEffectEngine {
     intermediate_target: Option<RenderTarget>,
     fx_pass_cache: std::collections::HashMap<StockPlugin, FxPass>,
     builtin_pass_cache: std::collections::HashMap<&'static str, FxPass>,
+    merge_pass_cache: std::collections::HashMap<&'static str, FxMergePass>,
+    bright_pass: Option<FxPass>,
+    blit_pass: Option<FxPass>,
+    /// Scratch target for multi-stage spatial effects (sharpen blur source,
+    /// bloom blurred glow): same size as the ping-pong pair, pooled.
+    scratch: Option<RenderTarget>,
     /// Pooled readback staging buffer (avoids a GPU buffer alloc + destroy
     /// on every blur/readback call; recreated only when dims change).
     readback: Option<PooledReadback>,
@@ -50,6 +56,10 @@ impl GpuEffectEngine {
             intermediate_target: None,
             fx_pass_cache: std::collections::HashMap::new(),
             builtin_pass_cache: std::collections::HashMap::new(),
+            merge_pass_cache: std::collections::HashMap::new(),
+            bright_pass: None,
+            blit_pass: None,
+            scratch: None,
             readback: None,
         })
     }
@@ -80,6 +90,7 @@ impl GpuEffectEngine {
             let format = wgpu::TextureFormat::Rgba8Unorm;
             self.targets = Some(DoubleBufferedTarget::with_format(&self.gpu, width, height, format)?);
             self.intermediate_target = Some(RenderTarget::with_format(&self.gpu, width, height, format)?);
+            self.scratch = Some(RenderTarget::with_format(&self.gpu, width, height, format)?);
         }
         Ok(())
     }
@@ -104,6 +115,40 @@ impl GpuEffectEngine {
             self.builtin_pass_cache.insert(id, pass);
         }
         Ok(&self.builtin_pass_cache[id])
+    }
+
+    /// Get or create a two-texture merge pass ("unsharp" / "screen").
+    fn get_or_create_merge_pass(&mut self, id: &'static str) -> Result<&FxMergePass, GpuError> {
+        if !self.merge_pass_cache.contains_key(id) {
+            let format = wgpu::TextureFormat::Rgba8Unorm;
+            let pass = match id {
+                "screen" => FxMergePass::screen(&self.gpu, format),
+                _ => FxMergePass::unsharp(&self.gpu, format),
+            }
+            .map_err(GpuError::ShaderCompilation)?;
+            self.merge_pass_cache.insert(id, pass);
+        }
+        Ok(&self.merge_pass_cache[id])
+    }
+
+    /// Get or create the bright-pass extract stage.
+    fn get_or_create_bright_pass(&mut self) -> Result<&FxPass, GpuError> {
+        if self.bright_pass.is_none() {
+            let format = wgpu::TextureFormat::Rgba8Unorm;
+            self.bright_pass =
+                Some(FxPass::bright_extract(&self.gpu, format).map_err(GpuError::ShaderCompilation)?);
+        }
+        Ok(self.bright_pass.as_ref().expect("just created"))
+    }
+
+    /// Get or create the identity blit stage.
+    fn get_or_create_blit_pass(&mut self) -> Result<&FxPass, GpuError> {
+        if self.blit_pass.is_none() {
+            let format = wgpu::TextureFormat::Rgba8Unorm;
+            self.blit_pass =
+                Some(FxPass::blit(&self.gpu, format).map_err(GpuError::ShaderCompilation)?);
+        }
+        Ok(self.blit_pass.as_ref().expect("just created"))
     }
 
     /// Read a render target back reusing the pooled staging buffer
@@ -192,12 +237,30 @@ impl GpuEffectEngine {
     /// which already picks the GPU compute path when hardware exists.
     pub fn supports_fx_chain(&mut self, effects: &[compositor::EvaluatedEffect]) -> bool {
         let mut any = false;
+        // Posterize-family after an edge map speckles: edge output sits on
+        // posterize boundaries, and u8 inter-pass rounding flips whole
+        // bands (empirically 0.3 on edge->cartoon). Decline those stacks
+        // to the exact CPU path.
+        let mut saw_edge = false;
         for eff in effects {
             if !eff.enabled {
                 continue;
             }
             match &eff.effect_type {
                 compositor::EvaluatedEffectType::Stock { plugin, .. } => {
+                    if matches!(
+                        plugin,
+                        StockPlugin::EdgeDetect
+                    ) {
+                        saw_edge = true;
+                    } else if saw_edge
+                        && matches!(
+                            plugin,
+                            StockPlugin::Cartoon | StockPlugin::Posterize | StockPlugin::Mosaic
+                        )
+                    {
+                        return false;
+                    }
                     if !crate::fx_pass::CHAIN_SAFE_STOCK.contains(plugin) {
                         return false;
                     }
@@ -206,6 +269,25 @@ impl GpuEffectEngine {
                     }
                 }
                 eff_type => {
+                    // Unsharp mask needs the blurred buffer beside the
+                    // original: blur into scratch, then merge. A zero
+                    // amount is a true no-op on both paths: skip it.
+                    // Wide radii exceed the compute apron (blur_buffer
+                    // downsamples there): keep those on the CPU kernel.
+                    if let compositor::EvaluatedEffectType::Sharpen { amount, radius } = eff_type {
+                        let k = (*amount / 100.0).clamp(0.0, 2.0);
+                        if k <= 0.01 {
+                            continue;
+                        }
+                        if *radius > 8.0 {
+                            return false;
+                        }
+                        if self.get_or_create_merge_pass("unsharp").is_err() {
+                            return false;
+                        }
+                        any = true;
+                        continue;
+                    }
                     let Some(id) = crate::fx_pass::builtin_gpu_id(eff_type) else {
                         return false;
                     };
@@ -271,6 +353,8 @@ impl GpuEffectEngine {
         for eff in &active_effects {
             if let EvaluatedEffectType::Stock { plugin, .. } = &eff.effect_type {
                 let _ = self.get_or_create_fx_pass(*plugin);
+            } else if matches!(&eff.effect_type, EvaluatedEffectType::Sharpen { .. }) {
+                let _ = self.get_or_create_merge_pass("unsharp");
             } else if let Some(id) = crate::fx_pass::builtin_gpu_id(&eff.effect_type) {
                 let _ = self.get_or_create_builtin_pass(id);
             }
@@ -316,6 +400,37 @@ impl GpuEffectEngine {
                     }
                 }
                 eff_type => {
+                    // Unsharp mask: compute-blur the chain cursor into
+                    // scratch, then merge (orig, blurred) into write.
+                    if let EvaluatedEffectType::Sharpen { amount, radius } = eff_type {
+                        let k = (*amount / 100.0).clamp(0.0, 2.0);
+                        if k > 0.01 {
+                            if let (Some(merge), Some(scratch)) = (
+                                self.merge_pass_cache.get("unsharp"),
+                                self.scratch.as_ref(),
+                            ) {
+                                let uniforms = FxUniforms::pack(&[k], time_s, width as f32, height as f32, 0.0);
+                                self.blur_pipeline.record_blur(
+                                    &self.gpu,
+                                    &mut encoder,
+                                    targets.read_target(),
+                                    intermediate,
+                                    scratch,
+                                    radius.max(0.5),
+                                );
+                                merge.record_into(
+                                    &self.gpu,
+                                    &mut encoder,
+                                    targets.read_target().view(),
+                                    scratch.view(),
+                                    targets.write_target(),
+                                    uniforms,
+                                );
+                                targets.swap();
+                            }
+                        }
+                        continue;
+                    }
                     // Built-in color ops: pack evaluated fields exactly as
                     // the WGSL twin's call site expects (see
                     // `FxPass::for_builtin`). Ten slots: two vec4s hold a
@@ -365,6 +480,12 @@ impl GpuEffectEngine {
                         EvaluatedEffectType::Warp { amount, scale, .. } => {
                             ("warp", [*amount, *scale, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
                         }
+                        EvaluatedEffectType::CelShading { levels, edge } => {
+                            ("cel_shading", [*levels, *edge, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+                        }
+                        EvaluatedEffectType::OilPaint { radius, amount } => {
+                            ("oil_paint", [*radius, *amount, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+                        }
                         _ => continue,
                     };
                     if let Some(pass) = self.builtin_pass_cache.get(id) {
@@ -387,6 +508,83 @@ impl GpuEffectEngine {
 
         // 4. Download processed pixels back to CPU (pooled staging buffer:
         // steady frames allocate nothing here).
+        let gpu = &self.gpu;
+        let pool = &mut self.readback;
+        let read = targets.read_target();
+        Self::read_pooled(pool, gpu, read)
+    }
+
+    /// Full spatial bloom (bright-pass -> separable blur -> screen merge),
+    /// mirroring `apply_bloom` stage for stage. Hardware-only by
+    /// construction (callers gate on the hardware engine, so the blur is
+    /// the same pipeline `blur_buffer` takes).
+    pub fn bloom_rgba(
+        &mut self,
+        src_rgba: &[u8],
+        width: u32,
+        height: u32,
+        intensity: f32,
+        radius_px: f32,
+    ) -> Result<Vec<u8>, GpuError> {
+        let k = (intensity / 100.0).clamp(0.0, 1.0);
+        if width == 0 || height == 0 {
+            return Ok(src_rgba.to_vec());
+        }
+        self.ensure_targets(width, height)?;
+        self.get_or_create_bright_pass()?;
+        self.get_or_create_merge_pass("screen")?;
+        self.get_or_create_blit_pass()?;
+
+        let targets = self.targets.as_mut().expect("targets allocated");
+        let intermediate = self.intermediate_target.as_ref().expect("intermediate allocated");
+        let scratch = self.scratch.as_ref().expect("scratch allocated");
+        let bright = self.bright_pass.as_ref().expect("bright allocated");
+        let screen = self.merge_pass_cache.get("screen").expect("screen allocated");
+        let blit = self.blit_pass.as_ref().expect("blit allocated");
+
+        // 1. Upload source to the chain cursor.
+        targets.read_target().write_texture_rgba(&self.gpu, src_rgba);
+
+        let mut encoder = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("GPU Bloom Encoder"),
+        });
+        let uniforms = FxUniforms::pack(&[k], 0.0, width as f32, height as f32, 0.0);
+        // 2. Bright-pass into write.
+        bright.record_into(
+            &self.gpu,
+            &mut encoder,
+            targets.read_target().view(),
+            targets.write_target(),
+            FxUniforms::pack(&[], 0.0, width as f32, height as f32, 0.0),
+        );
+        // 3. Separable blur of the bright buffer into scratch.
+        self.blur_pipeline.record_blur(
+            &self.gpu,
+            &mut encoder,
+            targets.write_target(),
+            intermediate,
+            scratch,
+            radius_px.max(1.0),
+        );
+        // 4. Screen (orig, glow) into intermediate.
+        screen.record_into(
+            &self.gpu,
+            &mut encoder,
+            targets.read_target().view(),
+            scratch.view(),
+            intermediate,
+            uniforms,
+        );
+        // 5. Blit back into the cursor for readback.
+        blit.record_into(
+            &self.gpu,
+            &mut encoder,
+            intermediate.view(),
+            targets.read_target(),
+            FxUniforms::pack(&[], 0.0, width as f32, height as f32, 0.0),
+        );
+        self.gpu.queue.submit(std::iter::once(encoder.finish()));
+
         let gpu = &self.gpu;
         let pool = &mut self.readback;
         let read = targets.read_target();

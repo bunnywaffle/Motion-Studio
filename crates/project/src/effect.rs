@@ -540,6 +540,18 @@ pub enum EffectType {
         amount: Property<f32>,
         softness: Property<f32>,
     },
+    /// Cel shading: luminance tone bands + inked Sobel edges (spatial).
+    /// OFX plug-in `net.sf.openfx.cel_shading`.
+    CelShading {
+        levels: Property<f32>,
+        edge: Property<f32>,
+    },
+    /// Oil painting: classic Kuwahara smoothing (spatial, min-variance).
+    /// OFX plug-in `net.sf.openfx.oil_paint`.
+    OilPaint {
+        radius: Property<f32>,
+        amount: Property<f32>,
+    },
     /// Modular stock plug-in (see `crate::stock::StockPlugin`): scalar
     /// params are built from the plug-in descriptor, so every stock effect
     /// is keyframable with zero per-effect plumbing. `colors` holds the
@@ -586,6 +598,8 @@ impl EffectType {
             Self::HueSaturation { .. } => "Hue / Saturation",
             Self::Sharpen { .. } => "Sharpen",
             Self::Vignette { .. } => "Vignette",
+            Self::CelShading { .. } => "Cel Shading",
+            Self::OilPaint { .. } => "Oil Painting",
             Self::Stock { plugin, .. } => plugin.descriptor().label,
         }
     }
@@ -984,6 +998,22 @@ impl EffectType {
         }
     }
 
+    /// Construct a Cel Shading effect type.
+    pub fn cel_shading(levels: f32, edge: f32) -> Self {
+        Self::CelShading {
+            levels: Property::new("Levels", levels.clamp(2.0, 8.0)),
+            edge: Property::new("Edge", edge.clamp(0.0, 100.0)),
+        }
+    }
+
+    /// Construct an Oil Painting effect type.
+    pub fn oil_paint(radius: f32, amount: f32) -> Self {
+        Self::OilPaint {
+            radius: Property::new("Radius", radius.clamp(1.0, 4.0)),
+            amount: Property::new("Amount", amount.clamp(0.0, 100.0)),
+        }
+    }
+
     /// Construct a Vignette effect type.
     pub fn vignette(amount: f32, softness: f32) -> Self {
         Self::Vignette {
@@ -1025,6 +1055,8 @@ impl EffectType {
             Self::HueSaturation { .. } => "net.sf.openfx.hue_saturation",
             Self::Sharpen { .. } => "net.sf.openfx.sharpen",
             Self::Vignette { .. } => "net.sf.openfx.vignette",
+            Self::CelShading { .. } => "net.sf.openfx.cel_shading",
+            Self::OilPaint { .. } => "net.sf.openfx.oil_paint",
             Self::Stock { plugin, .. } => plugin.plugin_id(),
         }
     }
@@ -1232,6 +1264,16 @@ impl Effect {
     /// Factory for creating a Sharpen effect.
     pub fn sharpen(id: impl Into<String>, amount: f32, radius: f32) -> Self {
         Self::new(id, "Sharpen", EffectType::sharpen(amount, radius))
+    }
+
+    /// Factory for creating a Cel Shading effect.
+    pub fn cel_shading(id: impl Into<String>, levels: f32, edge: f32) -> Self {
+        Self::new(id, "Cel Shading", EffectType::cel_shading(levels, edge))
+    }
+
+    /// Factory for creating an Oil Painting effect.
+    pub fn oil_paint(id: impl Into<String>, radius: f32, amount: f32) -> Self {
+        Self::new(id, "Oil Painting", EffectType::oil_paint(radius, amount))
     }
 
     /// Factory for creating a Vignette effect.
@@ -2137,6 +2179,24 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     return true;
                 }
             }
+            EffectType::CelShading { levels, edge } => {
+                if param_name.eq_ignore_ascii_case("levels") {
+                    levels.set_value((levels.value + delta).clamp(2.0, 8.0).round());
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("edge") {
+                    edge.set_value((edge.value + delta).clamp(0.0, 100.0));
+                    return true;
+                }
+            }
+            EffectType::OilPaint { radius, amount } => {
+                if param_name.eq_ignore_ascii_case("radius") {
+                    radius.set_value((radius.value + delta).clamp(1.0, 4.0).round());
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("amount") {
+                    amount.set_value((amount.value + delta).clamp(0.0, 100.0));
+                    return true;
+                }
+            }
             EffectType::Stock { plugin, params, .. } => {
                 let desc = plugin.descriptor();
                 for (i, p) in desc.params.iter().enumerate() {
@@ -2492,6 +2552,24 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     None
                 }
             }
+            EffectType::CelShading { levels, edge } => {
+                if param_name.eq_ignore_ascii_case("levels") {
+                    Some(levels)
+                } else if param_name.eq_ignore_ascii_case("edge") {
+                    Some(edge)
+                } else {
+                    None
+                }
+            }
+            EffectType::OilPaint { radius, amount } => {
+                if param_name.eq_ignore_ascii_case("radius") {
+                    Some(radius)
+                } else if param_name.eq_ignore_ascii_case("amount") {
+                    Some(amount)
+                } else {
+                    None
+                }
+            }
             EffectType::Stock { plugin, params, .. } => {
                 let idx = plugin
                     .descriptor()
@@ -2813,6 +2891,24 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     Some(amount)
                 } else if param_name.eq_ignore_ascii_case("softness") {
                     Some(softness)
+                } else {
+                    None
+                }
+            }
+            EffectType::CelShading { levels, edge } => {
+                if param_name.eq_ignore_ascii_case("levels") {
+                    Some(levels)
+                } else if param_name.eq_ignore_ascii_case("edge") {
+                    Some(edge)
+                } else {
+                    None
+                }
+            }
+            EffectType::OilPaint { radius, amount } => {
+                if param_name.eq_ignore_ascii_case("radius") {
+                    Some(radius)
+                } else if param_name.eq_ignore_ascii_case("amount") {
+                    Some(amount)
                 } else {
                     None
                 }
@@ -3162,6 +3258,14 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
             EffectType::Vignette { amount, softness } => vec![
                 scalar("amount", "Amount", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), amount),
                 scalar("softness", "Softness", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), softness),
+            ],
+            EffectType::CelShading { levels, edge } => vec![
+                scalar("levels", "Levels", WidgetKind::Slider, px1(2.0, 8.0, 1.0, 4.0), levels),
+                scalar("edge", "Edge", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 60.0), edge),
+            ],
+            EffectType::OilPaint { radius, amount } => vec![
+                scalar("radius", "Radius", WidgetKind::Slider, px1(1.0, 4.0, 1.0, 2.0), radius),
+                scalar("amount", "Amount", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), amount),
             ],
             EffectType::Stock { .. } => {
                 let mut out = Vec::new();

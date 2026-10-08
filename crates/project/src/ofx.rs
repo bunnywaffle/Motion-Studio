@@ -308,6 +308,26 @@ pub const OFX_SUITE: &[OfxEffectDescriptor] = &[
         spatial: true,
     },
     OfxEffectDescriptor {
+        id: "net.sf.openfx.cel_shading",
+        label: "Cel Shading",
+        category: OfxCategory::Stylize,
+        params: &[
+            OfxParamDescriptor { name: "levels", label: "Levels", min: 2.0, max: 8.0, default: 4.0 },
+            OfxParamDescriptor { name: "edge", label: "Edge", min: 0.0, max: 100.0, default: 60.0 },
+        ],
+        spatial: true,
+    },
+    OfxEffectDescriptor {
+        id: "net.sf.openfx.oil_paint",
+        label: "Oil Painting",
+        category: OfxCategory::Stylize,
+        params: &[
+            OfxParamDescriptor { name: "radius", label: "Radius", min: 1.0, max: 4.0, default: 2.0 },
+            OfxParamDescriptor { name: "amount", label: "Amount", min: 0.0, max: 100.0, default: 100.0 },
+        ],
+        spatial: true,
+    },
+    OfxEffectDescriptor {
         id: "net.sf.openfx.checkerboard",
         label: "Checkerboard",
         category: OfxCategory::Generate,

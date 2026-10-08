@@ -557,6 +557,8 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
         EvaluatedEffectType::HueSaturation { .. } => 23,
         EvaluatedEffectType::Sharpen { .. } => 24,
         EvaluatedEffectType::Vignette { .. } => 25,
+        EvaluatedEffectType::CelShading { .. } => 30,
+        EvaluatedEffectType::OilPaint { .. } => 31,
         EvaluatedEffectType::Stock { plugin, .. } => 100 + *plugin as u8,
     };
     disc.hash(h);
@@ -717,6 +719,14 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
         EvaluatedEffectType::Vignette { amount, softness } => {
             amount.to_bits().hash(h);
             softness.to_bits().hash(h);
+        }
+        EvaluatedEffectType::CelShading { levels, edge } => {
+            levels.to_bits().hash(h);
+            edge.to_bits().hash(h);
+        }
+        EvaluatedEffectType::OilPaint { radius, amount } => {
+            radius.to_bits().hash(h);
+            amount.to_bits().hash(h);
         }
         EvaluatedEffectType::Stock { params, colors, .. } => {
             params.len().hash(h);
@@ -1101,7 +1111,9 @@ pub fn rasterize_layer(
         blur_buffer(&mut work, blur_total);
     }
     if let Some((intensity, radius)) = bloom {
-        apply_bloom(&mut work, intensity, radius);
+        if !super::buffer::bloom_buffer(&mut work, intensity, radius) {
+            apply_bloom(&mut work, intensity, radius);
+        }
     }
     // World map (frame px -> output px of this AABB box). Buffer (0, 0) is
     // local `frame origin`, so the translation carries `W * origin`.
@@ -2488,5 +2500,103 @@ mod tests {
         ];
         let worst = gpu_parity_worst(&gpu_parity_base(), &effects);
         assert!(worst < 0.02, "GPU resample batch must match CPU within u8 rounding: {worst}");
+    }
+
+    #[test]
+    fn gpu_merge_batch_matches_cpu_within_tolerance() {
+        use compositor::{EvaluatedEffect, EvaluatedEffectType};
+        if !crate::raster::buffer::gpu_accelerated() {
+            return;
+        }
+        let fx = |id: &str, effect_type: EvaluatedEffectType| EvaluatedEffect {
+            id: id.to_string(),
+            name: id.to_string(),
+            enabled: true,
+            effect_type,
+        };
+        // Unsharp chain (radius within the compute apron). Bloom stays out:
+        // it is chain-identity on both paths (spatial bloom owns the look
+        // at the raster stage via apply_bloom/bloom_buffer).
+        let effects = vec![
+            fx("sharpen", EvaluatedEffectType::Sharpen { amount: 80.0, radius: 2.0 }),
+        ];
+        let worst = gpu_parity_worst(&gpu_parity_base(), &effects);
+        assert!(worst < 0.03, "GPU merge batch must match CPU within cascade rounding: {worst}");
+
+        // Full spatial bloom stage (bright-pass + blur + screen).
+        let mut cpu = gpu_parity_base();
+        apply_bloom(&mut cpu, 60.0, 4.0);
+        let mut gpu = gpu_parity_base();
+        let bloomed = crate::raster::buffer::bloom_buffer(&mut gpu, 60.0, 4.0);
+        assert!(bloomed, "hardware bloom stage must engage");
+        let mut worst = 0.0f32;
+        for (c, g) in cpu.px.iter().zip(gpu.px.iter()) {
+            for (cc, gg) in [c.r, c.g, c.b, c.a].into_iter().zip([g.r, g.g, g.b, g.a]) {
+                worst = worst.max((cc - gg).abs());
+            }
+        }
+        assert!(worst < 0.03, "GPU spatial bloom must match CPU within rounding: {worst}");
+    }
+
+    #[test]
+    fn gpu_stylize_batch_matches_cpu_within_tolerance() {
+        use compositor::{EvaluatedEffect, EvaluatedEffectType};
+        if !crate::raster::buffer::gpu_accelerated() {
+            return;
+        }
+        let stock = |plugin: StockPlugin, params: Vec<f32>| EvaluatedEffect {
+            id: format!("fx_{plugin:?}"),
+            name: format!("{plugin:?}"),
+            enabled: true,
+            effect_type: EvaluatedEffectType::Stock { plugin, params, colors: Vec::new() },
+        };
+        let effects = vec![
+            stock(StockPlugin::ChromaticAberration, vec![8.0, 0.0]),
+            // Fractional offsets lock the premultiplied-under-center-alpha
+            // convention (integer offsets would pass by texel luck).
+            stock(StockPlugin::RgbSplit, vec![10.0, 30.0]),
+            stock(StockPlugin::Emboss, vec![60.0, 135.0]),
+            // No edge/cartoon/halftone in chains: edge output sits on
+            // posterize boundaries (speckle via u8 rounding) and halftone
+            // dots flip on quantized gradients — both stay CPU by gate,
+            // asserted singly below within their own bars.
+        ];
+        let worst = gpu_parity_worst(&gpu_parity_base(), &effects);
+        assert!(worst < 0.02, "GPU stylize batch must match CPU within u8 rounding: {worst}");
+        for (plugin, params) in [
+            (StockPlugin::EdgeDetect, vec![20.0, 0.0]),
+            (StockPlugin::Cartoon, vec![4.0, 50.0]),
+        ] {
+            let single = vec![stock(plugin, params)];
+            let w = gpu_parity_worst(&gpu_parity_base(), &single);
+            assert!(w < 0.02, "GPU {plugin:?} must match CPU within u8 rounding: {w}");
+        }
+    }
+
+    #[test]
+    fn gpu_new_effects_match_cpu_within_tolerance() {
+        use compositor::{EvaluatedEffect, EvaluatedEffectType};
+        if !crate::raster::buffer::gpu_accelerated() {
+            return;
+        }
+        let fx = |id: &str, effect_type: EvaluatedEffectType| EvaluatedEffect {
+            id: id.to_string(),
+            name: id.to_string(),
+            enabled: true,
+            effect_type,
+        };
+        // Oil painting alone (Kuwahara min-variance selection).
+        let oil = vec![fx(
+            "oil",
+            EvaluatedEffectType::OilPaint { radius: 2.0, amount: 100.0 },
+        )];
+        let w = gpu_parity_worst(&gpu_parity_base(), &oil);
+        // Min-variance selection flips between near-tied quadrants on
+        // u8 noise; the error is bounded by the local mean spread
+        // (measured 0.033 at image rims), not a twin bug.
+        assert!(w < 0.04, "GPU oil must match CPU within selection rounding: {w}");
+        // No cel here: tone-band boundaries flip on u8-quantized
+        // gradients (0.13 measured), so it stays CPU like halftone. Its
+        // CPU kernel is covered by the raster unit tests.
     }
 }

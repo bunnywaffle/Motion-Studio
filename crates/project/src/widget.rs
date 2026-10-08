@@ -292,9 +292,11 @@ mod tests {
             fx(EffectType::HueSaturation { hue_shift: p(0.0), saturation: p(0.0), lightness: p(0.0) }),
             fx(EffectType::Sharpen { amount: p(50.0), radius: p(1.0) }),
             fx(EffectType::Vignette { amount: p(50.0), softness: p(50.0) }),
+            fx(EffectType::CelShading { levels: p(4.0), edge: p(60.0) }),
+            fx(EffectType::OilPaint { radius: p(2.0), amount: p(100.0) }),
             Effect::stock("s", StockPlugin::Solid),
         ];
-        assert_eq!(cases.len(), 26);
+        assert_eq!(cases.len(), 28);
         for fx in &cases {
             let decls = fx.declarations();
             assert!(!decls.is_empty(), "{:?}", fx.effect_type);

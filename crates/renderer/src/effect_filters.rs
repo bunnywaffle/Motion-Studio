@@ -1235,6 +1235,44 @@ fn fx_sample_cpu(s: vec2<f32>, res: vec2<f32>) -> vec4<f32> {
     }
     return vec4<f32>(m.rgb / m.a, m.a);
 }
+fn fx_sample_cpu_pm(s: vec2<f32>, res: vec2<f32>) -> vec4<f32> {
+    let x0 = floor(s.x);
+    let y0 = floor(s.y);
+    let fx = clamp(s.x - x0, 0.0, 1.0);
+    let fy = clamp(s.y - y0, 0.0, 1.0);
+    let ri = vec2<i32>(i32(res.x), i32(res.y));
+    let a = fx_fetch_pm(vec2<i32>(i32(x0), i32(y0)), ri);
+    let b = fx_fetch_pm(vec2<i32>(i32(x0) + 1, i32(y0)), ri);
+    let c = fx_fetch_pm(vec2<i32>(i32(x0), i32(y0) + 1), ri);
+    let d = fx_fetch_pm(vec2<i32>(i32(x0) + 1, i32(y0) + 1), ri);
+    return mix(mix(a, b, fx), mix(c, d, fx), fy);
+}
+fn fx_sobel_lum(px: vec2<i32>, res: vec2<i32>) -> f32 {
+    let cx = clamp(px.x, 0, res.x - 1);
+    let cy = clamp(px.y, 0, res.y - 1);
+    let t = textureLoad(src_tex, vec2<i32>(cx, cy), 0);
+    let a = max(t.a, 0.000001);
+    return dot(t.rgb / a, vec3<f32>(0.299, 0.587, 0.114));
+}
+fn fx_sobel_mag(X: vec2<f32>, res: vec2<f32>) -> f32 {
+    // X is integer-valued (pixel space); round (not floor): uv
+    // interpolation on non-power-of-two widths lands within 1e-4 and
+    // floor would pick the wrong texel half the time.
+    let ix = i32(floor(X.x + 0.5));
+    let iy = i32(floor(X.y + 0.5));
+    let ri = vec2<i32>(i32(res.x), i32(res.y));
+    let l00 = fx_sobel_lum(vec2<i32>(ix - 1, iy - 1), ri);
+    let l10 = fx_sobel_lum(vec2<i32>(ix, iy - 1), ri);
+    let l20 = fx_sobel_lum(vec2<i32>(ix + 1, iy - 1), ri);
+    let l01 = fx_sobel_lum(vec2<i32>(ix - 1, iy), ri);
+    let l21 = fx_sobel_lum(vec2<i32>(ix + 1, iy), ri);
+    let l02 = fx_sobel_lum(vec2<i32>(ix - 1, iy + 1), ri);
+    let l12 = fx_sobel_lum(vec2<i32>(ix, iy + 1), ri);
+    let l22 = fx_sobel_lum(vec2<i32>(ix + 1, iy + 1), ri);
+    let gx = -l00 - 2.0 * l01 - l02 + l20 + 2.0 * l21 + l22;
+    let gy = -l00 - 2.0 * l10 - l20 + l02 + 2.0 * l12 + l22;
+    return clamp(sqrt(gx * gx + gy * gy) * 0.35, 0.0, 1.0);
+}
 "#;
 
 /// Luminance-driven displacement (mirrors `apply_displacement`): forward
@@ -1269,6 +1307,223 @@ pub fn warp_wave() -> ColorFilter {
     let oy = trunc(sin(X.x * f * 1.3 + 1.7) * amp);
     let s = clamp(X + vec2<f32>(ox, oy), vec2<f32>(0.0), res - vec2<f32>(1.0));
     return fx_sample_cpu(s, res);
+}"#
+    )
+}
+
+/// Bloom highlight lift (mirrors `process_color::Bloom`): the evaluated
+/// chain semantic is a per-pixel lift curve, not a spatial blur.
+pub fn bloom_lift() -> ColorFilter {
+    color_filter!(
+        "bloom_lift",
+        r#"fn fx_bloom_lift(uv: vec2<f32>, color: vec4<f32>, intensity: f32) -> vec4<f32> {
+    let k = clamp(intensity / 100.0, 0.0, 1.0);
+    let rgb = clamp(color.rgb + color.rgb * color.rgb * k, vec3<f32>(0.0), vec3<f32>(1.0));
+    return vec4<f32>(rgb, color.a);
+}"#
+    )
+}
+
+/// Stock chromatic aberration (mirrors `k_chromatic`). The CPU stores
+/// shifted-sample premultiplied rgb under the CENTER alpha (no
+/// unpremultiply), so this samples premultiplied and divides by the
+/// center alpha instead of using the straight-out sampler.
+pub fn stock_chromatic_resample() -> ColorFilter {
+    color_filter!(
+        "stock_chromatic_resample",
+        r#"fn fx_stock_chromatic_c(uv: vec2<f32>, color: vec4<f32>, amount: f32, angle: f32, res: vec2<f32>) -> vec4<f32> {
+    if (color.a <= 0.0) {
+        return color;
+    }
+    let X = uv * res - vec2<f32>(0.5);
+    let rad = radians(angle);
+    let d = vec2<f32>(cos(rad), sin(rad));
+    let ex = abs(X.x - res.x * 0.5) / res.x * 2.0;
+    let ey = abs(X.y - res.y * 0.5) / res.y * 2.0;
+    let e = (ex + ey) * 0.5;
+    let o = amount * 0.15 * (0.25 + e);
+    let ia = 1.0 / max(color.a, 0.000001);
+    let r = fx_sample_cpu_pm(X + d * o, res);
+    let b = fx_sample_cpu_pm(X - d * o, res);
+    return vec4<f32>(r.r * ia, color.g, b.b * ia, color.a);
+}"#
+    )
+}
+
+/// Stock RGB split (mirrors `k_rgb_split`): same premultiplied-under-
+/// center-alpha convention as chromatic aberration.
+pub fn stock_rgb_split_resample() -> ColorFilter {
+    color_filter!(
+        "stock_rgb_split_resample",
+        r#"fn fx_stock_rgb_split_c(uv: vec2<f32>, color: vec4<f32>, amount: f32, angle: f32, res: vec2<f32>) -> vec4<f32> {
+    if (color.a <= 0.0) {
+        return color;
+    }
+    let X = uv * res - vec2<f32>(0.5);
+    let rad = radians(angle);
+    let d = vec2<f32>(cos(rad), sin(rad));
+    let ia = 1.0 / max(color.a, 0.000001);
+    let r = fx_sample_cpu_pm(X + d * amount, res);
+    let b = fx_sample_cpu_pm(X - d * amount, res);
+    return vec4<f32>(r.r * ia, color.g, b.b * ia, color.a);
+}"#
+    )
+}
+
+/// Stock emboss (mirrors `k_emboss`).
+pub fn stock_emboss_resample() -> ColorFilter {
+    color_filter!(
+        "stock_emboss_resample",
+        r#"fn fx_stock_emboss_c(uv: vec2<f32>, color: vec4<f32>, strength: f32, angle: f32, res: vec2<f32>) -> vec4<f32> {
+    if (color.a <= 0.0) {
+        return color;
+    }
+    let X = uv * res - vec2<f32>(0.5);
+    let rad = radians(angle);
+    let d = vec2<f32>(cos(rad), sin(rad));
+    let s = strength / 100.0;
+    let l1 = dot(fx_sample_cpu(X + d, res).rgb, vec3<f32>(0.299, 0.587, 0.114));
+    let l2 = dot(fx_sample_cpu(X - d, res).rgb, vec3<f32>(0.299, 0.587, 0.114));
+    let v = clamp(0.5 + (l1 - l2) * s * 2.0, 0.0, 1.0);
+    return vec4<f32>(vec3<f32>(v), color.a);
+}"#
+    )
+}
+
+/// Stock edge detect (mirrors `k_edge`).
+pub fn stock_edge_resample() -> ColorFilter {
+    color_filter!(
+        "stock_edge_resample",
+        r#"fn fx_stock_edge_c(uv: vec2<f32>, color: vec4<f32>, threshold: f32, invert: f32, res: vec2<f32>) -> vec4<f32> {
+    if (color.a <= 0.0) {
+        return color;
+    }
+    let X = uv * res - vec2<f32>(0.5);
+    var e = fx_sobel_mag(X, res);
+    e = clamp((e - threshold / 100.0) / 0.15, 0.0, 1.0);
+    let inv = invert / 100.0;
+    e = e * (1.0 - inv) + (1.0 - e) * inv;
+    return vec4<f32>(vec3<f32>(e), color.a);
+}"#
+    )
+}
+
+/// Stock cartoon (mirrors `k_cartoon`).
+pub fn stock_cartoon_resample() -> ColorFilter {
+    color_filter!(
+        "stock_cartoon_resample",
+        r#"fn fx_stock_cartoon_c(uv: vec2<f32>, color: vec4<f32>, levels: f32, edge: f32, res: vec2<f32>) -> vec4<f32> {
+    if (color.a <= 0.0) {
+        return color;
+    }
+    let X = uv * res - vec2<f32>(0.5);
+    let n = clamp(floor(levels + 0.5), 2.0, 8.0);
+    let q = clamp(floor(color.rgb * (n - 1.0) + vec3<f32>(0.5)) / (n - 1.0), vec3<f32>(0.0), vec3<f32>(1.0));
+    let e = fx_sobel_mag(X, res);
+    let ink = 1.0 - clamp(e * (0.5 + edge / 100.0 * 2.0), 0.0, 1.0);
+    return vec4<f32>(q * ink, color.a);
+}"#
+    )
+}
+
+/// Stock halftone, CPU-exact coordinates (mirrors `k_halftone`).
+pub fn stock_halftone_resample() -> ColorFilter {
+    color_filter!(
+        "stock_halftone_resample",
+        r#"fn fx_stock_halftone_c(uv: vec2<f32>, color: vec4<f32>, size: f32, angle: f32, res: vec2<f32>) -> vec4<f32> {
+    if (color.a <= 0.0) {
+        return color;
+    }
+    let l = dot(color.rgb, vec3<f32>(0.299, 0.587, 0.114));
+    let a = radians(angle);
+    let n = clamp(size, 2.0, 32.0);
+    let X = uv * res - vec2<f32>(0.5);
+    let u = (X.x * cos(a) - X.y * sin(a)) / n;
+    let v = (X.x * sin(a) + X.y * cos(a)) / n;
+    let cell = length(vec2<f32>(u - floor(u) - 0.5, v - floor(v) - 0.5)) * 2.0;
+    var dot_v = 0.06;
+    if (cell < (1.0 - l) * 1.1) {
+        dot_v = 1.0;
+    }
+    return vec4<f32>(vec3<f32>(dot_v), color.a);
+}"#
+    )
+}
+
+/// Cel shading: luminance tone bands plus inked Sobel edges (mirrors
+/// `apply_cel_shade`).
+pub fn cel_shade_resample() -> ColorFilter {
+    color_filter!(
+        "cel_shade_resample",
+        r#"fn fx_cel_shade(uv: vec2<f32>, color: vec4<f32>, levels: f32, edge: f32, res: vec2<f32>) -> vec4<f32> {
+    if (color.a <= 0.0) {
+        return color;
+    }
+    let X = uv * res - vec2<f32>(0.5);
+    let lum = dot(color.rgb, vec3<f32>(0.299, 0.587, 0.114));
+    let n = clamp(floor(levels + 0.5), 2.0, 8.0);
+    let band = floor(lum * (n - 1.0) + 0.5) / (n - 1.0);
+    let shade = 0.3 + 0.7 * band;
+    let e = fx_sobel_mag(X, res);
+    let ink = 1.0 - clamp(e * edge / 100.0 * 2.0, 0.0, 1.0);
+    return vec4<f32>(clamp(color.rgb * shade * ink, vec3<f32>(0.0), vec3<f32>(1.0)), color.a);
+}"#
+    )
+}
+
+/// Oil painting: classic Kuwahara smoothing (mirrors `apply_oil_paint`).
+/// Quadrant layout, mean/variance order, and straight-space sampling all
+/// match the CPU kernel exactly.
+pub fn oil_paint_resample() -> ColorFilter {
+    color_filter!(
+        "oil_paint_resample",
+        r#"fn fx_oil_texel(px: vec2<i32>, res: vec2<i32>) -> vec3<f32> {
+    if (px.x < 0 || px.y < 0 || px.x >= res.x || px.y >= res.y) {
+        return vec3<f32>(0.0);
+    }
+    return textureLoad(src_tex, px, 0).rgb;
+}
+fn fx_oil_paint(uv: vec2<f32>, color: vec4<f32>, radius: f32, amount: f32, res: vec2<f32>) -> vec4<f32> {
+    if (color.a <= 0.0) {
+        return color;
+    }
+    let X = uv * res - vec2<f32>(0.5);
+    let r = i32(clamp(floor(radius + 0.5), 1.0, 4.0));
+    let ri = vec2<i32>(i32(res.x), i32(res.y));
+    let xi = i32(floor(X.x + 0.5));
+    let yi = i32(floor(X.y + 0.5));
+    var best = color.rgb;
+    var best_v = 1e10;
+    for (var q = 0; q < 4; q++) {
+        var mean = vec3<f32>(0.0);
+        var sq = vec3<f32>(0.0);
+        var n = 0.0;
+        for (var j = -r; j <= 0; j++) {
+            for (var i = -r; i <= 0; i++) {
+                var o = vec2<i32>(i, j);
+                if (q == 1) {
+                    o.x = -o.x;
+                } else if (q == 2) {
+                    o = -o;
+                } else if (q == 3) {
+                    o.y = -o.y;
+                }
+                let c = fx_oil_texel(vec2<i32>(xi, yi) + o, ri);
+                mean += c;
+                sq += c * c;
+                n += 1.0;
+            }
+        }
+        mean /= n;
+        let va = abs(sq / n - mean * mean);
+        let v = va.r + va.g + va.b;
+        if (v < best_v) {
+            best_v = v;
+            best = mean;
+        }
+    }
+    let k = clamp(amount / 100.0, 0.0, 1.0);
+    return vec4<f32>(mix(color.rgb, best, k), color.a);
 }"#
     )
 }
@@ -1507,6 +1762,14 @@ pub fn resample_filters() -> Vec<ColorFilter> {
         stock_offset_resample(),
         stock_pixelate_resample(),
         stock_mosaic_resample(),
+        stock_chromatic_resample(),
+        stock_rgb_split_resample(),
+        stock_emboss_resample(),
+        stock_edge_resample(),
+        stock_cartoon_resample(),
+        stock_halftone_resample(),
+        cel_shade_resample(),
+        oil_paint_resample(),
     ]
 }
 
@@ -1529,6 +1792,7 @@ pub fn all_color_filters() -> Vec<ColorFilter> {
         checkerboard(),
         gradient_ramp(),
         bloom(),
+        bloom_lift(),
         exposure(),
         vibrance(),
         levels(),
@@ -1670,6 +1934,14 @@ mod tests {
             ("stock_offset_resample", "fx_stock_offset_c(uv, color, u.params[0].x, u.params[0].y, RES)"),
             ("stock_pixelate_resample", "fx_stock_pixelate_c(uv, color, u.params[0].x, RES)"),
             ("stock_mosaic_resample", "fx_stock_mosaic_c(uv, color, u.params[0].x, u.params[0].y, RES)"),
+            ("stock_chromatic_resample", "fx_stock_chromatic_c(uv, color, u.params[0].x, u.params[0].y, RES)"),
+            ("stock_rgb_split_resample", "fx_stock_rgb_split_c(uv, color, u.params[0].x, u.params[0].y, RES)"),
+            ("stock_emboss_resample", "fx_stock_emboss_c(uv, color, u.params[0].x, u.params[0].y, RES)"),
+            ("stock_edge_resample", "fx_stock_edge_c(uv, color, u.params[0].x, u.params[0].y, RES)"),
+            ("stock_cartoon_resample", "fx_stock_cartoon_c(uv, color, u.params[0].x, u.params[0].y, RES)"),
+            ("stock_halftone_resample", "fx_stock_halftone_c(uv, color, u.params[0].x, u.params[0].y, RES)"),
+            ("cel_shade_resample", "fx_cel_shade(uv, color, u.params[0].x, u.params[0].y, RES)"),
+            ("oil_paint_resample", "fx_oil_paint(uv, color, u.params[0].x, u.params[0].y, RES)"),
         ];
         let twins = resample_filters();
         let by_id: std::collections::HashMap<&str, &str> =

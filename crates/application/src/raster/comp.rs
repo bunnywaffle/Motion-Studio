@@ -249,7 +249,9 @@ pub fn rasterize_comp(
                 blur_buffer(&mut work, blur_total * k.max(0.5));
             }
             if let Some((intensity, radius)) = bloom {
-                apply_bloom(&mut work, intensity, radius * k.max(0.5));
+                if !crate::raster::buffer::bloom_buffer(&mut work, intensity, radius * k.max(0.5)) {
+                    apply_bloom(&mut work, intensity, radius * k.max(0.5));
+                }
             }
             // Drop shadow params (drawn under at blit).
             let mut shadow = None;

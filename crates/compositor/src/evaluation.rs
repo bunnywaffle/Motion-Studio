@@ -518,6 +518,14 @@ pub enum EvaluatedEffectType {
         amount: f32,
         softness: f32,
     },
+    CelShading {
+        levels: f32,
+        edge: f32,
+    },
+    OilPaint {
+        radius: f32,
+        amount: f32,
+    },
     /// Modular stock plug-in: evaluated scalar params in descriptor order
     /// plus resolved color slots.
     Stock {
@@ -558,6 +566,8 @@ impl EvaluatedEffectType {
             Self::HueSaturation { .. } => "Hue / Saturation",
             Self::Sharpen { .. } => "Sharpen",
             Self::Vignette { .. } => "Vignette",
+            Self::CelShading { .. } => "Cel Shading",
+            Self::OilPaint { .. } => "Oil Painting",
             Self::OuterGlow { .. } => "Outer Glow",
             Self::Stock { plugin, .. } => plugin.descriptor().label,
         }
@@ -594,6 +604,8 @@ impl EvaluatedEffectType {
             Self::HueSaturation { .. } => "net.sf.openfx.hue_saturation",
             Self::Sharpen { .. } => "net.sf.openfx.sharpen",
             Self::Vignette { .. } => "net.sf.openfx.vignette",
+            Self::CelShading { .. } => "net.sf.openfx.cel_shading",
+            Self::OilPaint { .. } => "net.sf.openfx.oil_paint",
             Self::OuterGlow { .. } => "net.sf.openfx.outer_glow",
             Self::Stock { plugin, .. } => plugin.plugin_id(),
         }
@@ -625,7 +637,8 @@ impl EvaluatedEffectType {
                     | Self::Puppet { .. }
                     | Self::Sharpen { .. }
                     | Self::Vignette { .. }
-            ),
+                    | Self::CelShading { .. }
+                    | Self::OilPaint { .. }            ),
         }
     }
 
@@ -868,7 +881,7 @@ impl EvaluatedEffectType {
             }
             // Sharpen (unsharp mask) and Vignette need neighbours / pixel
             // position: identity here, resolved by the rasterizer.
-            Self::Sharpen { .. } | Self::Vignette { .. } | Self::OuterGlow { .. } => c,
+            Self::Sharpen { .. } | Self::Vignette { .. } | Self::CelShading { .. } | Self::OilPaint { .. } | Self::OuterGlow { .. } => c,
             // Stock per-pixel kernels; spatial stock is identity here.
             Self::Stock { plugin, params, .. } => process_color_stock(*plugin, params, c),
         }
@@ -2018,6 +2031,18 @@ impl LayerStackEvaluator {
                             EvaluatedEffectType::Vignette {
                                 amount: eval_eff_prop("amount", amount.evaluate_at(time)),
                                 softness: eval_eff_prop("softness", softness.evaluate_at(time)),
+                            }
+                        }
+                        EffectType::CelShading { levels, edge } => {
+                            EvaluatedEffectType::CelShading {
+                                levels: eval_eff_prop("levels", levels.evaluate_at(time)),
+                                edge: eval_eff_prop("edge", edge.evaluate_at(time)),
+                            }
+                        }
+                        EffectType::OilPaint { radius, amount } => {
+                            EvaluatedEffectType::OilPaint {
+                                radius: eval_eff_prop("radius", radius.evaluate_at(time)),
+                                amount: eval_eff_prop("amount", amount.evaluate_at(time)),
                             }
                         }
                         EffectType::Stock { plugin, params, colors } => {

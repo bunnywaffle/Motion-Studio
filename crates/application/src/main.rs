@@ -8967,6 +8967,8 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             (project::Effect::warp("w", 30.0, 1.0), "Warp", "amount", 10.0, 40.0),
             (project::Effect::exposure("e", 0.0), "Exposure", "exposure", 1.0, 1.0),
             (project::Effect::vibrance("v", 30.0), "Vibrance", "vibrance", -10.0, 20.0),
+            (project::Effect::cel_shading("c", 4.0, 60.0), "Cel Shading", "edge", 10.0, 70.0),
+            (project::Effect::oil_paint("o", 2.0, 100.0), "Oil Painting", "radius", 1.0, 3.0),
         ] {
             assert_eq!(e.type_name(), name);
             assert!(e.nudge_param(param, delta), "{name}");
