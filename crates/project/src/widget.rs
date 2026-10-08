@@ -294,9 +294,12 @@ mod tests {
             fx(EffectType::Vignette { amount: p(50.0), softness: p(50.0) }),
             fx(EffectType::CelShading { levels: p(4.0), edge: p(60.0) }),
             fx(EffectType::OilPaint { radius: p(2.0), amount: p(100.0) }),
+            fx(EffectType::TrimPath { start: p(0.0), end: p(100.0), offset: p(0.0) }),
+            fx(EffectType::SinePath { amplitude: p(20.0), frequency: p(1.0), phase: p(0.0) }),
+            fx(EffectType::InstancePath { count: p(5.0), spread: p(100.0), offset: p(0.0), follow: p(100.0), scale: p(100.0) }),
             Effect::stock("s", StockPlugin::Solid),
         ];
-        assert_eq!(cases.len(), 28);
+        assert_eq!(cases.len(), 31);
         for fx in &cases {
             let decls = fx.declarations();
             assert!(!decls.is_empty(), "{:?}", fx.effect_type);

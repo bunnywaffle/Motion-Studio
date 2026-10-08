@@ -3549,13 +3549,18 @@ impl EditorState {
             .get_effect_mut(effect_id)
             .ok_or_else(|| format!("Effect {effect_id} not found on layer"))?;
 
+        // Declared range when known (bipolar stock params like Color
+        // Balance reach their negatives); legacy zero floor otherwise.
+        // Resolved before the property borrow below.
+        let range = effect.param_range(param_name);
         if let Some(prop) = effect.get_param_property_mut(param_name) {
             let current = if prop.is_animated() {
                 prop.evaluate_at(&current_tc)
             } else {
                 prop.value
             };
-            let new_val = (current + delta).max(0.0);
+            let (lo, hi) = range.unwrap_or((0.0, f32::INFINITY));
+            let new_val = (current + delta).clamp(lo, hi);
             prop.set_value(new_val);
             if prop.is_animated() {
                 prop.add_keyframe(Keyframe::new(current_tc, new_val));

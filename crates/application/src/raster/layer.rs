@@ -72,6 +72,18 @@ pub fn raster_content(
     base_w: f32,
     base_h: f32,
 ) -> Option<FloatBuf> {
+    // Instance-along-path replaces normal raster: the layer's own content
+    // (minus instance effects, so no recursion) is stamped N times along
+    // its resolved guide path. Works for shapes and text alike.
+    if let Some(inst) = layer.effects.iter().find(|e| {
+        e.enabled && matches!(e.effect_type, EvaluatedEffectType::InstancePath { .. })
+    }) {
+        if let EvaluatedEffectType::InstancePath { count, spread, offset, follow, scale } =
+            &inst.effect_type
+        {
+            return raster_instanced(layer, *count, *spread, *offset, *follow, *scale, base_w, base_h);
+        }
+    }
     match &layer.source {
         LayerSource::Solid { color, fill_gradient, .. } => {
             let mut buf = FloatBuf::clear(base_w.ceil().max(1.0) as u32, base_h.ceil().max(1.0) as u32);
@@ -113,22 +125,32 @@ pub fn raster_content(
                     }
                 }
                 ShapeType::Path { path_data, fill, fill_gradient, .. } => {
-                    let (origin, fw, fh) = path_frame(path_data);
+                    // Vector path effects run pre-flatten on the parsed
+                    // path; re-serialize for the SVG-string rasterizers.
+                    let shaped = apply_path_fx(
+                        &project::Path::from_svg(path_data),
+                        &layer.effects,
+                    );
+                    let shaped_svg = shaped.to_svg();
+                    let (origin, fw, fh) = match shaped.frame(8.0) {
+                        Some((origin, size)) => (origin, size.x, size.y),
+                        None => (Vec2::ZERO, 400.0, 300.0),
+                    };
                     match fill_gradient {
                         Some(gradient) => {
-                            fill_path_gradient(&mut buf, path_data, gradient, origin, (fw, fh));
-                            stroke_path_gradient(&mut buf, path_data, 2.0, gradient, origin, (fw, fh));
+                            fill_path_gradient(&mut buf, &shaped_svg, gradient, origin, (fw, fh));
+                            stroke_path_gradient(&mut buf, &shaped_svg, 2.0, gradient, origin, (fw, fh));
                         }
                         None => {
                             fill_path(
                                 &mut buf,
-                                path_data,
+                                &shaped_svg,
                                 Px::from_color(fill.value),
                                 origin,
                             );
                             stroke_path(
                                 &mut buf,
-                                path_data,
+                                &shaped_svg,
                                 2.0,
                                 Px::from_color(fill.value),
                                 origin,
@@ -559,6 +581,9 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
         EvaluatedEffectType::Vignette { .. } => 25,
         EvaluatedEffectType::CelShading { .. } => 30,
         EvaluatedEffectType::OilPaint { .. } => 31,
+        EvaluatedEffectType::TrimPath { .. } => 32,
+        EvaluatedEffectType::SinePath { .. } => 33,
+        EvaluatedEffectType::InstancePath { .. } => 34,
         EvaluatedEffectType::Stock { plugin, .. } => 100 + *plugin as u8,
     };
     disc.hash(h);
@@ -727,6 +752,23 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
         EvaluatedEffectType::OilPaint { radius, amount } => {
             radius.to_bits().hash(h);
             amount.to_bits().hash(h);
+        }
+        EvaluatedEffectType::TrimPath { start, end, offset } => {
+            start.to_bits().hash(h);
+            end.to_bits().hash(h);
+            offset.to_bits().hash(h);
+        }
+        EvaluatedEffectType::SinePath { amplitude, frequency, phase } => {
+            amplitude.to_bits().hash(h);
+            frequency.to_bits().hash(h);
+            phase.to_bits().hash(h);
+        }
+        EvaluatedEffectType::InstancePath { count, spread, offset, follow, scale } => {
+            count.to_bits().hash(h);
+            spread.to_bits().hash(h);
+            offset.to_bits().hash(h);
+            follow.to_bits().hash(h);
+            scale.to_bits().hash(h);
         }
         EvaluatedEffectType::Stock { params, colors, .. } => {
             params.len().hash(h);
@@ -1358,11 +1400,149 @@ pub fn blit_affine(
 /// coords. The content buffer spans `origin .. origin + (w, h)` (tight path
 /// bounds plus pad); drawing subtracts `origin` and world boxes are built
 /// from this frame. Non-path layers use `(ZERO, base_w, base_h)`.
-pub(crate) fn path_frame(path_data: &str) -> (Vec2, f32, f32) {
-    match project::Path::from_svg(path_data).frame(8.0) {
+pub(crate) fn path_frame(path_data: &str) -> (Vec2, f32, f32) {    match project::Path::from_svg(path_data).frame(8.0) {
         Some((origin, size)) => (origin, size.x, size.y),
         None => (Vec2::ZERO, 400.0, 300.0),
     }
+}
+
+/// Apply vector path effects (trim/sine) to an already-parsed path.
+/// Runs at raster time: trim changes topology per frame, so it can never
+/// be a keyframed `Property<Path>`.
+fn apply_path_fx(path: &project::Path, effects: &[EvaluatedEffect]) -> project::Path {
+    let mut out = path.clone();
+    for eff in effects {
+        if !eff.enabled {
+            continue;
+        }
+        match &eff.effect_type {
+            EvaluatedEffectType::TrimPath { start, end, offset } => {
+                out = apply_trim_path(&out, *start, *end, *offset);
+            }
+            EvaluatedEffectType::SinePath { amplitude, frequency, phase } => {
+                out = out.sine_displace(*amplitude, *frequency, *phase);
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Trim window with offset. Closed paths rotate the window around
+/// (After Effects behavior, concatenated over the wrap joint); open
+/// paths clamp.
+fn apply_trim_path(
+    path: &project::Path,
+    start: f32,
+    end: f32,
+    offset: f32,
+) -> project::Path {
+    let shift = offset / 100.0;
+    if path.closed && shift.abs() > 1e-6 {
+        let a = (start / 100.0 + shift).rem_euclid(1.0);
+        let b = (end / 100.0 + shift).rem_euclid(1.0);
+        if a <= b {
+            return path.trim(a, b, 0.5);
+        }
+        let p1 = path.trim(a, 1.0, 0.5);
+        let p2 = path.trim(0.0, b, 0.5);
+        let mut pts = p1.points;
+        let mut tail = p2.points.into_iter();
+        let _ = tail.next(); // == p1 end (t=1 identifies with t=0)
+        pts.extend(tail);
+        return project::Path { points: pts, closed: false };
+    }
+    path.trim(start / 100.0, end / 100.0, 0.5)
+}
+
+/// Resolve the instancing guide path: own shape outline first, then the
+/// text path, else a straight baseline across the content box. Shape
+/// primitives convert to their outline paths; coordinates are layer-local,
+/// matching the motif raster frame below.
+fn instance_guide(layer: &EvaluatedLayer, base_w: f32, base_h: f32) -> Option<project::Path> {
+    match &layer.source {
+        LayerSource::Shape { shape_type } => match shape_type {
+            ShapeType::Path { path_data, .. } => Some(project::Path::from_svg(path_data)),
+            ShapeType::Rectangle { width, height, .. } => Some(project::Path::rectangle(
+                0.0,
+                0.0,
+                width.value.max(1.0),
+                height.value.max(1.0),
+            )),
+            ShapeType::Ellipse { radius_x, radius_y, .. } => {
+                let (rx, ry) = (radius_x.value.max(1.0), radius_y.value.max(1.0));
+                Some(project::Path::ellipse(rx, ry, rx, ry))
+            }
+        },
+        LayerSource::Text { text_path: Some(p), .. } => Some(p.clone()),
+        _ => None,
+    }
+    .filter(|p| p.points.len() >= 2)
+    .or_else(|| {
+        // Straight horizontal baseline through the middle.
+        let w = base_w.max(8.0);
+        let h = base_h.max(8.0);
+        Some(project::Path {
+            points: vec![
+                project::PathPoint::corner(Vec2::new(0.0, h * 0.5)),
+                project::PathPoint::corner(Vec2::new(w, h * 0.5)),
+            ],
+            closed: false,
+        })
+    })
+}
+
+/// Stamp the layer's own raster (minus instance effects) along the guide
+/// path: `count` stamps spread over `spread`% starting at `offset`%,
+/// rotated toward the tangent by `follow`%, scaled by `scale`%.
+#[allow(clippy::too_many_arguments)]
+fn raster_instanced(
+    layer: &EvaluatedLayer,
+    count: f32,
+    spread: f32,
+    offset: f32,
+    follow: f32,
+    scale: f32,
+    base_w: f32,
+    base_h: f32,
+) -> Option<FloatBuf> {
+    let guide = instance_guide(layer, base_w, base_h)?;
+    let mut motif_layer = layer.clone();
+    motif_layer
+        .effects
+        .retain(|e| !(e.enabled && matches!(e.effect_type, EvaluatedEffectType::InstancePath { .. })));
+    let motif = raster_content(&motif_layer, base_w, base_h)?;
+    if motif.w == 0 || motif.h == 0 {
+        return None;
+    }
+    let mut out = FloatBuf::clear(motif.w, motif.h);
+    let n = count.round().clamp(1.0, 32.0) as usize;
+    let denom = (n - 1).max(1) as f32;
+    let (cxm, cym) = (motif.w as f32 * 0.5, motif.h as f32 * 0.5);
+    let s = (scale / 100.0).clamp(0.01, 4.0);
+    let fa = (follow / 100.0).clamp(0.0, 1.0);
+    for i in 0..n {
+        let mut t = offset / 100.0 + spread / 100.0 * (i as f32 / denom);
+        t = if guide.closed {
+            t.rem_euclid(1.0)
+        } else {
+            t.clamp(0.0, 1.0)
+        };
+        let pos = guide.point_at_ratio(t, 0.5)?;
+        let ang = guide.tangent_at_ratio(t, 0.5).unwrap_or(0.0) * fa;
+        let rad = ang.to_radians();
+        let (co, si) = (rad.cos(), rad.sin());
+        // T(pos) * R(ang) * S(s) * T(-center).
+        let map = aff_mul(
+            Aff { a: 1.0, b: 0.0, c: 0.0, d: 1.0, tx: pos.x, ty: pos.y },
+            aff_mul(
+                Aff { a: co, b: si, c: -si, d: co, tx: 0.0, ty: 0.0 },
+                Aff { a: s, b: 0.0, c: 0.0, d: s, tx: -cxm * s, ty: -cym * s },
+            ),
+        );
+        blit_affine(&mut out, &motif, map, 1.0, BlendMode::Normal, None, None);
+    }
+    Some(out)
 }
 
 /// Local content box for a layer: path shapes use their raster frame,
@@ -1440,6 +1620,14 @@ pub fn layer_effect_padding(layer: &EvaluatedLayer, base_w: f32, base_h: f32) ->
                 // width plus offset either way); without this wide outlines
                 // are cut by the fixed-size blit destination.
                 pad = pad.max(width.max(0.0) + offset.abs());
+            }
+            EvaluatedEffectType::SinePath { amplitude, .. } => {
+                pad = pad.max(amplitude.abs());
+            }
+            EvaluatedEffectType::InstancePath { scale, .. } => {
+                // Stamps travel the whole guide path at up to 2x motif
+                // size; half the diagonal covers the overhang.
+                pad = pad.max((base_w.max(base_h)) * 0.5 * (scale / 100.0).clamp(0.1, 2.0));
             }
             EvaluatedEffectType::Stock { plugin, params, .. } => {
                 use compositor::fx::stock_p;
@@ -1626,7 +1814,10 @@ pub(crate) fn apply_layer_fx(
             | EvaluatedEffectType::Bloom { .. }
             | EvaluatedEffectType::Perspective { .. }
             | EvaluatedEffectType::TextOutline { .. }
-            | EvaluatedEffectType::TextBevel { .. } => {
+            | EvaluatedEffectType::TextBevel { .. }
+            | EvaluatedEffectType::TrimPath { .. }
+            | EvaluatedEffectType::SinePath { .. }
+            | EvaluatedEffectType::InstancePath { .. } => {
                 // Handled at raster/blur/blit stages.
             }
             other => apply_effect_pixels(buf, base_w, base_h, other, fx),
@@ -1792,8 +1983,7 @@ mod tests {
         assert_ne!(k1, layer_cache_key(&rotated, 0, 100, 100, false, 0));
     }
 
-    fn path_project() -> (Project, String) {
-        let mut project = Project::new("p", "P");
+    fn path_project() -> (Project, String) {        let mut project = Project::new("p", "P");
         let mut comp = Composition::hd_1080p_30fps("c", "C", 5.0);
         let tc = TimeCode::from_frames(0, 30.0);
         let out = TimeCode::from_frames(150, 30.0);
@@ -1910,6 +2100,76 @@ mod tests {
         let mut d = dst.px[0];
         d.blend_over_at(src, BlendMode::Multiply, 0, 0);
         assert!((d.r - 1.0).abs() < 1e-4 && d.g.abs() < 1e-4 && d.b.abs() < 1e-4);
+    }
+
+    fn alpha_sum(buf: &FloatBuf) -> f32 {
+        buf.px.iter().map(|p| p.a).sum()
+    }
+
+    fn path_layer_with_fx(fx: project::Effect) -> compositor::EvaluatedLayer {
+        let mut project = Project::new("p", "P");
+        let mut comp = Composition::hd_1080p_30fps("c", "C", 5.0);
+        let tc = TimeCode::from_frames(0, 30.0);
+        let out = TimeCode::from_frames(150, 30.0);
+        let mut layer = project::Layer::shape(
+            "l1",
+            "Pen",
+            project::ShapeType::Path {
+                path_data: "M 0 0 L 200 0 L 200 100 L 0 100 Z".to_string(),
+                fill: project::Property::new("Fill", Color::WHITE),
+                fill_gradient: None,
+            },
+            tc,
+            out,
+        );
+        layer.effects.push(fx);
+        comp.add_layer(layer).unwrap();
+        project.add_composition(comp).unwrap();
+        eval_first(&project, "c")
+    }
+
+    #[test]
+    fn trim_path_halves_ink() {
+        let plain = path_layer_with_fx(project::Effect::trim_path("t", 0.0, 100.0, 0.0));
+        let half = path_layer_with_fx(project::Effect::trim_path("t", 25.0, 75.0, 0.0));
+        let full = raster_content(&plain, 220.0, 120.0).expect("raster");
+        let cut = raster_content(&half, 220.0, 120.0).expect("raster");
+        let (a_full, a_cut) = (alpha_sum(&full), alpha_sum(&cut));
+        assert!(a_full > 1.0, "rect outline must hold ink");
+        // Half the perimeter trimmed: ink drops substantially but stays > 0.
+        assert!(a_cut < a_full * 0.7, "trimmed {a_cut} vs full {a_full}");
+        assert!(a_cut > a_full * 0.2, "trimmed {a_cut} vs full {a_full}");
+    }
+
+    #[test]
+    fn sine_path_displaces_ink() {
+        let plain = path_layer_with_fx(project::Effect::sine_path("s", 0.0, 1.0, 0.0));
+        let waved = path_layer_with_fx(project::Effect::sine_path("s", 20.0, 2.0, 0.0));
+        let still = raster_content(&plain, 220.0, 120.0).expect("raster");
+        let wavy = raster_content(&waved, 220.0, 120.0).expect("raster");
+        // Zero amplitude leaves the frame alone (covered by unit behavior);
+        // the wave itself must hold ink but moved.
+        assert!(alpha_sum(&wavy) > 1.0, "waved outline must hold ink");
+        // Wave pushes ink outside the flat rect rows: some pixel must differ.
+        let diff = still
+            .px
+            .iter()
+            .zip(wavy.px.iter())
+            .map(|(a, b)| (a.a - b.a).abs())
+            .fold(0.0f32, f32::max);
+        assert!(diff > 0.05, "sine must move ink");
+    }
+
+    #[test]
+    fn instance_path_repeats_motif() {
+        let one = path_layer_with_fx(project::Effect::instance_path("i", 1.0, 100.0, 0.0, 100.0, 100.0));
+        let three = path_layer_with_fx(project::Effect::instance_path("i", 3.0, 100.0, 0.0, 100.0, 100.0));
+        let single = raster_content(&one, 220.0, 120.0).expect("raster");
+        let triple = raster_content(&three, 220.0, 120.0).expect("raster");
+        let (a1, a3) = (alpha_sum(&single), alpha_sum(&triple));
+        assert!(a1 > 1.0, "single stamp must hold ink");
+        // Three stamps along the rect perimeter hold clearly more ink.
+        assert!(a3 > a1 * 1.5, "triple {a3} vs single {a1}");
     }
 
     fn masked_solid_project(mode: project::MaskMode, invert: bool) -> (Project, String) {

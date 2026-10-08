@@ -492,6 +492,31 @@ pub enum EffectType {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pins: Vec<WarpPin>,
     },
+    /// Trim Path (vector, raster-time): arc-length slice of shape/mask
+    /// strokes. Start/end/offset in percent; degenerate windows render
+    /// nothing. Never a keyframed path — topology changes per frame.
+    TrimPath {
+        start: Property<f32>,
+        end: Property<f32>,
+        offset: Property<f32>,
+    },
+    /// Sine wave along a path (vector analogue of Warp): resamples the
+    /// shape/mask path and pushes samples along normals.
+    SinePath {
+        amplitude: Property<f32>,
+        frequency: Property<f32>,
+        phase: Property<f32>,
+    },
+    /// Instance along path (vector repeater): stamps the layer's own
+    /// raster (shape or text) N times along its resolved path — own
+    /// shape outline, text path, first mask, else a straight baseline.
+    InstancePath {
+        count: Property<f32>,
+        spread: Property<f32>,
+        offset: Property<f32>,
+        follow: Property<f32>,
+        scale: Property<f32>,
+    },
     /// Puppet warp (spatial): free-placed pins deform by inverse-distance
     /// weighting (`pins` + per-pin keyframable offsets, empty = identity,
     /// positions in layer px). Pin components resolve as `pin_{i}_{x|y}`
@@ -591,6 +616,9 @@ impl EffectType {
             Self::Bloom { .. } => "Bloom",
             Self::Tiler { .. } => "Tiler",
             Self::Warp { .. } => "Warp",
+            Self::TrimPath { .. } => "Trim Path",
+            Self::SinePath { .. } => "Sine Path",
+            Self::InstancePath { .. } => "Instance Path",
             Self::Puppet { .. } => "Puppet Warp",
             Self::Exposure { .. } => "Exposure",
             Self::Vibrance { .. } => "Vibrance",
@@ -950,6 +978,35 @@ impl EffectType {
         }
     }
 
+    /// Construct a Trim Path effect type (percent windows).
+    pub fn trim_path(start: f32, end: f32, offset: f32) -> Self {
+        Self::TrimPath {
+            start: Property::new("Start", start.clamp(0.0, 100.0)),
+            end: Property::new("End", end.clamp(0.0, 100.0)),
+            offset: Property::new("Offset", offset.clamp(0.0, 100.0)),
+        }
+    }
+
+    /// Construct a Sine Path effect type.
+    pub fn sine_path(amplitude: f32, frequency: f32, phase: f32) -> Self {
+        Self::SinePath {
+            amplitude: Property::new("Amplitude", amplitude.clamp(0.0, 200.0)),
+            frequency: Property::new("Frequency", frequency.clamp(0.1, 10.0)),
+            phase: Property::new("Phase", phase.clamp(0.0, 360.0)),
+        }
+    }
+
+    /// Construct an Instance Path effect type.
+    pub fn instance_path(count: f32, spread: f32, offset: f32, follow: f32, scale: f32) -> Self {
+        Self::InstancePath {
+            count: Property::new("Count", count.clamp(1.0, 32.0).round()),
+            spread: Property::new("Spread", spread.clamp(0.0, 100.0)),
+            offset: Property::new("Offset", offset.clamp(0.0, 100.0)),
+            follow: Property::new("Follow", follow.clamp(0.0, 100.0)),
+            scale: Property::new("Scale", scale.clamp(10.0, 200.0)),
+        }
+    }
+
     /// Construct an Exposure effect type (EV stops).
     pub fn exposure(exposure: f32) -> Self {
         Self::Exposure {
@@ -1048,6 +1105,9 @@ impl EffectType {
             Self::Bloom { .. } => "net.sf.openfx.bloom",
             Self::Tiler { .. } => "net.sf.openfx.tiler",
             Self::Warp { .. } => "net.sf.openfx.warp",
+            Self::TrimPath { .. } => "net.sf.openfx.trim_path",
+            Self::SinePath { .. } => "net.sf.openfx.sine_path",
+            Self::InstancePath { .. } => "net.sf.openfx.instance_path",
             Self::Puppet { .. } => "net.sf.openfx.puppet",
             Self::Exposure { .. } => "net.sf.openfx.exposure",
             Self::Vibrance { .. } => "net.sf.openfx.vibrance",
@@ -1219,6 +1279,28 @@ impl Effect {
     /// Factory for creating a Warp effect.
     pub fn warp(id: impl Into<String>, amount: f32, scale: f32) -> Self {
         Self::new(id, "Warp", EffectType::warp(amount, scale))
+    }
+
+    /// Factory for creating a Trim Path effect.
+    pub fn trim_path(id: impl Into<String>, start: f32, end: f32, offset: f32) -> Self {
+        Self::new(id, "Trim Path", EffectType::trim_path(start, end, offset))
+    }
+
+    /// Factory for creating a Sine Path effect.
+    pub fn sine_path(id: impl Into<String>, amplitude: f32, frequency: f32, phase: f32) -> Self {
+        Self::new(id, "Sine Path", EffectType::sine_path(amplitude, frequency, phase))
+    }
+
+    /// Factory for creating an Instance Path effect.
+    pub fn instance_path(
+        id: impl Into<String>,
+        count: f32,
+        spread: f32,
+        offset: f32,
+        follow: f32,
+        scale: f32,
+    ) -> Self {
+        Self::new(id, "Instance Path", EffectType::instance_path(count, spread, offset, follow, scale))
     }
 
     /// Factory for creating an Exposure effect.
@@ -2107,6 +2189,48 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     return true;
                 }
             }
+            EffectType::TrimPath { start, end, offset } => {
+                if param_name.eq_ignore_ascii_case("start") {
+                    start.set_value((start.value + delta).clamp(0.0, 100.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("end") {
+                    end.set_value((end.value + delta).clamp(0.0, 100.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("offset") {
+                    offset.set_value((offset.value + delta).clamp(0.0, 100.0));
+                    return true;
+                }
+            }
+            EffectType::SinePath { amplitude, frequency, phase } => {
+                if param_name.eq_ignore_ascii_case("amplitude") {
+                    amplitude.set_value((amplitude.value + delta).clamp(0.0, 200.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("frequency") {
+                    frequency.set_value((frequency.value + delta).clamp(0.1, 10.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("phase") {
+                    phase.set_value((phase.value + delta).clamp(0.0, 360.0));
+                    return true;
+                }
+            }
+            EffectType::InstancePath { count, spread, offset, follow, scale } => {
+                if param_name.eq_ignore_ascii_case("count") {
+                    count.set_value((count.value + delta).clamp(1.0, 32.0).round());
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("spread") {
+                    spread.set_value((spread.value + delta).clamp(0.0, 100.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("offset") {
+                    offset.set_value((offset.value + delta).clamp(0.0, 100.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("follow") {
+                    follow.set_value((follow.value + delta).clamp(0.0, 100.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("scale") {
+                    scale.set_value((scale.value + delta).clamp(10.0, 200.0));
+                    return true;
+                }
+            }
             EffectType::Puppet { expansion, stiffness, pins } => {
                 if param_name.eq_ignore_ascii_case("expansion") {
                     expansion.set_value((expansion.value + delta).max(0.0));
@@ -2494,6 +2618,43 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     None
                 }
             }
+            EffectType::TrimPath { start, end, offset } => {
+                if param_name.eq_ignore_ascii_case("start") {
+                    Some(start)
+                } else if param_name.eq_ignore_ascii_case("end") {
+                    Some(end)
+                } else if param_name.eq_ignore_ascii_case("offset") {
+                    Some(offset)
+                } else {
+                    None
+                }
+            }
+            EffectType::SinePath { amplitude, frequency, phase } => {
+                if param_name.eq_ignore_ascii_case("amplitude") {
+                    Some(amplitude)
+                } else if param_name.eq_ignore_ascii_case("frequency") {
+                    Some(frequency)
+                } else if param_name.eq_ignore_ascii_case("phase") {
+                    Some(phase)
+                } else {
+                    None
+                }
+            }
+            EffectType::InstancePath { count, spread, offset, follow, scale } => {
+                if param_name.eq_ignore_ascii_case("count") {
+                    Some(count)
+                } else if param_name.eq_ignore_ascii_case("spread") {
+                    Some(spread)
+                } else if param_name.eq_ignore_ascii_case("offset") {
+                    Some(offset)
+                } else if param_name.eq_ignore_ascii_case("follow") {
+                    Some(follow)
+                } else if param_name.eq_ignore_ascii_case("scale") {
+                    Some(scale)
+                } else {
+                    None
+                }
+            }
             EffectType::Exposure { exposure } => {
                 if param_name.eq_ignore_ascii_case("exposure") || param_name.eq_ignore_ascii_case("ev") {
                     Some(exposure)
@@ -2837,6 +2998,43 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     None
                 }
             }
+            EffectType::TrimPath { start, end, offset } => {
+                if param_name.eq_ignore_ascii_case("start") {
+                    Some(start)
+                } else if param_name.eq_ignore_ascii_case("end") {
+                    Some(end)
+                } else if param_name.eq_ignore_ascii_case("offset") {
+                    Some(offset)
+                } else {
+                    None
+                }
+            }
+            EffectType::SinePath { amplitude, frequency, phase } => {
+                if param_name.eq_ignore_ascii_case("amplitude") {
+                    Some(amplitude)
+                } else if param_name.eq_ignore_ascii_case("frequency") {
+                    Some(frequency)
+                } else if param_name.eq_ignore_ascii_case("phase") {
+                    Some(phase)
+                } else {
+                    None
+                }
+            }
+            EffectType::InstancePath { count, spread, offset, follow, scale } => {
+                if param_name.eq_ignore_ascii_case("count") {
+                    Some(count)
+                } else if param_name.eq_ignore_ascii_case("spread") {
+                    Some(spread)
+                } else if param_name.eq_ignore_ascii_case("offset") {
+                    Some(offset)
+                } else if param_name.eq_ignore_ascii_case("follow") {
+                    Some(follow)
+                } else if param_name.eq_ignore_ascii_case("scale") {
+                    Some(scale)
+                } else {
+                    None
+                }
+            }
             EffectType::Exposure { exposure } => {
                 if param_name.eq_ignore_ascii_case("exposure") || param_name.eq_ignore_ascii_case("ev") {
                     Some(exposure)
@@ -2925,6 +3123,53 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
             EffectType::Puppet { pins, .. } => Self::pin_component_mut(pins, param_name),
             // Shader Lab values are dynamic, not `Property<f32>` tracks.
             EffectType::ShaderLab { .. } => None,
+        }
+    }
+
+    /// Declared `[min, max]` for a scalar param, if known. Stock plug-ins
+    /// read their OFX descriptor (single source of truth); bespoke ranges
+    /// mirror the constructor/`nudge_param` clamps. `None` means unknown —
+    /// callers keep the legacy `max(0.0)` floor in that case.
+    pub fn param_range(&self, param_name: &str) -> Option<(f32, f32)> {
+        match &self.effect_type {
+            EffectType::Stock { plugin, .. } => plugin
+                .descriptor()
+                .params
+                .iter()
+                .find(|p| param_name.eq_ignore_ascii_case(p.name))
+                .map(|p| (p.min, p.max)),
+            EffectType::BrightnessContrast { .. } => match param_name.to_lowercase().as_str() {
+                "brightness" | "contrast" => Some((-100.0, 100.0)),
+                _ => None,
+            },
+            EffectType::DisplacementMap { .. } => match param_name.to_lowercase().as_str() {
+                "max_horizontal" | "horizontal" | "max_vertical" | "vertical" => {
+                    Some((-500.0, 500.0))
+                }
+                _ => None,
+            },
+            EffectType::Perspective { .. } => match param_name.to_lowercase().as_str() {
+                "skew_x" | "skewx" | "skew_y" | "skewy" => Some((-60.0, 60.0)),
+                _ => None,
+            },
+            EffectType::TextOutline { .. } => match param_name.to_lowercase().as_str() {
+                "offset" => Some((-50.0, 50.0)),
+                _ => None,
+            },
+            EffectType::Exposure { .. } => match param_name.to_lowercase().as_str() {
+                "exposure" | "ev" => Some((-10.0, 10.0)),
+                _ => None,
+            },
+            EffectType::Vibrance { .. } => match param_name.to_lowercase().as_str() {
+                "vibrance" => Some((-100.0, 100.0)),
+                _ => None,
+            },
+            EffectType::HueSaturation { .. } => match param_name.to_lowercase().as_str() {
+                "hue_shift" => Some((-180.0, 180.0)),
+                "saturation" | "lightness" => Some((-100.0, 100.0)),
+                _ => None,
+            },
+            _ => None,
         }
     }
 
@@ -3185,6 +3430,23 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 scalar("scale", "Scale", WidgetKind::Slider, ParamMeta::slider(0.1, 32.0, 0.2, 1, "", 100.0), scale),
                 scalar("cols", "Columns", WidgetKind::Integer, ParamMeta::slider(2.0, 8.0, 1.0, 0, "", 100.0), cols),
                 scalar("rows", "Rows", WidgetKind::Integer, ParamMeta::slider(2.0, 8.0, 1.0, 0, "", 100.0), rows),
+            ],
+            EffectType::TrimPath { start, end, offset } => vec![
+                scalar("start", "Start", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 0.0), start),
+                scalar("end", "End", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), end),
+                scalar("offset", "Offset", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 0.0), offset),
+            ],
+            EffectType::SinePath { amplitude, frequency, phase } => vec![
+                scalar("amplitude", "Amplitude", WidgetKind::Slider, px1(0.0, 200.0, 1.0, 20.0), amplitude),
+                scalar("frequency", "Frequency", WidgetKind::Slider, ParamMeta::slider(0.1, 10.0, 0.1, 1, "", 1.0), frequency),
+                scalar("phase", "Phase", WidgetKind::Slider, ParamMeta::slider(0.0, 360.0, 5.0, 0, "°", 0.0), phase),
+            ],
+            EffectType::InstancePath { count, spread, offset, follow, scale } => vec![
+                scalar("count", "Count", WidgetKind::Integer, ParamMeta::slider(1.0, 32.0, 1.0, 0, "", 5.0), count),
+                scalar("spread", "Spread", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), spread),
+                scalar("offset", "Offset", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 0.0), offset),
+                scalar("follow", "Follow", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), follow),
+                scalar("scale", "Scale", WidgetKind::Percentage, ParamMeta::slider(10.0, 200.0, 5.0, 0, "%", 100.0), scale),
             ],
             EffectType::Puppet { expansion, stiffness, pins } => {
                 let mut decls = vec![

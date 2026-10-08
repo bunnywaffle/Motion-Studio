@@ -4596,6 +4596,56 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         assert_eq!(layer.effects[0].id, fx2_id);
     }
 
+    #[test]
+    fn test_bipolar_effect_params_scrub_below_zero() {
+        use project::{EffectType, StockPlugin};
+        let mut state = EditorState::new();
+        // Stock, bipolar via descriptor: color balance shadows must reach
+        // the CMY side (regression: scrub floored everything at 0).
+        let cb = state
+            .add_effect_to_selected_layer(EffectType::Stock {
+                plugin: StockPlugin::ColorBalance,
+                params: StockPlugin::ColorBalance
+                    .descriptor()
+                    .params
+                    .iter()
+                    .map(|p| project::Property::new(p.label, p.default))
+                    .collect(),
+                colors: Vec::new(),
+            })
+            .expect("added color balance");
+        state
+            .nudge_effect_param(&cb, "shadows_cyan_red", -50.0)
+            .expect("nudged below zero");
+        let layer = state.selected_layer().expect("layer selected");
+        let val = layer.effects.iter().find(|e| e.id == cb).unwrap()
+            .get_param_property("shadows_cyan_red").unwrap().value;
+        assert!((val + 50.0).abs() < 1e-4, "must reach -50, got {val}");
+        // Stock clamp still enforced at the descriptor min.
+        state
+            .nudge_effect_param(&cb, "shadows_cyan_red", -100.0)
+            .expect("nudged past min");
+        let layer = state.selected_layer().expect("layer selected");
+        let val = layer.effects.iter().find(|e| e.id == cb).unwrap()
+            .get_param_property("shadows_cyan_red").unwrap().value;
+        assert!((val + 100.0).abs() < 1e-4, "must clamp at -100, got {val}");
+        // Bespoke bipolar: brightness/contrast ±100.
+        let bc = state
+            .add_effect_to_selected_layer(EffectType::brightness_contrast(0.0, 0.0))
+            .expect("added b/c");
+        state
+            .nudge_effect_param(&bc, "brightness", -30.0)
+            .expect("nudged brightness negative");
+        let layer = state.selected_layer().expect("layer selected");
+        if let EffectType::BrightnessContrast { brightness, .. } =
+            &layer.effects.iter().find(|e| e.id == bc).unwrap().effect_type
+        {
+            assert!((brightness.value + 30.0).abs() < 1e-4);
+        } else {
+            panic!("expected BrightnessContrast");
+        }
+    }
+
     #[gpui_kit::test]
     fn test_ui_effects_panel_addition_and_properties_inspector_manipulation(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
@@ -8969,6 +9019,9 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             (project::Effect::vibrance("v", 30.0), "Vibrance", "vibrance", -10.0, 20.0),
             (project::Effect::cel_shading("c", 4.0, 60.0), "Cel Shading", "edge", 10.0, 70.0),
             (project::Effect::oil_paint("o", 2.0, 100.0), "Oil Painting", "radius", 1.0, 3.0),
+            (project::Effect::trim_path("t", 0.0, 100.0, 0.0), "Trim Path", "end", -10.0, 90.0),
+            (project::Effect::sine_path("s", 20.0, 1.0, 0.0), "Sine Path", "amplitude", 10.0, 30.0),
+            (project::Effect::instance_path("i", 5.0, 100.0, 0.0, 100.0, 100.0), "Instance Path", "count", 2.0, 7.0),
         ] {
             assert_eq!(e.type_name(), name);
             assert!(e.nudge_param(param, delta), "{name}");
@@ -11056,8 +11109,76 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
     }
 
     #[gpui_kit::test]
-    fn test_modifier_graph_right_click_pan_releases(cx: &mut TestAppContext) {
-        // Right-drag panning the canvas must end on right-button release
+    fn test_modifier_graph_wire_renders_single_canvas(cx: &mut TestAppContext) {
+        // Committed wires render as one continuous canvas path, not bead
+        // divs (plus the midpoint disconnect badge).
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let state = cx.new(|_| EditorState::new());
+        let mut mg_view = None;
+        let handle = cx.open_window(size(px(1080.), px(720.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| {
+                crate::modifier_graph_view::ModifierGraphView::new(
+                    state.clone(),
+                    "layer_accent".to_string(),
+                    "transform.position.x".to_string(),
+                    window,
+                    cx,
+                )
+            });
+            mg_view = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let view = mg_view.expect("graph view created");
+        let math_id = view.update(cx, |this, cx| {
+            this.add_node(
+                project::modifier::NodeKind::Math {
+                    op: project::modifier::MathOp::Multiply,
+                    default_b: 2.0,
+                },
+                cx,
+            );
+            let math_node_id = this
+                .graph
+                .nodes
+                .iter()
+                .find(|n| matches!(n.kind, project::modifier::NodeKind::Math { .. }))
+                .unwrap()
+                .id
+                .clone();
+            let math_node = this.graph.get_node(&math_node_id).unwrap();
+            let (m_pos_x, m_pos_y) = (math_node.pos_x, math_node.pos_y);
+            this.connecting_wire = Some(crate::modifier_graph_view::WireDragState {
+                is_from_input: false,
+                node_id: "node_factor".to_string(),
+                socket_name: "factor".to_string(),
+                cur_x: m_pos_x + 50.0,
+                cur_y: m_pos_y + 30.0,
+                start_x: 40.0 + 186.0,
+                start_y: 220.0 + 41.0,
+            });
+            assert!(
+                this.try_finish_wire_connection(m_pos_x + 50.0, m_pos_y + 30.0, 0.0, 0.0, cx),
+                "factor must connect to math.a"
+            );
+            math_node_id
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let wire_id = SharedString::from(format!("wire_committed_{math_id}_a"));
+            assert!(window.find(wire_id).visible(), "single canvas wire must render");
+            assert!(
+                window.find(SharedString::from(format!("disc_{math_id}_a"))).visible(),
+                "disconnect badge must survive"
+            );
+        })
+        .expect("update_window failed");
+    }
+
+    #[gpui_kit::test]
+    fn test_modifier_graph_right_click_pan_releases(cx: &mut TestAppContext) {        // Right-drag panning the canvas must end on right-button release
         // (it used to stay stuck to the cursor: only Left-up cleared it).
         use gpui_kit::test::TestWindowExt;
 

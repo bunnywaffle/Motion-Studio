@@ -271,6 +271,41 @@ pub const OFX_SUITE: &[OfxEffectDescriptor] = &[
         spatial: true,
     },
     OfxEffectDescriptor {
+        id: "net.sf.openfx.trim_path",
+        label: "Trim Path",
+        category: OfxCategory::Stylize,
+        params: &[
+            OfxParamDescriptor { name: "start", label: "Start", min: 0.0, max: 100.0, default: 0.0 },
+            OfxParamDescriptor { name: "end", label: "End", min: 0.0, max: 100.0, default: 100.0 },
+            OfxParamDescriptor { name: "offset", label: "Offset", min: 0.0, max: 100.0, default: 0.0 },
+        ],
+        spatial: true,
+    },
+    OfxEffectDescriptor {
+        id: "net.sf.openfx.sine_path",
+        label: "Sine Path",
+        category: OfxCategory::Distort,
+        params: &[
+            OfxParamDescriptor { name: "amplitude", label: "Amplitude", min: 0.0, max: 200.0, default: 20.0 },
+            OfxParamDescriptor { name: "frequency", label: "Frequency", min: 0.1, max: 10.0, default: 1.0 },
+            OfxParamDescriptor { name: "phase", label: "Phase", min: 0.0, max: 360.0, default: 0.0 },
+        ],
+        spatial: true,
+    },
+    OfxEffectDescriptor {
+        id: "net.sf.openfx.instance_path",
+        label: "Instance Path",
+        category: OfxCategory::Generate,
+        params: &[
+            OfxParamDescriptor { name: "count", label: "Count", min: 1.0, max: 32.0, default: 5.0 },
+            OfxParamDescriptor { name: "spread", label: "Spread", min: 0.0, max: 100.0, default: 100.0 },
+            OfxParamDescriptor { name: "offset", label: "Offset", min: 0.0, max: 100.0, default: 0.0 },
+            OfxParamDescriptor { name: "follow", label: "Follow", min: 0.0, max: 100.0, default: 100.0 },
+            OfxParamDescriptor { name: "scale", label: "Scale", min: 10.0, max: 200.0, default: 100.0 },
+        ],
+        spatial: true,
+    },
+    OfxEffectDescriptor {
         id: "net.sf.openfx.puppet",
         label: "Puppet Warp",
         category: OfxCategory::Distort,

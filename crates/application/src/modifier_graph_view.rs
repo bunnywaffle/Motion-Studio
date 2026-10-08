@@ -880,7 +880,9 @@ impl ModifierGraphView {
         canvas_div
     }
 
-    /// Build a smooth bezier wire between two points.
+    /// Build one continuous stroked wire between two points (single canvas
+    /// element tessellating the cubic — no bead divs), plus the optional
+    /// midpoint disconnect badge overlay.
     fn build_bezier_wire(
         &self,
         from_pt: (f32, f32),
@@ -897,26 +899,60 @@ impl ModifierGraphView {
         let p2 = (x2 - dx, y2);
         let p3 = (x2, y2);
 
-        let mut elements = Vec::with_capacity(25);
+        // Same cubic samples the bead strip used (keeps curve shape).
         let steps = 22;
-
-        for i in 1..steps {
+        let mut pts = Vec::with_capacity(steps + 1);
+        for i in 0..=steps {
             let t = i as f32 / steps as f32;
             let it = 1.0 - t;
-            let bx = it * it * it * p0.0 + 3.0 * it * it * t * p1.0 + 3.0 * it * t * t * p2.0 + t * t * t * p3.0;
-            let by = it * it * it * p0.1 + 3.0 * it * it * t * p1.1 + 3.0 * it * t * t * p2.1 + t * t * t * p3.1;
-
-            let bead = div()
-                .absolute()
-                .left(px(bx - 3.0))
-                .top(px(by - 3.0))
-                .w(px(6.0))
-                .h(px(6.0))
-                .rounded_full()
-                .bg(bead_color);
-
-            elements.push(bead.into_any_element());
+            pts.push((
+                it * it * it * p0.0 + 3.0 * it * it * t * p1.0 + 3.0 * it * t * t * p2.0 + t * t * t * p3.0,
+                it * it * it * p0.1 + 3.0 * it * it * t * p1.1 + 3.0 * it * t * t * p2.1 + t * t * t * p3.1,
+            ));
         }
+
+        let mut elements = Vec::with_capacity(2);
+        let pad = 6.0;
+        let min_x = pts.iter().map(|p| p.0).fold(f32::INFINITY, f32::min) - pad;
+        let min_y = pts.iter().map(|p| p.1).fold(f32::INFINITY, f32::min) - pad;
+        let max_x = pts.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max) + pad;
+        let max_y = pts.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max) + pad;
+        let wire_id = match &disconnect_target {
+            Some((to_node, to_sock)) => format!("wire_committed_{to_node}_{to_sock}"),
+            None => "wire_drag".to_string(),
+        };
+        elements.push(
+            div()
+                .id(SharedString::from(wire_id))
+                .test_support()
+                .absolute()
+                .left(px(min_x))
+                .top(px(min_y))
+                .w(px((max_x - min_x).max(1.0)))
+                .h(px((max_y - min_y).max(1.0)))
+                .child(
+                    gpui::canvas(
+                        move |_bounds, _window, _cx| {},
+                        move |bounds, _, window, _cx| {
+                            let ox = bounds.origin.x;
+                            let oy = bounds.origin.y;
+                            let shifted: Vec<gpui::Point<gpui::Pixels>> = pts
+                                .iter()
+                                .map(|p| gpui::point(px(p.0 - min_x) + ox, px(p.1 - min_y) + oy))
+                                .collect();
+                            if shifted.len() >= 2 {
+                                let mut path = gpui::Path::new(shifted[0]);
+                                for seg in shifted.windows(2) {
+                                    crate::panels::draw_line_segment(&mut path, seg[0], seg[1], 2.5);
+                                }
+                                window.paint_path(path, bead_color);
+                            }
+                        },
+                    )
+                    .size_full(),
+                )
+                .into_any_element(),
+        );
 
         // Render disconnect badge at the midpoint of the wire
         if let Some((to_node, to_sock)) = disconnect_target {
@@ -929,6 +965,7 @@ impl ModifierGraphView {
 
             let disconnect_btn = div()
                 .id(SharedString::from(format!("disc_{}_{}", to_node, to_sock)))
+                .test_support()
                 .absolute()
                 .left(px(mx - 8.0))
                 .top(px(my - 8.0))

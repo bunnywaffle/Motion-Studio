@@ -551,6 +551,128 @@ impl Path {
         Self { points: out, closed: self.closed }
     }
 
+    /// Arc-length slice `[t0, t1]` as an open corner-node path (raster-time
+    /// Trim Path op: topology changes, so it is never a keyframed
+    /// `Property<Path>` — see `Interpolate`). Degenerate windows yield an
+    /// empty path, which rasterizes to nothing.
+    pub fn trim(&self, t0: f32, t1: f32, tolerance: f32) -> Self {
+        let (mut a, mut b) = (t0.clamp(0.0, 1.0), t1.clamp(0.0, 1.0));
+        if a > b {
+            std::mem::swap(&mut a, &mut b);
+        }
+        let empty = Self { points: Vec::new(), closed: false };
+        if b - a < 1e-4 || self.points.len() < 2 {
+            return if self.points.len() < 2 { self.clone() } else { empty };
+        }
+        let flat = self.flatten(tolerance.max(0.1));
+        if flat.len() < 2 {
+            return self.clone();
+        }
+        // Explicit segment table (closing edge only for closed paths).
+        let n = flat.len();
+        let nsegs = if self.closed { n } else { n - 1 };
+        let mut segs: Vec<(Vec2, Vec2, f32, f32)> = Vec::with_capacity(nsegs);
+        let mut acc = 0.0f32;
+        for i in 0..nsegs {
+            let p = flat[i];
+            let q = flat[(i + 1) % n];
+            let l = p.distance_to(q);
+            segs.push((p, q, acc, acc + l));
+            acc += l;
+        }
+        let total = acc.max(1e-9);
+        let start = a * total;
+        let end = b * total;
+        let at = |s: f32| -> Vec2 {
+            let s = s.clamp(0.0, total);
+            let mut pick = &segs[segs.len() - 1];
+            for sg in &segs {
+                if s <= sg.3 + 1e-9 {
+                    pick = sg;
+                    break;
+                }
+            }
+            let span = (pick.3 - pick.2).max(1e-9);
+            let f = ((s - pick.2) / span).clamp(0.0, 1.0);
+            pick.0.lerp(pick.1, f)
+        };
+        let mut out = vec![at(start)];
+        // Interior vertices strictly inside the window.
+        let mut vs = 0.0f32;
+        for i in 1..n {
+            vs += flat[i - 1].distance_to(flat[i]);
+            if vs > start + 1e-6 && vs < end - 1e-6 {
+                out.push(flat[i]);
+            }
+        }
+        out.push(at(end));
+        Self { points: out.into_iter().map(PathPoint::corner).collect(), closed: false }
+    }
+
+    /// Sine wave along the path (vector analogue of the raster Warp):
+    /// resample evenly, push each sample along its normal by
+    /// `amplitude * sin(2π * frequency * t + phase)`. Symmetric wave, so
+    /// no winding flip (unlike `offset`).
+    pub fn sine_displace(
+        &self,
+        amplitude: f32,
+        frequency: f32,
+        phase_deg: f32,
+    ) -> Self {
+        if self.points.len() < 2 || amplitude.abs() < 1e-6 {
+            return self.clone();
+        }
+        let flat = self.flatten(0.5);
+        if flat.len() < 2 {
+            return self.clone();
+        }
+        let closed_loop = self.closed;
+        let total = poly_length(&flat, closed_loop).max(1e-6);
+        let count = (self.segment_count() * 16).clamp(8, 512);
+        let mut pts = Vec::with_capacity(count);
+        for i in 0..count {
+            // Open paths keep both ends (like `resample`); closed wrap.
+            let t = if closed_loop {
+                i as f32 / count as f32
+            } else {
+                i as f32 / (count - 1).max(1) as f32
+            };
+            if let Some(p) = point_at_poly_ratio(&flat, closed_loop, t) {
+                pts.push((t, p));
+            }
+        }
+        let m = pts.len();
+        if m < 2 {
+            return self.clone();
+        }
+        let phase = phase_deg.to_radians();
+        let two_pi = std::f32::consts::TAU;
+        let mut out = Vec::with_capacity(m);
+        for i in 0..m {
+            let (t, p) = pts[i];
+            let (pp, np) = if closed_loop {
+                (pts[(i + m - 1) % m].1, pts[(i + 1) % m].1)
+            } else {
+                (
+                    pts[i.saturating_sub(1)].1,
+                    pts[(i + 1).min(m - 1)].1,
+                )
+            };
+            let mut tangent = np - pp;
+            let len = tangent.length();
+            if len < 1e-6 {
+                out.push(PathPoint::corner(p));
+                continue;
+            }
+            tangent /= len;
+            let normal = Vec2::new(-tangent.y, tangent.x);
+            let d = amplitude * (two_pi * frequency * t + phase).sin();
+            out.push(PathPoint::corner(p + normal * d));
+        }
+        let _ = total;
+        Self { points: out, closed: self.closed }
+    }
+
     /// Affine transform `(x', y') = (a*x + c*y + tx, b*x + d*y + ty)`.
     /// Tangents transform as directions (translation excluded).
     pub fn transformed(&self, a: f32, b: f32, c: f32, d: f32, tx: f32, ty: f32) -> Self {
@@ -1328,7 +1450,6 @@ mod tests {
     fn area_sum(polys: &[Vec<Vec2>]) -> f32 {
         polys.iter().map(|p| polygon_area(p).abs()).sum()
     }
-
     #[test]
     fn rect_path_roundtrips_svg() {
         let p = Path::rectangle(10.0, 20.0, 100.0, 50.0);
@@ -1340,6 +1461,60 @@ mod tests {
         let (mn, mx) = q.bounds().unwrap();
         assert!((mn.x - 10.0).abs() < 1e-3 && (mx.x - 110.0).abs() < 1e-3);
         assert!((mn.y - 20.0).abs() < 1e-3 && (mx.y - 70.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn trim_slices_arc_window() {
+        // Open polyline (0,0)-(100,0)-(100,100): total length 200.
+        let p = Path {
+            points: vec![
+                PathPoint::corner(Vec2::new(0.0, 0.0)),
+                PathPoint::corner(Vec2::new(100.0, 0.0)),
+                PathPoint::corner(Vec2::new(100.0, 100.0)),
+            ],
+            closed: false,
+        };
+        assert!((p.length(0.5) - 200.0).abs() < 1e-3);
+        // Middle half: starts on segment 0, ends on segment 1.
+        let t = p.trim(0.25, 0.75, 0.5);
+        assert!(!t.closed);
+        assert!((t.length(0.5) - 100.0).abs() < 0.5, "len {}", t.length(0.5));
+        let (mn, mx) = t.bounds().unwrap();
+        assert!((mn.x - 50.0).abs() < 0.5 && (mx.x - 100.0).abs() < 0.5);
+        assert!((mn.y - 0.0).abs() < 0.5 && (mx.y - 50.0).abs() < 0.5);
+        // Full window reproduces the length; degenerate yields empty.
+        assert!((p.trim(0.0, 1.0, 0.5).length(0.5) - 200.0).abs() < 0.5);
+        assert!(p.trim(0.5, 0.5, 0.5).points.is_empty());
+        // Reversed inputs normalize.
+        assert!((p.trim(0.75, 0.25, 0.5).length(0.5) - 100.0).abs() < 0.5);
+        // Closed square: quarter window is one side.
+        let sq = Path::rectangle(0.0, 0.0, 40.0, 40.0);
+        let q = sq.trim(0.0, 0.25, 0.5);
+        assert!(!q.closed);
+        assert!((q.length(0.5) - 40.0).abs() < 0.5, "len {}", q.length(0.5));
+    }
+
+    #[test]
+    fn sine_displace_waves_normals() {
+        // Straight horizontal line: wave pushes ±amplitude vertically.
+        let p = Path {
+            points: vec![
+                PathPoint::corner(Vec2::new(0.0, 0.0)),
+                PathPoint::corner(Vec2::new(100.0, 0.0)),
+            ],
+            closed: false,
+        };
+        let w = p.sine_displace(10.0, 1.0, 0.0);
+        // 1 segment * 16 samples, clamped to [8, 512].
+        assert_eq!(w.points.len(), 16);
+        let max_y = w.points.iter().map(|pt| pt.pos.y.abs()).fold(0.0f32, f32::max);
+        assert!(max_y > 5.0 && max_y <= 10.0 + 1e-3, "peak {max_y}");
+        // Zero amplitude returns the original untouched (early-out).
+        let flat = p.sine_displace(0.0, 1.0, 0.0);
+        assert_eq!(flat.points.len(), 2);
+        // x-range preserved (normal push is vertical here).
+        let (mn, mx) = w.bounds().unwrap();
+        assert!(mn.x.abs() < 1.0 && (mx.x - 100.0).abs() < 1.0);
     }
 
     #[test]

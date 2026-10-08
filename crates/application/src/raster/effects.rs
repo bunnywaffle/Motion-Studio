@@ -318,6 +318,12 @@ pub fn apply_effect_pixels(
         EvaluatedEffectType::OilPaint { radius, amount } => {
             apply_oil_paint(buf, *radius, *amount);
         }
+        EvaluatedEffectType::TrimPath { .. }
+        | EvaluatedEffectType::SinePath { .. }
+        | EvaluatedEffectType::InstancePath { .. } => {
+            // Vector-domain: applied pre-flatten at shape raster /
+            // content dispatch, never per-pixel.
+        }
         EvaluatedEffectType::Vignette { amount, softness } => {
             apply_vignette(buf, *amount, *softness);
         }

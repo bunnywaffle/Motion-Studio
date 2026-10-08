@@ -487,6 +487,23 @@ pub enum EvaluatedEffectType {
         rows: f32,
         pins: Vec<project::WarpPin>,
     },
+    TrimPath {
+        start: f32,
+        end: f32,
+        offset: f32,
+    },
+    SinePath {
+        amplitude: f32,
+        frequency: f32,
+        phase: f32,
+    },
+    InstancePath {
+        count: f32,
+        spread: f32,
+        offset: f32,
+        follow: f32,
+        scale: f32,
+    },
     Puppet {
         expansion: f32,
         stiffness: f32,
@@ -559,6 +576,9 @@ impl EvaluatedEffectType {
             Self::Bloom { .. } => "Bloom",
             Self::Tiler { .. } => "Tiler",
             Self::Warp { .. } => "Warp",
+            Self::TrimPath { .. } => "Trim Path",
+            Self::SinePath { .. } => "Sine Path",
+            Self::InstancePath { .. } => "Instance Path",
             Self::Puppet { .. } => "Puppet Warp",
             Self::Exposure { .. } => "Exposure",
             Self::Vibrance { .. } => "Vibrance",
@@ -597,6 +617,9 @@ impl EvaluatedEffectType {
             Self::Bloom { .. } => "net.sf.openfx.bloom",
             Self::Tiler { .. } => "net.sf.openfx.tiler",
             Self::Warp { .. } => "net.sf.openfx.warp",
+            Self::TrimPath { .. } => "net.sf.openfx.trim_path",
+            Self::SinePath { .. } => "net.sf.openfx.sine_path",
+            Self::InstancePath { .. } => "net.sf.openfx.instance_path",
             Self::Puppet { .. } => "net.sf.openfx.puppet",
             Self::Exposure { .. } => "net.sf.openfx.exposure",
             Self::Vibrance { .. } => "net.sf.openfx.vibrance",
@@ -634,6 +657,9 @@ impl EvaluatedEffectType {
                     | Self::TextSplitAnimator { .. }
                     | Self::Tiler { .. }
                     | Self::Warp { .. }
+                    | Self::TrimPath { .. }
+                    | Self::SinePath { .. }
+                    | Self::InstancePath { .. }
                     | Self::Puppet { .. }
                     | Self::Sharpen { .. }
                     | Self::Vignette { .. }
@@ -819,8 +845,11 @@ impl EvaluatedEffectType {
             | Self::TextOutline { .. }
             | Self::TextBevel { .. }
             | Self::TextSplitAnimator { .. }
-            | Self::Tiler { .. }
-            | Self::Warp { .. } => c,
+                    | Self::Tiler { .. }
+                    | Self::Warp { .. }
+                    | Self::TrimPath { .. }
+                    | Self::SinePath { .. }
+                    | Self::InstancePath { .. } => c,
             Self::Bloom { intensity, .. } => {
                 let k = (*intensity / 100.0).clamp(0.0, 1.0);
                 Color::rgba(
@@ -1977,6 +2006,29 @@ impl LayerStackEvaluator {
                                 cols: eval_eff_prop("cols", cols.evaluate_at(time)),
                                 rows: eval_eff_prop("rows", rows.evaluate_at(time)),
                                 pins: pins.clone(),
+                            }
+                        }
+                        EffectType::TrimPath { start, end, offset } => {
+                            EvaluatedEffectType::TrimPath {
+                                start: eval_eff_prop("start", start.evaluate_at(time)),
+                                end: eval_eff_prop("end", end.evaluate_at(time)),
+                                offset: eval_eff_prop("offset", offset.evaluate_at(time)),
+                            }
+                        }
+                        EffectType::SinePath { amplitude, frequency, phase } => {
+                            EvaluatedEffectType::SinePath {
+                                amplitude: eval_eff_prop("amplitude", amplitude.evaluate_at(time)),
+                                frequency: eval_eff_prop("frequency", frequency.evaluate_at(time)),
+                                phase: eval_eff_prop("phase", phase.evaluate_at(time)),
+                            }
+                        }
+                        EffectType::InstancePath { count, spread, offset, follow, scale } => {
+                            EvaluatedEffectType::InstancePath {
+                                count: eval_eff_prop("count", count.evaluate_at(time)),
+                                spread: eval_eff_prop("spread", spread.evaluate_at(time)),
+                                offset: eval_eff_prop("offset", offset.evaluate_at(time)),
+                                follow: eval_eff_prop("follow", follow.evaluate_at(time)),
+                                scale: eval_eff_prop("scale", scale.evaluate_at(time)),
                             }
                         }
                         EffectType::Puppet { expansion, stiffness, pins } => {

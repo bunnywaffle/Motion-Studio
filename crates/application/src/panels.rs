@@ -11004,7 +11004,10 @@ fn render_applied_effects(
                 | EffectType::Sharpen { .. }
                 | EffectType::Vignette { .. }
                 | EffectType::CelShading { .. }
-                | EffectType::OilPaint { .. } => {
+                | EffectType::OilPaint { .. }
+                | EffectType::TrimPath { .. }
+                | EffectType::SinePath { .. }
+                | EffectType::InstancePath { .. } => {
                     for decl in effect.declarations() {
                         effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, enums, cx));
                     }
@@ -14903,6 +14906,9 @@ pub(crate) fn effect_template_for(plugin_id: &str) -> Option<EffectType> {
         "net.sf.openfx.vignette" => EffectType::vignette(50.0, 50.0),
         "net.sf.openfx.cel_shading" => EffectType::cel_shading(4.0, 60.0),
         "net.sf.openfx.oil_paint" => EffectType::oil_paint(2.0, 100.0),
+        "net.sf.openfx.trim_path" => EffectType::trim_path(0.0, 100.0, 0.0),
+        "net.sf.openfx.sine_path" => EffectType::sine_path(20.0, 1.0, 0.0),
+        "net.sf.openfx.instance_path" => EffectType::instance_path(5.0, 100.0, 0.0, 100.0, 100.0),
         "net.sf.openfx.noise" => EffectType::noise_generator(25.0, true),
         "net.sf.openfx.checkerboard" => {
             EffectType::checkerboard(32.0, Color::BLACK, Color::WHITE)
@@ -16288,7 +16294,7 @@ fn graph_key_live_value(s: &EditorState, layer_id: &str, path: &str, at_s: f64) 
                 .map(|k| k.v)
         })
 }
-fn draw_point_cap(
+pub(crate) fn draw_point_cap(
     path: &mut gpui::Path<gpui::Pixels>,
     p: gpui::Point<gpui::Pixels>,
     radius: f32,
@@ -16303,7 +16309,7 @@ fn draw_point_cap(
     path.push_triangle((p_top, p_bot, p_right), st);
 }
 
-fn draw_line_segment(
+pub(crate) fn draw_line_segment(
     path: &mut gpui::Path<gpui::Pixels>,
     p0: gpui::Point<gpui::Pixels>,
     p1: gpui::Point<gpui::Pixels>,
