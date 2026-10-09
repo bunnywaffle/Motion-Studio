@@ -43,54 +43,69 @@ fn icon_box_size(icon: IconName, sz: f32) -> Div {
 pub mod ae {
     use super::*;
 
-    /// Deepest app background (timeline lanes, canvas letterbox).
+    /// Deepest app background (timeline lanes, canvas letterbox void).
     pub fn bg() -> Rgba {
-        rgb(0x1b1b1b)
+        rgb(0x0b0d11)
     }
-    /// Raised panel surfaces (cards, headers, side rails).
+    /// Raised panel surfaces (cards, headers, side rails - Stitch Surface Layer 1).
     pub fn panel() -> Rgba {
-        rgb(0x232323)
+        rgb(0x13171f)
     }
-    /// Controls / pills / wells.
+    /// Controls / pills / wells (Stitch Surface Layer 2).
     pub fn control() -> Rgba {
-        rgb(0x2e2e2e)
+        rgb(0x1a1f2c)
     }
-    /// Hover highlight.
+    /// Hover / active highlight (Stitch Surface Layer 3).
     pub fn hover() -> Rgba {
-        rgb(0x3a3a3a)
+        rgb(0x252d3d)
     }
-    /// Hairline borders.
+    /// Hairline borders (Stitch subtle hair border).
     pub fn border() -> Rgba {
-        rgb(0x101010)
+        rgb(0x272a33)
     }
     /// Primary text.
     pub fn text() -> Rgba {
-        rgb(0xd7d7d7)
+        rgb(0xe2e5eb)
     }
-    /// Secondary / header text.
+    /// Secondary / header text (muted).
     pub fn dim() -> Rgba {
-        rgb(0x9a9a9a)
+        rgb(0x7e8494)
     }
-    /// AE selection blue (active tools, spans, toggles).
+    /// Dimmed tertiary text.
+    #[allow(dead_code)]
+    pub fn dimmed() -> Rgba {
+        rgb(0x505565)
+    }
+    /// Electric Cyan selection & primary action accent.
     pub fn accent() -> Rgba {
-        rgb(0x2f7cf6)
+        rgb(0x00d2ff)
     }
-    /// Timeline layer span blue.
+    /// Electric Cyan accent.
+    #[allow(dead_code)]
+    pub fn cyan() -> Rgba {
+        rgb(0x00d2ff)
+    }
+    /// Vivid Violet secondary accent.
+    #[allow(dead_code)]
+    pub fn violet() -> Rgba {
+        rgb(0x7c3aed)
+    }
+    /// Timeline layer span deep blue.
     pub fn span() -> Rgba {
-        rgb(0x2b6cb0)
+        rgb(0x1d3557)
     }
-    /// Parent badge / success green.
+    /// Autosaved / success emerald.
     #[allow(dead_code)]
     pub fn green() -> Rgba {
-        rgb(0x2f9e44)
+        rgb(0x10b981)
     }
-    /// Timecode readout blue.
+    /// Timecode readout Electric Cyan.
     pub fn timecode() -> Rgba {
-        rgb(0x4da3ff)
+        rgb(0x00d2ff)
     }
     /// Keyframe diamond amber.
     pub fn amber() -> Rgba {
-        rgb(0xf5a623)
+        rgb(0xf59e0b)
     }
 
     /// Small-caps dim section header: `▾ TITLE ......... count`.
@@ -1779,21 +1794,21 @@ impl Render for ProjectPanel {
             .px_3()
             .py_2()
             .border_b_1()
-            .border_color(rgb(0x232428))
-            .bg(rgb(0x18191c))
+            .border_color(rgb(0x272a33))
+            .bg(rgb(0x13171f))
             .items_center()
             .justify_between()
             .child(
                 h_flex()
                     .gap_2()
                     .items_center()
-                    .child(icon_box_color(IconName::GripVertical, rgb(0x64748b)))
-                    .child(icon_box_color(IconName::Folder, rgb(0x38bdf8)))
+                    .child(icon_box_color(IconName::GripVertical, rgb(0x505565)))
+                    .child(icon_box_color(IconName::Folder, rgb(0x00d2ff)))
                     .child(
                         div()
                             .font_bold()
                             .text_sm()
-                            .text_color(rgb(0xf8fafc))
+                            .text_color(rgb(0xffffff))
                             .child("Project")
                     )
                     .child(
@@ -1813,8 +1828,8 @@ impl Render for ProjectPanel {
                             .cursor_pointer()
                             .p_1()
                             .rounded_sm()
-                            .text_color(rgb(0x94a3b8))
-                            .hover(|s| s.bg(rgb(0x27282d)).text_color(rgb(0xffffff)))
+                            .text_color(rgb(0x7e8494))
+                            .hover(|s| s.bg(rgb(0x252d3d)).text_color(rgb(0xffffff)))
                             .child(icon_box(IconName::Copy))
                     )
                     .child(
@@ -1822,8 +1837,8 @@ impl Render for ProjectPanel {
                             .cursor_pointer()
                             .p_1()
                             .rounded_sm()
-                            .text_color(rgb(0x94a3b8))
-                            .hover(|s| s.bg(rgb(0x27282d)).text_color(rgb(0xffffff)))
+                            .text_color(rgb(0x7e8494))
+                            .hover(|s| s.bg(rgb(0x252d3d)).text_color(rgb(0xffffff)))
                             .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
                                 let pos = event.position;
                                 p_more_menu.update(cx, |this, cx| {
@@ -1861,9 +1876,9 @@ impl Render for ProjectPanel {
                 .my_2()
                 .p_2p5()
                 .rounded_lg()
-                .bg(rgb(0x1c1d21))
+                .bg(rgb(0x1a1f2c))
                 .border_1()
-                .border_color(rgb(0x2a2b30))
+                .border_color(rgb(0x272a33))
                 .items_center()
                 .justify_between()
                 .gap_2p5()
@@ -1878,9 +1893,9 @@ impl Render for ProjectPanel {
                                 .w(px(58.))
                                 .h(px(52.))
                                 .rounded_md()
-                                .bg(rgb(0x121316))
+                                .bg(rgb(0x13171f))
                                 .border_1()
-                                .border_color(rgb(0x27282d))
+                                .border_color(rgb(0x272a33))
                                 .relative()
                                 .flex()
                                 .items_center()
@@ -1899,7 +1914,7 @@ impl Render for ProjectPanel {
                                         .right(px(3.))
                                         .text_xs()
                                         .font_bold()
-                                        .text_color(rgb(0x71717a))
+                                        .text_color(rgb(0x7e8494))
                                         .child(thumb_badge)
                                 )
                         )
@@ -1917,7 +1932,7 @@ impl Render for ProjectPanel {
                                             div()
                                                 .font_bold()
                                                 .text_sm()
-                                                .text_color(rgb(0xf8fafc))
+                                                .text_color(rgb(0xffffff))
                                                 .truncate()
                                                 .child(item.name.clone())
                                         )
@@ -1928,24 +1943,24 @@ impl Render for ProjectPanel {
                                                 .rounded_sm()
                                                 .text_xs()
                                                 .font_semibold()
-                                                .bg(rgba(0x0ea5e926))
+                                                .bg(rgba(0x00d2ff22))
                                                 .border_1()
-                                                .border_color(rgba(0x0ea5e966))
-                                                .text_color(rgb(0x38bdf8))
+                                                .border_color(rgba(0x00d2ff55))
+                                                .text_color(rgb(0x00d2ff))
                                                 .child(item.badge.clone())
                                         )
-                                )
+                                 )
                                 .child(
                                     div()
                                         .text_xs()
-                                        .text_color(rgb(0x94a3b8))
+                                        .text_color(rgb(0x7e8494))
                                         .truncate()
                                         .child(dims_line)
                                 )
                                 .child(
                                     div()
                                         .text_xs()
-                                        .text_color(rgb(0x64748b))
+                                        .text_color(rgb(0x505565))
                                         .truncate()
                                         .child(dur_line)
                                 )
@@ -1955,7 +1970,7 @@ impl Render for ProjectPanel {
                     div()
                         .text_xs()
                         .font_medium()
-                        .text_color(rgb(0x94a3b8))
+                        .text_color(rgb(0x7e8494))
                         .child(item.size_formatted.clone())
                 )
                 .into_any_element()
@@ -1965,13 +1980,13 @@ impl Render for ProjectPanel {
                 .my_2()
                 .p_2p5()
                 .rounded_lg()
-                .bg(rgb(0x1c1d21))
+                .bg(rgb(0x1a1f2c))
                 .border_1()
-                .border_color(rgb(0x2a2b30))
+                .border_color(rgb(0x272a33))
                 .items_center()
                 .justify_between()
                 .child(
-                    div().text_xs().text_color(rgb(0x94a3b8)).child("No media selected · Import media to start")
+                    div().text_xs().text_color(rgb(0x7e8494)).child("No media selected · Import media to start")
                 )
                 .into_any_element()
         };
@@ -1993,12 +2008,12 @@ impl Render for ProjectPanel {
                     .h(px(28.))
                     .px_2()
                     .rounded_md()
-                    .bg(rgb(0x16171a))
+                    .bg(rgb(0x1a1f2c))
                     .border_1()
-                    .border_color(rgb(0x28292e))
+                    .border_color(rgb(0x272a33))
                     .items_center()
                     .gap_1p5()
-                    .child(icon_box_color(IconName::Search, rgb(0x64748b)))
+                    .child(icon_box_color(IconName::Search, rgb(0x505565)))
                     .child(
                         Input::new(&search_input.read(cx).0)
                             .id("project_search_input")
@@ -2009,7 +2024,7 @@ impl Render for ProjectPanel {
                         div()
                             .cursor_pointer()
                             .p_0p5()
-                            .text_color(rgb(0x94a3b8))
+                            .text_color(rgb(0x7e8494))
                             .hover(|s| s.text_color(rgb(0xffffff)))
                             .on_mouse_down(MouseButton::Left, move |_e, window, cx| {
                                 s_inp.update(cx, |inp, cx| inp.set_value("", window, cx));
@@ -2028,9 +2043,9 @@ impl Render for ProjectPanel {
                 h_flex()
                     .h(px(28.))
                     .rounded_md()
-                    .bg(rgb(0x16171a))
+                    .bg(rgb(0x1a1f2c))
                     .border_1()
-                    .border_color(rgb(0x28292e))
+                    .border_color(rgb(0x272a33))
                     .p_0p5()
                     .gap_0p5()
                     .child(
@@ -2041,8 +2056,8 @@ impl Render for ProjectPanel {
                             .px_1p5()
                             .py_0p5()
                             .rounded_sm()
-                            .bg(if !is_grid { rgb(0x27282d) } else { rgba(0x00000000) })
-                            .text_color(if !is_grid { rgb(0xf1f5f9) } else { rgb(0x64748b) })
+                            .bg(if !is_grid { rgb(0x252d3d) } else { rgba(0x00000000) })
+                            .text_color(if !is_grid { rgb(0xffffff) } else { rgb(0x7e8494) })
                             .hover(|s| s.text_color(rgb(0xffffff)))
                             .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
                                 p_view_list.update(cx, |this, cx| {
@@ -2060,8 +2075,8 @@ impl Render for ProjectPanel {
                             .px_1p5()
                             .py_0p5()
                             .rounded_sm()
-                            .bg(if is_grid { rgb(0x27282d) } else { rgba(0x00000000) })
-                            .text_color(if is_grid { rgb(0xf1f5f9) } else { rgb(0x64748b) })
+                            .bg(if is_grid { rgb(0x252d3d) } else { rgba(0x00000000) })
+                            .text_color(if is_grid { rgb(0xffffff) } else { rgb(0x7e8494) })
                             .hover(|s| s.text_color(rgb(0xffffff)))
                             .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
                                 p_view_grid.update(cx, |this, cx| {
@@ -2095,12 +2110,12 @@ impl Render for ProjectPanel {
         let table_header = h_flex()
             .h(px(24.))
             .px_2p5()
-            .bg(rgb(0x141518))
+            .bg(rgb(0x13171f))
             .border_y_1()
-            .border_color(rgb(0x232428))
+            .border_color(rgb(0x272a33))
             .text_xs()
             .font_medium()
-            .text_color(rgb(0x94a3b8))
+            .text_color(rgb(0x7e8494))
             .items_center()
             .child(
                 h_flex()
@@ -2124,7 +2139,7 @@ impl Render for ProjectPanel {
                     })
                     .child(format!("Name {name_arrow}"))
             )
-            .child(div().w(px(1.)).h(px(12.)).bg(rgb(0x27282d)).mx_1())
+            .child(div().w(px(1.)).h(px(12.)).bg(rgb(0x272a33)).mx_1())
             .child(
                 h_flex()
                     .id("project_sort_type")
@@ -2145,10 +2160,10 @@ impl Render for ProjectPanel {
                             cx.notify();
                         });
                     })
-                    .child(icon_box_color(IconName::Tag, rgb(0x64748b)))
+                    .child(icon_box_color(IconName::Tag, rgb(0x505565)))
                     .child(format!("Type {type_arrow}"))
             )
-            .child(div().w(px(1.)).h(px(12.)).bg(rgb(0x27282d)).mx_1())
+            .child(div().w(px(1.)).h(px(12.)).bg(rgb(0x272a33)).mx_1())
             .child(
                 div()
                     .id("project_sort_size")
@@ -2170,7 +2185,7 @@ impl Render for ProjectPanel {
                     })
                     .child(format!("Size {size_arrow}"))
             )
-            .child(div().w(px(1.)).h(px(12.)).bg(rgb(0x27282d)).mx_1())
+            .child(div().w(px(1.)).h(px(12.)).bg(rgb(0x272a33)).mx_1())
             .child(
                 div()
                     .id("project_sort_framerate")
@@ -2365,16 +2380,16 @@ impl Render for ProjectPanel {
         let bottom_bar = h_flex()
             .h(px(32.))
             .px_3()
-            .bg(rgb(0x141518))
+            .bg(rgb(0x13171f))
             .border_t_1()
-            .border_color(rgb(0x232428))
+            .border_color(rgb(0x272a33))
             .items_center()
             .justify_between()
             .child(
                 div()
                     .font_bold()
                     .text_xs()
-                    .text_color(rgb(0xe2e8f0))
+                    .text_color(rgb(0xe2e5eb))
                     .child(format!("{total_items} items  ·  {total_size_formatted}"))
             )
             .child(
@@ -2388,8 +2403,8 @@ impl Render for ProjectPanel {
                             .cursor_pointer()
                             .p_1()
                             .rounded_sm()
-                            .text_color(rgb(0x94a3b8))
-                            .hover(|s| s.bg(rgb(0x27282d)).text_color(rgb(0xffffff)))
+                            .text_color(rgb(0x7e8494))
+                            .hover(|s| s.bg(rgb(0x252d3d)).text_color(rgb(0xffffff)))
                             .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
                                 let s_imp = p_bottom_folder.clone();
                                 cx.spawn(|cx: &mut AsyncApp| {
@@ -2434,8 +2449,8 @@ impl Render for ProjectPanel {
                             .cursor_pointer()
                             .p_1()
                             .rounded_sm()
-                            .text_color(rgb(0x94a3b8))
-                            .hover(|s| s.bg(rgb(0x27282d)).text_color(rgb(0xffffff)))
+                            .text_color(rgb(0x7e8494))
+                            .hover(|s| s.bg(rgb(0x252d3d)).text_color(rgb(0xffffff)))
                             .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
                                 p_bottom_comp.update(cx, |this, cx| {
                                     this.show_new_comp = true;
@@ -2453,8 +2468,8 @@ impl Render for ProjectPanel {
                             .cursor_pointer()
                             .p_1()
                             .rounded_sm()
-                            .text_color(rgb(0x94a3b8))
-                            .hover(|s| s.bg(rgb(0x27282d)).text_color(rgb(0xffffff)))
+                            .text_color(rgb(0x7e8494))
+                            .hover(|s| s.bg(rgb(0x252d3d)).text_color(rgb(0xffffff)))
                             .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
                                 p_bottom_solid.update(cx, |s, cx| {
                                     let color = Color::from_rgba_u8(245, 158, 11, 255);
@@ -2471,8 +2486,8 @@ impl Render for ProjectPanel {
                             .cursor_pointer()
                             .p_1()
                             .rounded_sm()
-                            .text_color(rgb(0x94a3b8))
-                            .hover(|s| s.bg(rgb(0x27282d)).text_color(rgb(0xffffff)))
+                            .text_color(rgb(0x7e8494))
+                            .hover(|s| s.bg(rgb(0x252d3d)).text_color(rgb(0xffffff)))
                             .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
                                 p_bottom_info.update(cx, |this, cx| {
                                     this.show_interpret_dialog = !this.show_interpret_dialog;
@@ -2488,7 +2503,7 @@ impl Render for ProjectPanel {
                             .cursor_pointer()
                             .p_1()
                             .rounded_sm()
-                            .text_color(rgb(0x94a3b8))
+                            .text_color(rgb(0x7e8494))
                             .hover(|s| s.bg(rgb(0xef4444)).text_color(rgb(0xffffff)))
                             .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
                                 let sel = current_sel.clone();
@@ -2522,7 +2537,7 @@ impl Render for ProjectPanel {
             .flex_col()
             .relative()
             .overflow_hidden()
-            .bg(rgb(0x141517))
+            .bg(rgb(0x111317))
             .text_color(cx.theme().foreground)
             .child(panel_header)
             .child(preview_card)
@@ -3999,7 +4014,7 @@ impl Render for CompositionViewerPanel {
                                 .size_full()
                                 .border_1()
                                 .border_dashed()
-                                .border_color(if is_selected { rgb(0x3b82f6) } else { Rgba { r: 0.8, g: 0.8, b: 0.8, a: 0.15 } })
+                                .border_color(if is_selected { rgb(0x00d2ff) } else { Rgba { r: 0.8, g: 0.8, b: 0.8, a: 0.15 } })
                                 .flex()
                                 .items_end()
                                 .justify_start()
@@ -4010,7 +4025,7 @@ impl Render for CompositionViewerPanel {
                                         .px_1()
                                         .rounded_sm()
                                         .bg(Rgba { r: 0.1, g: 0.1, b: 0.1, a: 0.6 })
-                                        .text_color(if is_selected { rgb(0x93c5fd) } else { Rgba { r: 1.0, g: 1.0, b: 1.0, a: 0.4 } })
+                                        .text_color(if is_selected { rgb(0x00d2ff) } else { Rgba { r: 1.0, g: 1.0, b: 1.0, a: 0.4 } })
                                         .child(adj_label),
                                 ),
                         );
@@ -4057,7 +4072,7 @@ impl Render for CompositionViewerPanel {
                         let c01 = w2c(g01);
                         let anchor_l = layer.transform.anchor_point;
                         let anchor_c = w2c(anchor_l);
-                        let accent = rgb(0x3b82f6);
+                        let accent = rgb(0x00d2ff);
                         let white = Rgba { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
 
                         // Window px -> composition px for drag starts (fresh
@@ -19148,13 +19163,13 @@ impl Render for TimelinePanel {
                             ),
                     )
                     .child(
-                        // Playhead line across track
+                        // Playhead line across track: Stitch Electric Cyan Needle
                         div()
                             .absolute()
                             .top_0()
                             .bottom_0()
                             .w(px(1.))
-                            .bg(rgb(0xef4444))
+                            .bg(rgba(0x00d2ff88))
                             .left(relative(playhead_percent / 100.0)),
                     );
 
@@ -20760,21 +20775,22 @@ impl Render for TimelinePanel {
                                 div()
                                     .id("timecode_display")
                                     .test_support()
-                                    .px_2()
-                                    .py_0p5()
-                                    .bg(rgb(0x101010))
-                                    .rounded_sm()
+                                    .px_2p5()
+                                    .py_1()
+                                    .bg(rgb(0x0b0d11))
+                                    .rounded_md()
                                     .border_1()
-                                    .border_color(ae::border())
+                                    .border_color(rgba(0x00d2ff55))
                                     .font_bold()
                                     .text_sm()
-                                    .text_color(ae::timecode())
+                                    .text_color(rgb(0x00d2ff))
                                     .child(format!("{current_tc}")),
                             )
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(ae::dim())
+                                    .font_medium()
+                                    .text_color(rgb(0x7e8494))
                                     .child(format!("Frame {current_frame} / {total_frames}")),
                             ),
                     )
@@ -21253,14 +21269,24 @@ impl Render for TimelinePanel {
                             ruler_track = ruler_track
                                 .child(ticks_row)
                                 .child(
-                                    // Playhead marker on ruler
+                                    // Playhead marker on ruler: Stitch Electric Cyan Needle + Diamond Crown
                                     div()
                                         .absolute()
                                         .top_0()
                                         .bottom_0()
                                         .w(px(2.))
-                                        .bg(rgb(0xef4444))
-                                        .left(relative(playhead_percent / 100.0)),
+                                        .bg(rgb(0x00d2ff))
+                                        .left(relative(playhead_percent / 100.0))
+                                        .child(
+                                            div()
+                                                .absolute()
+                                                .top(px(0.))
+                                                .left(px(-4.))
+                                                .w(px(10.))
+                                                .h(px(10.))
+                                                .rounded_xs()
+                                                .bg(rgb(0x00d2ff))
+                                        ),
                                 );
                         }
 

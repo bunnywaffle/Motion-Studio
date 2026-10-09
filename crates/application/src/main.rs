@@ -766,7 +766,7 @@ where
         .into_any_element()
 }
 
-/// The File / Edit / About bar above the toolbar.
+/// The File / Edit / About bar above the toolbar (Stitch Ergonomic Dark style).
 fn render_menubar(
     app: &Entity<AppView>,
     open_menu: Option<TopMenu>,
@@ -780,14 +780,55 @@ fn render_menubar(
         .id("top_menubar")
         .test_support()
         .w_full()
-        .h(px(30.))
-        .px_2()
-        .gap_0p5()
+        .h(px(32.))
+        .px_3()
+        .gap_1()
         .items_center()
-        .bg(cx.theme().background)
+        .bg(rgb(0x111317))
         .border_b_1()
-        .border_color(cx.theme().border)
-        .text_color(cx.theme().foreground);
+        .border_color(rgb(0x272a33))
+        .text_color(rgb(0xe2e5eb));
+
+    // Stitch Brand Pill: [ M ] Motion Studio Pro [v24.2.0]
+    bar = bar.child(
+        h_flex()
+            .gap_2()
+            .items_center()
+            .pr_3()
+            .border_r_1()
+            .border_color(rgb(0x272a33))
+            .child(
+                div()
+                    .w(px(20.))
+                    .h(px(20.))
+                    .rounded_md()
+                    .bg(rgb(0x00d2ff))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_xs()
+                    .font_bold()
+                    .text_color(rgb(0x0b0d11))
+                    .child("M"),
+            )
+            .child(
+                div()
+                    .font_bold()
+                    .text_xs()
+                    .text_color(rgb(0xffffff))
+                    .child("Motion Studio"),
+            )
+            .child(
+                div()
+                    .px_1p5()
+                    .py_0p5()
+                    .rounded_sm()
+                    .bg(rgb(0x1a1f2c))
+                    .text_xs()
+                    .text_color(rgb(0x7e8494))
+                    .child("v24.2"),
+            ),
+    );
 
     for menu in [TopMenu::File, TopMenu::Edit, TopMenu::Composition, TopMenu::Layer, TopMenu::View, TopMenu::About] {
         let a_toggle = app.clone();
@@ -800,8 +841,8 @@ fn render_menubar(
             .py_1()
             .rounded_sm()
             .text_xs()
-            .text_color(cx.theme().foreground)
-            .hover(|s| s.bg(cx.theme().muted))
+            .text_color(if is_open { rgb(0xffffff) } else { rgb(0xc5c9d3) })
+            .hover(|s| s.bg(rgb(0x252d3d)).text_color(rgb(0xffffff)))
             .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                 a_toggle.update(cx, |this, cx| {
                     this.open_menu = if this.open_menu == Some(menu) { None } else { Some(menu) };
@@ -810,33 +851,86 @@ fn render_menubar(
             })
             .child(menu.label());
         if is_open {
-            btn = btn.bg(cx.theme().muted);
+            btn = btn.bg(rgb(0x252d3d));
         }
         bar = bar.child(btn);
     }
 
+    // Center: Project name + Autosaved indicator
     bar.child(
         div()
             .flex_1()
             .min_w_0()
             .flex()
+            .items_center()
             .justify_center()
+            .gap_2()
             .text_xs()
-            .text_color(cx.theme().muted_foreground)
             .child(
                 div()
+                    .font_semibold()
+                    .text_color(rgb(0xe2e5eb))
                     .truncate()
                     .child(proj_name),
+            )
+            .child(
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_full()
+                    .bg(rgba(0x10b98118))
+                    .border_1()
+                    .border_color(rgba(0x10b98144))
+                    .child(
+                        div()
+                            .w(px(5.))
+                            .h(px(5.))
+                            .rounded_full()
+                            .bg(rgb(0x10b981)),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_medium()
+                            .text_color(rgb(0x10b981))
+                            .child("Autosaved"),
+                    ),
             ),
     )
     .child(
-        div()
-            .min_w_0()
-            .max_w(px(320.))
-            .truncate()
-            .text_xs()
-            .text_color(cx.theme().primary)
-            .child(menu_note.unwrap_or_default()),
+        h_flex()
+            .gap_2()
+            .items_center()
+            .child(
+                div()
+                    .min_w_0()
+                    .max_w(px(240.))
+                    .truncate()
+                    .text_xs()
+                    .text_color(rgb(0x00d2ff))
+                    .child(menu_note.unwrap_or_default()),
+            )
+            .child(
+                h_flex()
+                    .gap_1p5()
+                    .items_center()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_sm()
+                    .bg(rgb(0x1a1f2c))
+                    .text_xs()
+                    .text_color(rgb(0x7e8494))
+                    .child(
+                        div()
+                            .w(px(6.))
+                            .h(px(6.))
+                            .rounded_full()
+                            .bg(if crate::raster::gpu_accelerated() { rgb(0x10b981) } else { rgb(0xf59e0b) }),
+                    )
+                    .child(div().child(if crate::raster::gpu_accelerated() { "GPU: ON" } else { "GPU: OFF" })),
+            ),
     )
     .into_any_element()
 }
@@ -1548,7 +1642,33 @@ fn render_toolbar(state: &Entity<EditorState>, cx: &App) -> impl IntoElement {
     use crate::state::EditorTool;
     let s_read = state.read(cx);
     let active_tool = s_read.active_tool;
-    let (tool_name, tool_key) = match active_tool {
+    let fill = s_read.tool_solid_color;
+    let fill_hex = fill.to_hex_rgb();
+    let snapping = s_read.snapping;
+    let is_full_width = s_read.timeline_full_width;
+    let s_snap = state.clone();
+    let s_full = state.clone();
+
+    // Stitch chrome tokens
+    let bar_bg = rgb(0x13171f);
+    let ctl_bg = rgb(0x1a1f2c);
+    let hov_bg = rgb(0x252d3d);
+    let bdr_col = rgb(0x272a33);
+    let txt_col = rgb(0xe2e5eb);
+    let dim_col = rgb(0x7e8494);
+    let cyan_acc = rgb(0x00d2ff);
+
+    let tools = [
+        (EditorTool::Move, gpui_kit::assets::IconName::Move, "V", "Selection (V)"),
+        (EditorTool::Hand, gpui_kit::assets::IconName::Hand, "H", "Hand (H)"),
+        (EditorTool::Rotate, gpui_kit::assets::IconName::RotateCw, "W", "Rotate (W)"),
+        (EditorTool::Pen, gpui_kit::assets::IconName::Pen, "G", "Pen (G)"),
+        (EditorTool::Text, gpui_kit::assets::IconName::Type, "T", "Text (T)"),
+        (EditorTool::ShapeRect, gpui_kit::assets::IconName::Square, "Q", "Rectangle (Q)"),
+        (EditorTool::ShapeEllipse, gpui_kit::assets::IconName::Circle, "Q", "Ellipse (Q)"),
+    ];
+
+    let (active_tool_name, active_tool_key) = match active_tool {
         EditorTool::Move => ("Selection", "V"),
         EditorTool::Hand => ("Hand", "H"),
         EditorTool::Rotate => ("Rotate", "W"),
@@ -1566,124 +1686,223 @@ fn render_toolbar(state: &Entity<EditorState>, cx: &App) -> impl IntoElement {
         EditorTool::ShapeRect => EditorTool::ShapeEllipse,
         EditorTool::ShapeEllipse => EditorTool::Move,
     };
-    let fill = s_read.tool_solid_color;
-    let fill_hex = fill.to_hex_rgb();
-    let snapping = s_read.snapping;
-    let is_full_width = s_read.timeline_full_width;
-    let s_tool = state.clone();
-    let s_snap = state.clone();
-    let s_full = state.clone();
-    // AE chrome tokens (match panels::ae).
-    let bar = rgb(0x232323);
-    let ctl = rgb(0x2e2e2e);
-    let hov = rgb(0x3a3a3a);
-    let txt = rgb(0xd7d7d7);
-    let dim = rgb(0x9a9a9a);
-    let acc = rgb(0x2f7cf6);
+    let s_cycler = state.clone();
+
+    let mut tool_buttons = h_flex().gap_1().items_center();
+    for (tool, icon, _key, _label) in tools {
+        let is_selected = active_tool == tool;
+        let s_set = state.clone();
+        tool_buttons = tool_buttons.child(
+            div()
+                .cursor_pointer()
+                .w(px(28.))
+                .h(px(28.))
+                .rounded_md()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(if is_selected { rgba(0x00d2ff1f) } else { rgba(0x00000000) })
+                .border_1()
+                .border_color(if is_selected { cyan_acc } else { rgba(0x00000000) })
+                .text_color(if is_selected { cyan_acc } else { dim_col })
+                .hover(|s| if is_selected { s } else { s.bg(hov_bg).text_color(txt_col) })
+                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    s_set.update(cx, |s, cx| {
+                        s.set_tool(tool);
+                        cx.notify();
+                    });
+                })
+                .child(
+                    div()
+                        .w(px(16.))
+                        .h(px(16.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(icon)
+                ),
+        );
+    }
 
     h_flex()
         .id("top_toolbar")
         .test_support()
         .w_full()
-        .h(px(36.))
+        .h(px(38.))
         .px_3()
         .gap_3()
         .border_b_1()
-        .border_color(rgb(0x101010))
-        .bg(bar)
+        .border_color(bdr_col)
+        .bg(bar_bg)
         .items_center()
         .justify_between()
         .text_xs()
-        .text_color(txt)
+        .text_color(txt_col)
         .child(
             h_flex()
-                .gap_2()
+                .gap_2p5()
                 .items_center()
-                // Active tool cycler.
+                // Dedicated Squircle Tool Buttons
+                .child(tool_buttons)
+                .child(div().w(px(1.)).h(px(18.)).bg(bdr_col))
+                // Active tool indicator pill (maintaining existing test id and cycler functionality)
                 .child(
                     div()
                         .id("active_tool_pill")
                         .test_support()
                         .cursor_pointer()
                         .px_2()
-                        .py_0p5()
-                        .rounded_sm()
-                        .bg(ctl)
-                        .hover(|s| s.bg(hov))
+                        .py_1()
+                        .rounded_md()
+                        .bg(ctl_bg)
+                        .border_1()
+                        .border_color(bdr_col)
+                        .hover(|s| s.bg(hov_bg))
                         .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                            s_tool.update(cx, |s, cx| {
+                            s_cycler.update(cx, |s, cx| {
                                 s.set_tool(next_tool);
                                 cx.notify();
                             });
                         })
-                        .child(format!("Active Tool: {tool_name} ({tool_key})")),
+                        .child(
+                            h_flex()
+                                .gap_1p5()
+                                .items_center()
+                                .child(div().text_color(dim_col).child("Tool:"))
+                                .child(div().font_medium().text_color(cyan_acc).child(format!("{active_tool_name} ({active_tool_key})"))),
+                        ),
                 )
-                // Fill / Stroke wells.
+                .child(div().w(px(1.)).h(px(18.)).bg(bdr_col))
+                // Fill / Stroke wells
                 .child(
                     h_flex()
-                        .gap_1()
+                        .gap_2()
                         .items_center()
-                        .text_color(dim)
-                        .child(div().child("Fill:"))
-                        .child(div().w(px(12.)).h(px(12.)).rounded_sm().bg(Rgba { r: fill.r, g: fill.g, b: fill.b, a: 1.0 }))
-                        .child(div().font_medium().text_color(txt).child(fill_hex)),
-                )
-                .child(
-                    h_flex()
-                        .gap_1()
-                        .items_center()
-                        .text_color(dim)
-                        .child(div().child("Stroke:"))
-                        .child(div().child("None")),
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(ctl_bg)
+                        .border_1()
+                        .border_color(bdr_col)
+                        .child(
+                            h_flex()
+                                .gap_1p5()
+                                .items_center()
+                                .text_color(dim_col)
+                                .child(div().child("Fill:"))
+                                .child(
+                                    div()
+                                        .w(px(14.))
+                                        .h(px(14.))
+                                        .rounded_sm()
+                                        .bg(Rgba { r: fill.r, g: fill.g, b: fill.b, a: 1.0 })
+                                        .border_1()
+                                        .border_color(rgb(0x3a4254)),
+                                )
+                                .child(div().font_medium().text_color(txt_col).child(fill_hex)),
+                        )
+                        .child(div().w(px(1.)).h(px(12.)).bg(bdr_col))
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .items_center()
+                                .text_color(dim_col)
+                                .child(div().child("Stroke:"))
+                                .child(div().text_color(dim_col).child("None")),
+                        ),
                 ),
         )
         .child(
             h_flex()
                 .gap_2()
                 .items_center()
-                // Snapping magnet.
+                // Snapping Magnet Toggle
                 .child(
                     div()
                         .id("snapping_toggle")
                         .test_support()
                         .cursor_pointer()
-                        .px_2()
-                        .py_0p5()
-                        .rounded_sm()
-                        .bg(if snapping { acc } else { ctl })
-                        .hover(|s| s.bg(hov))
+                        .px_2p5()
+                        .py_1()
+                        .rounded_md()
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .bg(if snapping { rgba(0x00d2ff22) } else { ctl_bg })
+                        .border_1()
+                        .border_color(if snapping { cyan_acc } else { bdr_col })
+                        .text_color(if snapping { cyan_acc } else { txt_col })
+                        .hover(|s| s.bg(hov_bg))
                         .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                             s_snap.update(cx, |s, cx| {
                                 s.toggle_snapping();
                                 cx.notify();
                             });
                         })
+                        .child(
+                            div()
+                                .w(px(14.))
+                                .h(px(14.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(gpui_kit::assets::IconName::Magnet),
+                        )
                         .child("Snapping"),
                 )
-                .child(div().text_color(dim).child("100% (Fit)"))
-                .child(div().text_color(dim).child("Full Res (1:1)"))
-                .child(div().text_color(dim).child("RGB Channel"))
-                .child(div().text_color(dim).child("+"))
+                .child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(ctl_bg)
+                        .border_1()
+                        .border_color(bdr_col)
+                        .text_color(dim_col)
+                        .child("100% (Fit)"),
+                )
+                .child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(ctl_bg)
+                        .border_1()
+                        .border_color(bdr_col)
+                        .text_color(dim_col)
+                        .child("Full Res (1:1)"),
+                )
                 .child(
                     div()
                         .id("toggle_timeline_full_width_button")
                         .test_support()
                         .cursor_pointer()
-                        .px_2()
+                        .px_2p5()
                         .py_1()
-                        .rounded_sm()
+                        .rounded_md()
                         .flex()
                         .items_center()
-                        .gap_1()
-                        .bg(if is_full_width { acc } else { ctl })
-                        .hover(|s| s.opacity(0.85))
+                        .gap_1p5()
+                        .bg(if is_full_width { rgba(0x00d2ff22) } else { ctl_bg })
+                        .border_1()
+                        .border_color(if is_full_width { cyan_acc } else { bdr_col })
+                        .text_color(if is_full_width { cyan_acc } else { txt_col })
+                        .hover(|s| s.bg(hov_bg))
                         .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                             s_full.update(cx, |s, cx| {
                                 s.toggle_timeline_full_width();
                                 cx.notify();
                             });
                         })
-                        .child(div().w(px(14.)).h(px(14.)).flex().items_center().justify_center().child(if is_full_width { gpui_kit::assets::IconName::Minimize2 } else { gpui_kit::assets::IconName::Maximize2 }))
+                        .child(
+                            div()
+                                .w(px(14.))
+                                .h(px(14.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(if is_full_width { gpui_kit::assets::IconName::Minimize2 } else { gpui_kit::assets::IconName::Maximize2 }),
+                        )
                         .child(if is_full_width { "Timeline: Full Width" } else { "Timeline: Docked" }),
                 ),
         )
