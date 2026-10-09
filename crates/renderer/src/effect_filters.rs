@@ -957,6 +957,117 @@ pub fn stock_particles() -> ColorFilter {
     )
 }
 
+/// Stock Saber laser beam & energy glow generator.
+pub fn stock_saber() -> ColorFilter {
+    color_filter!(
+        "stock_saber",
+        r#"fn fx_saber_vnoise(p: vec2<f32>, seed: f32) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let a = fract(sin(dot(i, vec2<f32>(12.9898, 78.233)) + seed * 37.719) * 43758.5453);
+    let b = fract(sin(dot(i + vec2<f32>(1.0, 0.0), vec2<f32>(12.9898, 78.233)) + seed * 37.719) * 43758.5453);
+    let c = fract(sin(dot(i + vec2<f32>(0.0, 1.0), vec2<f32>(12.9898, 78.233)) + seed * 37.719) * 43758.5453);
+    let d = fract(sin(dot(i + vec2<f32>(1.0, 1.0), vec2<f32>(12.9898, 78.233)) + seed * 37.719) * 43758.5453);
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+fn fx_stock_saber(
+    uv: vec2<f32>,
+    color: vec4<f32>,
+    core_w: f32,
+    glow_w: f32,
+    d_amt_norm: f32,
+    d_scale: f32,
+    d_speed_norm: f32,
+    f_amt_norm: f32,
+    f_speed_norm: f32,
+    evo_in: f32,
+    intensity_norm: f32,
+    blend_mode: f32,
+    time_s: f32,
+    res: vec2<f32>
+) -> vec4<f32> {
+    let intensity = intensity_norm;
+    if (intensity <= 0.001 || (core_w < 0.05 && glow_w < 0.5)) {
+        return color;
+    }
+    let p_px = uv * res;
+    let s = d_scale * 0.03;
+    let evo = evo_in + time_s * (0.5 + d_speed_norm * 4.0) * 30.0;
+
+    let nx = (fx_saber_vnoise(p_px * s + vec2<f32>(evo * 0.05, 0.0), evo * 0.01) - 0.5) * d_amt_norm * max(glow_w, 8.0);
+    let ny = (fx_saber_vnoise(p_px * s + vec2<f32>(0.0, evo * 0.05), evo * 0.01 + 5.0) - 0.5) * d_amt_norm * max(glow_w, 8.0);
+
+    let p1 = vec2<f32>(res.x * 0.15, res.y * 0.5);
+    let p2 = vec2<f32>(res.x * 0.85, res.y * 0.5);
+    let seg = p2 - p1;
+    let seg_len_sq = max(dot(seg, seg), 0.0001);
+    let distorted_p = p_px + vec2<f32>(nx, ny);
+
+    let t = clamp(dot(distorted_p - p1, seg) / seg_len_sq, 0.0, 1.0);
+    let closest = p1 + seg * t;
+    let dist = length(distorted_p - closest);
+
+    let eff_cw = max(core_w, 1.5);
+    let d_core = dist / eff_cw;
+    let c = exp(-d_core * d_core * 2.0);
+
+    let eff_gw = max(glow_w, 4.0);
+    let d_glow = dist / eff_gw;
+    let g = exp(-d_glow * d_glow * 0.5);
+
+    let halo = max(g - c * 0.6, 0.0);
+    let fl_wob = sin(time_s * (1.0 + f_speed_norm * 8.0) * 6.0) * 0.5
+        + (fx_saber_vnoise(vec2<f32>(time_s * (1.0 + f_speed_norm * 3.0), 0.0), 1.0) - 0.5);
+    let fl = max(1.0 + fl_wob * f_amt_norm * 0.6, 0.0);
+    let k = max(intensity * fl, 0.0);
+
+    let falloff_t = clamp(halo / max(g, 0.001), 0.0, 1.0);
+    let inner_c = vec3<f32>(0.4, 0.7, 1.0);
+    let outer_c = vec3<f32>(0.1, 0.2, 1.0);
+    let glow_col = mix(inner_c, outer_c, falloff_t);
+    let core_col = vec3<f32>(1.0, 1.0, 1.0);
+
+    let add_rgb = (core_col * c + glow_col * halo) * k;
+    let saber_alpha = clamp((c + halo * 0.8) * k, 0.0, 1.0);
+
+    if (blend_mode >= 1.0) {
+        let ia = 1.0 / max(color.a, 0.000001);
+        let screen_col = vec3<f32>(1.0) - (vec3<f32>(1.0) - color.rgb * ia) * (vec3<f32>(1.0) - clamp(add_rgb, vec3<f32>(0.0), vec3<f32>(1.0)));
+        let new_a = clamp(color.a + saber_alpha * (1.0 - color.a), 0.0, 1.0);
+        return vec4<f32>(clamp(screen_col, vec3<f32>(0.0), vec3<f32>(1.0)) * new_a, new_a);
+    } else {
+        let new_rgb = clamp(color.rgb + add_rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+        let new_a = clamp(color.a + saber_alpha * (1.0 - color.a * 0.3), 0.0, 1.0);
+        return vec4<f32>(new_rgb, new_a);
+    }
+}"#
+    )
+}
+
+/// Outer glow halo generator for silhouettes.
+pub fn outer_glow() -> ColorFilter {
+    color_filter!(
+        "outer_glow",
+        r#"fn fx_outer_glow(uv: vec2<f32>, color: vec4<f32>, glow_color: vec3<f32>, size: f32, spread: f32, opacity: f32, res: vec2<f32>) -> vec4<f32> {
+    let k = clamp(opacity / 100.0, 0.0, 1.0);
+    if (k <= 0.001 || size <= 0.1) {
+        return color;
+    }
+    let radius = max(size, 0.5);
+    let inv_r = 1.0 / radius;
+    // Fast analytical radial silhouette approximation
+    let a = color.a;
+    let glow_falloff = exp(-pow(max(1.0 - a, 0.0) * radius * 0.2, 2.0)) * k;
+    let add_glow = glow_color * glow_falloff * (1.0 - a);
+    let new_rgb = clamp(color.rgb + add_glow, vec3<f32>(0.0), vec3<f32>(1.0));
+    let new_a = clamp(color.a + glow_falloff * (1.0 - color.a), 0.0, 1.0);
+    return vec4<f32>(new_rgb, new_a);
+}"#
+    )
+}
+
 /// Rectangular crop (transparent outside). Coordinates follow the CPU
 /// kernel's texel-corner convention (`x / w`, not the pixel-center uv),
 /// so both paths cut the same pixels.
@@ -1842,6 +1953,8 @@ pub fn all_color_filters() -> Vec<ColorFilter> {
         stock_shapes(),
         stock_plasma(),
         stock_particles(),
+        stock_saber(),
+        outer_glow(),
         stock_crop(),
         stock_mosaic(),
         drop_shadow_core(),

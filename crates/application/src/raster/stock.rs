@@ -747,9 +747,9 @@ fn k_long_shadow(buf: &mut FloatBuf, p: &[f32], plugin: StockPlugin, colors: &[C
     }
 }
 
-/// Saber: white-hot core from the alpha/luma mask + two-tone bloom glow
-/// with turbulence distortion and timeline-driven flicker. Evolution is
-/// manual AND auto-advanced by the frame clock (both, per request).
+/// Saber: white-hot core from the alpha/luma mask OR procedural laser beam +
+/// two-tone bloom glow with turbulence distortion and timeline-driven flicker.
+/// Evolution is manual AND auto-advanced by the frame clock (both, per request).
 fn k_saber(
     buf: &mut FloatBuf,
     p: &[f32],
@@ -779,74 +779,128 @@ fn k_saber(
     let evo = evolution + ctx.time_s * (0.5 + d_speed * 4.0) * 30.0;
     let src = snap(buf);
     let s = d_scale * 0.03;
+
+    // Check whether source has non-trivial transparent contour/mask or is a blank/solid canvas.
+    // In motion graphics / Saber, if source has zero alpha or uniform solid alpha, it operates
+    // in Laser Beam mode (connecting across center: (0.15*w, 0.5*h) to (0.85*w, 0.5*h)).
+    let mut min_a = 1.0f32;
+    let mut max_a = 0.0f32;
+    let mut min_lum = 1.0f32;
+    let mut max_lum = 0.0f32;
+    let step = ((buf.w * buf.h) / 256).max(1) as usize;
+    for px in src.px.iter().step_by(step) {
+        min_a = min_a.min(px.a);
+        max_a = max_a.max(px.a);
+        let lum = pluma(px);
+        min_lum = min_lum.min(lum);
+        max_lum = max_lum.max(lum);
+    }
+    // If alpha is uniformly flat (transparent layer or solid color layer without shapes),
+    // Saber generates its laser beam:
+    let is_beam_mode = (max_a - min_a) < 0.1 && (max_a <= 0.05 || (max_lum - min_lum) < 0.1);
+
+    // Beam line segment coordinates in buffer space:
+    let (p1x, p1y) = (buf.w as f32 * 0.15, buf.h as f32 * 0.5);
+    let (p2x, p2y) = (buf.w as f32 * 0.85, buf.h as f32 * 0.5);
+    let seg_dx = p2x - p1x;
+    let seg_dy = p2y - p1y;
+    let seg_len_sq = (seg_dx * seg_dx + seg_dy * seg_dy).max(1e-4);
+
     // Distorted core mask.
     let mut core = FloatBuf::clear(buf.w, buf.h);
+    let eff_core_w = core_w.max(1.5);
     for y in 0..buf.h {
         for x in 0..buf.w {
+            let min_dim = (buf.w.min(buf.h) as f32).max(16.0);
+            let disp_limit = (d_amt * glow_w.max(8.0)).min(min_dim * 0.2);
             let nx = if d_amt > 0.001 {
-                (vnoise(x as f32 * s + evo * 0.05, y as f32 * s, evo * 0.01) - 0.5) * d_amt * glow_w.max(8.0)
+                (vnoise(x as f32 * s + evo * 0.05, y as f32 * s, evo * 0.01) - 0.5) * disp_limit
             } else {
                 0.0
             };
             let ny = if d_amt > 0.001 {
-                (vnoise(x as f32 * s, y as f32 * s + evo * 0.05, evo * 0.01 + 5.0) - 0.5) * d_amt * glow_w.max(8.0)
+                (vnoise(x as f32 * s, y as f32 * s + evo * 0.05, evo * 0.01 + 5.0) - 0.5) * disp_limit
             } else {
                 0.0
             };
-            let sm = src.sample(x as f32 + nx, y as f32 + ny);
-            let l = pluma(&sm).max(sm.a);
-            let m = ((l - threshold) / 0.15 + 0.5).clamp(0.0, 1.0);
-            let m = m * m * (3.0 - 2.0 * m);
-            core.px[(y * buf.w + x) as usize] = Px { r: m, g: m, b: m, a: m * sm.a.max(l) };
+
+            let m = if is_beam_mode {
+                let px = x as f32 + nx;
+                let py = y as f32 + ny;
+                let t = (((px - p1x) * seg_dx + (py - p1y) * seg_dy) / seg_len_sq).clamp(0.0, 1.0);
+                let qx = p1x + t * seg_dx;
+                let qy = p1y + t * seg_dy;
+                let dist = ((px - qx) * (px - qx) + (py - qy) * (py - qy)).sqrt();
+                // Gaussian / smooth falloff across core width
+                let d_norm = dist / eff_core_w;
+                (-d_norm * d_norm * 2.0).exp()
+            } else {
+                let sm = src.sample(x as f32 + nx, y as f32 + ny);
+                // Source edge/luma: for textured/alpha layers, key from alpha or luma above threshold
+                let l = if sm.a < 0.99 { sm.a } else { pluma(&sm) };
+                let val = ((l - threshold) / 0.15 + 0.5).clamp(0.0, 1.0);
+                val * val * (3.0 - 2.0 * val)
+            };
+
+            core.px[(y * buf.w + x) as usize] = Px { r: m, g: m, b: m, a: m };
         }
     }
-    // Glow = blurred mask minus core (bloom-stack idea, glampert).
+
+    // Glow = blurred mask minus core (bloom-stack idea).
     let mut glow = core.clone();
     if glow_w > 0.5 {
         blur_buffer(&mut glow, (glow_w * (0.4 + soft * 0.9)).clamp(0.5, 64.0));
     }
+
     // Flicker: timeline-clocked brightness wobble, animatable amount/speed.
     let fl = if f_amt > 0.001 {
         let wob = (ctx.time_s * (1.0 + f_speed * 8.0) * 6.0).sin() * 0.5
             + (vnoise(ctx.time_s * (1.0 + f_speed * 3.0), 0.0, 1.0) - 0.5);
-        1.0 + wob * f_amt * 0.6
+        (1.0 + wob * f_amt * 0.6).max(0.0)
     } else {
         1.0
     };
     let k = (intensity * fl).max(0.0);
+
     for y in 0..buf.h {
         for x in 0..buf.w {
             let idx = (y * buf.w + x) as usize;
             let c = core.px[idx].a.clamp(0.0, 1.0);
             let g = glow.px[idx].a.clamp(0.0, 1.0);
-            let halo = (g - c * 0.7).max(0.0);
-            // ponytail: two-tone glow lerp by falloff, no spline ramp
+            let halo = (g - c * 0.6).max(0.0);
+            // Two-tone glow lerp by falloff
             let t = (halo / g.max(1e-3)).clamp(0.0, 1.0);
             let gr = inner_c.r + (outer_c.r - inner_c.r) * t;
             let gg = inner_c.g + (outer_c.g - inner_c.g) * t;
             let gb = inner_c.b + (outer_c.b - inner_c.b) * t;
-            let d = &mut buf.px[idx];
-            if d.a <= 0.0 && c <= 0.003 && halo <= 0.003 {
+
+            if c <= 0.002 && halo <= 0.002 {
                 continue;
             }
+
             let add_r = (c * core_c.r + halo * gr) * k;
             let add_g = (c * core_c.g + halo * gg) * k;
             let add_b = (c * core_c.b + halo * gb) * k;
+            let saber_alpha = ((c + halo * 0.8) * k).clamp(0.0, 1.0);
+
+            let d = &mut buf.px[idx];
             if blend_screen {
                 let ia = 1.0 / d.a.max(1e-6);
-                let s = |a: f32, b: f32| 1.0 - (1.0 - a) * (1.0 - (b * d.a).min(1.0));
-                d.r = s(d.r * ia, add_r).clamp(0.0, 1.0) * d.a;
-                d.g = s(d.g * ia, add_g).clamp(0.0, 1.0) * d.a;
-                d.b = s(d.b * ia, add_b).clamp(0.0, 1.0) * d.a;
+                let s = |a: f32, b: f32| 1.0 - (1.0 - a) * (1.0 - b.min(1.0));
+                let new_a = (d.a + saber_alpha * (1.0 - d.a)).clamp(0.0, 1.0);
+                d.r = s(d.r * ia, add_r).clamp(0.0, 1.0) * new_a;
+                d.g = s(d.g * ia, add_g).clamp(0.0, 1.0) * new_a;
+                d.b = s(d.b * ia, add_b).clamp(0.0, 1.0) * new_a;
+                d.a = new_a;
             } else {
-                d.r = (d.r + add_r * d.a.max(0.15)).min(1.0);
-                d.g = (d.g + add_g * d.a.max(0.15)).min(1.0);
-                d.b = (d.b + add_b * d.a.max(0.15)).min(1.0);
+                // Additive energy glow: expands into transparent space properly!
+                d.r = (d.r + add_r).min(1.0);
+                d.g = (d.g + add_g).min(1.0);
+                d.b = (d.b + add_b).min(1.0);
+                d.a = (d.a + saber_alpha * (1.0 - d.a * 0.3)).clamp(0.0, 1.0);
             }
-            d.a = (d.a + halo * 0.5 * d.a).min(1.0);
         }
     }
-    let _ = core_w;
 }
 
 // ---------------------------------------------------------------------------

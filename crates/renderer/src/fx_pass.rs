@@ -334,6 +334,11 @@ impl FxPass {
                 "fx_stock_card_3d_c(uv, color, u.params[0].xyz, u.params[1].xyz, u.params[2].xyz, RES)",
                 true,
             ),
+            StockPlugin::Saber => (
+                ef::stock_saber().wgsl,
+                "fx_stock_saber(uv, color, u.params[0].x, u.params[0].y, u.params[1].x, u.params[1].y, u.params[1].z, u.params[1].w, u.params[2].x, u.params[2].y, u.params[2].z, u.params[2].w, u.misc.x, RES)",
+                false,
+            ),
             _ => {
                 return Err(format!("No native WGSL pass implemented for stock plugin {:?}", plugin));
             }
@@ -428,6 +433,21 @@ impl FxPass {
                 ef::oil_paint_resample().wgsl,
                 "fx_oil_paint(uv, color, u.params[0].x, u.params[0].y, vec2<f32>(u.misc.y, u.misc.z))",
                 true,
+            ),
+            "outer_glow" => (
+                ef::outer_glow().wgsl,
+                "fx_outer_glow(uv, color, u.params[0].xyz, u.params[0].w, u.params[1].x, u.params[1].y, vec2<f32>(u.misc.y, u.misc.z))",
+                false,
+            ),
+            "checkerboard" => (
+                ef::checkerboard().wgsl,
+                "fx_checkerboard(uv, color, u.params[0].xy, u.params[1].xyz, u.params[2].xyz, 1.0)",
+                false,
+            ),
+            "gradient_ramp" => (
+                ef::gradient_ramp().wgsl,
+                "fx_gradient_ramp(uv, color, u.params[0].xyz, u.params[1].xyz, u.params[2].x, 1.0)",
+                false,
             ),
             _ => {
                 return Err(format!("No native WGSL pass implemented for built-in effect {id}"));
@@ -814,7 +834,7 @@ struct FxUniforms {
 /// thresholded binary dots flip on u8-quantized smooth gradients — the
 /// twin is exact, but the chain cannot bound it); those stay on the exact
 /// CPU path, as does export.
-pub const CHAIN_SAFE_STOCK: [StockPlugin; 23] = [
+pub const CHAIN_SAFE_STOCK: [StockPlugin; 24] = [
     StockPlugin::Posterize,
     StockPlugin::TemperatureTint,
     StockPlugin::SpillSuppress,
@@ -838,13 +858,14 @@ pub const CHAIN_SAFE_STOCK: [StockPlugin; 23] = [
     StockPlugin::EdgeDetect,
     StockPlugin::Cartoon,
     StockPlugin::Card3d,
+    StockPlugin::Saber,
 ];
 
 /// Built-in (non-stock) evaluated effects whose WGSL twin reproduces the
 /// CPU kernel within u8 rounding (gentle point math, no time seeds, no
 /// spatial resampling): the set the live GPU chain may take without
 /// visual change. Same audit bar as [`CHAIN_SAFE_STOCK`].
-pub const CHAIN_SAFE_BUILTIN: [&str; 14] = [
+pub const CHAIN_SAFE_BUILTIN: [&str; 17] = [
     "brightness_contrast",
     "tint",
     "levels",
@@ -859,6 +880,9 @@ pub const CHAIN_SAFE_BUILTIN: [&str; 14] = [
     "displacement",
     "warp",
     "oil_paint",
+    "outer_glow",
+    "checkerboard",
+    "gradient_ramp",
 ];
 
 /// Stable built-in id for a GPU-ported evaluated effect, if any.
@@ -879,6 +903,9 @@ pub fn builtin_gpu_id(effect: &compositor::EvaluatedEffectType) -> Option<&'stat
         E::DisplacementMap { .. } => Some("displacement"),
         E::Warp { .. } => Some("warp"),
         E::OilPaint { .. } => Some("oil_paint"),
+        E::OuterGlow { .. } => Some("outer_glow"),
+        E::Checkerboard { .. } => Some("checkerboard"),
+        E::GradientRamp { .. } => Some("gradient_ramp"),
         _ => None,
     }
 }
@@ -927,6 +954,7 @@ pub fn stock_wgsl_plugins() -> Vec<StockPlugin> {
         S::Reframe,
         S::Liquify,
         S::Card3d,
+        S::Saber,
     ]
 }
 

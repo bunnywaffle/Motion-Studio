@@ -376,4 +376,59 @@ mod tests {
         let inked: usize = buf.px.iter().filter(|p| p.a > 0.05).count();
         assert!(inked > 50, "glyphs rasterized: {inked}");
     }
+
+    #[test]
+    fn test_saber_renders_on_transparent_canvas() {
+        use crate::raster::stock::apply_stock;
+        let mut buf = FloatBuf::clear(64, 32);
+        let ctx = RasterFx {
+            time_s: 0.0,
+            frame: 0,
+            res_w: 64.0,
+            res_h: 32.0,
+            duration_s: 1.0,
+            playing: false,
+        };
+        // Saber with default params
+        let params = [6.0, 42.0, 35.0, 45.0, 25.0, 2.0, 30.0, 15.0, 30.0, 0.0, 100.0, 0.0];
+        let colors = [Color::WHITE, Color::rgb(0.4, 0.7, 1.0), Color::rgb(0.1, 0.2, 1.0)];
+        apply_stock(&mut buf, project::StockPlugin::Saber, &params, &colors, &ctx);
+
+        // Across the column x=32, the wavy laser core reaches peak intensity
+        let max_col = (0..32).map(|y| buf.px[y * 64 + 32]).max_by(|a, b| a.r.partial_cmp(&b.r).unwrap()).unwrap();
+        assert!(max_col.a > 0.8, "Saber alpha must expand into transparency at peak core: {:?}", max_col);
+        assert!(max_col.r > 0.8, "Saber must produce visible laser core: {:?}", max_col);
+
+        // Far corners should remain mostly dark / low alpha
+        let corner_px = buf.px[0];
+        assert!(corner_px.a < 0.2, "Corner alpha must be dark/low away from laser core: {:?}", corner_px);
+    }
+
+    #[test]
+    fn test_saber_renders_on_solid_canvas_without_blowout() {
+        use crate::raster::stock::apply_stock;
+        let mut buf = FloatBuf::clear(64, 32);
+        // Fill canvas with solid black
+        for p in buf.px.iter_mut() {
+            *p = Px { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
+        }
+        let ctx = RasterFx {
+            time_s: 0.0,
+            frame: 0,
+            res_w: 64.0,
+            res_h: 32.0,
+            duration_s: 1.0,
+            playing: false,
+        };
+        let params = [6.0, 42.0, 35.0, 45.0, 25.0, 2.0, 30.0, 15.0, 30.0, 0.0, 100.0, 0.0];
+        let colors = [Color::WHITE, Color::rgb(0.4, 0.7, 1.0), Color::rgb(0.1, 0.2, 1.0)];
+        apply_stock(&mut buf, project::StockPlugin::Saber, &params, &colors, &ctx);
+
+        let max_col = (0..32).map(|y| buf.px[y * 64 + 32]).max_by(|a, b| a.r.partial_cmp(&b.r).unwrap()).unwrap();
+        assert!(max_col.r > 0.8, "Center laser core must be bright: {:?}", max_col);
+
+        // Crucial test: corners should NOT blow out into white (preventing the uniform solid blowout bug)
+        let corner_px = buf.px[0];
+        assert!(corner_px.r < 0.2 && corner_px.g < 0.2, "Corner must not blow out to white: {:?}", corner_px);
+    }
 }

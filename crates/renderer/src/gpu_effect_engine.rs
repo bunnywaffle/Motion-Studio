@@ -533,6 +533,21 @@ impl GpuEffectEngine {
                         EvaluatedEffectType::OilPaint { radius, amount } => {
                             ("oil_paint", [*radius, *amount, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
                         }
+                        EvaluatedEffectType::OuterGlow { size, spread, opacity, color, .. } => (
+                            "outer_glow",
+                            [color.r, color.g, color.b, *size, *spread, *opacity, 0.0, 0.0, 0.0, 0.0],
+                        ),
+                        EvaluatedEffectType::Checkerboard { size, color_a, color_b } => {
+                            let s = size.max(2.0);
+                            let cx = (width as f32 / s).max(1.0);
+                            let cy = (height as f32 / s).max(1.0);
+                            ("checkerboard", [cx, cy, 0.0, 0.0, color_a.r, color_a.g, color_a.b, color_b.r, color_b.g, color_b.b])
+                        }
+                        EvaluatedEffectType::GradientRamp { gradient, .. } => {
+                            let ca = gradient.stops.first().map(|s| s.color).unwrap_or(project::Color::BLACK);
+                            let cb = gradient.stops.last().map(|s| s.color).unwrap_or(project::Color::WHITE);
+                            ("gradient_ramp", [ca.r, ca.g, ca.b, 0.0, cb.r, cb.g, cb.b, gradient.angle.to_radians(), 0.0, 0.0])
+                        }
                         _ => continue,
                     };
                     if let Some(pass) = self.builtin_pass_cache.get(id) {
