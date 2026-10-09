@@ -22,6 +22,16 @@ fn default_shape_fill_prop() -> Property<Color> {
     Property::new("Fill", Color::WHITE)
 }
 
+fn default_shape_stroke_prop() -> Property<Color> {
+    // Transparent = legacy look (2px outline in the fill color); see the
+    // stroke-color fallback in the path rasterizer.
+    Property::new("Stroke", Color::TRANSPARENT)
+}
+
+fn default_shape_stroke_width_prop() -> Property<f32> {
+    Property::new("Stroke Width", 2.0)
+}
+
 fn default_no_gradient() -> Option<Property<FillGradient>> {
     None
 }
@@ -324,6 +334,13 @@ pub enum ShapeType {
         /// Linear fill gradient (None = solid `fill`).
         #[serde(default = "default_no_gradient", skip_serializing_if = "Option::is_none", deserialize_with = "crate::property::de_opt_property_or_value")]
         fill_gradient: Option<Property<FillGradient>>,
+        /// Stroke color. Transparent (the default for old files) means
+        /// "outline in the fill color", preserving the legacy 2px look.
+        #[serde(default = "default_shape_stroke_prop", deserialize_with = "crate::property::de_property_or_value")]
+        stroke: Property<Color>,
+        /// Stroke width in px (0 = no stroke).
+        #[serde(default = "default_shape_stroke_width_prop", deserialize_with = "crate::property::de_property_or_value")]
+        stroke_width: Property<f32>,
     },
 }
 

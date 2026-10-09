@@ -20,7 +20,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::state::{AnimationPreset, EditorState, EditorTool, EasingPreset, GraphSeries, KeyEase};
+use crate::state::{AnimationPreset, EditorState, EditorTool, EasingPreset, GraphSeries, KeyEase, PathDrawMode};
 use project::shader::{presets as shader_presets, ShaderParamValue};
 use project::{BlendMode, Color, EffectType, LayerSource, ShapeType, TimeCode, TrackMatteMode, Vec2};
 
@@ -470,7 +470,7 @@ impl ProjectPanel {
             nc_h: 1080,
             nc_fps: 30.0,
             nc_dur: 10.0,
-            nc_bg: 0,
+            nc_bg: 2,
             nc_preset_open: false,
             nc_preset_idx: 0,
             last_project_fp,
@@ -3179,6 +3179,9 @@ pub struct CompositionViewerPanel {
     pub pick_boxes: Vec<PickBox>,
     /// Persistent canvas composite buffer reused across renders without re-allocating.
     pub canvas_comp_buf: Option<crate::raster::FloatBuf>,
+    /// Cached transparency-checker image ((w, h, image); rebuilt only when
+    /// the canvas size changes).
+    pub transparency_checker: Option<(u32, u32, std::sync::Arc<gpui::RenderImage>)>,
     /// Fingerprint of the canvas composite (dims + bg + underlying layers).
     pub canvas_comp_fingerprint: Option<u64>,
     /// Viewport zoom factor (e.g. 1.5 for 150%, None for fit-to-view).
@@ -3338,6 +3341,7 @@ impl CompositionViewerPanel {
             last_frame_ms: 0.0,
             pick_boxes: Vec::new(),
             canvas_comp_buf: None,
+            transparency_checker: None,
             canvas_comp_fingerprint: None,
             zoom_factor: None,
             overlays_enabled: true,
@@ -5782,6 +5786,53 @@ impl Render for CompositionViewerPanel {
                                 }
                             })
                             .child({
+                                // Transparency checker (preview only — export
+                                // buffers stay clean), painted first so all
+                                // layers composite over it.
+                                let checker_el: Option<AnyElement> =
+                                    if bg_color.a < 0.999 {
+                                        let (ck_w, ck_h) = (
+                                            canvas_w.ceil().max(1.0) as u32,
+                                            canvas_h.ceil().max(1.0) as u32,
+                                        );
+                                        let fresh = self
+                                            .transparency_checker
+                                            .as_ref()
+                                            .is_none_or(|(w, h, _)| *w != ck_w || *h != ck_h);
+                                        if fresh {
+                                            let cell = 16u32;
+                                            let mut img = image::RgbaImage::new(ck_w, ck_h);
+                                            for (x, y, p) in img.enumerate_pixels_mut() {
+                                                let on = (x / cell + y / cell) & 1 == 0;
+                                                let g = if on { 41u8 } else { 28u8 };
+                                                *p = image::Rgba([g, g, g, 255]);
+                                            }
+                                            self.transparency_checker = Some((
+                                                ck_w,
+                                                ck_h,
+                                                std::sync::Arc::new(gpui::RenderImage::new(vec![
+                                                    image::Frame::new(img),
+                                                ])),
+                                            ));
+                                        }
+                                        let checker = self
+                                            .transparency_checker
+                                            .as_ref()
+                                            .map(|(_, _, im)| im.clone());
+                                        checker.map(|im| {
+                                            gpui::img(im)
+                                                .id("transparency_checker")
+                                                .test_support()
+                                                .absolute()
+                                                .left(px(0.0))
+                                                .top(px(0.0))
+                                                .w(px(canvas_w))
+                                                .h(px(canvas_h))
+                                                .into_any_element()
+                                        })
+                                    } else {
+                                        None
+                                    };
                                 let mut canvas_frame = div()
                                     .id("canvas_viewport_frame")
                                     .test_support()
@@ -5789,7 +5840,11 @@ impl Render for CompositionViewerPanel {
                                     .h(px(canvas_h))
                                     .border_2()
                                     .border_color(cx.theme().border)
-                                    .bg(bg_color)
+                                    .bg(if bg_color.a < 0.999 {
+                                        Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }
+                                    } else {
+                                        bg_color
+                                    })
                                     .rounded_sm()
                                     .relative()
                                     .overflow_hidden()
@@ -5992,8 +6047,7 @@ impl Render for CompositionViewerPanel {
             }
         }
                                     })
-                                    .children(rendered_layers);
-                                if self.overlays_enabled {
+                                    .children(checker_el.into_iter().chain(rendered_layers));                                if self.overlays_enabled {
                                     canvas_frame = canvas_frame.children(gizmo_els);
                                 }
 
@@ -8552,7 +8606,7 @@ pub(crate) fn fx_swatch_row(
 /// layers are created with, so tools behave consistently across the app.
 /// Pure preset chips/swatches — no steppers anywhere.
 fn render_tool_settings(state: &Entity<EditorState>, cx: &App) -> AnyElement {
-    let (tool, font_size, text_color, shape_fill, solid_color, rotate_step) = {
+    let (tool, font_size, text_color, shape_fill, solid_color, rotate_step, path_mode, path_width) = {
         let s = state.read(cx);
         (
             s.active_tool,
@@ -8561,6 +8615,8 @@ fn render_tool_settings(state: &Entity<EditorState>, cx: &App) -> AnyElement {
             s.tool_shape_fill,
             s.tool_solid_color,
             s.tool_rotate_step,
+            s.tool_path_mode,
+            s.tool_path_width,
         )
     };
     let (tool_name, tool_icon) = match tool {
@@ -8736,6 +8792,55 @@ fn render_tool_settings(state: &Entity<EditorState>, cx: &App) -> AnyElement {
                         .child("Drag layer bodies to move • corners/edges scale • top handle rotates • amber diamond moves the pivot."),
                 );
         }
+        EditorTool::Pen => {
+            // Paint mode for newly drawn paths.
+            let mut modes = h_flex().gap_1().items_center().flex_wrap();
+            for (mode, id, label) in [
+                (PathDrawMode::Both, "both", "Fill + Stroke"),
+                (PathDrawMode::Fill, "fill", "Fill"),
+                (PathDrawMode::Stroke, "stroke", "Stroke"),
+            ] {
+                let s_m = state.clone();
+                let sel = path_mode == mode;
+                modes = modes.child(
+                    chip(format!("tool_path_mode_{id}"), label.to_string(), sel, cx)
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            s_m.update(cx, |s, cx| {
+                                s.tool_path_mode = mode;
+                                cx.notify();
+                            });
+                        }),
+                );
+            }
+            // Stroke width presets.
+            let mut widths = h_flex().gap_1().items_center().flex_wrap();
+            for w in [1.0f32, 2.0, 4.0, 8.0, 16.0] {
+                let s_w = state.clone();
+                let sel = (path_width - w).abs() < 1e-4;
+                widths = widths.child(
+                    chip(format!("tool_path_width_{w:.0}"), format!("{w:.0}px"), sel, cx)
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            s_w.update(cx, |s, cx| {
+                                s.tool_path_width = w;
+                                cx.notify();
+                            });
+                        }),
+                );
+            }
+            body = body
+                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("New paths draw with"))
+                .child(modes)
+                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Stroke width"))
+                .child(widths);
+            // Trim lives on the selected path's own section (tool settings
+            // hide on selection), so no trim button here.
+            body = body.child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Click the canvas to drop path points; switch tools to finish."),
+            );
+        }
         _ => {
             body = body.child(
                 div()
@@ -8743,7 +8848,6 @@ fn render_tool_settings(state: &Entity<EditorState>, cx: &App) -> AnyElement {
                     .text_color(cx.theme().muted_foreground)
                     .child(match tool {
                         EditorTool::Hand => "Drag the canvas to pan the view.",
-                        EditorTool::Pen => "Click the canvas to drop path points; switch tools to finish.",
                         _ => "Canvas tool active.",
                     }),
             );
@@ -11163,6 +11267,7 @@ impl Render for PropertiesPanel {
                             "text_fill" => state.set_layer_text_color(&layer_id, color),
                             "text_stroke" => state.set_layer_stroke_color(&layer_id, color),
                             "shape_fill" => state.set_layer_shape_fill(&layer_id, color),
+                            "shape_stroke" => state.set_layer_shape_stroke(&layer_id, color),
                             _ => state.set_layer_solid_color(&layer_id, color),
                         };
                         cx.notify();
@@ -11174,6 +11279,7 @@ impl Render for PropertiesPanel {
         let text_fill_editor = fill_editor(window, cx, "text_fill");
         let text_stroke_editor = fill_editor(window, cx, "text_stroke");
         let shape_fill_editor = fill_editor(window, cx, "shape_fill");
+        let shape_stroke_editor = fill_editor(window, cx, "shape_stroke");
 
         // Gradient stop editor: drives the selected stop of the open fill
         // picker (same routing the shared wheel used to do).
@@ -13623,7 +13729,7 @@ impl Render for PropertiesPanel {
                                         );
                                         props_items.push(ellipse_section);
                                     }
-                                    ShapeType::Path { path_data, .. } => {
+                                    ShapeType::Path { path_data, stroke, stroke_width, .. } => {
                                         let path_body = v_flex()
                                             .id("shape_properties_section")
                                             .test_support()
@@ -13634,6 +13740,176 @@ impl Render for PropertiesPanel {
                                                     .text_color(cx.theme().muted_foreground)
                                                     .child(format!("Path: {}", if path_data.len() > 40 { format!("{}...", &path_data[..40]) } else { path_data.clone() })),
                                             );
+                                        let sc = stroke.value;
+                                        let sw = stroke_width.value;
+                                        let sc_hex = format!("#{:02X}{:02X}{:02X}", (sc.r * 255.0).round() as u8, (sc.g * 255.0).round() as u8, (sc.b * 255.0).round() as u8);
+                                        let open = shape_stroke_editor.read(cx).expanded;
+                                        let ed_toggle = shape_stroke_editor.clone();
+                                        let ed_render = shape_stroke_editor.clone();
+                                        let s_sw_m = self.state.clone();
+                                        let s_sw_p = self.state.clone();
+                                        let path_body = path_body
+                                            .child(
+                                                h_flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .text_xs()
+                                                    .border_b_1()
+                                                    .border_color(cx.theme().border)
+                                                    .child(
+                                                        h_flex()
+                                                            .gap_1p5()
+                                                            .items_center()
+                                                            .child(div().text_color(cx.theme().muted_foreground).child("Stroke"))
+                                                            .child(
+                                                                div()
+                                                                    .id("shape_stroke_swatch")
+                                                                    .test_support()
+                                                                    .w(px(20.))
+                                                                    .h(px(14.))
+                                                                    .rounded_sm()
+                                                                    .border_1()
+                                                                    .border_color(cx.theme().border)
+                                                                    .bg(Rgba { r: sc.r, g: sc.g, b: sc.b, a: sc.a }),
+                                                            )
+                                                            .child(div().text_xs().text_color(cx.theme().foreground).child(sc_hex))
+                                                            .child(
+                                                                div()
+                                                                    .id("shape_stroke_wheel")
+                                                                    .test_support()
+                                                                    .px_2()
+                                                                    .py_0p5()
+                                                                    .rounded_sm()
+                                                                    .cursor_pointer()
+                                                                    .text_xs()
+                                                                    .text_color(if open { cx.theme().accent_foreground } else { cx.theme().muted_foreground })
+                                                                    .bg(if open { cx.theme().accent } else { cx.theme().muted })
+                                                                    .child(if open { "Close" } else { "Edit" })
+                                                                    .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                                                                        ed_toggle.update(cx, |this, cx| {
+                                                                            this.set_expanded(!open, sc);
+                                                                            cx.notify();
+                                                                        });
+                                                                        if !open {
+                                                                            InspectorColorPicker::sync_inputs(&ed_toggle, None, window, cx);
+                                                                        }
+                                                                    }),
+                                                            ),
+                                                    ),
+                                            );
+                                        let path_body = if open {
+                                            path_body.child(crate::color_editor::render_color_editor(
+                                                &ed_render,
+                                                "shape_stroke",
+                                                sc,
+                                                cx,
+                                            ))
+                                        } else {
+                                            path_body
+                                        };
+                                        let path_body = path_body.child(
+                                            h_flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .text_xs()
+                                                .border_b_1()
+                                                .border_color(cx.theme().border)
+                                                .child(div().text_color(cx.theme().muted_foreground).child("Stroke Width"))
+                                                .child(
+                                                    h_flex()
+                                                        .gap_1()
+                                                        .items_center()
+                                                        .child(
+                                                            div()
+                                                                .id("shape_stroke_w_minus")
+                                                                .test_support()
+                                                                .cursor_pointer()
+                                                                .px_2()
+                                                                .py_0p5()
+                                                                .rounded_sm()
+                                                                .bg(cx.theme().muted)
+                                                                .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                                                .child("−1")
+                                                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                                    let cur = s_sw_m.read(cx).selected_layer().and_then(|l| match &l.source {
+                                                                        LayerSource::Shape { shape_type: ShapeType::Path { stroke_width, .. } } => Some(stroke_width.value),
+                                                                        _ => None,
+                                                                    }).unwrap_or(sw);
+                                                                    s_sw_m.update(cx, |s, cx| {
+                                                                        if let Some(lid) = s.selected_layer_id.clone() {
+                                                                            let _ = s.set_layer_shape_stroke_width(&lid, cur - 1.0);
+                                                                            cx.notify();
+                                                                        }
+                                                                    });
+                                                                }),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .id("shape_stroke_w_value")
+                                                                .test_support()
+                                                                .text_color(cx.theme().foreground)
+                                                                .child(format!("{sw:.0}px")),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .id("shape_stroke_w_plus")
+                                                                .test_support()
+                                                                .cursor_pointer()
+                                                                .px_2()
+                                                                .py_0p5()
+                                                                .rounded_sm()
+                                                                .bg(cx.theme().muted)
+                                                                .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                                                .child("+1")
+                                                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                                    let cur = s_sw_p.read(cx).selected_layer().and_then(|l| match &l.source {
+                                                                        LayerSource::Shape { shape_type: ShapeType::Path { stroke_width, .. } } => Some(stroke_width.value),
+                                                                        _ => None,
+                                                                    }).unwrap_or(sw);
+                                                                    s_sw_p.update(cx, |s, cx| {
+                                                                        if let Some(lid) = s.selected_layer_id.clone() {
+                                                                            let _ = s.set_layer_shape_stroke_width(&lid, cur + 1.0);
+                                                                            cx.notify();
+                                                                        }
+                                                                    });
+                                                                }),
+                                                        ),
+                                                ),
+                                        );
+                                        // Trim shortcut lives with the path it
+                                        // trims (not in tool settings, which
+                                        // hide on selection). Shown only
+                                        // until the first TrimPath lands.
+                                        let has_trim = layer.effects.iter().any(|e| {
+                                            matches!(e.effect_type, project::EffectType::TrimPath { .. })
+                                        });
+                                        let path_body = if has_trim {
+                                            path_body
+                                        } else {
+                                            let s_trim = self.state.clone();
+                                            path_body.child(
+                                                div()
+                                                    .id("shape_trim_path_add")
+                                                    .test_support()
+                                                    .cursor_pointer()
+                                                    .px_2()
+                                                    .py_0p5()
+                                                    .rounded_sm()
+                                                    .bg(cx.theme().muted)
+                                                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                                    .text_xs()
+                                                    .text_color(cx.theme().foreground)
+                                                    .child("Add Trim Path")
+                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                        s_trim.update(cx, |s, cx| {
+                                                            let _ = s.add_effect_to_selected_layer(
+                                                                project::EffectType::trim_path(0.0, 100.0, 0.0),
+                                                            );
+                                                            cx.notify();
+                                                        });
+                                                    }),
+                                            )
+                                        };
 
                                         let p_src = panel_entity.clone();
                                         let path_section = prop_section(

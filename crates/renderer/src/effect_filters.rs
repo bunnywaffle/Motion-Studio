@@ -1528,6 +1528,27 @@ fn fx_oil_paint(uv: vec2<f32>, color: vec4<f32>, radius: f32, amount: f32, res: 
     )
 }
 
+/// Stock Card 3D (mirrors `k_card_3d` via the shared plan): inverse
+/// homography in uniforms (row-major, baked by `card_3d_plan`) with a
+/// TRUE projective divide — not the bilinear approximation the corner
+/// pin twin uses.
+pub fn stock_card_3d_resample() -> ColorFilter {
+    color_filter!(
+        "stock_card_3d_resample",
+        r#"fn fx_stock_card_3d_c(uv: vec2<f32>, color: vec4<f32>, r0: vec3<f32>, r1: vec3<f32>, r2: vec3<f32>, res: vec2<f32>) -> vec4<f32> {
+    let w = r2.x * uv.x + r2.y * uv.y + r2.z;
+    if (abs(w) < 0.000001) {
+        return vec4<f32>(0.0);
+    }
+    let s = vec2<f32>(
+        (r0.x * uv.x + r0.y * uv.y + r0.z) / w,
+        (r1.x * uv.x + r1.y * uv.y + r1.z) / w
+    ) * res - vec2<f32>(0.5);
+    return fx_sample_cpu(s, res);
+}"#
+    )
+}
+
 /// Stock wave displacement (mirrors `k_wave`).
 pub fn stock_wave_resample() -> ColorFilter {
     color_filter!(
@@ -1768,6 +1789,7 @@ pub fn resample_filters() -> Vec<ColorFilter> {
         stock_edge_resample(),
         stock_cartoon_resample(),
         stock_halftone_resample(),
+        stock_card_3d_resample(),
         cel_shade_resample(),
         oil_paint_resample(),
     ]
@@ -1940,6 +1962,7 @@ mod tests {
             ("stock_edge_resample", "fx_stock_edge_c(uv, color, u.params[0].x, u.params[0].y, RES)"),
             ("stock_cartoon_resample", "fx_stock_cartoon_c(uv, color, u.params[0].x, u.params[0].y, RES)"),
             ("stock_halftone_resample", "fx_stock_halftone_c(uv, color, u.params[0].x, u.params[0].y, RES)"),
+            ("stock_card_3d_resample", "fx_stock_card_3d_c(uv, color, u.params[0].xyz, u.params[1].xyz, u.params[2].xyz, RES)"),
             ("cel_shade_resample", "fx_cel_shade(uv, color, u.params[0].x, u.params[0].y, RES)"),
             ("oil_paint_resample", "fx_oil_paint(uv, color, u.params[0].x, u.params[0].y, RES)"),
         ];

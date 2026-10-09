@@ -72,6 +72,8 @@ fn test_multi_layer_mixed_sources_composite_evaluation() {
             path_data: "M 0 0 L 40 20 L 0 40 Z".to_string(),
             fill: Property::new("Fill", Color::WHITE),
         fill_gradient: None,
+            stroke: Property::new("Stroke", Color::TRANSPARENT),
+            stroke_width: Property::new("Stroke Width", 2.0),
         },
         tc0,
         tc300,

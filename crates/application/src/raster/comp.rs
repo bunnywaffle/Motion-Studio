@@ -26,28 +26,21 @@ pub fn rasterize_comp(
 ) -> FloatBuf {
     let (ow, oh) = (out_w.max(1), out_h.max(1));
     let mut dst = FloatBuf::clear(ow, oh);
-    // Background (transparent comps get a checkerboard).
+    // Background: opaque fills; anything else stays transparent. The
+    // viewer paints its own checkerboard behind transparent comps —
+    // export buffers must never bake one in (it would ship as gray
+    // squares in movies and dirty PNG alpha).
     if bg.a >= 0.999 {
         let p = Px::from_color(bg);
         for px in dst.px.iter_mut() {
             *px = p;
         }
-    } else {
-        let cell = 12.0;
-        for y in 0..oh {
-            for x in 0..ow {
-                let on = ((x as f32 / cell).floor() + (y as f32 / cell).floor()) as i32 & 1 == 0;
-                let g = if on { 0.16 } else { 0.11 };
-                dst.px[(y * ow + x) as usize] = Px { r: g, g, b: g, a: 1.0 };
-            }
-        }
-        if bg.a > 0.0 {
-            let p = Px::from_color(bg);
-            for px in dst.px.iter_mut() {
-                let mut out = *px;
-                out.over(p);
-                *px = out;
-            }
+    } else if bg.a > 0.0 {
+        let p = Px::from_color(bg);
+        for px in dst.px.iter_mut() {
+            let mut out = *px;
+            out.over(p);
+            *px = out;
         }
     }
 

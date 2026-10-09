@@ -12,6 +12,10 @@ pub enum GpuError {
     InvalidDimensions { width: u32, height: u32 },
     #[error("Shader compilation failed: {0}")]
     ShaderCompilation(String),
+    /// Content-dependent decline (culled/degenerate geometry): the caller
+    /// falls back to the exact CPU path. Not a failure.
+    #[error("GPU path declined: {0}")]
+    Declined(String),
 }
 
 /// GPU Context encapsulating wgpu instance, adapter, device, and command queue.

@@ -99,7 +99,7 @@ mod tests {
         assert_eq!(comp.duration_frames(), 300);
         assert!((comp.duration_seconds() - 10.0).abs() < 1e-6);
         assert!((comp.aspect_ratio() - (16.0 / 9.0)).abs() < 1e-6);
-        assert_eq!(comp.background_color, Color::BLACK);
+        assert_eq!(comp.background_color, Color::TRANSPARENT);
 
         // Validation of valid composition passes
         assert!(comp.validate().is_ok());
@@ -842,7 +842,7 @@ mod tests {
         let shape = Layer::shape(
             "shp",
             "Shape",
-            ShapeType::Path { path_data: "M 0 0 L 10 10".to_string(), fill: Property::new("Fill", Color::WHITE), fill_gradient: None },
+            ShapeType::Path { path_data: "M 0 0 L 10 10".to_string(), fill: Property::new("Fill", Color::WHITE), fill_gradient: None, stroke: Property::new("Stroke", Color::TRANSPARENT), stroke_width: Property::new("Stroke Width", 2.0) },
             tc0,
             tc100,
         );
@@ -1017,6 +1017,8 @@ mod tests {
                 path_data: "M 0 0 C 10 20, 30 40, 50 50 Z".to_string(),
                 fill: Property::new("Fill", Color::WHITE),
                 fill_gradient: None,
+                stroke: Property::new("Stroke", Color::TRANSPARENT),
+                stroke_width: Property::new("Stroke Width", 2.0),
             },
             tc0,
             tc300,

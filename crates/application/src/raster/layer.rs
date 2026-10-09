@@ -124,7 +124,7 @@ pub fn raster_content(
                         None => fill_ellipse(&mut buf, w / 2.0, h / 2.0, Px::from_color(fill.value)),
                     }
                 }
-                ShapeType::Path { path_data, fill, fill_gradient, .. } => {
+                ShapeType::Path { path_data, fill, fill_gradient, stroke, stroke_width, .. } => {
                     // Vector path effects run pre-flatten on the parsed
                     // path; re-serialize for the SVG-string rasterizers.
                     let shaped = apply_path_fx(
@@ -136,25 +136,44 @@ pub fn raster_content(
                         Some((origin, size)) => (origin, size.x, size.y),
                         None => (Vec2::ZERO, 400.0, 300.0),
                     };
+                    // Transparent stroke = legacy look (outline in the fill
+                    // color); width 0 (or transparent fill+stroke) skips.
+                    let nib = stroke_width.value.max(0.0);
+                    let do_fill = fill.value.a > 0.0;
+                    let do_stroke = nib > 0.0
+                        && (stroke.value.a > 0.0 || fill.value.a > 0.0);
                     match fill_gradient {
                         Some(gradient) => {
-                            fill_path_gradient(&mut buf, &shaped_svg, gradient, origin, (fw, fh));
-                            stroke_path_gradient(&mut buf, &shaped_svg, 2.0, gradient, origin, (fw, fh));
+                            if do_fill {
+                                fill_path_gradient(&mut buf, &shaped_svg, gradient, origin, (fw, fh));
+                            }
+                            if do_stroke {
+                                stroke_path_gradient(&mut buf, &shaped_svg, nib, gradient, origin, (fw, fh));
+                            }
                         }
                         None => {
-                            fill_path(
-                                &mut buf,
-                                &shaped_svg,
-                                Px::from_color(fill.value),
-                                origin,
-                            );
-                            stroke_path(
-                                &mut buf,
-                                &shaped_svg,
-                                2.0,
-                                Px::from_color(fill.value),
-                                origin,
-                            );
+                            if do_fill {
+                                fill_path(
+                                    &mut buf,
+                                    &shaped_svg,
+                                    Px::from_color(fill.value),
+                                    origin,
+                                );
+                            }
+                            if do_stroke {
+                                let sc = if stroke.value.a > 0.0 {
+                                    stroke.value
+                                } else {
+                                    fill.value
+                                };
+                                stroke_path(
+                                    &mut buf,
+                                    &shaped_svg,
+                                    nib,
+                                    Px::from_color(sc),
+                                    origin,
+                                );
+                            }
                         }
                     }
                 }
@@ -1996,6 +2015,8 @@ mod tests {
                 path_data: "M -100.0 -50.0 L 100.0 60.0".to_string(),
                 fill: project::Property::new("Fill", Color::WHITE),
                 fill_gradient: None,
+                stroke: project::Property::new("Stroke", Color::TRANSPARENT),
+                stroke_width: project::Property::new("Stroke Width", 2.0),
             },
             tc,
             out,
@@ -2118,6 +2139,8 @@ mod tests {
                 path_data: "M 0 0 L 200 0 L 200 100 L 0 100 Z".to_string(),
                 fill: project::Property::new("Fill", Color::WHITE),
                 fill_gradient: None,
+                stroke: project::Property::new("Stroke", Color::TRANSPARENT),
+                stroke_width: project::Property::new("Stroke Width", 2.0),
             },
             tc,
             out,
@@ -2831,6 +2854,10 @@ mod tests {
             let w = gpu_parity_worst(&gpu_parity_base(), &single);
             assert!(w < 0.02, "GPU {plugin:?} must match CPU within u8 rounding: {w}");
         }
+        // Card 3D: true projective divide both sides (shared plan).
+        let single = vec![stock(StockPlugin::Card3d, vec![15.0, 0.0, 300.0, 50.0, 50.0, 1.0])];
+        let w = gpu_parity_worst(&gpu_parity_base(), &single);
+        assert!(w < 0.03, "GPU card 3d must match CPU within rounding: {w}");
     }
 
     #[test]

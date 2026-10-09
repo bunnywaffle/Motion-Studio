@@ -41,7 +41,7 @@ impl Composition {
             height,
             frame_rate,
             duration,
-            background_color: Color::BLACK,
+            background_color: Color::TRANSPARENT,
             layers: Vec::new(),
             markers: Vec::new(),
         }
@@ -61,7 +61,7 @@ impl Composition {
             height: 1080,
             frame_rate,
             duration: TimeCode::from_seconds(duration_seconds, frame_rate),
-            background_color: Color::BLACK,
+            background_color: Color::TRANSPARENT,
             layers: Vec::new(),
             markers: Vec::new(),
         }

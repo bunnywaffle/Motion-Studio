@@ -387,6 +387,42 @@ impl GpuEffectEngine {
                     }
                 }
                 EvaluatedEffectType::Stock { plugin, params, colors: _ } => {
+                    // Card 3D packs the shared-plan inverse homography
+                    // (same matrix the CPU kernel solves): identity skips,
+                    // culled/degenerate bail to the exact CPU path via Err.
+                    if *plugin == StockPlugin::Card3d {
+                        use compositor::fx::{card_3d_plan, Card3dPlan};
+                        match card_3d_plan(params, width as f32, height as f32) {
+                            Card3dPlan::Identity => continue,
+                            Card3dPlan::Clear | Card3dPlan::Keep => {
+                                return Err(GpuError::Declined(
+                                    "card 3d culled or degenerate".to_string(),
+                                ));
+                            }
+                            Card3dPlan::Project(inv) => {
+                                if let Some(pass) = self.fx_pass_cache.get(plugin) {
+                                    // Row-padded so the twin reads matrix
+                                    // rows as params[0..2].xyz.
+                                    let m = [
+                                        inv[0], inv[1], inv[2], 0.0,
+                                        inv[3], inv[4], inv[5], 0.0,
+                                        inv[6], inv[7], inv[8], 0.0,
+                                        0.0, 0.0, 0.0, 0.0,
+                                    ];
+                                    let uniforms = FxUniforms::pack(&m, time_s, width as f32, height as f32, 0.0);
+                                    pass.record_into(
+                                        &self.gpu,
+                                        &mut encoder,
+                                        targets.read_target().view(),
+                                        targets.write_target(),
+                                        uniforms,
+                                    );
+                                    targets.swap();
+                                }
+                                continue;
+                            }
+                        }
+                    }
                     if let Some(pass) = self.fx_pass_cache.get(plugin) {
                         let uniforms = FxUniforms::pack(params, time_s, width as f32, height as f32, 0.0);
                         pass.record_into(

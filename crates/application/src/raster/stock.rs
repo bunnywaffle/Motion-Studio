@@ -1386,6 +1386,38 @@ fn k_corner_pin(buf: &mut FloatBuf, p: &[f32], plugin: StockPlugin) {
     });
 }
 
+/// Card 3D: rotate the frame rectangle about its pivot in 3D (rx then ry)
+/// and project with a true perspective divide, reusing the corner-pin
+/// homography machinery. Aspect-corrected so rotation is circular on any
+/// frame. Backface (flipped winding) culls to transparent when enabled.
+fn k_card_3d(buf: &mut FloatBuf, p: &[f32], plugin: StockPlugin) {
+    if buf.w == 0 || buf.h == 0 {
+        return;
+    }
+    let vals = compositor::fx::stock_params_resolved(plugin, p);
+    let (w, h) = (buf.w as f32, buf.h as f32);
+    match compositor::fx::card_3d_plan(&vals, w, h) {
+        compositor::fx::Card3dPlan::Identity | compositor::fx::Card3dPlan::Keep => {}
+        compositor::fx::Card3dPlan::Clear => {
+            for px in buf.px.iter_mut() {
+                *px = Px::clear();
+            }
+        }
+        compositor::fx::Card3dPlan::Project(inv) => {
+            remap(buf, |x, y, w, hgt| {
+                let (ux, uy) = (x / w.max(1.0), y / hgt.max(1.0));
+                let ww = inv[6] * ux + inv[7] * uy + inv[8];
+                if ww.abs() < 1e-6 {
+                    return (-10.0, -10.0);
+                }
+                let sx = (inv[0] * ux + inv[1] * uy + inv[2]) / ww * w;
+                let sy = (inv[3] * ux + inv[4] * uy + inv[5]) / ww * hgt;
+                (sx, sy)
+            });
+        }
+    }
+}
+
 fn k_mirror(buf: &mut FloatBuf, p: &[f32], plugin: StockPlugin) {
     let (mode, center) = (stock_p(plugin, p, 0).round() as i32, stock_p(plugin, p, 1) / 100.0);
     if !(0..=2).contains(&mode) {
@@ -1862,6 +1894,7 @@ pub fn apply_stock(
         S::TransformFx => {}
         S::Crop => k_crop(buf, params, plugin),
         S::CornerPin => k_corner_pin(buf, params, plugin),
+        S::Card3d => k_card_3d(buf, params, plugin),
         S::Mirror => k_mirror(buf, params, plugin),
         S::Repeat => k_repeat(buf, params, plugin),
         S::Offset => k_offset(buf, params, plugin),

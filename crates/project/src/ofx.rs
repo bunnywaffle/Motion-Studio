@@ -753,6 +753,14 @@ pub const STOCK_SUITE: &[OfxEffectDescriptor] = &[
         pd!("ll_x", "Lower Left X", 0.0, 1.0, 0.0),
         pd!("ll_y", "Lower Left Y", 0.0, 1.0, 1.0),
     ], true),
+    sd("net.sf.openfx.card_3d", "Card 3D", OfxCategory::Spatial, &[
+        pd!("rotation_x", "Rotation X", -180.0, 180.0, 0.0),
+        pd!("rotation_y", "Rotation Y", -180.0, 180.0, 0.0),
+        pd!("distance", "Distance", 50.0, 800.0, 300.0),
+        pd!("pivot_x", "Pivot X", 0.0, 100.0, 50.0),
+        pd!("pivot_y", "Pivot Y", 0.0, 100.0, 50.0),
+        pd!("cull_backface", "Cull Backface", 0.0, 1.0, 1.0),
+    ], true),
     sd("net.sf.openfx.mirror", "Mirror", OfxCategory::Spatial, &[
         pd!("mode", "Mode", 0.0, 2.0, 0.0),
         pd!("center", "Center", 0.0, 100.0, 50.0),

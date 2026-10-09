@@ -99,6 +99,18 @@ pub fn resolve_font_family(requested: &str) -> String {
     }
 }
 
+/// Pen path paint mode for newly drawn paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PathDrawMode {
+    /// Fill plus outline (today's look).
+    #[default]
+    Both,
+    /// Fill only (no stroke).
+    Fill,
+    /// Outline only (transparent fill).
+    Stroke,
+}
+
 /// Viewport preview resolution. Full rasterizes at the capped box size (100% native quality);
 /// Half renders at 1/2 resolution; Quarter at 1/4 resolution; Auto adapts during playback
 /// on heavy compositions while maintaining full quality when paused.
@@ -156,6 +168,9 @@ pub struct EditorState {
     pub tool_text_color: Color,
     pub tool_shape_fill: Color,
     pub tool_solid_color: Color,
+    /// Pen path paint mode + stroke width for newly drawn paths.
+    pub tool_path_mode: PathDrawMode,
+    pub tool_path_width: f32,
     /// Degrees per click for the Rotate tool.
     pub tool_rotate_step: f32,
     /// True while a drag/scrub gesture is active anywhere. The viewport
@@ -819,6 +834,8 @@ impl EditorState {
             tool_text_color: Color::WHITE,
             tool_shape_fill: Color::from_rgba_u8(168, 85, 247, 255),
             tool_solid_color: Color::from_rgba_u8(59, 130, 246, 255),
+            tool_path_mode: PathDrawMode::Both,
+            tool_path_width: 2.0,
             tool_rotate_step: 15.0,
             preview_fast: false,
             preview_quality: PreviewQuality::Auto,
@@ -4546,6 +4563,54 @@ impl EditorState {
                 Ok(())
             }
             _ => Err("Not a shape layer".to_string()),
+        }
+    }
+
+    /// Set a pen-path shape's stroke color (Path shapes only).
+    pub fn set_layer_shape_stroke(&mut self, layer_id: &str, color: Color) -> Result<(), String> {
+        self.checkpoint();
+        let current_tc = self.clock.timecode();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        match &mut layer.source {
+            LayerSource::Shape {
+                shape_type: ShapeType::Path { stroke, .. },
+            } => {
+                stroke.set_value(color);
+                if stroke.is_animated() {
+                    stroke.add_keyframe(Keyframe::new(current_tc, color));
+                }
+                Ok(())
+            }
+            _ => Err("Not a path shape layer".to_string()),
+        }
+    }
+
+    /// Set a pen-path shape's stroke width in px (Path shapes only).
+    pub fn set_layer_shape_stroke_width(&mut self, layer_id: &str, width: f32) -> Result<(), String> {
+        self.checkpoint();
+        let current_tc = self.clock.timecode();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        match &mut layer.source {
+            LayerSource::Shape {
+                shape_type: ShapeType::Path { stroke_width, .. },
+            } => {
+                stroke_width.set_value(width.max(0.0));
+                if stroke_width.is_animated() {
+                    stroke_width.add_keyframe(Keyframe::new(current_tc, width.max(0.0)));
+                }
+                Ok(())
+            }
+            _ => Err("Not a path shape layer".to_string()),
         }
     }
 
@@ -8722,6 +8787,11 @@ impl EditorState {
         let in_pt = TimeCode::zero(frame_rate);
         let out_pt = duration;
         let fill = self.tool_shape_fill;
+        let (fill, stroke_width) = match self.tool_path_mode {
+            PathDrawMode::Fill => (fill, 0.0),
+            PathDrawMode::Stroke => (Color::TRANSPARENT, self.tool_path_width),
+            PathDrawMode::Both => (fill, self.tool_path_width),
+        };
         let layer = Layer::shape(
             &layer_id,
             "Path",
@@ -8729,6 +8799,8 @@ impl EditorState {
                 path_data: format!("M {:.1} {:.1}", point.x, point.y),
                 fill: Property::new("Fill", fill),
                 fill_gradient: None,
+                stroke: Property::new("Stroke", self.tool_shape_fill),
+                stroke_width: Property::new("Stroke Width", stroke_width),
             },
             in_pt,
             out_pt,

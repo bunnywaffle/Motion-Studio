@@ -329,6 +329,11 @@ impl FxPass {
                 "fx_stock_halftone_c(uv, color, u.params[0].x, u.params[0].y, RES)",
                 true,
             ),
+            StockPlugin::Card3d => (
+                ef::stock_card_3d_resample().wgsl,
+                "fx_stock_card_3d_c(uv, color, u.params[0].xyz, u.params[1].xyz, u.params[2].xyz, RES)",
+                true,
+            ),
             _ => {
                 return Err(format!("No native WGSL pass implemented for stock plugin {:?}", plugin));
             }
@@ -809,7 +814,7 @@ struct FxUniforms {
 /// thresholded binary dots flip on u8-quantized smooth gradients — the
 /// twin is exact, but the chain cannot bound it); those stay on the exact
 /// CPU path, as does export.
-pub const CHAIN_SAFE_STOCK: [StockPlugin; 22] = [
+pub const CHAIN_SAFE_STOCK: [StockPlugin; 23] = [
     StockPlugin::Posterize,
     StockPlugin::TemperatureTint,
     StockPlugin::SpillSuppress,
@@ -832,6 +837,7 @@ pub const CHAIN_SAFE_STOCK: [StockPlugin; 22] = [
     StockPlugin::Emboss,
     StockPlugin::EdgeDetect,
     StockPlugin::Cartoon,
+    StockPlugin::Card3d,
 ];
 
 /// Built-in (non-stock) evaluated effects whose WGSL twin reproduces the
@@ -920,6 +926,7 @@ pub fn stock_wgsl_plugins() -> Vec<StockPlugin> {
         S::MeshWarp,
         S::Reframe,
         S::Liquify,
+        S::Card3d,
     ]
 }
 
@@ -940,12 +947,17 @@ mod tests {
     fn every_wgsl_plugin_has_a_filter() {
         let color_ids: Vec<&str> = ef::all_color_filters().iter().map(|f| f.id).collect();
         let uv_ids: Vec<&str> = ef::all_uv_filters().iter().map(|f| f.id).collect();
-        // Slug of the plug-in id must appear in one of the registries.
+        let resample_ids: Vec<&str> = ef::resample_filters().iter().map(|f| f.id).collect();
+        // Slug of the plug-in id must appear in one of the registries
+        // (resampling twins carry a `_resample` suffix).
         for plugin in stock_wgsl_plugins() {
             let slug = plugin.plugin_id().rsplit('.').next().unwrap();
             let want = format!("stock_{slug}");
+            let want_resample = format!("stock_{slug}_resample");
             assert!(
-                color_ids.contains(&want.as_str()) || uv_ids.contains(&want.as_str()),
+                color_ids.contains(&want.as_str())
+                    || uv_ids.contains(&want.as_str())
+                    || resample_ids.contains(&want_resample.as_str()),
                 "no WGSL twin for {}",
                 plugin.plugin_id()
             );
@@ -990,6 +1002,13 @@ mod tests {
             S::Offset,
             S::Pixelate,
             S::Mosaic,
+            S::ChromaticAberration,
+            S::RgbSplit,
+            S::Emboss,
+            S::EdgeDetect,
+            S::Cartoon,
+            S::Halftone,
+            S::Card3d,
         ] {
             FxPass::for_stock(&gpu, plugin, wgpu::TextureFormat::Rgba8Unorm)
                 .unwrap_or_else(|e| panic!("for_stock {plugin:?} failed: {e}"));

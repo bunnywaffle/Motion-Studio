@@ -4646,6 +4646,150 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         }
     }
 
+    #[test]
+    fn test_pen_modes_bake_fill_stroke_and_raster_guards() {
+        use crate::state::PathDrawMode;
+        use project::{Color, LayerSource, ShapeType};
+        let mut state = EditorState::new();
+        // Stroke-only: transparent fill, colored 4px stroke.
+        state.tool_path_mode = PathDrawMode::Stroke;
+        state.tool_path_width = 4.0;
+        let sid = state
+            .pen_press_at(project::Vec2::new(100.0, 100.0), None)
+            .expect("drew stroke path");
+        // Second point continues the open path (a lone click is degenerate
+        // and rasterizes nothing).
+        state
+            .pen_press_at(project::Vec2::new(200.0, 120.0), None)
+            .expect("extended stroke path");
+        // Deselect: otherwise the next press continues the open path.
+        state.select_layer(None);
+        // Fill-only: solid fill, zero width (triangle, so fill covers).
+        state.tool_path_mode = PathDrawMode::Fill;
+        let fid = state
+            .pen_press_at(project::Vec2::new(300.0, 300.0), None)
+            .expect("drew fill path");
+        state
+            .pen_press_at(project::Vec2::new(400.0, 300.0), None)
+            .expect("extended fill path");
+        state
+            .pen_press_at(project::Vec2::new(350.0, 400.0), None)
+            .expect("closed fill path");
+        let comp = state.active_composition().unwrap().clone();
+        for (lid, fill_a, width) in [(&sid, 0.0, 4.0), (&fid, 1.0, 0.0)] {
+            let l = comp.get_layer(lid).unwrap();
+            if let LayerSource::Shape {
+                shape_type: ShapeType::Path { fill, stroke, stroke_width, .. },
+                ..
+            } = &l.source
+            {
+                assert!((fill.value.a - fill_a).abs() < 1e-4, "{lid} fill alpha");
+                assert!((stroke_width.value - width).abs() < 1e-4, "{lid} width");
+                assert!(stroke.value.a > 0.9, "{lid} stroke color kept");
+            } else {
+                panic!("{lid} must be a path shape");
+            }
+        }
+        // Stroke setter + width setter round-trip.
+        state.select_layer(Some(sid.clone()));
+        state
+            .set_layer_shape_stroke(&sid, Color::from_hex("#FF0000").unwrap())
+            .expect("stroke color");
+        state
+            .set_layer_shape_stroke_width(&sid, 6.0)
+            .expect("stroke width");
+        let comp = state.active_composition().unwrap().clone();
+        let l = comp.get_layer(&sid).unwrap();
+        if let LayerSource::Shape {
+            shape_type: ShapeType::Path { stroke, stroke_width, .. },
+            ..
+        } = &l.source
+        {
+            assert!((stroke.value.r - 1.0).abs() < 1e-4);
+            assert!((stroke_width.value - 6.0).abs() < 1e-4);
+        } else {
+            panic!("stroke setters must stick");
+        }
+        // Raster: stroke-only holds ink despite transparent fill.
+        let graph = compositor::SceneGraph::from_project(&state.project, &state.active_comp_id).unwrap();
+        let evaluator = compositor::LayerStackEvaluator::new();
+        let stack = evaluator
+            .evaluate_with_project(&graph, &state.project, &state.clock.timecode())
+            .unwrap();
+        let layer = stack.get_layer(&sid).expect("evaluated").clone();
+        let buf = crate::raster::layer::raster_content(&layer, 1920.0, 1080.0).expect("raster");
+        assert!(buf.px.iter().any(|p| p.a > 0.05), "stroke-only must hold ink");
+    }
+
+    #[gpui_kit::test]
+    fn test_pen_tool_settings_modes_and_trim_button(cx: &mut TestAppContext) {
+        use crate::state::{EditorTool, PathDrawMode};
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1440.), px(1200.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        // Draw a path to trim later, then open Tool Settings with Pen.
+        let pid = app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.tool_path_mode = PathDrawMode::Both;
+                let id = s.pen_press_at(project::Vec2::new(50.0, 50.0), None).unwrap();
+                s.pen_press_at(project::Vec2::new(150.0, 60.0), None).unwrap();
+                s.select_layer(None);
+                s.active_tool = EditorTool::Pen;
+                cx.notify();
+                id
+            })
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("tool_path_mode_stroke", cx);
+        })
+        .expect("update_window failed");
+        app_view.read_with(cx, |view, cx| {
+            assert_eq!(view.state().read(cx).tool_path_mode, PathDrawMode::Stroke);
+        });
+        // Select the path: trim shortcut appears and attaches the effect.
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.select_layer(Some(pid.clone()));
+                cx.notify();
+            });
+        });
+        app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            assert_eq!(s.selected_layer_id, Some(pid.clone()));
+            assert!(matches!(
+                &s.selected_layer().unwrap().source,
+                project::LayerSource::Shape { .. }
+            ));
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("shape_trim_path_add").visible());
+            window.click("shape_trim_path_add", cx);
+        })
+        .expect("update_window failed");
+        app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            let comp = s.active_composition().unwrap();
+            let l = comp.get_layer(&pid).unwrap();
+            assert!(
+                l.effects.iter().any(|e| matches!(
+                    e.effect_type,
+                    project::EffectType::TrimPath { .. }
+                )),
+                "trim button must attach TrimPath"
+            );
+        });
+    }
+
     #[gpui_kit::test]
     fn test_ui_effects_panel_addition_and_properties_inspector_manipulation(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
@@ -8962,6 +9106,61 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         assert_eq!(state.active_composition().unwrap().name, "Vertical");
         assert_eq!(state.active_composition().unwrap().background_color, Color::TRANSPARENT);
         assert_ne!(id, id2);
+    }
+
+    #[test]
+    fn test_new_comps_default_transparent_and_empty_raster_is_clean() {
+        use project::Color;
+        // Constructors default to a transparent base (no black default).
+        let c = project::Composition::hd_1080p_30fps("c", "C", 5.0);
+        assert_eq!(c.background_color, Color::TRANSPARENT);
+        // Empty transparent comp rasterizes to clean alpha — no baked
+        // checkerboard, no black fill (checker lives in the viewer only).
+        let mut state = EditorState::new();
+        let cid = state
+            .add_composition("Empty", 64, 48, 30.0, 1.0, Color::TRANSPARENT)
+            .expect("empty composition");
+        let proj = state.project.clone();
+        let comp = proj.get_composition(&cid).unwrap();
+        let graph = compositor::SceneGraph::from_project(&proj, &cid).unwrap();
+        let evaluator = compositor::LayerStackEvaluator::new();
+        let stack = evaluator
+            .evaluate_with_project(&graph, &proj, &comp.duration)
+            .unwrap();
+        let mut assets = std::collections::HashMap::new();
+        let buf = crate::raster::comp::rasterize_comp(
+            &stack, 64.0, 48.0, comp.background_color, 64, 48, 0.0, 0, false, 1.0, &mut assets,
+        );
+        assert!(buf.px.iter().all(|p| p.a <= 0.0), "empty comp must be transparent");
+        assert!(buf.px.iter().all(|p| p.r <= 0.0 && p.g <= 0.0 && p.b <= 0.0));
+    }
+
+    #[gpui_kit::test]
+    fn test_viewer_shows_checker_for_transparent_bg(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1440.), px(1200.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        // Default comp background is transparent now.
+        app_view.read_with(cx, |view, cx| {
+            assert_eq!(
+                view.state().read(cx).active_composition().unwrap().background_color,
+                project::Color::TRANSPARENT
+            );
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("transparency_checker").visible());
+            assert!(window.find("canvas_viewport_frame").visible());
+        })
+        .expect("update_window failed");
     }
 
     #[test]
