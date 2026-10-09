@@ -1145,6 +1145,16 @@ impl Layer {
         Some(self.effects.remove(pos))
     }
 
+    /// Move an effect from one position in the stack to another.
+    pub fn move_effect(&mut self, from_index: usize, to_index: usize) {
+        let len = self.effects.len();
+        if from_index >= len || to_index >= len || from_index == to_index {
+            return;
+        }
+        let fx = self.effects.remove(from_index);
+        self.effects.insert(to_index, fx);
+    }
+
     /// Retrieve an immutable reference to an effect on this layer.
     pub fn get_effect(&self, effect_id: &str) -> Option<&Effect> {
         self.effects.iter().find(|e| e.id == effect_id)

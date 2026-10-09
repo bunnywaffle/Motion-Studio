@@ -2290,6 +2290,36 @@ impl EditorState {
         self.remove_layer_effect(&selected_id, effect_id)
     }
 
+    /// Drag-and-drop reorder: move an effect to the hovered card's slot
+    /// (one undo step). No-op when the target equals the current index.
+    pub fn move_effect_to(&mut self, layer_id: &str, effect_id: &str, index: usize) -> Result<(), String> {
+        let current = {
+            let comp = self
+                .active_composition()
+                .ok_or_else(|| "No active composition".to_string())?;
+            let layer = comp
+                .get_layer(layer_id)
+                .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+            layer
+                .effects
+                .iter()
+                .position(|e| e.id == effect_id)
+                .ok_or_else(|| format!("Effect {effect_id} not found"))?
+        };
+        if current == index {
+            return Ok(());
+        }
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        layer.move_effect(current, index.min(layer.effects.len().saturating_sub(1)));
+        Ok(())
+    }
+
     /// Toggle enabled state of an effect on a specific layer.
     pub fn toggle_layer_effect_enabled(&mut self, layer_id: &str, effect_id: &str) -> Result<(), String> {
         let comp = self

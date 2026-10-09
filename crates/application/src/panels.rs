@@ -6469,6 +6469,12 @@ pub struct PropertiesPanel {
     pub text_collapsed: HashSet<&'static str>,
     /// Collapsed applied-effect cards by effect id (empty = all expanded).
     pub fx_collapsed: HashSet<String>,
+    /// Effect card reorder drag: (effect id, from-index).
+    pub fx_drag: Option<(String, usize)>,
+    /// Hovered card index as drop target while reordering.
+    pub fx_hover: Option<usize>,
+    /// Window-y where the effect reorder press started (threshold gate).
+    pub fx_start_y: f32,
     /// Effect ids already seeded into `fx_collapsed` once, so cards start
     /// collapsed but explicit user expand/collapse choices stick.
     fx_seen: HashSet<String>,
@@ -6644,6 +6650,9 @@ impl PropertiesPanel {
             tools_expanded: false,
             text_collapsed: HashSet::new(),
             fx_collapsed: HashSet::new(),
+            fx_drag: None,
+            fx_hover: None,
+            fx_start_y: 0.0,
             fx_seen: HashSet::new(),
             fx_group_collapsed: HashSet::new(),
             shader_editor_open: None,
@@ -10143,6 +10152,8 @@ fn render_applied_effects(
     balance_cats: &HashMap<String, Entity<ComboboxState<SearchableVec<String>>>>,
     collapsed: &HashSet<String>,
     group_collapsed: &HashSet<String>,
+    fx_drag: &Option<(String, usize)>,
+    fx_hover: &Option<usize>,
     cx: &App,
 ) -> AnyElement {    if layer.effects.is_empty() {
         div()
@@ -10157,14 +10168,18 @@ fn render_applied_effects(
             .into_any_element()
     } else {
         let mut fx_col = v_flex().id("applied_effects_list").test_support().gap_2();
-        for effect in &layer.effects {
+        for (fx_idx, effect) in layer.effects.iter().enumerate() {
             let eff_id = effect.id.clone();
             let eff_id_toggle = effect.id.clone();
             let eff_id_del = effect.id.clone();
             let eff_id_disc = effect.id.clone();
+            let eff_id_drag = effect.id.clone();
             let s_toggle = state.clone();
             let s_del = state.clone();
             let p_disc = panel_entity.clone();
+            let p_drag = panel_entity.clone();
+            let p_hover = panel_entity.clone();
+            let row_idx = fx_idx;
             // Nested-collapsible state: collapsed by default (ids are
             // seeded into `collapsed` on first sight); expanding is sticky.
             let fx_open = !collapsed.contains(&eff_id);
@@ -11203,6 +11218,39 @@ fn render_applied_effects(
                     .rounded_sm()
                     .bg(cx.theme().secondary)
                     .gap_1p5()
+                    .border_t_2()
+                    .border_color({
+                        let show = fx_hover == &Some(row_idx)
+                            && fx_drag
+                                .as_ref()
+                                .map(|(id, _)| id != &effect.id)
+                                .unwrap_or(false);
+                        if show { rgb(0x38bdf8) } else { cx.theme().secondary.into() }
+                    })
+                    .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+                        let start_y = event.position.y / px(1.0);
+                        // Arm a potential reorder drag (commits on mouseup
+                        // over another card; plain clicks just interact).
+                        p_drag.update(cx, |this, cx| {
+                            this.fx_drag = Some((eff_id_drag.clone(), row_idx));
+                            this.fx_hover = None;
+                            this.fx_start_y = start_y;
+                            cx.notify();
+                        });
+                    })
+                    .on_mouse_move(move |event, _window, cx| {
+                        // Another card hovered mid-drag → drop target.
+                        let y = event.position.y / px(1.0);
+                        p_hover.update(cx, |this, cx| {
+                            if let Some((_, from)) = this.fx_drag.clone() {
+                                if (y - this.fx_start_y).abs() > 4.0 && from != row_idx
+                                    && this.fx_hover != Some(row_idx) {
+                                        this.fx_hover = Some(row_idx);
+                                        cx.notify();
+                                    }
+                            }
+                        });
+                    })
                     .child(
                         Collapsible::new()
                             .open(fx_open)
@@ -11211,6 +11259,36 @@ fn render_applied_effects(
                     ),
             );
         }
+        // Commit/clear on the list (not per card): leaving one card for
+        // another must not clear mid-drag; release outside clears.
+        let lid_drop = layer.id.clone();
+        let s_list_drop = state.clone();
+        let p_list_drop = panel_entity.clone();
+        let p_list_out = panel_entity.clone();
+        fx_col = fx_col
+            .on_mouse_up(MouseButton::Left, move |_event, _window, cx| {
+                let drag = p_list_drop.read(cx).fx_drag.clone();
+                let hover = p_list_drop.read(cx).fx_hover;
+                if let (Some((drag_id, _)), Some(target)) = (drag, hover) {
+                    let lid = lid_drop.clone();
+                    s_list_drop.update(cx, |s, cx| {
+                        let _ = s.move_effect_to(&lid, &drag_id, target);
+                        cx.notify();
+                    });
+                }
+                p_list_drop.update(cx, |this, cx| {
+                    this.fx_drag = None;
+                    this.fx_hover = None;
+                    cx.notify();
+                });
+            })
+            .on_mouse_up_out(MouseButton::Left, move |_event, _window, cx| {
+                p_list_out.update(cx, |this, cx| {
+                    this.fx_drag = None;
+                    this.fx_hover = None;
+                    cx.notify();
+                });
+            });
         fx_col.into_any_element()
     }
 }
@@ -12518,6 +12596,8 @@ impl Render for PropertiesPanel {
                             &stock_bal_cats,
                             &self.fx_collapsed,
                             &self.fx_group_collapsed,
+                            &self.fx_drag,
+                            &self.fx_hover,
                             cx,
                         );
 
@@ -16229,6 +16309,10 @@ pub struct TimelinePanel {
     pub timeline_zoom: f32,
     /// Timeline view window start time in seconds (for panning when zoomed in).
     pub timeline_view_t0: f64,
+    /// Zoom-percentage scrub drag: press-x and zoom at press (None = idle).
+    pub zoom_scrub: Option<(f32, f32)>,
+    /// Whether the zoom scrub moved (distinguishes drag-scrub from click).
+    pub zoom_scrub_moved: bool,
 }
 
 /// Active drag of a keyframe along the timeline time ruler.
@@ -18144,13 +18228,21 @@ impl TimelinePanel {
             keyframe_drag: None,
             timeline_zoom: 1.0,
             timeline_view_t0: 0.0,
+            zoom_scrub: None,
+            zoom_scrub_moved: false,
         }
     }
 
     /// Visible time span (start_time_s, visible_duration_s) for the timeline lanes and ruler.
+    /// Zoom 1.0 fits the whole comp; below 1.0 (min 0.25) the comp is
+    /// centered with padding on both sides.
     pub fn visible_time_span(&self, total_duration: f64) -> (f64, f64) {
-        let zoom = (self.timeline_zoom as f64).clamp(1.0, 32.0);
-        let visible_duration = (total_duration / zoom).min(total_duration).max(0.05);
+        let zoom = (self.timeline_zoom as f64).clamp(0.25, 16.0);
+        let visible_duration = (total_duration / zoom).max(0.05);
+        if visible_duration >= total_duration {
+            // Zoomed out past fit: lock centered with padding.
+            return ((total_duration - visible_duration) / 2.0, visible_duration);
+        }
         let max_start = (total_duration - visible_duration).max(0.0);
         let start = self.timeline_view_t0.clamp(0.0, max_start);
         (start, visible_duration)
@@ -18164,7 +18256,7 @@ impl TimelinePanel {
 
     /// Zoom out on the timeline centered on the current playhead.
     pub fn zoom_out(&mut self, current_time: f64, total_duration: f64) {
-        let new_zoom = (self.timeline_zoom / 1.5).max(1.0);
+        let new_zoom = (self.timeline_zoom / 1.5).max(0.25);
         self.set_zoom(new_zoom, current_time, total_duration);
     }
 
@@ -18176,20 +18268,29 @@ impl TimelinePanel {
 
     /// Set explicit zoom factor centered on current_time.
     pub fn set_zoom(&mut self, new_zoom: f32, current_time: f64, total_duration: f64) {
-        self.timeline_zoom = new_zoom.clamp(1.0, 16.0);
-        if self.timeline_zoom <= 1.001 {
+        self.timeline_zoom = new_zoom.clamp(0.25, 16.0);
+        if (self.timeline_zoom - 1.0).abs() < 0.001 {
             self.timeline_zoom = 1.0;
             self.timeline_view_t0 = 0.0;
-        } else {
-            let visible_duration = total_duration / self.timeline_zoom as f64;
-            let max_start = (total_duration - visible_duration).max(0.0);
-            self.timeline_view_t0 = (current_time - visible_duration * 0.5).clamp(0.0, max_start);
+            return;
         }
+        let visible_duration = total_duration / self.timeline_zoom as f64;
+        if visible_duration >= total_duration {
+            // Below 100%: centered padding, no pan window.
+            self.timeline_view_t0 = (total_duration - visible_duration) / 2.0;
+            return;
+        }
+        let max_start = (total_duration - visible_duration).max(0.0);
+        self.timeline_view_t0 = (current_time - visible_duration * 0.5).clamp(0.0, max_start);
     }
 
     /// Pan timeline view window to the left.
     pub fn pan_left(&mut self, total_duration: f64) {
         let (_, vis_dur) = self.visible_time_span(total_duration);
+        // Zoomed out past fit: view is locked centered, nothing to pan.
+        if vis_dur >= total_duration {
+            return;
+        }
         let step = vis_dur * 0.25;
         self.timeline_view_t0 = (self.timeline_view_t0 - step).max(0.0);
     }
@@ -18197,6 +18298,10 @@ impl TimelinePanel {
     /// Pan timeline view window to the right.
     pub fn pan_right(&mut self, total_duration: f64) {
         let (start, vis_dur) = self.visible_time_span(total_duration);
+        // Zoomed out past fit: view is locked centered, nothing to pan.
+        if vis_dur >= total_duration {
+            return;
+        }
         let max_start = (total_duration - vis_dur).max(0.0);
         let step = vis_dur * 0.25;
         self.timeline_view_t0 = (start + step).min(max_start);
@@ -20115,6 +20220,22 @@ impl Render for TimelinePanel {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .on_mouse_move(move |event, window, cx| {
+                // Zoom-percentage scrub: continues anywhere on the panel
+                // (the label is small; the pointer leaves it immediately).
+                if p_root_move.read(cx).zoom_scrub.is_some() {
+                    let x = event.position.x / px(1.0);
+                    p_root_move.update(cx, |this, cx| {
+                        if let Some((start_x, z0)) = this.zoom_scrub {
+                            let dx = x - start_x;
+                            if dx.abs() > 3.0 {
+                                this.zoom_scrub_moved = true;
+                                // ~1% zoom per px, anchored at press.
+                                this.set_zoom(z0 * (1.0 + dx / 100.0), current_time_secs, total_duration_secs);
+                                cx.notify();
+                            }
+                        }
+                    });
+                }
                 if p_root_move.read(cx).is_scrubbing_ruler {
                     let cur_x = event.position.x / px(1.0);
                     let (ox, rw, t_start, vis_dur) = {
@@ -20549,6 +20670,8 @@ impl Render for TimelinePanel {
                     this.scrub_last_x = None;
                     this.scrub_moved = false;
                     this.keyframe_drag = None;
+                    this.zoom_scrub = None;
+                    this.zoom_scrub_moved = false;
                     cx.notify();
                 });
                 // Commit a layer reorder drop (dragged onto another row).
@@ -20593,6 +20716,8 @@ impl Render for TimelinePanel {
                     this.reorder_drag = None;
                     this.reorder_hover = None;
                     this.keyframe_drag = None;
+                    this.zoom_scrub = None;
+                    this.zoom_scrub_moved = false;
                     cx.notify();
                 });
                 s_root_up_out.update(cx, |s, cx| {
@@ -20887,6 +21012,8 @@ impl Render for TimelinePanel {
                                 let p_zin = panel_entity.clone();
                                 let p_zout = panel_entity.clone();
                                 let p_zres = panel_entity.clone();
+                                let p_zscrub = panel_entity.clone();
+                                let p_zupout = panel_entity.clone();
                                 let p_zfit = panel_entity.clone();
                                 let p_pan_l = panel_entity.clone();
                                 let p_pan_r = panel_entity.clone();
@@ -20929,9 +21056,33 @@ impl Render for TimelinePanel {
                                             .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
                                             .text_xs()
                                             .child(format!("{:.0}%", cur_z * 100.0))
-                                            .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                                            // Click resets; horizontal drag
+                                            // scrubs the zoom live.
+                                            .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+                                                let start_x = event.position.x / px(1.0);
+                                                let z0 = cur_z;
+                                                p_zscrub.update(cx, |this, cx| {
+                                                    this.zoom_scrub = Some((start_x, z0));
+                                                    this.zoom_scrub_moved = false;
+                                                    cx.notify();
+                                                });
+                                            })
+                                            .on_mouse_up(MouseButton::Left, move |_event, _window, cx| {
+                                                // Plain click (no drag) resets to fit.
+                                                let was_scrub = p_zres.read(cx).zoom_scrub_moved;
                                                 p_zres.update(cx, |this, cx| {
-                                                    this.zoom_reset();
+                                                    this.zoom_scrub = None;
+                                                    this.zoom_scrub_moved = false;
+                                                    if !was_scrub {
+                                                        this.zoom_reset();
+                                                    }
+                                                    cx.notify();
+                                                });
+                                            })
+                                            .on_mouse_up_out(MouseButton::Left, move |_event, _window, cx| {
+                                                p_zupout.update(cx, |this, cx| {
+                                                    this.zoom_scrub = None;
+                                                    this.zoom_scrub_moved = false;
                                                     cx.notify();
                                                 });
                                             }),
@@ -21088,7 +21239,9 @@ impl Render for TimelinePanel {
                             let mut ticks_row = h_flex().size_full().justify_between().px_3().items_center();
                             for i in 0..=num_ticks {
                                 let t = t_start + (visible_duration * (i as f64 / num_ticks as f64));
-                                let tc = TimeCode::from_seconds(t, fps);
+                                // Padded zoom-out shows pre-zero space: pin
+                                // labels at zero, positions stay truthful.
+                                let tc = TimeCode::from_seconds(t.max(0.0), fps);
                                 ticks_row = ticks_row.child(div().child(format!("{tc}")));
                             }
                             ruler_track = ruler_track

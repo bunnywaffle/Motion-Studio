@@ -4597,8 +4597,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
     }
 
     #[test]
-    fn test_bipolar_effect_params_scrub_below_zero() {
-        use project::{EffectType, StockPlugin};
+    fn test_bipolar_effect_params_scrub_below_zero() {        use project::{EffectType, StockPlugin};
         let mut state = EditorState::new();
         // Stock, bipolar via descriptor: color balance shadows must reach
         // the CMY side (regression: scrub floored everything at 0).
@@ -4719,6 +4718,96 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         let layer = stack.get_layer(&sid).expect("evaluated").clone();
         let buf = crate::raster::layer::raster_content(&layer, 1920.0, 1080.0).expect("raster");
         assert!(buf.px.iter().any(|p| p.a > 0.05), "stroke-only must hold ink");
+    }
+
+    #[test]
+    fn test_move_effect_to_reorders_stack() {
+        use project::EffectType;
+        let mut state = EditorState::new();
+        let a = state
+            .add_effect_to_selected_layer(EffectType::gaussian_blur(5.0))
+            .expect("added blur");
+        let b = state
+            .add_effect_to_selected_layer(EffectType::invert(100.0))
+            .expect("added invert");
+        let c = state
+            .add_effect_to_selected_layer(EffectType::vignette(50.0, 50.0))
+            .expect("added vignette");
+        let lid = state.selected_layer_id.clone().expect("layer selected");
+        let order = |state: &EditorState| {
+            state
+                .active_composition()
+                .unwrap()
+                .get_layer(&lid)
+                .unwrap()
+                .effects
+                .iter()
+                .map(|e| e.id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(order(&state), vec![a.clone(), b.clone(), c.clone()]);
+        // Drag first card onto last row.
+        state.move_effect_to(&lid, &a, 2).expect("moved");
+        assert_eq!(order(&state), vec![b.clone(), c.clone(), a.clone()]);
+        // No-op on same index.
+        state.move_effect_to(&lid, &b, 0).expect("no-op ok");
+        assert_eq!(order(&state), vec![b.clone(), c.clone(), a.clone()]);
+        // Unknown effect errors.
+        assert!(state.move_effect_to(&lid, "nope", 0).is_err());
+    }
+
+    #[gpui_kit::test]
+    fn test_effect_card_drag_reorders_stack(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1440.), px(1600.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        let (lid, a, b) = app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.select_layer(Some("layer_bg".to_string()));
+                let a = s
+                    .add_effect_to_selected_layer(project::EffectType::gaussian_blur(5.0))
+                    .unwrap();
+                let b = s
+                    .add_effect_to_selected_layer(project::EffectType::invert(100.0))
+                    .unwrap();
+                let lid = s.selected_layer_id.clone().unwrap();
+                cx.notify();
+                (lid, a, b)
+            })
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find(SharedString::from(format!("applied_effect_{a}"))).visible());
+            assert!(window.find(SharedString::from(format!("applied_effect_{b}"))).visible());
+            window.drag_to(
+                SharedString::from(format!("applied_effect_{a}")),
+                SharedString::from(format!("applied_effect_{b}")),
+                cx,
+            );
+        })
+        .expect("update_window failed");
+        app_view.read_with(cx, |view, cx| {
+            let got = view
+                .state()
+                .read(cx)
+                .active_composition()
+                .unwrap()
+                .get_layer(&lid)
+                .unwrap()
+                .effects
+                .iter()
+                .map(|e| e.id.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(got, vec![b, a], "drag must reorder, got {got:?}");
+        });
     }
 
     #[gpui_kit::test]
@@ -11928,6 +12017,76 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             let (start, span) = p.visible_time_span(10.0);
             assert_eq!(start, 0.0);
             assert_eq!(span, 10.0);
+        });
+
+        // 5. Zoom out below 100%: visible exceeds total, start centers
+        // negative (padding on both sides), pan locks.
+        timeline_panel.update(cx, |p, _| {
+            p.set_zoom(0.5, 5.0, 10.0);
+            assert!((p.timeline_zoom - 0.5).abs() < 1e-4);
+            let (start, span) = p.visible_time_span(10.0);
+            assert!((span - 20.0).abs() < 1e-6);
+            assert!((start + 5.0).abs() < 1e-6);
+            p.pan_left(10.0);
+            p.pan_right(10.0);
+            let (start2, _) = p.visible_time_span(10.0);
+            assert!((start2 - start).abs() < 1e-9, "pan must lock below fit");
+        });
+
+        // 6. Zoom-out button floors at 25%, zoom-in caps at 1600%.
+        timeline_panel.update(cx, |p, _| {
+            for _ in 0..10 {
+                p.zoom_out(5.0, 10.0);
+            }
+            assert!((p.timeline_zoom - 0.25).abs() < 1e-4);
+            for _ in 0..20 {
+                p.zoom_in(5.0, 10.0);
+            }
+            assert!((p.timeline_zoom - 16.0).abs() < 1e-4);
+            p.zoom_reset();
+            assert_eq!(p.timeline_zoom, 1.0);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn test_timeline_zoom_label_scrubs_and_click_resets(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1440.), px(1200.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        // Scrub right on the percentage label: zoom climbs above 100%.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("tl_zoom_reset").visible());
+            let b = window.find("tl_zoom_reset").bounds();
+            let cx0 = b.origin.x + b.size.width / 2.0;
+            let cy = b.origin.y + b.size.height / 2.0;
+            window.drag(
+                gpui::point(cx0, cy),
+                gpui::point(cx0 + px(80.0), cy),
+                cx,
+            );
+        })
+        .expect("update_window failed");
+        app_view.read_with(cx, |view, cx| {
+            let z = view.panels().timeline.read(cx).timeline_zoom;
+            assert!(z > 1.2, "scrub right must zoom in, got {z}");
+        });
+        // Plain click (no movement) resets to fit.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("tl_zoom_reset", cx);
+        })
+        .expect("update_window failed");
+        app_view.read_with(cx, |view, cx| {
+            assert_eq!(view.panels().timeline.read(cx).timeline_zoom, 1.0);
         });
     }
 
