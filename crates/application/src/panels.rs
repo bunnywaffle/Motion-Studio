@@ -11052,6 +11052,12 @@ fn render_applied_effects(
                     if let Some(angle) = find("angle") {
                         effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &angle, wheels, enums, cx));
                     }
+                    // Animatable radial geometry + dither share the generic row.
+                    for f in &["center_x", "center_y", "radius", "dither"] {
+                        if let Some(decl) = find(f) {
+                            effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, enums, cx));
+                        }
+                    }
                 }
                 EffectType::TextSplitAnimator { .. } => {
                     let decls = effect.declarations();

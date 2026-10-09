@@ -50,8 +50,15 @@ pub fn apply_effect_pixels(
                 }
             }
         }
-        EvaluatedEffectType::GradientRamp { gradient } => {
+        EvaluatedEffectType::GradientRamp { gradient, center_x, center_y, radius, dither } => {
             let axis = gradient_axis(base_w, base_h, gradient.angle);
+            // Animatable radial geometry: center (% of box) + radius (%
+            // of half-diagonal). Linear/Angular keep the shared axis path.
+            let radial = matches!(gradient.gradient_type, project::GradientType::Radial | project::GradientType::Angular);
+            let rcx = base_w * (center_x / 100.0).clamp(0.0, 1.0);
+            let rcy = base_h * (center_y / 100.0).clamp(0.0, 1.0);
+            let rmax = (base_w * base_w + base_h * base_h).sqrt() * 0.5 * (radius / 71.0).clamp(0.02, 3.0).max(1e-3);
+            let dk = (dither / 100.0).clamp(0.0, 1.0) / 255.0 * 2.0;
             for y in 0..buf.h {
                 for x in 0..buf.w {
                     let dst = buf.get(x as i32, y as i32);
@@ -60,7 +67,30 @@ pub fn apply_effect_pixels(
                     }
                     let lx = x as f32 / w * base_w;
                     let ly = y as f32 / h * base_h;
-                    let c = sample_fill_gradient(gradient, lx, ly, axis);
+                    let mut c = if radial {
+                        let dx = lx - rcx;
+                        let dy = ly - rcy;
+                        let t = if matches!(gradient.gradient_type, project::GradientType::Radial) {
+                            (dx * dx + dy * dy).sqrt() / rmax
+                        } else {
+                            let a = dy.atan2(dx) - gradient.angle.to_radians();
+                            let two_pi = std::f32::consts::TAU;
+                            ((a % two_pi + two_pi) % two_pi) / two_pi
+                        };
+                        gradient.sample(t.clamp(0.0, 1.0))
+                    } else {
+                        sample_fill_gradient(gradient, lx, ly, axis)
+                    };
+                    // IGN dither against 8-bit banding on smooth ramps.
+                    if dk > 0.0001 {
+                        let n = (super::stock::hash2(x as f32, y as f32, 11.0) - 0.5) * dk;
+                        c = Color::rgba(
+                            (c.r + n).clamp(0.0, 1.0),
+                            (c.g + n).clamp(0.0, 1.0),
+                            (c.b + n).clamp(0.0, 1.0),
+                            c.a,
+                        );
+                    }
                     buf.put(
                         x as i32,
                         y as i32,
@@ -301,8 +331,8 @@ pub fn apply_effect_pixels(
         EvaluatedEffectType::Perspective { .. } => {
             // Perspective skew folds into the blit map (affine).
         }
-        EvaluatedEffectType::DisplacementMap { max_horizontal, max_vertical } => {
-            apply_displacement(buf, *max_horizontal, *max_vertical);
+        EvaluatedEffectType::DisplacementMap { max_horizontal, max_vertical, source_mode, channel_h, channel_v, map_scale, wrap, evolution } => {
+            apply_displacement_full(buf, *max_horizontal, *max_vertical, *source_mode, *channel_h, *channel_v, *map_scale, *wrap, *evolution, ctx.time_s);
         }
         EvaluatedEffectType::NoiseGenerator { amount, monochrome } => {
             // Time-seeded per frame so grain crawls during playback
@@ -509,28 +539,91 @@ pub fn apply_animated_noise(buf: &mut FloatBuf, amount: f32, monochrome: bool, f
     }
 }
 
-/// Luminance-driven displacement in place: each pixel is resampled from
-/// `(x - (luma - 0.5) * max_h, y - (luma - 0.5) * max_v)` with bilinear
-/// filtering, so bright areas push one way and dark areas the other
-/// (self-map mode; a dedicated map layer is a future input).
+/// Legacy self-luminance entry point (kept for callers/tests).
 pub fn apply_displacement(buf: &mut FloatBuf, max_horizontal: f32, max_vertical: f32) {
+    apply_displacement_full(buf, max_horizontal, max_vertical, 0.0, 4.0, 4.0, 1.0, 0.0, 0.0, 0.0);
+}
+
+/// Channel selector: 0..2 = R/G/B, 3 = alpha, 4+ = luminance.
+fn displace_channel(p: &super::pixel::Px, sel: f32) -> f32 {
+    let ia = 1.0 / p.a.max(1e-6);
+    match sel.round().clamp(0.0, 4.0) as i32 {
+        0 => (p.r * ia).clamp(0.0, 1.0),
+        1 => (p.g * ia).clamp(0.0, 1.0),
+        2 => (p.b * ia).clamp(0.0, 1.0),
+        3 => p.a.clamp(0.0, 1.0),
+        _ => ((0.299 * p.r + 0.587 * p.g + 0.114 * p.b) * ia).clamp(0.0, 1.0),
+    }
+}
+
+/// Full displacement: per-axis channel select, map scale, wrap mode and a
+/// procedural-noise map source (Evolution + frame clock). `source_mode`
+/// 0 = self, 1 = noise; specific-layer / image-file maps need a string
+/// param kind + comp-graph ordering (follow-up — no dead params shipped).
+/// `wrap`: 0 = clamp (bilinear edge), 1 = repeat, 2 = mirror.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_displacement_full(
+    buf: &mut FloatBuf,
+    max_horizontal: f32,
+    max_vertical: f32,
+    source_mode: f32,
+    channel_h: f32,
+    channel_v: f32,
+    map_scale: f32,
+    wrap: f32,
+    evolution: f32,
+    time_s: f32,
+) {
     if max_horizontal.abs() < 0.05 && max_vertical.abs() < 0.05 {
         return;
     }
+    if buf.w == 0 || buf.h == 0 {
+        return;
+    }
+    let noise = source_mode.round() >= 1.0;
+    let evo = evolution + time_s * 12.0;
+    let s = map_scale.clamp(0.1, 10.0) * 0.02;
+    let wm = wrap.round().clamp(0.0, 2.0) as i32;
     let src = buf.px.clone();
     let snap = FloatBuf { w: buf.w, h: buf.h, px: src.clone() };
+    let (w, h) = (buf.w as f32, buf.h as f32);
+    // ponytail: single noise octave for the map, finer detail is what max_h/v are for
+    let map_at = |x: f32, y: f32, ch: f32| -> f32 {
+        if noise {
+            super::stock::vnoise(x * s + evo * 0.13, y * s, evo * 0.031 + ch * 7.0)
+        } else {
+            let sx = x.clamp(0.0, w - 1.0).round() as usize;
+            let sy = y.clamp(0.0, h - 1.0).round() as usize;
+            displace_channel(&src[sy * buf.w as usize + sx], ch)
+        }
+    };
+    let wrap_coord = |v: f32, m: f32| -> f32 {
+        match wm {
+            1 => ((v % m) + m) % m,
+            2 => {
+                let q = ((v % (2.0 * m)) + 2.0 * m) % (2.0 * m);
+                if q > m { 2.0 * m - q } else { q }
+            }
+            _ => v,
+        }
+    };
     for y in 0..buf.h {
         for x in 0..buf.w {
             let idx = (y * buf.w + x) as usize;
-            let p = src[idx];
-            if p.a <= 0.0 {
+            if src[idx].a <= 0.0 {
                 continue;
             }
-            let ia = 1.0 / p.a.max(1e-6);
-            let lum = (0.299 * p.r + 0.587 * p.g + 0.114 * p.b) * ia;
-            let ox = (lum - 0.5) * max_horizontal;
-            let oy = (lum - 0.5) * max_vertical;
-            buf.px[idx] = snap.sample(x as f32 - ox, y as f32 - oy);
+            let mh = map_at(x as f32, y as f32, channel_h);
+            let mv = map_at(x as f32, y as f32, channel_v);
+            let ox = (mh - 0.5) * max_horizontal;
+            let oy = (mv - 0.5) * max_vertical;
+            let sx = wrap_coord(x as f32 - ox, w);
+            let sy = wrap_coord(y as f32 - oy, h);
+            buf.px[idx] = if wm == 0 {
+                snap.sample(sx, sy)
+            } else {
+                snap.sample_wrapped(sx, sy)
+            };
         }
     }
 }
@@ -959,5 +1052,46 @@ mod tests {
         assert!(diff > 100, "pin must visibly displace pixels, got {diff}");
         let ink: f32 = buf.px.iter().map(|p| p.a).sum();
         assert!(ink > 0.9 * 100.0 * 100.0, "ink preserved: {ink}");
+    }
+
+    #[test]
+    fn displacement_full_modes_and_gradient_geometry() {
+        use project::{FillGradient, GradientType};
+        let ctx = warp_test_ctx();
+        // Noise map actually moves pixels on a gradient card.
+        let mut card = warp_gradient_buf();
+        let before = card.px.clone();
+        apply_displacement_full(&mut card, 40.0, 40.0, 1.0, 4.0, 4.0, 2.0, 0.0, 30.0, 1.0);
+        let moved = card.px.iter().zip(before.iter()).filter(|(a, b)| (a.r - b.r).abs() > 0.02).count();
+        assert!(moved > 200, "noise map must move pixels, got {moved}");
+        for p in &card.px {
+            for v in [p.r, p.g, p.b, p.a] {
+                assert!(v.is_finite() && (0.0..=1.0).contains(&v), "out of range {v}");
+            }
+        }
+        // Repeat wrap on self-map stays finite too.
+        let mut card2 = warp_gradient_buf();
+        apply_displacement_full(&mut card2, 60.0, 60.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0);
+        assert!(card2.px.iter().all(|p| [p.r, p.g, p.b, p.a].iter().all(|v| v.is_finite())));
+        // Radial gradient honors an off-center focus: the focus pixel
+        // must sample stop 0 (black) while the far corner goes white.
+        let mut buf = FloatBuf { w: 32, h: 32, px: vec![Px { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }; 1024] };
+        let eff = EvaluatedEffectType::GradientRamp {
+            gradient: FillGradient {
+                stops: vec![
+                    project::GradientStop::new(0.0, project::Color::BLACK),
+                    project::GradientStop::new(1.0, project::Color::WHITE),
+                ],
+                angle: 0.0,
+                gradient_type: GradientType::Radial,
+            },
+            center_x: 25.0,
+            center_y: 25.0,
+            radius: 71.0,
+            dither: 0.0,
+        };
+        apply_effect_pixels(&mut buf, 32.0, 32.0, &eff, &ctx);
+        assert!(buf.px[8 * 32 + 8].r < 0.15, "focus must be near stop 0");
+        assert!(buf.px[31 * 32 + 31].r > 0.85, "far corner must reach stop 1");
     }
 }

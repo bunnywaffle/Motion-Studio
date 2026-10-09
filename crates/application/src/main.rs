@@ -7035,7 +7035,9 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
 
         cx.update(gpui_kit::init);
         let mut app_view_entity = None;
-        let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
+        // Tall window: the ramp card now carries center/radius/dither rows,
+        // so the noise disclosure must stay on-screen to click.
+        let handle = cx.open_window(size(px(1280.), px(1100.)), |window, cx| {
             window.activate_window();
             let view = cx.new(|cx| AppView::new(window, cx));
             app_view_entity = Some(view.clone());

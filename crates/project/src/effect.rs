@@ -72,6 +72,38 @@ fn default_puppet_stiffness() -> Property<f32> {
     Property::new("Stiffness", 2.0)
 }
 
+fn default_displace_source() -> Property<f32> {
+    Property::new("Map Source Self/Noise", 0.0)
+}
+
+fn default_displace_channel() -> Property<f32> {
+    Property::new("Channel Luminance", 4.0)
+}
+
+fn default_displace_wrap() -> Property<f32> {
+    Property::new("Wrap Clamp", 0.0)
+}
+
+fn default_displace_scale() -> Property<f32> {
+    Property::new("Map Scale", 1.0)
+}
+
+fn default_displace_evolution() -> Property<f32> {
+    Property::new("Evolution", 0.0)
+}
+
+fn default_gradient_center() -> Property<f32> {
+    Property::new("Center", 50.0)
+}
+
+fn default_gradient_radius() -> Property<f32> {
+    Property::new("Radius", 71.0)
+}
+
+fn default_gradient_dither() -> Property<f32> {
+    Property::new("Dither", 30.0)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TileMode {
@@ -353,6 +385,23 @@ pub enum EffectType {
     DisplacementMap {
         max_horizontal: Property<f32>,
         max_vertical: Property<f32>,
+        /// 0 = self luminance, 1 = procedural noise (Evolution + clock).
+        /// (Specific-layer / image-file maps need a string param kind +
+        /// comp-graph ordering — follow-up, no dead params shipped.)
+        #[serde(default = "default_displace_source")]
+        source_mode: Property<f32>,
+        /// 0..3 = R/G/B/A, 4 = luminance.
+        #[serde(default = "default_displace_channel")]
+        channel_h: Property<f32>,
+        #[serde(default = "default_displace_channel")]
+        channel_v: Property<f32>,
+        #[serde(default = "default_displace_scale")]
+        map_scale: Property<f32>,
+        /// 0 = clamp, 1 = repeat, 2 = mirror.
+        #[serde(default = "default_displace_wrap")]
+        wrap: Property<f32>,
+        #[serde(default = "default_displace_evolution")]
+        evolution: Property<f32>,
     },
     ChromaKey {
         #[serde(deserialize_with = "crate::property::de_property_or_value", default)]
@@ -401,6 +450,17 @@ pub enum EffectType {
         stops: Vec<GradientStop>,
         #[serde(default)]
         gradient_type: GradientType,
+        /// Radial center (% of box), animatable.
+        #[serde(default = "default_gradient_center")]
+        center_x: Property<f32>,
+        #[serde(default = "default_gradient_center")]
+        center_y: Property<f32>,
+        /// Radial radius (% of half-diagonal), animatable.
+        #[serde(default = "default_gradient_radius")]
+        radius: Property<f32>,
+        /// IGN dither 0..100 against banding, animatable.
+        #[serde(default = "default_gradient_dither")]
+        dither: Property<f32>,
     },
     /// Fake-3D skew filter in degrees (spatial).
     Perspective {
@@ -713,6 +773,12 @@ impl EffectType {
         Self::DisplacementMap {
             max_horizontal: Property::new("Max Horizontal", max_horizontal.clamp(-500.0, 500.0)),
             max_vertical: Property::new("Max Vertical", max_vertical.clamp(-500.0, 500.0)),
+            source_mode: default_displace_source(),
+            channel_h: default_displace_channel(),
+            channel_v: default_displace_channel(),
+            map_scale: default_displace_scale(),
+            wrap: default_displace_wrap(),
+            evolution: default_displace_evolution(),
         }
     }
 
@@ -782,6 +848,10 @@ impl EffectType {
             angle: Property::new("Angle", angle),
             stops: Vec::new(),
             gradient_type: GradientType::Linear,
+            center_x: default_gradient_center(),
+            center_y: default_gradient_center(),
+            radius: default_gradient_radius(),
+            dither: default_gradient_dither(),
         }
     }
 
@@ -793,6 +863,10 @@ impl EffectType {
             angle: Property::new("Angle", angle),
             stops: Vec::new(),
             gradient_type,
+            center_x: default_gradient_center(),
+            center_y: default_gradient_center(),
+            radius: default_gradient_radius(),
+            dither: default_gradient_dither(),
         }
     }
 
@@ -2020,12 +2094,40 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     return true;
                 }
             }
-            EffectType::DisplacementMap { max_horizontal, max_vertical } => {
+            EffectType::DisplacementMap {
+                max_horizontal,
+                max_vertical,
+                source_mode,
+                channel_h,
+                channel_v,
+                map_scale,
+                wrap,
+                evolution,
+                ..
+            } => {
                 if param_name.eq_ignore_ascii_case("max_horizontal") || param_name.eq_ignore_ascii_case("horizontal") {
                     max_horizontal.set_value((max_horizontal.value + delta).clamp(-500.0, 500.0));
                     return true;
                 } else if param_name.eq_ignore_ascii_case("max_vertical") || param_name.eq_ignore_ascii_case("vertical") {
                     max_vertical.set_value((max_vertical.value + delta).clamp(-500.0, 500.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("source_mode") || param_name.eq_ignore_ascii_case("source") {
+                    source_mode.set_value((source_mode.value + delta).clamp(0.0, 1.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("channel_h") {
+                    channel_h.set_value((channel_h.value + delta).clamp(0.0, 4.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("channel_v") {
+                    channel_v.set_value((channel_v.value + delta).clamp(0.0, 4.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("map_scale") || param_name.eq_ignore_ascii_case("scale") {
+                    map_scale.set_value((map_scale.value + delta).clamp(0.1, 10.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("wrap") {
+                    wrap.set_value((wrap.value + delta).clamp(0.0, 2.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("evolution") {
+                    evolution.set_value(evolution.value + delta);
                     return true;
                 }
             }
@@ -2068,9 +2170,21 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     return true;
                 }
             }
-            EffectType::GradientRamp { angle, .. } => {
+            EffectType::GradientRamp { angle, center_x, center_y, radius, dither, .. } => {
                 if param_name.eq_ignore_ascii_case("angle") {
                     angle.set_value(angle.value + delta);
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("center_x") {
+                    center_x.set_value((center_x.value + delta).clamp(0.0, 100.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("center_y") {
+                    center_y.set_value((center_y.value + delta).clamp(0.0, 100.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("radius") {
+                    radius.set_value((radius.value + delta).clamp(1.0, 200.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("dither") {
+                    dither.set_value((dither.value + delta).clamp(0.0, 100.0));
                     return true;
                 }
             }
@@ -2459,11 +2573,33 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     None
                 }
             }
-            EffectType::DisplacementMap { max_horizontal, max_vertical } => {
+            EffectType::DisplacementMap {
+                max_horizontal,
+                max_vertical,
+                source_mode,
+                channel_h,
+                channel_v,
+                map_scale,
+                wrap,
+                evolution,
+                ..
+            } => {
                 if param_name.eq_ignore_ascii_case("max_horizontal") || param_name.eq_ignore_ascii_case("horizontal") {
                     Some(max_horizontal)
                 } else if param_name.eq_ignore_ascii_case("max_vertical") || param_name.eq_ignore_ascii_case("vertical") {
                     Some(max_vertical)
+                } else if param_name.eq_ignore_ascii_case("source_mode") || param_name.eq_ignore_ascii_case("source") {
+                    Some(source_mode)
+                } else if param_name.eq_ignore_ascii_case("channel_h") {
+                    Some(channel_h)
+                } else if param_name.eq_ignore_ascii_case("channel_v") {
+                    Some(channel_v)
+                } else if param_name.eq_ignore_ascii_case("map_scale") || param_name.eq_ignore_ascii_case("scale") {
+                    Some(map_scale)
+                } else if param_name.eq_ignore_ascii_case("wrap") {
+                    Some(wrap)
+                } else if param_name.eq_ignore_ascii_case("evolution") {
+                    Some(evolution)
                 } else {
                     None
                 }
@@ -2509,9 +2645,17 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     None
                 }
             }
-            EffectType::GradientRamp { angle, .. } => {
+            EffectType::GradientRamp { angle, center_x, center_y, radius, dither, .. } => {
                 if param_name.eq_ignore_ascii_case("angle") {
                     Some(angle)
+                } else if param_name.eq_ignore_ascii_case("center_x") {
+                    Some(center_x)
+                } else if param_name.eq_ignore_ascii_case("center_y") {
+                    Some(center_y)
+                } else if param_name.eq_ignore_ascii_case("radius") {
+                    Some(radius)
+                } else if param_name.eq_ignore_ascii_case("dither") {
+                    Some(dither)
                 } else {
                     None
                 }
@@ -2839,11 +2983,33 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     None
                 }
             }
-            EffectType::DisplacementMap { max_horizontal, max_vertical } => {
+            EffectType::DisplacementMap {
+                max_horizontal,
+                max_vertical,
+                source_mode,
+                channel_h,
+                channel_v,
+                map_scale,
+                wrap,
+                evolution,
+                ..
+            } => {
                 if param_name.eq_ignore_ascii_case("max_horizontal") || param_name.eq_ignore_ascii_case("horizontal") {
                     Some(max_horizontal)
                 } else if param_name.eq_ignore_ascii_case("max_vertical") || param_name.eq_ignore_ascii_case("vertical") {
                     Some(max_vertical)
+                } else if param_name.eq_ignore_ascii_case("source_mode") || param_name.eq_ignore_ascii_case("source") {
+                    Some(source_mode)
+                } else if param_name.eq_ignore_ascii_case("channel_h") {
+                    Some(channel_h)
+                } else if param_name.eq_ignore_ascii_case("channel_v") {
+                    Some(channel_v)
+                } else if param_name.eq_ignore_ascii_case("map_scale") || param_name.eq_ignore_ascii_case("scale") {
+                    Some(map_scale)
+                } else if param_name.eq_ignore_ascii_case("wrap") {
+                    Some(wrap)
+                } else if param_name.eq_ignore_ascii_case("evolution") {
+                    Some(evolution)
                 } else {
                     None
                 }
@@ -2889,9 +3055,17 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     None
                 }
             }
-            EffectType::GradientRamp { angle, .. } => {
+            EffectType::GradientRamp { angle, center_x, center_y, radius, dither, .. } => {
                 if param_name.eq_ignore_ascii_case("angle") {
                     Some(angle)
+                } else if param_name.eq_ignore_ascii_case("center_x") {
+                    Some(center_x)
+                } else if param_name.eq_ignore_ascii_case("center_y") {
+                    Some(center_y)
+                } else if param_name.eq_ignore_ascii_case("radius") {
+                    Some(radius)
+                } else if param_name.eq_ignore_ascii_case("dither") {
+                    Some(dither)
                 } else {
                     None
                 }
@@ -3146,6 +3320,11 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 "max_horizontal" | "horizontal" | "max_vertical" | "vertical" => {
                     Some((-500.0, 500.0))
                 }
+                "source_mode" | "source" => Some((0.0, 1.0)),
+                "channel_h" | "channel_v" => Some((0.0, 4.0)),
+                "map_scale" | "scale" => Some((0.1, 10.0)),
+                "wrap" => Some((0.0, 2.0)),
+                "evolution" => Some((0.0, 360.0)),
                 _ => None,
             },
             EffectType::Perspective { .. } => match param_name.to_lowercase().as_str() {
@@ -3308,9 +3487,15 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 scalar("param4", "P4 (Opacity)", WidgetKind::Slider, ParamMeta::slider(-100.0, 100.0, 5.0, 1, "", 100.0), param4),
             ],
             EffectType::ShaderLab { .. } => Vec::new(),
-            EffectType::DisplacementMap { max_horizontal, max_vertical } => vec![
+            EffectType::DisplacementMap { max_horizontal, max_vertical, source_mode, channel_h, channel_v, map_scale, wrap, evolution } => vec![
                 scalar("max_horizontal", "Max Horizontal", WidgetKind::Slider, px1(-500.0, 500.0, 5.0, 100.0), max_horizontal),
                 scalar("max_vertical", "Max Vertical", WidgetKind::Slider, px1(-500.0, 500.0, 5.0, 100.0), max_vertical),
+                scalar("source_mode", "Map Self/Noise", WidgetKind::Slider, ParamMeta::slider(0.0, 1.0, 1.0, 0, "", 100.0), source_mode),
+                scalar("channel_h", "Channel H", WidgetKind::Slider, ParamMeta::slider(0.0, 4.0, 1.0, 0, "", 100.0), channel_h),
+                scalar("channel_v", "Channel V", WidgetKind::Slider, ParamMeta::slider(0.0, 4.0, 1.0, 0, "", 100.0), channel_v),
+                scalar("map_scale", "Map Scale", WidgetKind::Slider, ParamMeta::slider(0.1, 10.0, 0.1, 2, "", 100.0), map_scale),
+                scalar("wrap", "Wrap Clamp/Repeat/Mirror", WidgetKind::Slider, ParamMeta::slider(0.0, 2.0, 1.0, 0, "", 100.0), wrap),
+                scalar("evolution", "Evolution", WidgetKind::Angle, ParamMeta::slider(0.0, 360.0, 5.0, 0, "°", 100.0), evolution),
             ],
             EffectType::ChromaKey { key_color, tolerance, feather } => vec![
                 PropDecl::color("key_color", "Key Color", key_color.value, key_color.is_animated()),
@@ -3336,10 +3521,14 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 PropDecl::color("color_b", "Color B", color_b.value, color_b.is_animated()),
                 scalar("size", "Size", WidgetKind::Slider, ParamMeta::slider(2.0, 512.0, 4.0, 0, "px", 100.0), size),
             ],
-            EffectType::GradientRamp { color_a, color_b, angle, .. } => vec![
+            EffectType::GradientRamp { color_a, color_b, angle, center_x, center_y, radius, dither, .. } => vec![
                 PropDecl::color("color_a", "Start", color_a.value, color_a.is_animated()),
                 PropDecl::color("color_b", "End", color_b.value, color_b.is_animated()),
                 scalar("angle", "Angle", WidgetKind::Angle, ParamMeta::slider(0.0, 360.0, 5.0, 0, "°", 100.0), angle),
+                scalar("center_x", "Center X", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 1.0, 1, "%", 100.0), center_x),
+                scalar("center_y", "Center Y", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 1.0, 1, "%", 100.0), center_y),
+                scalar("radius", "Radius", WidgetKind::Percentage, ParamMeta::slider(1.0, 200.0, 1.0, 1, "%", 100.0), radius),
+                scalar("dither", "Dither", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 1.0, 0, "%", 100.0), dither),
             ],
             EffectType::Perspective { skew_x, skew_y } => vec![
                 scalar("skew_x", "Skew X", WidgetKind::Angle, ParamMeta::slider(-60.0, 60.0, 1.0, 1, "°", 100.0), skew_x),

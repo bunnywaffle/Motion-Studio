@@ -342,140 +342,236 @@ fn k_glint(buf: &mut FloatBuf, p: &[f32], plugin: StockPlugin) {
     screen_over(buf, &st2, k);
 }
 
-fn k_light_rays(buf: &mut FloatBuf, p: &[f32], plugin: StockPlugin) {
-    let (inten, len, ang) = (stock_p(plugin, p, 0), stock_p(plugin, p, 1), stock_p(plugin, p, 2));
+fn tint_of(colors: &[Color], i: usize, fb: Color) -> Color {
+    colors.get(i).copied().unwrap_or(fb)
+}
+
+fn k_light_rays(buf: &mut FloatBuf, p: &[f32], plugin: StockPlugin, colors: &[Color]) {
+    let inten = stock_p(plugin, p, 0);
+    let len = stock_p(plugin, p, 1);
+    let ang = stock_p(plugin, p, 2);
     if inten <= 0.01 || len < 0.5 {
         return;
     }
-    // Directional smear of the whole frame toward the light angle.
+    // New animatable params (descriptor defaults cover old project files).
+    let threshold = stock_p(plugin, p, 3);
+    let knee = stock_p(plugin, p, 4).clamp(0.0, 50.0).max(1.0);
+    let density = 0.4 + stock_p(plugin, p, 5) / 100.0 * 1.4;
+    let decay = (stock_p(plugin, p, 6) / 100.0).clamp(0.8, 1.0);
+    let exposure = stock_p(plugin, p, 7) / 100.0;
+    let taps = stock_p(plugin, p, 8).round().clamp(8.0, 64.0) as usize;
+    let jitter = stock_p(plugin, p, 9).clamp(0.0, 1.0);
+    let blend_screen = stock_p(plugin, p, 10).round() >= 1.0;
+    let mix = (stock_p(plugin, p, 11) / 100.0).clamp(0.0, 1.0);
+    let tint = tint_of(colors, 0, Color::rgba(1.0, 0.9, 0.7, 1.0));
+    // Thresholded highlight mask with soft knee, so rays stream from hot
+    // zones instead of smearing the whole frame (Chapman-style source).
     let src = snap(buf);
+    let th = (threshold / 100.0).clamp(0.0, 1.0);
+    let mut mask = FloatBuf::clear(src.w, src.h);
+    for (d, s) in mask.px.iter_mut().zip(src.px.iter()) {
+        let l = pluma(s);
+        let m = ((l - th) / (knee / 100.0 + 1e-3) + 0.5).clamp(0.0, 1.0);
+        let m = m * m * (3.0 - 2.0 * m);
+        *d = Px { r: m * s.a, g: m * s.a, b: m * s.a, a: m * s.a };
+    }
     let rad = ang.to_radians();
     let (dx, dy) = (rad.cos(), rad.sin());
-    let taps = 24;
+    let k = (inten / 100.0).clamp(0.0, 2.0) * mix * (0.4 + exposure);
+    let mut rays = FloatBuf::clear(buf.w, buf.h);
     for y in 0..buf.h {
         for x in 0..buf.w {
-            let mut acc = Px::clear();
+            // IGN-ish per-pixel jitter of the march start kills banding at
+            // low sample counts (warbell godrays.wgsl trick).
+            let j = if jitter > 0.5 { hash2(x as f32, y as f32, 7.0) - 0.5 } else { 0.0 };
+            let mut acc = 0.0;
             let mut wsum = 0.0;
+            let mut wgt = 1.0;
             for i in 0..taps {
-                let t = i as f32 / (taps - 1) as f32 * len;
-                let decay = 1.0 - t / (len + 1.0);
-                let s = src.sample(x as f32 - dx * t, y as f32 - dy * t);
-                acc.r += s.r * decay;
-                acc.g += s.g * decay;
-                acc.b += s.b * decay;
-                acc.a += s.a * decay;
-                wsum += decay;
+                let t = (i as f32 + 0.5 + j) / taps as f32 * len * density;
+                let s = mask.sample(x as f32 - dx * t, y as f32 - dy * t);
+                acc += s.r * wgt;
+                wsum += wgt;
+                wgt *= decay;
             }
-            let n = wsum.max(1e-5);
-            let sm = Px { r: acc.r / n, g: acc.g / n, b: acc.b / n, a: acc.a / n };
-            let idx = (y * buf.w + x) as usize;
-            let d = buf.px[idx];
-            let k = (inten / 100.0).clamp(0.0, 1.0) * 0.7;
-            let ia = 1.0 / d.a.max(1e-6);
-            let ib = 1.0 / sm.a.max(1e-6);
-            let s = |a: f32, b: f32| 1.0 - (1.0 - a) * (1.0 - b * k);
-            buf.px[idx] = Px {
-                r: s(d.r * ia, sm.r * ib).clamp(0.0, 1.0) * d.a,
-                g: s(d.g * ia, sm.g * ib).clamp(0.0, 1.0) * d.a,
-                b: s(d.b * ia, sm.b * ib).clamp(0.0, 1.0) * d.a,
-                a: d.a,
+            let v = (acc / wsum.max(1e-5) * k).min(2.0);
+            rays.px[(y * buf.w + x) as usize] = Px {
+                r: v * tint.r,
+                g: v * tint.g,
+                b: v * tint.b,
+                a: v.clamp(0.0, 1.0),
             };
+        }
+    }
+    if blend_screen {
+        screen_over(buf, &rays, 1.0);
+    } else {
+        for (d, g) in buf.px.iter_mut().zip(rays.px.iter()) {
+            if d.a <= 0.0 || g.a <= 0.0 {
+                continue;
+            }
+            d.r = (d.r + g.r * d.a).min(1.0);
+            d.g = (d.g + g.g * d.a).min(1.0);
+            d.b = (d.b + g.b * d.a).min(1.0);
         }
     }
 }
 
-fn k_god_rays(buf: &mut FloatBuf, p: &[f32], plugin: StockPlugin) {
-    let (inten, dens, decay, ccx, ccy) = (
-        stock_p(plugin, p, 0),
-        stock_p(plugin, p, 1),
-        stock_p(plugin, p, 2),
-        stock_p(plugin, p, 3) / 100.0,
-        stock_p(plugin, p, 4) / 100.0,
-    );
+fn k_god_rays(buf: &mut FloatBuf, p: &[f32], plugin: StockPlugin, colors: &[Color]) {
+    let inten = stock_p(plugin, p, 0);
     if inten <= 0.01 {
         return;
     }
+    let dens = stock_p(plugin, p, 1);
+    let decay_p = stock_p(plugin, p, 2);
+    let ccx = stock_p(plugin, p, 3) / 100.0;
+    let ccy = stock_p(plugin, p, 4) / 100.0;
+    let threshold = stock_p(plugin, p, 5);
+    let knee = stock_p(plugin, p, 6).clamp(0.0, 50.0).max(1.0);
+    let weight = stock_p(plugin, p, 7) / 100.0;
+    let exposure = stock_p(plugin, p, 8) / 100.0;
+    let taps = stock_p(plugin, p, 9).round().clamp(8.0, 64.0) as usize;
+    let jitter = stock_p(plugin, p, 10).clamp(0.0, 1.0);
+    let beams = (stock_p(plugin, p, 11) / 100.0).clamp(0.0, 1.0);
+    let tint = tint_of(colors, 0, Color::rgba(1.0, 0.9, 0.7, 1.0));
     let src = snap(buf);
+    let th = (threshold / 100.0).clamp(0.0, 1.0);
+    let mut mask = FloatBuf::clear(src.w, src.h);
+    for (d, s) in mask.px.iter_mut().zip(src.px.iter()) {
+        let l = pluma(s);
+        let m = ((l - th) / (knee / 100.0 + 1e-3) + 0.5).clamp(0.0, 1.0);
+        let m = m * m * (3.0 - 2.0 * m);
+        *d = Px { r: m * s.a, g: m * s.a, b: m * s.a, a: m * s.a };
+    }
     let (w, h) = (buf.w as f32, buf.h as f32);
     let (cx, cy) = (w * ccx, h * ccy);
     let density = 0.5 + dens / 100.0 * 1.5;
-    let dk = 1.0 - (decay / 100.0).clamp(0.0, 0.99) * 0.12;
-    let taps = 32;
+    let dk = decay_p.clamp(0.8, 1.0);
+    let k = (inten / 100.0).clamp(0.0, 2.0) * (0.3 + weight * 1.4) * (0.4 + exposure);
+    let mut rays = FloatBuf::clear(buf.w, buf.h);
     for y in 0..buf.h {
         for x in 0..buf.w {
             let dx = x as f32 - cx;
             let dy = y as f32 - cy;
-            let mut acc = Px::clear();
+            let j = if jitter > 0.5 { hash2(x as f32, y as f32, 3.0) - 0.5 } else { 0.0 };
+            let mut acc = 0.0;
             let mut wsum = 0.0;
             let mut wgt = 1.0;
             for i in 0..taps {
-                let t = i as f32 / taps as f32 * density;
-                let s = src.sample(cx + dx * (1.0 - t * 0.5), cy + dy * (1.0 - t * 0.5));
-                acc.r += s.r * wgt;
-                acc.g += s.g * wgt;
-                acc.b += s.b * wgt;
-                acc.a += s.a * wgt;
+                let t = (i as f32 + 0.5 + j) / taps as f32 * density;
+                let s = mask.sample(cx + dx * (1.0 - t * 0.5), cy + dy * (1.0 - t * 0.5));
+                acc += s.r * wgt;
                 wsum += wgt;
                 wgt *= dk;
             }
-            let n = wsum.max(1e-5);
-            let idx = (y * buf.w + x) as usize;
-            let d = buf.px[idx];
-            let k = (inten / 100.0).clamp(0.0, 1.0) * 0.8;
-            let ia = 1.0 / d.a.max(1e-6);
-            let ib = n / n.max(1e-6);
-            let _ = ib;
-            let s = |a: f32, b: f32| 1.0 - (1.0 - a) * (1.0 - b * k);
-            buf.px[idx] = Px {
-                r: s(d.r * ia, (acc.r / n) * ia).clamp(0.0, 1.0) * d.a,
-                g: s(d.g * ia, (acc.g / n) * ia).clamp(0.0, 1.0) * d.a,
-                b: s(d.b * ia, (acc.b / n) * ia).clamp(0.0, 1.0) * d.a,
-                a: d.a,
+            // Angular shaft structure: non-harmonic beam/gap modulation
+            // anchored to the light direction (warbell beam trick).
+            let mut v = acc / wsum.max(1e-5) * k;
+            if beams > 0.01 {
+                let ang = dy.atan2(dx);
+                let beam = 0.72 + 0.28 * (0.6 * (ang * 9.0).sin() + 0.4 * (ang * 17.0 + 1.7).sin());
+                v *= 1.0 - beams + beams * beam;
+            }
+            rays.px[(y * buf.w + x) as usize] = Px {
+                r: (v * tint.r).min(2.0),
+                g: (v * tint.g).min(2.0),
+                b: (v * tint.b).min(2.0),
+                a: v.clamp(0.0, 1.0),
             };
         }
     }
+    for (d, g) in buf.px.iter_mut().zip(rays.px.iter()) {
+        if d.a <= 0.0 || g.a <= 0.0 {
+            continue;
+        }
+        d.r = (d.r + g.r * d.a).min(1.0);
+        d.g = (d.g + g.g * d.a).min(1.0);
+        d.b = (d.b + g.b * d.a).min(1.0);
+    }
 }
 
-fn k_lens_flare(buf: &mut FloatBuf, p: &[f32], plugin: StockPlugin) {
-    let (inten, pos, ghosts) = (stock_p(plugin, p, 0), stock_p(plugin, p, 1), stock_p(plugin, p, 2));
+fn k_lens_flare(buf: &mut FloatBuf, p: &[f32], plugin: StockPlugin, colors: &[Color]) {
+    let inten = stock_p(plugin, p, 0);
     if inten <= 0.01 {
         return;
     }
-    let k = (inten / 100.0).clamp(0.0, 1.0);
+    let pos = stock_p(plugin, p, 2);
+    let k = (inten / 100.0).clamp(0.0, 2.0);
     let (w, h) = (buf.w as f32, buf.h as f32);
-    // Flare axis: from frame center through the hot spot position.
+    let ccx = stock_p(plugin, p, 3) / 100.0;
+    let ccy = stock_p(plugin, p, 4) / 100.0;
+    let threshold = stock_p(plugin, p, 5);
+    let dispersal = 0.4 + stock_p(plugin, p, 6) / 100.0 * 1.4;
+    let halo_w = stock_p(plugin, p, 7) / 100.0;
+    let halo_k = (stock_p(plugin, p, 8) / 100.0).clamp(0.0, 2.0);
+    let chroma = stock_p(plugin, p, 9).clamp(0.0, 8.0);
+    let streak_len = stock_p(plugin, p, 10);
+    let streak_k = (stock_p(plugin, p, 11) / 100.0).clamp(0.0, 2.0);
+    let tint = tint_of(colors, 0, Color::rgba(1.0, 0.9, 0.75, 1.0));
+    // Hot-spot slides with Position along the top third (legacy behavior);
+    // explicit center overrides the auto frame center.
     let t = (pos / 100.0).clamp(0.0, 1.0);
     let (hx, hy) = (w * (0.2 + 0.6 * t), h * 0.35);
-    let (cx, cy) = (w * 0.5, h * 0.5);
-    let n = (ghosts.round() as usize).clamp(0, 10);
+    let (cx, cy) = (w * ccx, h * ccy);
+    let ghosts = stock_p(plugin, p, 2).round().clamp(0.0, 10.0) as usize;
+    // Gate the whole flare on scene heat so dark frames stay clean
+    // (threshold over mean luminance, Chapman bright-pass idea).
+    let mut mean = 0.0;
+    let mut n = 0;
+    for s in snap(buf).px.iter().step_by(16) {
+        mean += pluma(s) * s.a;
+        n += 1;
+    }
+    let heat = (((mean / n.max(1) as f32) - threshold / 100.0) * 4.0 + 0.5).clamp(0.0, 1.0);
+    let gate = heat * heat * (3.0 - 2.0 * heat);
+    if gate <= 0.01 {
+        return;
+    }
+    let min_d = w.min(h).max(1.0);
     for y in 0..buf.h {
         for x in 0..buf.w {
             let idx = (y * buf.w + x) as usize;
             if buf.px[idx].a <= 0.0 {
                 continue;
             }
-            let mut add = 0.0;
-            // Hot spot.
-            let dh = ((x as f32 - hx).powi(2) + (y as f32 - hy).powi(2)).sqrt() / w.min(h);
-            add += (-dh * dh * 60.0).exp() * 1.2;
-            // Ghosts mirrored across the center.
-            for i in 1..=n {
-                let f = i as f32 / (n.max(1)) as f32;
+            let mut ar = 0.0;
+            let mut ag = 0.0;
+            let mut ab = 0.0;
+            let dh = ((x as f32 - hx).powi(2) + (y as f32 - hy).powi(2)).sqrt() / min_d;
+            let hot = (-dh * dh * 60.0).exp() * 1.2;
+            ar += hot;
+            ag += hot;
+            ab += hot;
+            // Ghost discs mirrored across the center, spread by dispersal;
+            // chroma offsets the per-channel radii (cheap CA fringing).
+            for i in 1..=ghosts {
+                let f = i as f32 / ghosts.max(1) as f32 * dispersal;
                 let gx = cx + (cx - hx) * f * 1.4;
                 let gy = cy + (cy - hy) * f * 1.4;
-                let dg = ((x as f32 - gx).powi(2) + (y as f32 - gy).powi(2)).sqrt() / w.min(h);
-                let r = 0.02 + 0.05 * (i as f32 / n.max(1) as f32);
-                add += (-((dg - r) * (dg - r)) / (0.004 + 0.01 * r)).exp() * 0.35;
+                let r = 0.02 + 0.05 * (i as f32 / ghosts.max(1) as f32);
+                let ring = |dd: f32| (-((dd - r) * (dd - r)) / (0.004 + 0.01 * r)).exp() * 0.35;
+                let dg = ((x as f32 - gx).powi(2) + (y as f32 - gy).powi(2)).sqrt() / min_d;
+                let px = chroma * 0.004;
+                ar += ring((dg - px).max(0.0));
+                ag += ring(dg);
+                ab += ring(dg + px);
             }
-            // Central halo ring.
-            let dc = ((x as f32 - cx).powi(2) + (y as f32 - cy).powi(2)).sqrt() / w.min(h);
-            add += (-((dc - 0.30) * (dc - 0.30)) / 0.01).exp() * 0.25;
+            let dc = ((x as f32 - cx).powi(2) + (y as f32 - cy).powi(2)).sqrt() / min_d;
+            let halo = (-((dc - 0.30 * (0.5 + halo_w)) / (0.12 + halo_w * 0.2 + 1e-3)).powi(2)).exp() * halo_k;
+            ar += halo;
+            ag += halo * 0.9;
+            ab += halo * 0.8;
             let p = &mut buf.px[idx];
-            let g = (add * k * p.a).min(1.0);
-            p.r = (p.r + g * 0.9).min(1.0);
-            p.g = (p.g + g * 0.75).min(1.0);
-            p.b = (p.b + g * 0.6).min(1.0);
+            let g = (k * gate * p.a).min(1.5);
+            p.r = (p.r + ar * g * tint.r).min(1.0);
+            p.g = (p.g + ag * g * tint.g).min(1.0);
+            p.b = (p.b + ab * g * tint.b).min(1.0);
         }
+    }
+    // Anamorphic streaks off the highlights reuse the 1D smear helper.
+    if streak_k > 0.01 && streak_len > 0.5 {
+        let st = streak_layer(&snap(buf), streak_len.max(8.0), 0.0, 60.0);
+        screen_over(buf, &st, streak_k * gate * 0.7);
     }
 }
 
@@ -552,6 +648,205 @@ fn k_halo(buf: &mut FloatBuf, p: &[f32], plugin: StockPlugin) {
             p.b = (p.b + m * (0.55 - 0.3 * wt)).min(1.0);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Long Shadow + Saber (flat extrusion / core+bloom models)
+// ---------------------------------------------------------------------------
+
+/// Flat-extrusion long shadow: for each pixel take the max mask alpha
+/// along the shadow ray, fade with distance, tint near→far. Modes:
+/// 0 behind, 1 cutout (source punched out), 2 shadow only.
+fn k_long_shadow(buf: &mut FloatBuf, p: &[f32], plugin: StockPlugin, colors: &[Color]) {
+    let angle = stock_p(plugin, p, 0).to_radians();
+    let dist = stock_p(plugin, p, 1).clamp(0.0, 1024.0);
+    let strength = (stock_p(plugin, p, 8) / 100.0).clamp(0.0, 1.0);
+    if dist < 0.5 || strength <= 0.001 {
+        return;
+    }
+    let steps = stock_p(plugin, p, 2).round().clamp(1.0, 64.0) as usize;
+    let fade = (stock_p(plugin, p, 3) / 100.0).clamp(0.0, 1.0);
+    let opacity = (stock_p(plugin, p, 4) / 100.0).clamp(0.0, 1.0);
+    let soft = stock_p(plugin, p, 5).clamp(0.0, 60.0);
+    let expand = stock_p(plugin, p, 6).clamp(-50.0, 50.0) / 100.0;
+    let mode = stock_p(plugin, p, 7).round().clamp(0.0, 2.0) as i32;
+    let stride = stock_p(plugin, p, 9).clamp(1.0, 8.0);
+    let near = tint_of(colors, 0, Color::rgba(0.0, 0.0, 0.0, 0.8));
+    let far = tint_of(colors, 1, Color::rgba(0.0, 0.0, 0.0, 0.0));
+    let (dx, dy) = (angle.cos(), angle.sin());
+    let src = snap(buf);
+    // Opaque mask (straight alpha + expand choke).
+    let mut mask = FloatBuf::clear(src.w, src.h);
+    for (d, s) in mask.px.iter_mut().zip(src.px.iter()) {
+        *d = Px {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: (s.a + expand).clamp(0.0, 1.0),
+        };
+    }
+    let exp = 1.0 + fade * 3.0;
+    let mut shadow = FloatBuf::clear(buf.w, buf.h);
+    for y in 0..buf.h {
+        for x in 0..buf.w {
+            let mut best = 0.0;
+            let mut best_t = 0.0;
+            let mut t = stride;
+            for _ in 0..steps {
+                if t > dist {
+                    break;
+                }
+                let m = mask.sample(x as f32 - dx * t, y as f32 - dy * t).a;
+                // Pixel-art stride quantizes the ray (ChocDino step size).
+                let tq = if stride > 1.0 { (t / stride).floor() * stride } else { t };
+                let fall = 1.0 - (tq / dist.max(1.0)).clamp(0.0, 1.0);
+                let v = m * fall.powf(exp);
+                if v > best {
+                    best = v;
+                    best_t = (tq / dist.max(1.0)).clamp(0.0, 1.0);
+                }
+                t += stride;
+            }
+            if best > 0.003 {
+                // Don't paint over the source itself in behind/cutout modes.
+                let sa = src.px[(y * buf.w + x) as usize].a;
+                if mode != 2 && sa > 0.5 {
+                    continue;
+                }
+                // ponytail: single lerp near→far, no multi-stop ramp
+                let a = (best * opacity * strength).min(1.0);
+                shadow.px[(y * buf.w + x) as usize] = Px {
+                    r: (near.r + (far.r - near.r) * best_t) * a,
+                    g: (near.g + (far.g - near.g) * best_t) * a,
+                    b: (near.b + (far.b - near.b) * best_t) * a,
+                    a,
+                };
+            }
+        }
+    }
+    if soft > 0.5 {
+        blur_buffer(&mut shadow, soft);
+    }
+    if mode == 2 {
+        *buf = shadow;
+        return;
+    }
+    // Under-composite: shadow beneath source.
+    for (d, s) in buf.px.iter_mut().zip(shadow.px.iter()) {
+        if s.a <= 0.0 {
+            continue;
+        }
+        if mode == 1 && d.a > 0.01 {
+            continue;
+        }
+        let ia = 1.0 - s.a;
+        d.r += s.r * ia.max(0.0);
+        d.g += s.g * ia.max(0.0);
+        d.b += s.b * ia.max(0.0);
+        d.a = (d.a + s.a * (1.0 - d.a)).min(1.0);
+    }
+}
+
+/// Saber: white-hot core from the alpha/luma mask + two-tone bloom glow
+/// with turbulence distortion and timeline-driven flicker. Evolution is
+/// manual AND auto-advanced by the frame clock (both, per request).
+fn k_saber(
+    buf: &mut FloatBuf,
+    p: &[f32],
+    plugin: StockPlugin,
+    colors: &[Color],
+    ctx: &RasterFx,
+) {
+    let core_w = stock_p(plugin, p, 0).clamp(0.0, 50.0);
+    let glow_w = stock_p(plugin, p, 1).clamp(0.0, 200.0);
+    let soft = (stock_p(plugin, p, 2) / 100.0).clamp(0.0, 1.0);
+    let threshold = (stock_p(plugin, p, 3) / 100.0).clamp(0.0, 1.0);
+    let d_amt = (stock_p(plugin, p, 4) / 100.0).clamp(0.0, 1.0);
+    let d_scale = stock_p(plugin, p, 5).clamp(0.1, 10.0);
+    let d_speed = stock_p(plugin, p, 6) / 100.0;
+    let f_amt = (stock_p(plugin, p, 7) / 100.0).clamp(0.0, 1.0);
+    let f_speed = stock_p(plugin, p, 8) / 100.0;
+    let evolution = stock_p(plugin, p, 9);
+    let intensity = (stock_p(plugin, p, 10) / 100.0).clamp(0.0, 2.0);
+    let blend_screen = stock_p(plugin, p, 11).round() >= 1.0;
+    if intensity <= 0.001 || (core_w < 0.05 && glow_w < 0.5) {
+        return;
+    }
+    let core_c = tint_of(colors, 0, Color::WHITE);
+    let inner_c = tint_of(colors, 1, Color::rgb(0.4, 0.7, 1.0));
+    let outer_c = tint_of(colors, 2, Color::rgb(0.1, 0.2, 1.0));
+    // Evolution: manual param + auto clock advance.
+    let evo = evolution + ctx.time_s * (0.5 + d_speed * 4.0) * 30.0;
+    let src = snap(buf);
+    let s = d_scale * 0.03;
+    // Distorted core mask.
+    let mut core = FloatBuf::clear(buf.w, buf.h);
+    for y in 0..buf.h {
+        for x in 0..buf.w {
+            let nx = if d_amt > 0.001 {
+                (vnoise(x as f32 * s + evo * 0.05, y as f32 * s, evo * 0.01) - 0.5) * d_amt * glow_w.max(8.0)
+            } else {
+                0.0
+            };
+            let ny = if d_amt > 0.001 {
+                (vnoise(x as f32 * s, y as f32 * s + evo * 0.05, evo * 0.01 + 5.0) - 0.5) * d_amt * glow_w.max(8.0)
+            } else {
+                0.0
+            };
+            let sm = src.sample(x as f32 + nx, y as f32 + ny);
+            let l = pluma(&sm).max(sm.a);
+            let m = ((l - threshold) / 0.15 + 0.5).clamp(0.0, 1.0);
+            let m = m * m * (3.0 - 2.0 * m);
+            core.px[(y * buf.w + x) as usize] = Px { r: m, g: m, b: m, a: m * sm.a.max(l) };
+        }
+    }
+    // Glow = blurred mask minus core (bloom-stack idea, glampert).
+    let mut glow = core.clone();
+    if glow_w > 0.5 {
+        blur_buffer(&mut glow, (glow_w * (0.4 + soft * 0.9)).clamp(0.5, 64.0));
+    }
+    // Flicker: timeline-clocked brightness wobble, animatable amount/speed.
+    let fl = if f_amt > 0.001 {
+        let wob = (ctx.time_s * (1.0 + f_speed * 8.0) * 6.0).sin() * 0.5
+            + (vnoise(ctx.time_s * (1.0 + f_speed * 3.0), 0.0, 1.0) - 0.5);
+        1.0 + wob * f_amt * 0.6
+    } else {
+        1.0
+    };
+    let k = (intensity * fl).max(0.0);
+    for y in 0..buf.h {
+        for x in 0..buf.w {
+            let idx = (y * buf.w + x) as usize;
+            let c = core.px[idx].a.clamp(0.0, 1.0);
+            let g = glow.px[idx].a.clamp(0.0, 1.0);
+            let halo = (g - c * 0.7).max(0.0);
+            // ponytail: two-tone glow lerp by falloff, no spline ramp
+            let t = (halo / g.max(1e-3)).clamp(0.0, 1.0);
+            let gr = inner_c.r + (outer_c.r - inner_c.r) * t;
+            let gg = inner_c.g + (outer_c.g - inner_c.g) * t;
+            let gb = inner_c.b + (outer_c.b - inner_c.b) * t;
+            let d = &mut buf.px[idx];
+            if d.a <= 0.0 && c <= 0.003 && halo <= 0.003 {
+                continue;
+            }
+            let add_r = (c * core_c.r + halo * gr) * k;
+            let add_g = (c * core_c.g + halo * gg) * k;
+            let add_b = (c * core_c.b + halo * gb) * k;
+            if blend_screen {
+                let ia = 1.0 / d.a.max(1e-6);
+                let s = |a: f32, b: f32| 1.0 - (1.0 - a) * (1.0 - (b * d.a).min(1.0));
+                d.r = s(d.r * ia, add_r).clamp(0.0, 1.0) * d.a;
+                d.g = s(d.g * ia, add_g).clamp(0.0, 1.0) * d.a;
+                d.b = s(d.b * ia, add_b).clamp(0.0, 1.0) * d.a;
+            } else {
+                d.r = (d.r + add_r * d.a.max(0.15)).min(1.0);
+                d.g = (d.g + add_g * d.a.max(0.15)).min(1.0);
+                d.b = (d.b + add_b * d.a.max(0.15)).min(1.0);
+            }
+            d.a = (d.a + halo * 0.5 * d.a).min(1.0);
+        }
+    }
+    let _ = core_w;
 }
 
 // ---------------------------------------------------------------------------
@@ -1846,12 +2141,14 @@ pub fn apply_stock(
         S::Glow => k_glow(buf, params, plugin),
         S::Glare => k_glare(buf, params, plugin),
         S::Glint => k_glint(buf, params, plugin),
-        S::LightRays => k_light_rays(buf, params, plugin),
-        S::GodRays => k_god_rays(buf, params, plugin),
-        S::LensFlare => k_lens_flare(buf, params, plugin),
+        S::LightRays => k_light_rays(buf, params, plugin, colors),
+        S::GodRays => k_god_rays(buf, params, plugin, colors),
+        S::LensFlare => k_lens_flare(buf, params, plugin, colors),
         S::LightLeak => k_light_leak(buf, params, plugin),
         S::Streaks => k_streaks(buf, params, plugin),
         S::Halo => k_halo(buf, params, plugin),
+        S::LongShadow => k_long_shadow(buf, params, plugin, colors),
+        S::Saber => k_saber(buf, params, plugin, colors, ctx),
         // Distort
         S::TurbulentDisplace => k_turbulent(buf, params, plugin),
         S::Wave => k_wave(buf, params, plugin),
@@ -2036,5 +2333,55 @@ mod tests {
         assert!(homography([(0.0, 0.0), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0)]).is_none());
         let h = homography([(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]).unwrap();
         assert!((h[0] - 1.0).abs() < 1e-5 && (h[8] - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn long_shadow_extends_and_saber_adds_light() {
+        use project::{stock_default_color, stock_color_slots};
+        // Opaque 8x8 block top-left of a 32x32 buffer; shadow at 0° (+x).
+        let mut buf = FloatBuf::clear(32, 32);
+        for y in 4..12 {
+            for x in 4..12 {
+                buf.px[(y * 32 + x) as usize] = Px { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+            }
+        }
+        let cols: Vec<Color> = stock_color_slots(StockPlugin::LongShadow)
+            .iter()
+            .map(|s| stock_default_color(StockPlugin::LongShadow, s))
+            .collect();
+        // angle=0, distance=16, steps=16, fade=0, opacity=100, soft=0,
+        // expand=0, mode=behind, strength=100, stride=1.
+        apply_stock(&mut buf, StockPlugin::LongShadow, &[0.0, 16.0, 16.0, 0.0, 100.0, 0.0, 0.0, 0.0, 100.0, 1.0], &cols, &ctx_for(0));
+        // Source block intact, shadow present to its right, far corner clean.
+        assert!(buf.px[(8 * 32 + 8) as usize].a > 0.9);
+        assert!(buf.px[(8 * 32 + 20) as usize].a > 0.05, "shadow must extend +x");
+        assert!(buf.px[(31 * 32 + 31) as usize].a < 0.01);
+        // Shadow-only mode clears the source but keeps the tail.
+        let mut only = FloatBuf::clear(32, 32);
+        for y in 4..12 {
+            for x in 4..12 {
+                only.px[(y * 32 + x) as usize] = Px { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+            }
+        }
+        apply_stock(&mut only, StockPlugin::LongShadow, &[0.0, 16.0, 16.0, 0.0, 100.0, 0.0, 0.0, 2.0, 100.0, 1.0], &cols, &ctx_for(0));
+        // Shadow-only: no source compositing — the extrusion volume covers
+        // the source footprint too, while far pixels stay clean.
+        assert!(only.px[(8 * 32 + 8) as usize].a > 0.05);
+        assert!(only.px[(8 * 32 + 20) as usize].a > 0.05);
+        assert!(only.px[(31 * 32 + 31) as usize].a < 0.01);
+        // Saber on a mid-gray card must not dim it (additive-style glow).
+        let mut card = FloatBuf::clear(24, 24);
+        for p in card.px.iter_mut() {
+            *p = Px { r: 0.4, g: 0.4, b: 0.4, a: 1.0 };
+        }
+        let scol: Vec<Color> = stock_color_slots(StockPlugin::Saber)
+            .iter()
+            .map(|s| stock_default_color(StockPlugin::Saber, s))
+            .collect();
+        let before: f32 = card.px.iter().map(|p| p.r).sum();
+        apply_stock(&mut card, StockPlugin::Saber, &[6.0, 42.0, 35.0, 45.0, 25.0, 2.0, 30.0, 15.0, 30.0, 0.0, 100.0, 0.0], &scol, &ctx_for(3));
+        let after: f32 = card.px.iter().map(|p| p.r).sum();
+        assert!(after >= before, "saber must not dim the card");
+        assert_finite(&card, StockPlugin::Saber);
     }
 }

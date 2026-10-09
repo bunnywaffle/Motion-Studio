@@ -46,6 +46,8 @@ pub enum StockPlugin {
     LightLeak,
     Streaks,
     Halo,
+    LongShadow,
+    Saber,
     // Distortion
     TurbulentDisplace,
     Wave,
@@ -136,6 +138,8 @@ impl StockPlugin {
             StockPlugin::LightRays,
             StockPlugin::GodRays,
             StockPlugin::LensFlare,
+            StockPlugin::LongShadow,
+            StockPlugin::Saber,
             StockPlugin::LightLeak,
             StockPlugin::Streaks,
             StockPlugin::Halo,
@@ -222,6 +226,8 @@ impl StockPlugin {
             StockPlugin::LightRays => "net.sf.openfx.light_rays",
             StockPlugin::GodRays => "net.sf.openfx.god_rays",
             StockPlugin::LensFlare => "net.sf.openfx.lens_flare",
+            StockPlugin::LongShadow => "net.sf.openfx.long_shadow",
+            StockPlugin::Saber => "net.sf.openfx.saber",
             StockPlugin::LightLeak => "net.sf.openfx.light_leak",
             StockPlugin::Streaks => "net.sf.openfx.streaks",
             StockPlugin::Halo => "net.sf.openfx.halo",
@@ -302,6 +308,9 @@ pub fn stock_color_slots(plugin: StockPlugin) -> &'static [&'static str] {
         StockPlugin::Shapes => &["color"],
         StockPlugin::PlasmaGen => &["color_a", "color_b"],
         StockPlugin::Particles => &["color"],
+        StockPlugin::LongShadow => &["shadow_a", "shadow_b"],
+        StockPlugin::Saber => &["core", "glow_inner", "glow_outer"],
+        StockPlugin::LightRays | StockPlugin::GodRays | StockPlugin::LensFlare => &["tint"],
         _ => &[],
     }
 }
@@ -320,6 +329,22 @@ pub fn stock_default_color(plugin: StockPlugin, slot: &str) -> super::Color {
         }
         StockPlugin::GridGen => Color::rgba(1.0, 1.0, 1.0, 0.9),
         StockPlugin::Shapes | StockPlugin::Particles => Color::rgb(0.25, 0.6, 1.0),
+        StockPlugin::LongShadow => {
+            if slot == "shadow_b" {
+                Color::rgba(0.0, 0.0, 0.0, 0.0)
+            } else {
+                Color::rgba(0.0, 0.0, 0.0, 0.8)
+            }
+        }
+        StockPlugin::Saber => match slot {
+            "core" => Color::WHITE,
+            "glow_inner" => Color::rgb(0.4, 0.7, 1.0),
+            "glow_outer" => Color::rgb(0.1, 0.2, 1.0),
+            _ => Color::WHITE,
+        },
+        StockPlugin::LightRays | StockPlugin::GodRays | StockPlugin::LensFlare => {
+            Color::rgba(1.0, 0.9, 0.7, 1.0)
+        }
         _ => Color::WHITE,
     }
 }

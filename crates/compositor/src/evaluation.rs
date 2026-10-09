@@ -398,6 +398,12 @@ pub enum EvaluatedEffectType {
     DisplacementMap {
         max_horizontal: f32,
         max_vertical: f32,
+        source_mode: f32,
+        channel_h: f32,
+        channel_v: f32,
+        map_scale: f32,
+        wrap: f32,
+        evolution: f32,
     },
     ChromaKey {
         key_color: Color,
@@ -438,6 +444,10 @@ pub enum EvaluatedEffectType {
     },
     GradientRamp {
         gradient: FillGradient,
+        center_x: f32,
+        center_y: f32,
+        radius: f32,
+        dither: f32,
     },
     Perspective {
         skew_x: f32,
@@ -1831,9 +1841,21 @@ impl LayerStackEvaluator {
                         EffectType::DisplacementMap {
                             max_horizontal,
                             max_vertical,
+                            source_mode,
+                            channel_h,
+                            channel_v,
+                            map_scale,
+                            wrap,
+                            evolution,
                         } => EvaluatedEffectType::DisplacementMap {
                             max_horizontal: eval_eff_prop("max_horizontal", max_horizontal.evaluate_at(time)),
                             max_vertical: eval_eff_prop("max_vertical", max_vertical.evaluate_at(time)),
+                            source_mode: eval_eff_prop("source_mode", source_mode.evaluate_at(time)),
+                            channel_h: eval_eff_prop("channel_h", channel_h.evaluate_at(time)),
+                            channel_v: eval_eff_prop("channel_v", channel_v.evaluate_at(time)),
+                            map_scale: eval_eff_prop("map_scale", map_scale.evaluate_at(time)),
+                            wrap: eval_eff_prop("wrap", wrap.evaluate_at(time)),
+                            evolution: eval_eff_prop("evolution", evolution.evaluate_at(time)),
                         },
                         EffectType::ChromaKey {
                             key_color,
@@ -1906,7 +1928,7 @@ impl LayerStackEvaluator {
                                 color_b: color_b.evaluate_at(time),
                             }
                         }
-                        EffectType::GradientRamp { color_a, color_b, angle, stops, gradient_type } => {
+                        EffectType::GradientRamp { color_a, color_b, angle, stops, gradient_type, center_x, center_y, radius, dither } => {
                             let angle = eval_eff_prop("angle", angle.evaluate_at(time));
                             let stops = if stops.len() >= 2 {
                                 let mut sorted = stops.clone();
@@ -1924,6 +1946,10 @@ impl LayerStackEvaluator {
                             };
                             EvaluatedEffectType::GradientRamp {
                                 gradient: FillGradient { stops, angle, gradient_type: *gradient_type },
+                                center_x: eval_eff_prop("center_x", center_x.evaluate_at(time)),
+                                center_y: eval_eff_prop("center_y", center_y.evaluate_at(time)),
+                                radius: eval_eff_prop("radius", radius.evaluate_at(time)),
+                                dither: eval_eff_prop("dither", dither.evaluate_at(time)),
                             }
                         }
                         EffectType::Perspective { skew_x, skew_y } => {

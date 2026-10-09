@@ -639,9 +639,15 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
             param3.to_bits().hash(h);
             param4.to_bits().hash(h);
         }
-        EvaluatedEffectType::DisplacementMap { max_horizontal, max_vertical } => {
+        EvaluatedEffectType::DisplacementMap { max_horizontal, max_vertical, source_mode, channel_h, channel_v, map_scale, wrap, evolution } => {
             max_horizontal.to_bits().hash(h);
             max_vertical.to_bits().hash(h);
+            source_mode.to_bits().hash(h);
+            channel_h.to_bits().hash(h);
+            channel_v.to_bits().hash(h);
+            map_scale.to_bits().hash(h);
+            wrap.to_bits().hash(h);
+            evolution.to_bits().hash(h);
         }
         EvaluatedEffectType::ChromaKey { key_color, tolerance, feather } => {
             color_hash(key_color, h);
@@ -676,9 +682,13 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
             color_hash(color_a, h);
             color_hash(color_b, h);
         }
-        EvaluatedEffectType::GradientRamp { gradient } => {
+        EvaluatedEffectType::GradientRamp { gradient, center_x, center_y, radius, dither } => {
             (gradient.gradient_type as u8).hash(h);
             gradient.angle.to_bits().hash(h);
+            center_x.to_bits().hash(h);
+            center_y.to_bits().hash(h);
+            radius.to_bits().hash(h);
+            dither.to_bits().hash(h);
             for stop in &gradient.stops {
                 stop.offset.to_bits().hash(h);
                 color_hash(&stop.color, h);
@@ -1622,7 +1632,7 @@ pub fn layer_effect_padding(layer: &EvaluatedLayer, base_w: f32, base_h: f32) ->
                 let sy = skew_y.to_radians().tan().clamp(-2.0, 2.0).abs();
                 pad = pad.max(sx * base_h / 2.0).max(sy * base_w / 2.0);
             }
-            EvaluatedEffectType::DisplacementMap { max_horizontal, max_vertical } => {
+            EvaluatedEffectType::DisplacementMap { max_horizontal, max_vertical, .. } => {
                 pad = pad
                     .max(max_horizontal.abs() / 2.0)
                     .max(max_vertical.abs() / 2.0);
@@ -1658,6 +1668,15 @@ pub fn layer_effect_padding(layer: &EvaluatedLayer, base_w: f32, base_h: f32) ->
                     StockPlugin::Glare => {
                         let len = stock_p(*plugin, params, 1);
                         pad = pad.max(len * 1.5);
+                    }
+                    StockPlugin::LongShadow => {
+                        pad = pad.max(stock_p(*plugin, params, 1).clamp(0.0, 1024.0));
+                    }
+                    StockPlugin::Saber => {
+                        pad = pad.max(stock_p(*plugin, params, 1).clamp(0.0, 200.0));
+                    }
+                    StockPlugin::LightRays => {
+                        pad = pad.max(stock_p(*plugin, params, 1).clamp(0.0, 200.0));
                     }
                     StockPlugin::TransformFx => {
                         let tx = stock_p(*plugin, params, 0).abs();
@@ -2760,6 +2779,12 @@ mod tests {
             fx("displace", EvaluatedEffectType::DisplacementMap {
                 max_horizontal: 6.0,
                 max_vertical: -5.0,
+                source_mode: 0.0,
+                channel_h: 4.0,
+                channel_v: 4.0,
+                map_scale: 1.0,
+                wrap: 0.0,
+                evolution: 0.0,
             }),
             // Identity pins: wave part only, mesh path stays CPU.
             fx("warp", EvaluatedEffectType::Warp {

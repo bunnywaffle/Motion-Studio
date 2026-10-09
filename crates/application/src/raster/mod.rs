@@ -289,6 +289,10 @@ mod tests {
         }
         let fx = EvaluatedEffectType::GradientRamp {
             gradient: project::FillGradient::two_color(Color::BLACK, Color::WHITE, 0.0),
+            center_x: 50.0,
+            center_y: 50.0,
+            radius: 71.0,
+            dither: 0.0,
         };
         apply_effect_pixels(&mut buf, 32.0, 1.0, &fx, &ctx);
         assert!(buf.px[0].r < 0.1);
@@ -311,6 +315,10 @@ mod tests {
                 angle: 0.0,
                 gradient_type: project::GradientType::Linear,
             },
+            center_x: 50.0,
+            center_y: 50.0,
+            radius: 71.0,
+            dither: 0.0,
         };
         let ctx = RasterFx { time_s: 0.0, frame: 0, res_w: 32.0, res_h: 1.0, duration_s: 0.0, playing: false };
         apply_effect_pixels(&mut buf, 32.0, 1.0, &fx, &ctx);

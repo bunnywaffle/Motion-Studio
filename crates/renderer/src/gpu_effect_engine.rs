@@ -309,8 +309,19 @@ impl GpuEffectEngine {
                     // that hard edges amplify into visible flips: keep large
                     // offsets on the exact CPU path (empirically ≈0.0012
                     // error per px of offset on hard-edge content).
-                    if let compositor::EvaluatedEffectType::DisplacementMap { max_horizontal, max_vertical } = eff_type {
+                    if let compositor::EvaluatedEffectType::DisplacementMap { max_horizontal, max_vertical, source_mode, channel_h, channel_v, map_scale, wrap, .. } = eff_type {
                         if max_horizontal.abs() > 8.0 || max_vertical.abs() > 8.0 {
+                            return false;
+                        }
+                        // The WGSL twin is legacy self-luminance only; any
+                        // new knob (noise map, channel select, scale, wrap)
+                        // stays on the exact CPU path (honest badge).
+                        if source_mode.round() != 0.0
+                            || channel_h.round() != 4.0
+                            || channel_v.round() != 4.0
+                            || (map_scale - 1.0).abs() > 1e-4
+                            || wrap.round() != 0.0
+                        {
                             return false;
                         }
                     }
@@ -510,7 +521,7 @@ impl GpuEffectEngine {
                         EvaluatedEffectType::Vignette { amount, softness } => {
                             ("vignette", [*amount, *softness, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
                         }
-                        EvaluatedEffectType::DisplacementMap { max_horizontal, max_vertical } => {
+                        EvaluatedEffectType::DisplacementMap { max_horizontal, max_vertical, .. } => {
                             ("displacement", [*max_horizontal, *max_vertical, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
                         }
                         EvaluatedEffectType::Warp { amount, scale, .. } => {

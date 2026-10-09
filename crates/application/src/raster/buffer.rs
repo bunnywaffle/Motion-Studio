@@ -42,6 +42,37 @@ impl FloatBuf {
         let b = self.get(x0 + 1, y0);
         let c = self.get(x0, y0 + 1);
         let d = self.get(x0 + 1, y0 + 1);
+        Self::mix4(a, b, c, d, fx, fy)
+    }
+
+    #[inline]
+    fn get_wrapped(&self, x: i32, y: i32) -> Px {
+        if self.w == 0 || self.h == 0 {
+            return Px::clear();
+        }
+        let w = self.w as i32;
+        let h = self.h as i32;
+        let xx = ((x % w) + w) % w;
+        let yy = ((y % h) + h) % h;
+        self.px[(yy as u32 * self.w + xx as u32) as usize]
+    }
+
+    /// Bilinear sample with repeat wrapping (mirror folding happens in the
+    /// caller, so repeat-get covers both wrap modes).
+    pub fn sample_wrapped(&self, x: f32, y: f32) -> Px {
+        let x0 = x.floor() as i32;
+        let y0 = y.floor() as i32;
+        let fx = (x - x0 as f32).clamp(0.0, 1.0);
+        let fy = (y - y0 as f32).clamp(0.0, 1.0);
+        let a = self.get_wrapped(x0, y0);
+        let b = self.get_wrapped(x0 + 1, y0);
+        let c = self.get_wrapped(x0, y0 + 1);
+        let d = self.get_wrapped(x0 + 1, y0 + 1);
+        Self::mix4(a, b, c, d, fx, fy)
+    }
+
+    #[inline]
+    fn mix4(a: Px, b: Px, c: Px, d: Px, fx: f32, fy: f32) -> Px {
         let mix = |p: f32, q: f32, r: f32, s: f32| {
             p * (1.0 - fx) * (1.0 - fy) + q * fx * (1.0 - fy) + r * (1.0 - fx) * fy + s * fx * fy
         };
