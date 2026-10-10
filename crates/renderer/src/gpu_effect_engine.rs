@@ -45,6 +45,27 @@ struct PooledReadback {
     height: u32,
 }
 
+/// Resolve a stock plug-in's RGBA color slots for uniform packing:
+/// evaluated colors win, descriptor defaults cover old project files
+/// with shorter vectors (same fallback as the CPU kernels).
+fn stock_uniform_colors(plugin: StockPlugin, colors: &[project::Color]) -> [[f32; 4]; 4] {
+    let slots = project::stock_color_slots(plugin);
+    let mut out = [[0.0f32; 4]; 4];
+    for (i, slot) in out.iter_mut().enumerate() {
+        let c = colors
+            .get(i)
+            .copied()
+            .unwrap_or_else(|| {
+                slots
+                    .get(i)
+                    .map(|s| project::stock_default_color(plugin, s))
+                    .unwrap_or(project::Color::WHITE)
+            });
+        *slot = [c.r, c.g, c.b, c.a];
+    }
+    out
+}
+
 impl GpuEffectEngine {
     /// Create a new GPU effect engine with a headless or native device context.
     pub fn new(gpu: GpuContext) -> Result<Self, GpuError> {
@@ -397,7 +418,7 @@ impl GpuEffectEngine {
                         targets.swap();
                     }
                 }
-                EvaluatedEffectType::Stock { plugin, params, colors: _ } => {
+                EvaluatedEffectType::Stock { plugin, params, colors } => {
                     // Card 3D packs the shared-plan inverse homography
                     // (same matrix the CPU kernel solves): identity skips,
                     // culled/degenerate bail to the exact CPU path via Err.
@@ -420,7 +441,41 @@ impl GpuEffectEngine {
                                         inv[6], inv[7], inv[8], 0.0,
                                         0.0, 0.0, 0.0, 0.0,
                                     ];
-                                    let uniforms = FxUniforms::pack(&m, time_s, width as f32, height as f32, 0.0);
+                                    let uniforms = FxUniforms::pack(&m, &stock_uniform_colors(*plugin, colors), time_s, width as f32, height as f32, 0.0);
+                                    pass.record_into(
+                                        &self.gpu,
+                                        &mut encoder,
+                                        targets.read_target().view(),
+                                        targets.write_target(),
+                                        uniforms,
+                                    );
+                                    targets.swap();
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                    // Corner Pin shares the Card3D project body through its
+                    // own shared plan (same solve the CPU kernel runs):
+                    // identity skips, degenerate bails to CPU via Err.
+                    if *plugin == StockPlugin::CornerPin {
+                        use compositor::fx::{corner_pin_plan, Card3dPlan};
+                        match corner_pin_plan(params) {
+                            Card3dPlan::Identity => continue,
+                            Card3dPlan::Clear | Card3dPlan::Keep => {
+                                return Err(GpuError::Declined(
+                                    "corner pin degenerate".to_string(),
+                                ));
+                            }
+                            Card3dPlan::Project(inv) => {
+                                if let Some(pass) = self.fx_pass_cache.get(plugin) {
+                                    let m = [
+                                        inv[0], inv[1], inv[2], 0.0,
+                                        inv[3], inv[4], inv[5], 0.0,
+                                        inv[6], inv[7], inv[8], 0.0,
+                                        0.0, 0.0, 0.0, 0.0,
+                                    ];
+                                    let uniforms = FxUniforms::pack(&m, &stock_uniform_colors(*plugin, colors), time_s, width as f32, height as f32, 0.0);
                                     pass.record_into(
                                         &self.gpu,
                                         &mut encoder,
@@ -435,7 +490,7 @@ impl GpuEffectEngine {
                         }
                     }
                     if let Some(pass) = self.fx_pass_cache.get(plugin) {
-                        let uniforms = FxUniforms::pack(params, time_s, width as f32, height as f32, 0.0);
+                        let uniforms = FxUniforms::pack(params, &stock_uniform_colors(*plugin, colors), time_s, width as f32, height as f32, 0.0);
                         pass.record_into(
                             &self.gpu,
                             &mut encoder,
@@ -456,7 +511,7 @@ impl GpuEffectEngine {
                                 self.merge_pass_cache.get("unsharp"),
                                 self.scratch.as_ref(),
                             ) {
-                                let uniforms = FxUniforms::pack(&[k], time_s, width as f32, height as f32, 0.0);
+                                let uniforms = FxUniforms::pack(&[k], &[], time_s, width as f32, height as f32, 0.0);
                                 self.blur_pipeline.record_blur(
                                     &self.gpu,
                                     &mut encoder,
@@ -551,7 +606,7 @@ impl GpuEffectEngine {
                         _ => continue,
                     };
                     if let Some(pass) = self.builtin_pass_cache.get(id) {
-                        let uniforms = FxUniforms::pack(&params, time_s, width as f32, height as f32, 0.0);
+                        let uniforms = FxUniforms::pack(&params, &[], time_s, width as f32, height as f32, 0.0);
                         pass.record_into(
                             &self.gpu,
                             &mut encoder,
@@ -610,14 +665,14 @@ impl GpuEffectEngine {
         let mut encoder = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("GPU Bloom Encoder"),
         });
-        let uniforms = FxUniforms::pack(&[k], 0.0, width as f32, height as f32, 0.0);
+        let uniforms = FxUniforms::pack(&[k], &[], 0.0, width as f32, height as f32, 0.0);
         // 2. Bright-pass into write.
         bright.record_into(
             &self.gpu,
             &mut encoder,
             targets.read_target().view(),
             targets.write_target(),
-            FxUniforms::pack(&[], 0.0, width as f32, height as f32, 0.0),
+            FxUniforms::pack(&[], &[], 0.0, width as f32, height as f32, 0.0),
         );
         // 3. Separable blur of the bright buffer into scratch.
         self.blur_pipeline.record_blur(
@@ -643,7 +698,7 @@ impl GpuEffectEngine {
             &mut encoder,
             intermediate.view(),
             targets.read_target(),
-            FxUniforms::pack(&[], 0.0, width as f32, height as f32, 0.0),
+            FxUniforms::pack(&[], &[], 0.0, width as f32, height as f32, 0.0),
         );
         self.gpu.queue.submit(std::iter::once(encoder.finish()));
 

@@ -151,6 +151,27 @@ pub fn card_3d_plan(params: &[f32], w: f32, h: f32) -> Card3dPlan {
     }
 }
 
+/// Plan a Corner Pin pass over descriptor-order params (ul_x, ul_y, ur_x,
+/// ur_y, lr_x, lr_y, ll_x, ll_y, unit space). Same solve + inverse as the
+/// CPU kernel (shared so both paths project through one matrix); the GPU
+/// twin reuses the Card3D project body.
+pub fn corner_pin_plan(params: &[f32]) -> Card3dPlan {
+    let g = |i: usize| params.get(i).copied().unwrap_or(0.0);
+    let quad = [
+        (g(0).clamp(0.0, 1.0), g(1).clamp(0.0, 1.0)),
+        (g(2).clamp(0.0, 1.0), g(3).clamp(0.0, 1.0)),
+        (g(4).clamp(0.0, 1.0), g(5).clamp(0.0, 1.0)),
+        (g(6).clamp(0.0, 1.0), g(7).clamp(0.0, 1.0)),
+    ];
+    if quad[0] == (0.0, 0.0) && quad[1] == (1.0, 0.0) && quad[2] == (1.0, 1.0) && quad[3] == (0.0, 1.0) {
+        return Card3dPlan::Identity;
+    }
+    match homography_unit(quad).and_then(invert_homography) {
+        Some(inv) => Card3dPlan::Project(inv),
+        None => Card3dPlan::Keep,
+    }
+}
+
 /// True when this plug-in needs neighbours, position, or time.
 pub fn is_spatial_stock(plugin: StockPlugin) -> bool {
     plugin.descriptor().spatial

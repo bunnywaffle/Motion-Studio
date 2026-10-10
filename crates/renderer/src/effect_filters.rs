@@ -63,6 +63,9 @@ pub fn brightness_contrast() -> ColorFilter {
     color_filter!(
         "brightness_contrast",
         r#"fn fx_brightness_contrast(uv: vec2<f32>, color: vec4<f32>, brightness: f32, contrast: f32) -> vec4<f32> {
+    if (color.a <= 0.0) {
+        return color;
+    }
     let b = brightness / 100.0;
     let k = max(1.0 + contrast / 100.0, 0.0);
     let rgb = (color.rgb - vec3<f32>(0.5)) * k + vec3<f32>(0.5) + vec3<f32>(b);
@@ -76,6 +79,9 @@ pub fn tint() -> ColorFilter {
     color_filter!(
         "tint",
         r#"fn fx_tint(uv: vec2<f32>, color: vec4<f32>, map_black: vec3<f32>, map_white: vec3<f32>, amount: f32) -> vec4<f32> {
+    if (color.a <= 0.0) {
+        return color;
+    }
     let t = clamp(amount / 100.0, 0.0, 1.0);
     let lum = dot(color.rgb, vec3<f32>(0.299, 0.587, 0.114));
     let mapped = map_black * (1.0 - lum) + map_white * lum;
@@ -89,6 +95,9 @@ pub fn invert() -> ColorFilter {
     color_filter!(
         "invert",
         r#"fn fx_invert(uv: vec2<f32>, color: vec4<f32>, amount: f32) -> vec4<f32> {
+    if (color.a <= 0.0) {
+        return color;
+    }
     let t = clamp(amount / 100.0, 0.0, 1.0);
     return vec4<f32>(mix(color.rgb, vec3<f32>(1.0) - color.rgb, t), color.a);
 }"#
@@ -100,6 +109,9 @@ pub fn custom_grade() -> ColorFilter {
     color_filter!(
         "custom_grade",
         r#"fn fx_custom_grade(uv: vec2<f32>, color: vec4<f32>, p1: f32, p2: f32, p3: f32, p4: f32) -> vec4<f32> {
+    if (color.a <= 0.0) {
+        return color;
+    }
     let gain = 1.0 + p2 / 100.0;
     let shift = p3 / 100.0;
     var mod_alpha = 1.0;
@@ -280,6 +292,9 @@ pub fn levels() -> ColorFilter {
     color_filter!(
         "levels",
         r#"fn fx_levels(uv: vec2<f32>, color: vec4<f32>, in_black: f32, in_white: f32, gamma: f32, out_black: f32, out_white: f32) -> vec4<f32> {
+    if (color.a <= 0.0) {
+        return color;
+    }
     let ib = clamp(in_black / 255.0, 0.0, 1.0);
     let iw = clamp(in_white / 255.0, 0.0, 1.0);
     let ob = clamp(out_black / 255.0, 0.0, 1.0);
@@ -310,6 +325,9 @@ pub fn hue_saturation() -> ColorFilter {
     return l - a * max(-1.0, min(min(k - 3.0, 9.0 - k), 1.0));
 }
 fn fx_hue_saturation(uv: vec2<f32>, color: vec4<f32>, hue_shift: f32, saturation: f32, lightness: f32) -> vec4<f32> {
+    if (color.a <= 0.0) {
+        return color;
+    }
     let mx = max(color.r, max(color.g, color.b));
     let mn = min(color.r, min(color.g, color.b));
     var h = 0.0;
@@ -552,13 +570,21 @@ pub fn stock_curves() -> ColorFilter {
     color_filter!(
         "stock_curves",
         r#"fn fx_stock_curves(uv: vec2<f32>, color: vec4<f32>, lifts: vec4<f32>, hi: f32) -> vec4<f32> {
+    if (color.a <= 0.0) {
+        return color;
+    }
+    // Chain convention is straight-alpha (see gpu_fx_chain): grade the
+    // ORIGINAL channels like the CPU kernel (all zone weights derive
+    // from the unmodified sample, then clamp, then re-premultiply on
+    // write-back).
+    let base = color.rgb;
     let zones = vec4<f32>(0.1, 0.3, 0.5, 0.7);
-    var rgb = color.rgb;
-    rgb += lifts.x / 100.0 * 0.6 * clamp(1.0 - abs(rgb - vec3<f32>(zones.x)) / vec3<f32>(0.35), vec3<f32>(0.0), vec3<f32>(1.0));
-    rgb += lifts.y / 100.0 * 0.6 * clamp(1.0 - abs(rgb - vec3<f32>(zones.y)) / vec3<f32>(0.35), vec3<f32>(0.0), vec3<f32>(1.0));
-    rgb += lifts.z / 100.0 * 0.6 * clamp(1.0 - abs(rgb - vec3<f32>(zones.z)) / vec3<f32>(0.35), vec3<f32>(0.0), vec3<f32>(1.0));
-    rgb += lifts.w / 100.0 * 0.6 * clamp(1.0 - abs(rgb - vec3<f32>(zones.w)) / vec3<f32>(0.35), vec3<f32>(0.0), vec3<f32>(1.0));
-    rgb += hi / 100.0 * 0.6 * clamp(1.0 - abs(rgb - vec3<f32>(0.9)) / vec3<f32>(0.35), vec3<f32>(0.0), vec3<f32>(1.0));
+    var rgb = base;
+    rgb += lifts.x / 100.0 * 0.6 * clamp(1.0 - abs(base - vec3<f32>(zones.x)) / vec3<f32>(0.35), vec3<f32>(0.0), vec3<f32>(1.0));
+    rgb += lifts.y / 100.0 * 0.6 * clamp(1.0 - abs(base - vec3<f32>(zones.y)) / vec3<f32>(0.35), vec3<f32>(0.0), vec3<f32>(1.0));
+    rgb += lifts.z / 100.0 * 0.6 * clamp(1.0 - abs(base - vec3<f32>(zones.z)) / vec3<f32>(0.35), vec3<f32>(0.0), vec3<f32>(1.0));
+    rgb += lifts.w / 100.0 * 0.6 * clamp(1.0 - abs(base - vec3<f32>(zones.w)) / vec3<f32>(0.35), vec3<f32>(0.0), vec3<f32>(1.0));
+    rgb += hi / 100.0 * 0.6 * clamp(1.0 - abs(base - vec3<f32>(0.9)) / vec3<f32>(0.35), vec3<f32>(0.0), vec3<f32>(1.0));
     return vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)), color.a);
 }"#
     )
@@ -575,6 +601,9 @@ pub fn stock_color_balance() -> ColorFilter {
     return vec3<f32>(ws, wm, wh);
 }
 fn fx_stock_color_balance(uv: vec2<f32>, color: vec4<f32>, shadows: vec3<f32>, mids: vec3<f32>, highs: vec3<f32>) -> vec4<f32> {
+    if (color.a <= 0.0) {
+        return color;
+    }
     let wr = fx_cb_zone(color.r);
     let wg = fx_cb_zone(color.g);
     let wb = fx_cb_zone(color.b);
@@ -582,7 +611,7 @@ fn fx_stock_color_balance(uv: vec2<f32>, color: vec4<f32>, shadows: vec3<f32>, m
     let tg = vec3<f32>(shadows.y, mids.y, highs.y);
     let tb = vec3<f32>(shadows.z, mids.z, highs.z);
     let zero = vec3<f32>(0.0);
-    var rgb = color.rgb + vec3<f32>(dot(tr, wr), dot(tg, wg), dot(tb, wb)) / 100.0 * 0.5;
+    var rgb = clamp(color.rgb + vec3<f32>(dot(tr, wr), dot(tg, wg), dot(tb, wb)) / 100.0 * 0.5, vec3<f32>(0.0), vec3<f32>(1.0));
     rgb.g += (dot(max(-tr, zero), wr) + dot(max(-tb, zero), wb)) * 0.25 / 100.0;
     rgb.b += (dot(max(-tr, zero), wr) + dot(max(-tg, zero), wg)) * 0.25 / 100.0;
     rgb.r += (dot(max(-tg, zero), wg) + dot(max(-tb, zero), wb)) * 0.25 / 100.0;
@@ -596,6 +625,9 @@ pub fn stock_color_wheels() -> ColorFilter {
     color_filter!(
         "stock_color_wheels",
         r#"fn fx_stock_color_wheels(uv: vec2<f32>, color: vec4<f32>, wheels: vec3<f32>) -> vec4<f32> {
+    if (color.a <= 0.0) {
+        return color;
+    }
     let ws = (1.0 - color.rgb) * (1.0 - color.rgb);
     let wm = 1.0 - (2.0 * color.rgb - 1.0) * (2.0 * color.rgb - 1.0);
     let wh = color.rgb * color.rgb;
@@ -610,6 +642,9 @@ pub fn stock_temperature_tint() -> ColorFilter {
     color_filter!(
         "stock_temperature_tint",
         r#"fn fx_stock_temperature_tint(uv: vec2<f32>, color: vec4<f32>, temp_tint: vec2<f32>) -> vec4<f32> {
+    if (color.a <= 0.0) {
+        return color;
+    }
     let t = temp_tint.x / 100.0;
     let ti = temp_tint.y / 100.0;
     let rgb = vec3<f32>(color.r + t * 0.35 - ti * 0.10, color.g + ti * 0.15, color.b - t * 0.35 - ti * 0.10);
@@ -635,6 +670,9 @@ pub fn stock_threshold() -> ColorFilter {
     color_filter!(
         "stock_threshold",
         r#"fn fx_stock_threshold(uv: vec2<f32>, color: vec4<f32>, threshold: f32, feather: f32) -> vec4<f32> {
+    if (color.a <= 0.0) {
+        return color;
+    }
     let t = clamp(threshold / 100.0, 0.0, 1.0);
     let f = max(feather / 100.0, 0.001);
     let l = dot(color.rgb, vec3<f32>(0.299, 0.587, 0.114));
@@ -677,16 +715,29 @@ pub fn stock_spill_suppress() -> ColorFilter {
     )
 }
 
-/// Warm diagonal light leak.
+/// Warm diagonal light leak (mirrors `k_light_leak`: the leak color is
+/// the temperature kernel on orange, screen-blended by the falloff mask;
+/// transparent pixels pass through like the CPU skip).
 pub fn stock_light_leak() -> ColorFilter {
     color_filter!(
         "stock_light_leak",
-        r#"fn fx_stock_light_leak(uv: vec2<f32>, color: vec4<f32>, intensity: f32, hue_shift: f32, position: f32) -> vec4<f32> {
+        r#"fn fx_stock_light_leak(uv: vec2<f32>, color: vec4<f32>, intensity: f32, hue_shift: f32, position: f32, res: vec2<f32>) -> vec4<f32> {
+    if (color.a <= 0.0) {
+        return color;
+    }
     let k = clamp(intensity / 100.0, 0.0, 1.0);
-    let ox = clamp(position / 100.0, 0.0, 1.0);
-    let d = length(vec2<f32>(uv.x - ox, uv.y + 0.1));
-    let m = pow(clamp(1.0 - d * 1.6, 0.0, 1.0), 1.5) * k;
-    let warm = vec3<f32>(1.0, 0.45 + hue_shift / 360.0, 0.15);
+    if (k <= 0.001) {
+        return color;
+    }
+    // Pixel-space diagonal falloff like the CPU kernel (uv space would
+    // skew the cone on non-square frames).
+    let t = clamp(position / 100.0, 0.0, 1.0);
+    let p = uv * res;
+    let dist = length(vec2<f32>(p.x - res.x * t, p.y + res.y * 0.1));
+    let m = pow(clamp(1.0 - dist / length(res) * 1.6, 0.0, 1.0), 1.5) * k;
+    // Temperature kernel (tint = 0) on orange (1.0, 0.45, 0.15).
+    let tt = hue_shift / 100.0;
+    let warm = vec3<f32>(1.0 + tt * 0.35, 0.45, 0.15 - tt * 0.35);
     let rgb = vec3<f32>(1.0) - (vec3<f32>(1.0) - color.rgb) * (vec3<f32>(1.0) - clamp(warm, vec3<f32>(0.0), vec3<f32>(1.0)) * m);
     return vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)), color.a);
 }"#
@@ -827,7 +878,9 @@ pub fn stock_solid() -> ColorFilter {
         "stock_solid",
         r#"fn fx_stock_solid(uv: vec2<f32>, color: vec4<f32>, fill: vec3<f32>, opacity: f32) -> vec4<f32> {
     let op = clamp(opacity / 100.0, 0.0, 1.0);
-    return vec4<f32>(fill * op, op);
+    // Straight-space chain: straight fill + coverage; the write-back
+    // re-premultiplies (CPU stores fill * op the same way).
+    return vec4<f32>(fill, op);
 }"#
     )
 }
@@ -867,7 +920,9 @@ pub fn stock_grid() -> ColorFilter {
     color_filter!(
         "stock_grid",
         r#"fn fx_stock_grid(uv: vec2<f32>, color: vec4<f32>, fill: vec3<f32>, size: f32, line: f32, opacity: f32, res: vec2<f32>) -> vec4<f32> {
-    let p = uv * res;
+    // Texel-corner convention (uv * res - 0.5) so cell edges land on the
+    // same pixels as the CPU kernel's integer lattice.
+    let p = uv * res - vec2<f32>(0.5);
     let sz = clamp(size, 2.0, 256.0);
     let mx = p.x - floor(p.x / sz) * sz;
     let my = p.y - floor(p.y / sz) * sz;
@@ -875,29 +930,35 @@ pub fn stock_grid() -> ColorFilter {
     let fy = min(my, sz - my);
     let op = clamp(opacity / 100.0, 0.0, 1.0);
     if (fx < clamp(line, 1.0, 32.0) || fy < clamp(line, 1.0, 32.0)) {
-        return vec4<f32>(fill * op, op);
+        return vec4<f32>(fill, op);
     }
     return vec4<f32>(0.0, 0.0, 0.0, 0.0);
 }"#
     )
 }
 
-/// Circle / rect / ring shape generator.
+/// Circle / rect / ring shape generator (mirrors `k_shapes`: pixel-space
+/// SDF about the frame center, radius from the frame's min dimension).
 pub fn stock_shapes() -> ColorFilter {
     color_filter!(
         "stock_shapes",
-        r#"fn fx_stock_shapes(uv: vec2<f32>, color: vec4<f32>, fill: vec3<f32>, shape: f32, size: f32, softness: f32, opacity: f32) -> vec4<f32> {
-    let p = abs(uv - 0.5) * 2.0;
-    let r = clamp(size / 100.0, 0.0, 1.0);
-    let feather = max(clamp(softness / 100.0, 0.0, 1.0) * r * 0.5 + 0.01, 0.01);
+        r#"fn fx_stock_shapes(uv: vec2<f32>, color: vec4<f32>, fill: vec3<f32>, shape: f32, size: f32, softness: f32, opacity: f32, res: vec2<f32>) -> vec4<f32> {
+    let op = clamp(opacity / 100.0, 0.0, 1.0);
+    let r = clamp(size, 0.0, 100.0) / 100.0 * min(res.x, res.y) * 0.5;
+    let feather = max(clamp(softness, 0.0, 100.0) / 100.0 * r * 0.5 + 0.5, 0.5);
+    // Texel-corner lattice like the CPU kernel's integer pixel coords.
+    let p = uv * res - vec2<f32>(0.5) - res * 0.5;
+    let ax = abs(p.x);
+    let ay = abs(p.y);
+    let si = i32(floor(shape + 0.5));
     var d = length(p) - r;
-    if (shape > 0.5 && shape < 1.5) {
-        d = max(p.x, p.y) - r;
-    } else if (shape >= 1.5) {
+    if (si == 1) {
+        d = max(ax, ay) - r;
+    } else if (si == 2) {
         d = abs(length(p) - r * 0.6) - r * 0.18;
     }
-    let a = clamp((feather - d) / (2.0 * feather), 0.0, 1.0) * clamp(opacity / 100.0, 0.0, 1.0);
-    return vec4<f32>(fill * a, a);
+    let a = clamp((feather - d) / (2.0 * feather), 0.0, 1.0) * op;
+    return vec4<f32>(fill, a);
 }"#
     )
 }
@@ -985,6 +1046,9 @@ fn fx_stock_saber(
     evo_in: f32,
     intensity_norm: f32,
     blend_mode: f32,
+    core_col: vec3<f32>,
+    inner_col: vec3<f32>,
+    outer_col: vec3<f32>,
     time_s: f32,
     res: vec2<f32>
 ) -> vec4<f32> {
@@ -1024,10 +1088,7 @@ fn fx_stock_saber(
     let k = max(intensity * fl, 0.0);
 
     let falloff_t = clamp(halo / max(g, 0.001), 0.0, 1.0);
-    let inner_c = vec3<f32>(0.4, 0.7, 1.0);
-    let outer_c = vec3<f32>(0.1, 0.2, 1.0);
-    let glow_col = mix(inner_c, outer_c, falloff_t);
-    let core_col = vec3<f32>(1.0, 1.0, 1.0);
+    let glow_col = mix(inner_col, outer_col, falloff_t);
 
     let add_rgb = (core_col * c + glow_col * halo) * k;
     let saber_alpha = clamp((c + halo * 0.8) * k, 0.0, 1.0);
@@ -1642,19 +1703,23 @@ fn fx_oil_paint(uv: vec2<f32>, color: vec4<f32>, radius: f32, amount: f32, res: 
 /// Stock Card 3D (mirrors `k_card_3d` via the shared plan): inverse
 /// homography in uniforms (row-major, baked by `card_3d_plan`) with a
 /// TRUE projective divide — not the bilinear approximation the corner
-/// pin twin uses.
+/// pin twin uses. The projection evaluates at the texel-corner lattice
+/// (`uv * res - 0.5`, the CPU `remap` convention): perspective slopes
+/// would otherwise shift edges by the center/corner half-texel.
 pub fn stock_card_3d_resample() -> ColorFilter {
     color_filter!(
         "stock_card_3d_resample",
         r#"fn fx_stock_card_3d_c(uv: vec2<f32>, color: vec4<f32>, r0: vec3<f32>, r1: vec3<f32>, r2: vec3<f32>, res: vec2<f32>) -> vec4<f32> {
-    let w = r2.x * uv.x + r2.y * uv.y + r2.z;
+    let X = uv * res - vec2<f32>(0.5);
+    let u = X / res;
+    let w = r2.x * u.x + r2.y * u.y + r2.z;
     if (abs(w) < 0.000001) {
         return vec4<f32>(0.0);
     }
     let s = vec2<f32>(
-        (r0.x * uv.x + r0.y * uv.y + r0.z) / w,
-        (r1.x * uv.x + r1.y * uv.y + r1.z) / w
-    ) * res - vec2<f32>(0.5);
+        (r0.x * u.x + r0.y * u.y + r0.z) / w,
+        (r1.x * u.x + r1.y * u.y + r1.z) / w
+    ) * res;
     return fx_sample_cpu(s, res);
 }"#
     )
@@ -1842,7 +1907,76 @@ pub fn stock_offset_resample() -> ColorFilter {
     )
 }
 
-/// Stock pixelate (mirrors `k_pixelate` without color quantization).
+/// Stock corner-pin project (mirrors `k_corner_pin` via the shared plan):
+/// inverse homography in uniforms (row-major, baked by `corner_pin_plan`)
+/// with a true perspective divide. Evaluates at the texel-corner lattice
+/// like the CPU `remap` loop (see the Card3D twin note).
+pub fn stock_corner_pin_resample() -> ColorFilter {
+    color_filter!(
+        "stock_corner_pin_resample",
+        r#"fn fx_stock_corner_pin_c(uv: vec2<f32>, color: vec4<f32>, r0: vec3<f32>, r1: vec3<f32>, r2: vec3<f32>, res: vec2<f32>) -> vec4<f32> {
+    let X = uv * res - vec2<f32>(0.5);
+    let u = X / res;
+    let w = r2.x * u.x + r2.y * u.y + r2.z;
+    if (abs(w) < 0.000001) {
+        return vec4<f32>(0.0);
+    }
+    let s = vec2<f32>(
+        (r0.x * u.x + r0.y * u.y + r0.z) / w,
+        (r1.x * u.x + r1.y * u.y + r1.z) / w
+    ) * res;
+    return fx_sample_cpu(s, res);
+}"#
+    )
+}
+
+/// Stock reframe (mirrors `k_reframe`): zoom-about-center with offset, in
+/// pixel space so non-square frames match the CPU kernel exactly.
+pub fn stock_reframe_resample() -> ColorFilter {
+    color_filter!(
+        "stock_reframe_resample",
+        r#"fn fx_stock_reframe_c(uv: vec2<f32>, color: vec4<f32>, scale: f32, ox: f32, oy: f32, res: vec2<f32>) -> vec4<f32> {
+    let sc = max(scale / 100.0, 0.1);
+    if (abs(sc - 1.0) < 0.001 && abs(ox / 100.0) < 0.001 && abs(oy / 100.0) < 0.001) {
+        return color;
+    }
+    let X = uv * res - vec2<f32>(0.5);
+    let cx = res.x * (0.5 + ox / 100.0 * 0.5);
+    let cy = res.y * (0.5 + oy / 100.0 * 0.5);
+    let s = vec2<f32>(cx + (X.x - res.x * 0.5) / sc, cy + (X.y - res.y * 0.5) / sc);
+    return fx_sample_cpu(s, res);
+}"#
+    )
+}
+
+/// Stock liquify (mirrors `k_liquify`): radial push + twirl about a center
+/// in pixel space, so the falloff stays circular on any frame.
+pub fn stock_liquify_resample() -> ColorFilter {
+    color_filter!(
+        "stock_liquify_resample",
+        r#"fn fx_stock_liquify_c(uv: vec2<f32>, color: vec4<f32>, pc: vec2<f32>, radius: f32, strength: f32, twirl: f32, res: vec2<f32>) -> vec4<f32> {
+    let stren = strength / 100.0;
+    let tw = radians(twirl);
+    if (abs(stren) < 0.001 && abs(tw) < 0.001) {
+        return color;
+    }
+    let X = uv * res - vec2<f32>(0.5);
+    let c = vec2<f32>(res.x * (0.5 + pc.x / 100.0 * 0.5), res.y * (0.5 + pc.y / 100.0 * 0.5));
+    let m = min(res.x, res.y) * 0.5;
+    let rmax = clamp(radius / 100.0, 0.02, 1.0) * m;
+    let d = X - c;
+    let r = length(d);
+    if (r > rmax || r < 0.0001) {
+        return color;
+    }
+    let fall = 1.0 - r / rmax;
+    let push = stren * fall * fall * m * 0.4;
+    let th = atan2(d.y, d.x) + tw * fall;
+    let nr = max(r - push, 0.0);
+    return fx_sample_cpu(c + nr * vec2<f32>(cos(th), sin(th)), res);
+}"#
+    )
+}
 pub fn stock_pixelate_resample() -> ColorFilter {
     color_filter!(
         "stock_pixelate_resample",
@@ -1901,6 +2035,9 @@ pub fn resample_filters() -> Vec<ColorFilter> {
         stock_cartoon_resample(),
         stock_halftone_resample(),
         stock_card_3d_resample(),
+        stock_corner_pin_resample(),
+        stock_reframe_resample(),
+        stock_liquify_resample(),
         cel_shade_resample(),
         oil_paint_resample(),
     ]
@@ -2076,6 +2213,9 @@ mod tests {
             ("stock_cartoon_resample", "fx_stock_cartoon_c(uv, color, u.params[0].x, u.params[0].y, RES)"),
             ("stock_halftone_resample", "fx_stock_halftone_c(uv, color, u.params[0].x, u.params[0].y, RES)"),
             ("stock_card_3d_resample", "fx_stock_card_3d_c(uv, color, u.params[0].xyz, u.params[1].xyz, u.params[2].xyz, RES)"),
+            ("stock_corner_pin_resample", "fx_stock_corner_pin_c(uv, color, u.params[0].xyz, u.params[1].xyz, u.params[2].xyz, RES)"),
+            ("stock_reframe_resample", "fx_stock_reframe_c(uv, color, u.params[0].x, u.params[0].y, u.params[0].z, RES)"),
+            ("stock_liquify_resample", "fx_stock_liquify_c(uv, color, u.params[0].xy, u.params[0].z, u.params[0].w, u.params[1].x, RES)"),
             ("cel_shade_resample", "fx_cel_shade(uv, color, u.params[0].x, u.params[0].y, RES)"),
             ("oil_paint_resample", "fx_oil_paint(uv, color, u.params[0].x, u.params[0].y, RES)"),
         ];

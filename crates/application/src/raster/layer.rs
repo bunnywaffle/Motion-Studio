@@ -2749,6 +2749,26 @@ mod tests {
                 params: vec![50.0, 15.0, 10.0],
                 colors: Vec::new(),
             }),
+            fx("curves", EvaluatedEffectType::Stock {
+                plugin: StockPlugin::Curves,
+                params: vec![20.0, -10.0, 0.0, 15.0, -5.0],
+                colors: Vec::new(),
+            }),
+            fx("balance", EvaluatedEffectType::Stock {
+                plugin: StockPlugin::ColorBalance,
+                params: vec![12.0, -8.0, 5.0, -6.0, 10.0, -4.0, 8.0, -12.0, 6.0],
+                colors: Vec::new(),
+            }),
+            fx("wheels", EvaluatedEffectType::Stock {
+                plugin: StockPlugin::ColorWheels,
+                params: vec![10.0, -5.0, 8.0],
+                colors: Vec::new(),
+            }),
+            fx("leak", EvaluatedEffectType::Stock {
+                plugin: StockPlugin::LightLeak,
+                params: vec![40.0, -20.0, 15.0],
+                colors: Vec::new(),
+            }),
         ];
         let worst = gpu_parity_worst(&gpu_parity_base(), &effects);
         // Eight passes × u8 inter-pass rounding, steepened by key-ramp
@@ -2910,5 +2930,73 @@ mod tests {
         // No cel here: tone-band boundaries flip on u8-quantized
         // gradients (0.13 measured), so it stays CPU like halftone. Its
         // CPU kernel is covered by the raster unit tests.
+    }
+
+    #[test]
+    fn gpu_projective_batch_matches_cpu_within_tolerance() {
+        use compositor::{EvaluatedEffect, EvaluatedEffectType};
+        if !crate::raster::buffer::gpu_accelerated() {
+            return;
+        }
+        let stock = |plugin: StockPlugin, params: Vec<f32>| EvaluatedEffect {
+            id: format!("fx_{plugin:?}"),
+            name: format!("{plugin:?}"),
+            enabled: true,
+            effect_type: EvaluatedEffectType::Stock { plugin, params, colors: Vec::new() },
+        };
+        // Corner pin through the shared homography plan, reframe zoom +
+        // offset, liquify push + twirl: all pixel-space mirrors of the CPU
+        // kernels (trig precision only, like the wave batch).
+        for (plugin, params) in [
+            (StockPlugin::CornerPin, vec![0.05, 0.02, 0.95, 0.0, 1.0, 1.0, 0.0, 0.98]),
+            (StockPlugin::Reframe, vec![150.0, 10.0, -5.0]),
+            (StockPlugin::Liquify, vec![10.0, -10.0, 60.0, 40.0, 30.0]),
+        ] {
+            let single = vec![stock(plugin, params)];
+            let w = gpu_parity_worst(&gpu_parity_base(), &single);
+            assert!(w < 0.03, "GPU {plugin:?} must match CPU within rounding: {w}");
+        }
+        // Degenerate quad stays on the exact CPU path (Declined, not wrong).
+        let degenerate = vec![stock(StockPlugin::CornerPin, vec![0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5])];
+        let mut cpu = gpu_parity_base();
+        let ctx = RasterFx { time_s: 0.0, frame: 0, res_w: 64.0, res_h: 64.0, duration_s: 0.0, playing: false };
+        apply_layer_fx(&mut cpu, 64.0, 64.0, &degenerate, &ctx, false);
+        let mut gpu = gpu_parity_base();
+        apply_layer_fx(&mut gpu, 64.0, 64.0, &degenerate, &ctx, true);
+        let mut worst = 0.0f32;
+        for (c, g) in cpu.px.iter().zip(gpu.px.iter()) {
+            for (cc, gg) in [c.r, c.g, c.b, c.a].into_iter().zip([g.r, g.g, g.b, g.a]) {
+                worst = worst.max((cc - gg).abs());
+            }
+        }
+        assert!(worst < 1e-5, "degenerate corner pin must fall back to CPU exactly: {worst}");
+    }
+
+    #[test]
+    fn gpu_generator_batch_matches_cpu_within_tolerance() {
+        use compositor::{EvaluatedEffect, EvaluatedEffectType};
+        if !crate::raster::buffer::gpu_accelerated() {
+            return;
+        }
+        let gen = |plugin: StockPlugin, params: Vec<f32>, colors: Vec<Color>| EvaluatedEffect {
+            id: format!("fx_{plugin:?}"),
+            name: format!("{plugin:?}"),
+            enabled: true,
+            effect_type: EvaluatedEffectType::Stock { plugin, params, colors },
+        };
+        // Generators overwrite the buffer (order-independent), so assert
+        // each singly; this also exercises uniform color slots with
+        // explicit colors instead of descriptor defaults.
+        for (plugin, params, colors) in [
+            (StockPlugin::Solid, vec![80.0], vec![Color::rgba(0.2, 0.5, 0.9, 1.0)]),
+            (StockPlugin::GridGen, vec![16.0, 2.0, 90.0], vec![Color::rgba(1.0, 0.8, 0.2, 1.0)]),
+            (StockPlugin::Shapes, vec![0.0, 50.0, 20.0, 100.0], vec![Color::rgba(0.3, 0.9, 0.4, 1.0)]),
+            (StockPlugin::Shapes, vec![1.0, 60.0, 0.0, 100.0], vec![Color::rgba(0.9, 0.2, 0.2, 1.0)]),
+            (StockPlugin::Shapes, vec![2.0, 70.0, 30.0, 100.0], vec![Color::rgba(0.9, 0.9, 0.2, 1.0)]),
+        ] {
+            let single = vec![gen(plugin, params, colors)];
+            let w = gpu_parity_worst(&gpu_parity_base(), &single);
+            assert!(w < 0.02, "GPU {plugin:?} must match CPU within u8 rounding: {w}");
+        }
     }
 }

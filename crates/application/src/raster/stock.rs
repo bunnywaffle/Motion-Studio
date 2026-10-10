@@ -1694,45 +1694,29 @@ fn homography(dst: [(f32, f32); 4]) -> Option<[f32; 9]> {
 }
 
 fn k_corner_pin(buf: &mut FloatBuf, p: &[f32], plugin: StockPlugin) {
-    let q = |i: usize| stock_p(plugin, p, i).clamp(0.0, 1.0);
-    let quad = [(q(0), q(1)), (q(2), q(3)), (q(4), q(5)), (q(6), q(7))];
-    // Identity quad -> pass through.
-    let ident = quad[0] == (0.0, 0.0) && quad[1] == (1.0, 0.0) && quad[2] == (1.0, 1.0) && quad[3] == (0.0, 1.0);
-    if ident {
-        return;
-    }
-    // Map OUTPUT unit coords back to SOURCE unit coords: invert the pin.
-    // H maps src-unit -> dst-unit; invert once, then per-pixel.
-    let h = match homography(quad) {
-        Some(h) => h,
-        None => return,
-    };
-    let det = h[0] * (h[4] - h[5] * h[7]) - h[1] * (h[3] - h[5] * h[6]) + h[2] * (h[3] * h[7] - h[4] * h[6]);
-    if det.abs() < 1e-9 {
-        return;
-    }
-    let id = 1.0 / det;
-    let inv = [
-        (h[4] - h[5] * h[7]) * id,
-        (h[2] * h[7] - h[1]) * id,
-        (h[1] * h[5] - h[2] * h[4]) * id,
-        (h[5] * h[6] - h[3]) * id,
-        (h[0] - h[2] * h[6]) * id,
-        (h[2] * h[3] - h[0] * h[5]) * id,
-        (h[3] * h[7] - h[4] * h[6]) * id,
-        (h[1] * h[6] - h[0] * h[7]) * id,
-        (h[0] * h[4] - h[1] * h[3]) * id,
-    ];
-    remap(buf, |x, y, w, hgt| {
-        let (ux, uy) = (x / w.max(1.0), y / hgt.max(1.0));
-        let ww = inv[6] * ux + inv[7] * uy + inv[8];
-        if ww.abs() < 1e-6 {
-            return (-10.0, -10.0);
+    // Shared solve with the GPU twin (`corner_pin_plan`): one matrix for
+    // both paths, parity by construction.
+    let vals = compositor::fx::stock_params_resolved(plugin, p);
+    match compositor::fx::corner_pin_plan(&vals) {
+        compositor::fx::Card3dPlan::Identity | compositor::fx::Card3dPlan::Keep => {}
+        compositor::fx::Card3dPlan::Clear => {
+            for px in buf.px.iter_mut() {
+                *px = Px::clear();
+            }
         }
-        let sx = (inv[0] * ux + inv[1] * uy + inv[2]) / ww * w;
-        let sy = (inv[3] * ux + inv[4] * uy + inv[5]) / ww * hgt;
-        (sx, sy)
-    });
+        compositor::fx::Card3dPlan::Project(inv) => {
+            remap(buf, |x, y, w, hgt| {
+                let (ux, uy) = (x / w.max(1.0), y / hgt.max(1.0));
+                let ww = inv[6] * ux + inv[7] * uy + inv[8];
+                if ww.abs() < 1e-6 {
+                    return (-10.0, -10.0);
+                }
+                let sx = (inv[0] * ux + inv[1] * uy + inv[2]) / ww * w;
+                let sy = (inv[3] * ux + inv[4] * uy + inv[5]) / ww * hgt;
+                (sx, sy)
+            });
+        }
+    }
 }
 
 /// Card 3D: rotate the frame rectangle about its pivot in 3D (rx then ry)

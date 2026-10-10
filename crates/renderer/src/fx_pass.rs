@@ -11,23 +11,29 @@ use crate::device::{GpuContext, RenderTarget};
 use bytemuck::{Pod, Zeroable};
 use project::StockPlugin;
 
-/// Uniform block shared by every stock WGSL twin: 16 param floats, then
-/// `(time_s, width_px, height_px, seed)`.
+/// Uniform block shared by every stock WGSL twin: 16 param floats, 4 RGBA
+/// color slots (stock `colors`, descriptor defaults when the project
+/// predates the slot), then `(time_s, width_px, height_px, seed)`.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 pub struct FxUniforms {
     pub params: [[f32; 4]; 4],
+    pub colors: [[f32; 4]; 4],
     pub misc: [f32; 4],
 }
 
 impl FxUniforms {
-    /// Pack evaluated scalar params + frame context into the block.
-    pub fn pack(params: &[f32], time_s: f32, w: f32, h: f32, seed: f32) -> Self {
+    /// Pack evaluated scalar params + color slots + frame context.
+    pub fn pack(params: &[f32], colors: &[[f32; 4]], time_s: f32, w: f32, h: f32, seed: f32) -> Self {
         let mut p = [[0.0f32; 4]; 4];
         for (i, v) in params.iter().take(16).enumerate() {
             p[i / 4][i % 4] = *v;
         }
-        Self { params: p, misc: [time_s, w, h, seed] }
+        let mut c = [[0.0f32; 4]; 4];
+        for (i, v) in colors.iter().take(4).enumerate() {
+            c[i] = *v;
+        }
+        Self { params: p, colors: c, misc: [time_s, w, h, seed] }
     }
 }
 
@@ -56,6 +62,7 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
 pub const FX_BINDINGS_WGSL: &str = r#"
 struct FxUniforms {
     params: array<vec4<f32>, 4>,
+    colors: array<vec4<f32>, 4>,
     misc: vec4<f32>,
 };
 
@@ -334,9 +341,59 @@ impl FxPass {
                 "fx_stock_card_3d_c(uv, color, u.params[0].xyz, u.params[1].xyz, u.params[2].xyz, RES)",
                 true,
             ),
+            StockPlugin::CornerPin => (
+                ef::stock_corner_pin_resample().wgsl,
+                "fx_stock_corner_pin_c(uv, color, u.params[0].xyz, u.params[1].xyz, u.params[2].xyz, RES)",
+                true,
+            ),
+            StockPlugin::Reframe => (
+                ef::stock_reframe_resample().wgsl,
+                "fx_stock_reframe_c(uv, color, u.params[0].x, u.params[0].y, u.params[0].z, RES)",
+                true,
+            ),
+            StockPlugin::Liquify => (
+                ef::stock_liquify_resample().wgsl,
+                "fx_stock_liquify_c(uv, color, u.params[0].xy, u.params[0].z, u.params[0].w, u.params[1].x, RES)",
+                true,
+            ),
+            StockPlugin::Curves => (
+                ef::stock_curves().wgsl,
+                "fx_stock_curves(uv, color, u.params[0].xyzw, u.params[1].x)",
+                false,
+            ),
+            StockPlugin::ColorBalance => (
+                ef::stock_color_balance().wgsl,
+                "fx_stock_color_balance(uv, color, vec3<f32>(u.params[0].x, u.params[0].y, u.params[0].z), vec3<f32>(u.params[0].w, u.params[1].x, u.params[1].y), vec3<f32>(u.params[1].z, u.params[1].w, u.params[2].x))",
+                false,
+            ),
+            StockPlugin::ColorWheels => (
+                ef::stock_color_wheels().wgsl,
+                "fx_stock_color_wheels(uv, color, u.params[0].xyz)",
+                false,
+            ),
+            StockPlugin::LightLeak => (
+                ef::stock_light_leak().wgsl,
+                "fx_stock_light_leak(uv, color, u.params[0].x, u.params[0].y, u.params[0].z, RES)",
+                false,
+            ),
+            StockPlugin::Solid => (
+                ef::stock_solid().wgsl,
+                "fx_stock_solid(uv, color, u.colors[0].rgb, u.params[0].x)",
+                false,
+            ),
+            StockPlugin::GridGen => (
+                ef::stock_grid().wgsl,
+                "fx_stock_grid(uv, color, u.colors[0].rgb, u.params[0].x, u.params[0].y, u.params[0].z, RES)",
+                false,
+            ),
+            StockPlugin::Shapes => (
+                ef::stock_shapes().wgsl,
+                "fx_stock_shapes(uv, color, u.colors[0].rgb, u.params[0].x, u.params[0].y, u.params[0].z, u.params[0].w, RES)",
+                false,
+            ),
             StockPlugin::Saber => (
                 ef::stock_saber().wgsl,
-                "fx_stock_saber(uv, color, u.params[0].x, u.params[0].y, u.params[1].x, u.params[1].y, u.params[1].z, u.params[1].w, u.params[2].x, u.params[2].y, u.params[2].z, u.params[2].w, u.misc.x, RES)",
+                "fx_stock_saber(uv, color, u.params[0].x, u.params[0].y, u.params[1].x, u.params[1].y, u.params[1].z, u.params[1].w, u.params[2].x, u.params[2].y, u.params[2].z, u.params[2].w, u.colors[0].rgb, u.colors[1].rgb, u.colors[2].rgb, u.misc.x, RES)",
                 false,
             ),
             _ => {
@@ -623,6 +680,7 @@ impl FxMergePass {
         const BINDINGS: &str = r#"
 struct FxUniforms {
     params: array<vec4<f32>, 4>,
+    colors: array<vec4<f32>, 4>,
     misc: vec4<f32>,
 };
 
@@ -833,8 +891,11 @@ struct FxUniforms {
 /// amplify u8 rounding through cascades), and Halftone (luminance-
 /// thresholded binary dots flip on u8-quantized smooth gradients — the
 /// twin is exact, but the chain cannot bound it); those stay on the exact
-/// CPU path, as does export.
-pub const CHAIN_SAFE_STOCK: [StockPlugin; 24] = [
+/// CPU path, as does export. Saber is excluded too: its twin is a fixed
+/// beam generator while the CPU kernel is mask-driven with a blur-based
+/// glow, so the two cannot agree — it needs a multi-stage (blur + merge)
+/// pass before it can rejoin this set.
+pub const CHAIN_SAFE_STOCK: [StockPlugin; 33] = [
     StockPlugin::Posterize,
     StockPlugin::TemperatureTint,
     StockPlugin::SpillSuppress,
@@ -858,7 +919,16 @@ pub const CHAIN_SAFE_STOCK: [StockPlugin; 24] = [
     StockPlugin::EdgeDetect,
     StockPlugin::Cartoon,
     StockPlugin::Card3d,
-    StockPlugin::Saber,
+    StockPlugin::Curves,
+    StockPlugin::ColorBalance,
+    StockPlugin::ColorWheels,
+    StockPlugin::LightLeak,
+    StockPlugin::Solid,
+    StockPlugin::GridGen,
+    StockPlugin::Shapes,
+    StockPlugin::CornerPin,
+    StockPlugin::Reframe,
+    StockPlugin::Liquify,
 ];
 
 /// Built-in (non-stock) evaluated effects whose WGSL twin reproduces the
@@ -965,10 +1035,12 @@ mod tests {
 
     #[test]
     fn uniforms_pack_roundtrip() {
-        let u = FxUniforms::pack(&[1.0, 2.0, 3.0], 0.5, 1920.0, 1080.0, 7.0);
+        let u = FxUniforms::pack(&[1.0, 2.0, 3.0], &[[1.0, 0.0, 0.0, 1.0]], 0.5, 1920.0, 1080.0, 7.0);
         assert_eq!(u.params[0], [1.0, 2.0, 3.0, 0.0]);
+        assert_eq!(u.colors[0], [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(u.colors[3], [0.0, 0.0, 0.0, 0.0]);
         assert_eq!(u.misc, [0.5, 1920.0, 1080.0, 7.0]);
-        assert_eq!(std::mem::size_of::<FxUniforms>(), 80);
+        assert_eq!(std::mem::size_of::<FxUniforms>(), 144);
     }
 
     #[test]
@@ -1037,6 +1109,17 @@ mod tests {
             S::Cartoon,
             S::Halftone,
             S::Card3d,
+            S::CornerPin,
+            S::Reframe,
+            S::Liquify,
+            S::Curves,
+            S::ColorBalance,
+            S::ColorWheels,
+            S::LightLeak,
+            S::Solid,
+            S::GridGen,
+            S::Shapes,
+            S::Saber,
         ] {
             FxPass::for_stock(&gpu, plugin, wgpu::TextureFormat::Rgba8Unorm)
                 .unwrap_or_else(|e| panic!("for_stock {plugin:?} failed: {e}"));
@@ -1073,7 +1156,7 @@ mod tests {
         let dst = RenderTarget::with_format(&gpu, 4, 4, wgpu::TextureFormat::Rgba8Unorm)
             .expect("dst target");
         src.write_texture_rgba(&gpu, &[255u8; 4 * 4 * 4]);
-        let uniforms = FxUniforms::pack(&[0.0, 50.0, 0.0, 0.0], 0.0, 4.0, 4.0, 0.0);
+        let uniforms = FxUniforms::pack(&[0.0, 50.0, 0.0, 0.0], &[], 0.0, 4.0, 4.0, 0.0);
         pass.render(&gpu, src.view(), &dst, uniforms);
         let px = dst.read_texture_to_cpu(&gpu).expect("readback");
         assert_eq!(px.len(), 4 * 4 * 4);
