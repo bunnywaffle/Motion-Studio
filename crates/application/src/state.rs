@@ -4102,6 +4102,46 @@ impl EditorState {
                 }
                 _ => None,
             },
+            // Ellipse Size row edits diameters (radii × 2).
+            "ellipse_sw" => match &layer.source {
+                LayerSource::Shape { shape_type: ShapeType::Ellipse { radius_x, .. } } => {
+                    Some(radius_x.value * 2.0)
+                }
+                _ => None,
+            },
+            "ellipse_sh" => match &layer.source {
+                LayerSource::Shape { shape_type: ShapeType::Ellipse { radius_y, .. } } => {
+                    Some(radius_y.value * 2.0)
+                }
+                _ => None,
+            },
+            "shape_dash" => match &layer.source {
+                LayerSource::Shape {
+                    shape_type:
+                        ShapeType::Rectangle { dash, .. }
+                        | ShapeType::Ellipse { dash, .. }
+                        | ShapeType::Path { dash, .. },
+                } => Some(dash.value),
+                _ => None,
+            },
+            "shape_dash_gap" => match &layer.source {
+                LayerSource::Shape {
+                    shape_type:
+                        ShapeType::Rectangle { dash_gap, .. }
+                        | ShapeType::Ellipse { dash_gap, .. }
+                        | ShapeType::Path { dash_gap, .. },
+                } => Some(dash_gap.value),
+                _ => None,
+            },
+            "shape_dash_offset" => match &layer.source {
+                LayerSource::Shape {
+                    shape_type:
+                        ShapeType::Rectangle { dash_offset, .. }
+                        | ShapeType::Ellipse { dash_offset, .. }
+                        | ShapeType::Path { dash_offset, .. },
+                } => Some(dash_offset.value),
+                _ => None,
+            },
             _ => {
                 // Shader Lab scalar (sl:) and component (slc:) keys.
                 let (rest, is_component) = match (key.strip_prefix("slc:"), key.strip_prefix("sl:")) {
@@ -4287,7 +4327,7 @@ impl EditorState {
             }
             "rect_w" | "rect_h" | "rect_cr" => {
                 if let Some(id) = self.selected_layer_id.clone() {
-                    let (w, h, cr) = {
+                    let (w, h, cr, linked) = {
                         let comp = match self.active_composition() {
                             Some(c) => c,
                             None => return false,
@@ -4298,14 +4338,23 @@ impl EditorState {
                         };
                         match &layer.source {
                             LayerSource::Shape {
-                                shape_type: ShapeType::Rectangle { width, height, corner_radius, .. },
-                            } => (width.value, height.value, corner_radius.value),
+                                shape_type: ShapeType::Rectangle { width, height, corner_radius, size_linked, .. },
+                            } => (width.value, height.value, corner_radius.value, *size_linked),
                             _ => return false,
                         }
                     };
+                    // Linked Size scales proportionally (AE-style).
                     match key {
-                        "rect_w" => self.set_layer_rect_dimensions(&id, v.max(1.0), h, cr).is_ok(),
-                        "rect_h" => self.set_layer_rect_dimensions(&id, w, v.max(1.0), cr).is_ok(),
+                        "rect_w" => {
+                            let nw = v.max(1.0);
+                            let nh = if linked && w > 0.0 { h * nw / w } else { h };
+                            self.set_layer_rect_dimensions(&id, nw, nh, cr).is_ok()
+                        }
+                        "rect_h" => {
+                            let nh = v.max(1.0);
+                            let nw = if linked && h > 0.0 { w * nh / h } else { w };
+                            self.set_layer_rect_dimensions(&id, nw, nh, cr).is_ok()
+                        }
                         _ => self.set_layer_rect_dimensions(&id, w, h, v.max(0.0)).is_ok(),
                     }
                 } else {
@@ -4314,7 +4363,7 @@ impl EditorState {
             }
             "ellipse_rx" | "ellipse_ry" => {
                 if let Some(id) = self.selected_layer_id.clone() {
-                    let (rx, ry) = {
+                    let (rx, ry, linked) = {
                         let comp = match self.active_composition() {
                             Some(c) => c,
                             None => return false,
@@ -4325,17 +4374,64 @@ impl EditorState {
                         };
                         match &layer.source {
                             LayerSource::Shape {
-                                shape_type: ShapeType::Ellipse { radius_x, radius_y, .. },
-                            } => (radius_x.value, radius_y.value),
+                                shape_type: ShapeType::Ellipse { radius_x, radius_y, size_linked, .. },
+                            } => (radius_x.value, radius_y.value, *size_linked),
                             _ => return false,
                         }
                     };
+                    // Linked Size scales proportionally (diameters stay in ratio).
                     let (nrx, nry) = if key == "ellipse_rx" {
-                        (v.max(1.0), ry)
+                        let nrx = v.max(1.0);
+                        (nrx, if linked && rx > 0.0 { ry * nrx / rx } else { ry })
                     } else {
-                        (rx, v.max(1.0))
+                        let nry = v.max(1.0);
+                        (if linked && ry > 0.0 { rx * nry / ry } else { rx }, nry)
                     };
                     self.set_layer_ellipse_radii(&id, nrx, nry).is_ok()
+                } else {
+                    false
+                }
+            }
+            // Ellipse Size row commits diameters (halved into radii),
+            // linked proportionally like rectangles.
+            "ellipse_sw" | "ellipse_sh" => {
+                if let Some(id) = self.selected_layer_id.clone() {
+                    let (rx, ry, linked) = {
+                        let comp = match self.active_composition() {
+                            Some(c) => c,
+                            None => return false,
+                        };
+                        let layer = match comp.get_layer(&id) {
+                            Some(l) => l,
+                            None => return false,
+                        };
+                        match &layer.source {
+                            LayerSource::Shape {
+                                shape_type: ShapeType::Ellipse { radius_x, radius_y, size_linked, .. },
+                            } => (radius_x.value, radius_y.value, *size_linked),
+                            _ => return false,
+                        }
+                    };
+                    let (nrx, nry) = if key == "ellipse_sw" {
+                        let nrx = (v.max(2.0)) / 2.0;
+                        (nrx, if linked && rx > 0.0 { ry * nrx / rx } else { ry })
+                    } else {
+                        let nry = (v.max(2.0)) / 2.0;
+                        (if linked && ry > 0.0 { rx * nry / ry } else { rx }, nry)
+                    };
+                    self.set_layer_ellipse_radii(&id, nrx, nry).is_ok()
+                } else {
+                    false
+                }
+            }
+            "shape_dash" | "shape_dash_gap" | "shape_dash_offset" => {
+                if let Some(id) = self.selected_layer_id.clone() {
+                    let field = match key {
+                        "shape_dash" => "dash",
+                        "shape_dash_gap" => "dash_gap",
+                        _ => "dash_offset",
+                    };
+                    self.set_layer_shape_dash(&id, field, v.max(0.0)).is_ok()
                 } else {
                     false
                 }
@@ -4747,9 +4843,124 @@ impl EditorState {
         }
     }
 
-    /// Mutable access to a layer's fill-gradient slot by picker key:
+    /// Set a shape layer's dash pattern field ("dash" | "dash_gap" |
+    /// "dash_offset") in px, clamped ≥ 0 (Rectangle, Ellipse, Path).
+    pub fn set_layer_shape_dash(&mut self, layer_id: &str, field: &str, value: f32) -> Result<(), String> {
+        self.checkpoint();
+        let current_tc = self.clock.timecode();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let shape = match &mut layer.source {
+            LayerSource::Shape { shape_type } => shape_type,
+            _ => return Err("Not a shape layer".to_string()),
+        };
+        let prop = match (shape, field.to_lowercase().as_str()) {
+            (ShapeType::Rectangle { dash, .. }, "dash")
+            | (ShapeType::Ellipse { dash, .. }, "dash")
+            | (ShapeType::Path { dash, .. }, "dash") => dash,
+            (ShapeType::Rectangle { dash_gap, .. }, "dash_gap")
+            | (ShapeType::Ellipse { dash_gap, .. }, "dash_gap")
+            | (ShapeType::Path { dash_gap, .. }, "dash_gap") => dash_gap,
+            (ShapeType::Rectangle { dash_offset, .. }, "dash_offset")
+            | (ShapeType::Ellipse { dash_offset, .. }, "dash_offset")
+            | (ShapeType::Path { dash_offset, .. }, "dash_offset") => dash_offset,
+            _ => return Err(format!("Unknown shape dash field {field}")),
+        };
+        prop.set_value(value.max(0.0));
+        if prop.is_animated() {
+            prop.add_keyframe(Keyframe::new(current_tc, value.max(0.0)));
+        }
+        Ok(())
+    }
+
+    /// Set a shape layer's line cap ("butt" | "round" | "square";
+    /// Rectangle, Ellipse, Path). Unknown values fall back to round.
+    pub fn set_layer_shape_line_cap(&mut self, layer_id: &str, value: &str) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let clean = match value.to_lowercase().as_str() {
+            "butt" => "butt",
+            "square" => "square",
+            _ => "round",
+        }
+        .to_string();
+        match &mut layer.source {
+            LayerSource::Shape {
+                shape_type:
+                    ShapeType::Rectangle { line_cap, .. }
+                    | ShapeType::Ellipse { line_cap, .. }
+                    | ShapeType::Path { line_cap, .. },
+            } => {
+                *line_cap = clean;
+                Ok(())
+            }
+            _ => Err("Not a shape layer".to_string()),
+        }
+    }
+
+    /// Set a shape layer's line join ("miter" | "round" | "bevel";
+    /// Rectangle, Ellipse, Path). Unknown values fall back to round.
+    pub fn set_layer_shape_line_join(&mut self, layer_id: &str, value: &str) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let clean = match value.to_lowercase().as_str() {
+            "miter" => "miter",
+            "bevel" => "bevel",
+            _ => "round",
+        }
+        .to_string();
+        match &mut layer.source {
+            LayerSource::Shape {
+                shape_type:
+                    ShapeType::Rectangle { line_join, .. }
+                    | ShapeType::Ellipse { line_join, .. }
+                    | ShapeType::Path { line_join, .. },
+            } => {
+                *line_join = clean;
+                Ok(())
+            }
+            _ => Err("Not a shape layer".to_string()),
+        }
+    }
+
+    /// Toggle linked Size editing on a Rectangle/Ellipse shape layer.
+    pub fn set_layer_shape_size_linked(&mut self, layer_id: &str, linked: bool) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        match &mut layer.source {
+            LayerSource::Shape {
+                shape_type:
+                    ShapeType::Rectangle { size_linked, .. }
+                    | ShapeType::Ellipse { size_linked, .. },
+            } => {
+                *size_linked = linked;
+                Ok(())
+            }
+            _ => Err("Not a rectangle/ellipse shape layer".to_string()),
+        }
+    }
     /// `"text_fill"` / `"text_stroke"` (Text), `"shape_fill"` (Shape),
     /// `"solid_color"` (Solid). Errors when the key doesn't fit the source.
+    /// Mutable access to a layer's fill-gradient slot by picker key:
     fn fill_gradient_slot_mut<'a>(
         layer: &'a mut Layer,
         key: &str,
@@ -5952,6 +6163,26 @@ impl EditorState {
                 if let LayerSource::Shape { shape_type: project::ShapeType::Ellipse { radius_y, .. } } = &mut layer.source {
                     if radius_y.is_animated() { radius_y.clear_keyframes(); }
                     else { let val = radius_y.value; radius_y.add_keyframe(Keyframe::new(current_tc, val)); }
+                }
+            }
+            "shape.dash" | "shape.dash_gap" | "shape.dash_offset" => {
+                if let LayerSource::Shape { shape_type } = &mut layer.source {
+                    let prop = match (shape_type, prop_path) {
+                        (project::ShapeType::Rectangle { dash, .. }, "shape.dash")
+                        | (project::ShapeType::Ellipse { dash, .. }, "shape.dash")
+                        | (project::ShapeType::Path { dash, .. }, "shape.dash") => Some(dash),
+                        (project::ShapeType::Rectangle { dash_gap, .. }, "shape.dash_gap")
+                        | (project::ShapeType::Ellipse { dash_gap, .. }, "shape.dash_gap")
+                        | (project::ShapeType::Path { dash_gap, .. }, "shape.dash_gap") => Some(dash_gap),
+                        (project::ShapeType::Rectangle { dash_offset, .. }, "shape.dash_offset")
+                        | (project::ShapeType::Ellipse { dash_offset, .. }, "shape.dash_offset")
+                        | (project::ShapeType::Path { dash_offset, .. }, "shape.dash_offset") => Some(dash_offset),
+                        _ => None,
+                    };
+                    if let Some(p) = prop {
+                        if p.is_animated() { p.clear_keyframes(); }
+                        else { let val = p.value; p.add_keyframe(Keyframe::new(current_tc, val)); }
+                    }
                 }
             }
             _ => {
@@ -8649,10 +8880,16 @@ impl EditorState {
                 width: Property::new("Width", width),
                 height: Property::new("Height", height),
                 corner_radius: Property::new("Corner Radius", 0.0),
+                size_linked: true,
                 fill: Property::new("Fill", fill),
                 fill_gradient: None,
                 stroke: Property::new("Stroke", Color::TRANSPARENT),
                 stroke_width: Property::new("Stroke Width", 0.0),
+                line_cap: "round".to_string(),
+                line_join: "round".to_string(),
+                dash: Property::new("Dash", 0.0),
+                dash_gap: Property::new("Dash Gap", 0.0),
+                dash_offset: Property::new("Dash Offset", 0.0),
             },
             in_pt,
             out_pt,
@@ -8710,10 +8947,16 @@ impl EditorState {
             ShapeType::Ellipse {
                 radius_x: Property::new("Radius X", radius_x),
                 radius_y: Property::new("Radius Y", radius_y),
+                size_linked: true,
                 fill: Property::new("Fill", fill),
                 fill_gradient: None,
                 stroke: Property::new("Stroke", Color::TRANSPARENT),
                 stroke_width: Property::new("Stroke Width", 0.0),
+                line_cap: "round".to_string(),
+                line_join: "round".to_string(),
+                dash: Property::new("Dash", 0.0),
+                dash_gap: Property::new("Dash Gap", 0.0),
+                dash_offset: Property::new("Dash Offset", 0.0),
             },
             in_pt,
             out_pt,
@@ -8779,6 +9022,11 @@ impl EditorState {
                 fill_gradient: None,
                 stroke: Property::new("Stroke", Color::TRANSPARENT),
                 stroke_width: Property::new("Stroke Width", 0.0),
+                line_cap: "round".to_string(),
+                line_join: "round".to_string(),
+                dash: Property::new("Dash", 0.0),
+                dash_gap: Property::new("Dash Gap", 0.0),
+                dash_offset: Property::new("Dash Offset", 0.0),
             },
             in_pt,
             out_pt,
@@ -9016,6 +9264,11 @@ impl EditorState {
                 fill_gradient: None,
                 stroke: Property::new("Stroke", self.tool_shape_fill),
                 stroke_width: Property::new("Stroke Width", stroke_width),
+                line_cap: "round".to_string(),
+                line_join: "round".to_string(),
+                dash: Property::new("Dash", 0.0),
+                dash_gap: Property::new("Dash Gap", 0.0),
+                dash_offset: Property::new("Dash Offset", 0.0),
             },
             in_pt,
             out_pt,

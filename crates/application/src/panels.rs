@@ -6559,6 +6559,8 @@ pub struct PropertiesPanel {
     pub scrub_moved: bool,
     /// Collapsible section states (true = expanded, false = collapsed)
     pub source_expanded: bool,
+    /// Shape STROKE parameter group (ends/joins/trim/dash).
+    pub stroke_section_expanded: bool,
     pub transform_expanded: bool,
     pub switches_expanded: bool,
     pub effects_expanded: bool,
@@ -6743,6 +6745,7 @@ impl PropertiesPanel {
             scrub_last_x: None,
             scrub_moved: false,
             source_expanded: true,
+            stroke_section_expanded: true,
             transform_expanded: true,
             switches_expanded: false,
             effects_expanded: true,
@@ -8203,6 +8206,28 @@ fn property_keyframe_controls(
                             )
                         } else { (false, false, false) }
                     }
+                    "shape.dash" | "shape.dash_gap" | "shape.dash_offset" => {
+                        let prop = match (&layer.source, prop_path) {
+                            (LayerSource::Shape { shape_type: project::ShapeType::Rectangle { dash, .. } }, "shape.dash")
+                            | (LayerSource::Shape { shape_type: project::ShapeType::Ellipse { dash, .. } }, "shape.dash")
+                            | (LayerSource::Shape { shape_type: project::ShapeType::Path { dash, .. } }, "shape.dash") => Some(dash),
+                            (LayerSource::Shape { shape_type: project::ShapeType::Rectangle { dash_gap, .. } }, "shape.dash_gap")
+                            | (LayerSource::Shape { shape_type: project::ShapeType::Ellipse { dash_gap, .. } }, "shape.dash_gap")
+                            | (LayerSource::Shape { shape_type: project::ShapeType::Path { dash_gap, .. } }, "shape.dash_gap") => Some(dash_gap),
+                            (LayerSource::Shape { shape_type: project::ShapeType::Rectangle { dash_offset, .. } }, "shape.dash_offset")
+                            | (LayerSource::Shape { shape_type: project::ShapeType::Ellipse { dash_offset, .. } }, "shape.dash_offset")
+                            | (LayerSource::Shape { shape_type: project::ShapeType::Path { dash_offset, .. } }, "shape.dash_offset") => Some(dash_offset),
+                            _ => None,
+                        };
+                        match prop {
+                            Some(p) => (
+                                p.has_keyframe_at(&current_tc),
+                                p.previous_keyframe_time(&current_tc).is_some(),
+                                p.next_keyframe_time(&current_tc).is_some(),
+                            ),
+                            None => (false, false, false),
+                        }
+                    }
                     "text.stroke_color" => {
                         if let LayerSource::Text { ref stroke_color, .. } = layer.source {
                             (
@@ -9206,6 +9231,205 @@ fn shape_stroke_rows(
     }
     rows.push(width_row);
     rows
+}
+
+/// Cycle pill for a shape stroke enum (Stroke Ends / Stroke Joints):
+/// shows the current value, click advances to the next option.
+#[allow(clippy::too_many_arguments)]
+fn shape_enum_pill(
+    state: &Entity<EditorState>,
+    layer_id: &str,
+    id: SharedString,
+    label: &str,
+    current: &str,
+    options: &[&str],
+    set: fn(&mut EditorState, &str, &str) -> Result<(), String>,
+    cx: &App,
+) -> AnyElement {
+    let s_set = state.clone();
+    let lid = layer_id.to_string();
+    let cur = current.to_lowercase();
+    let opts: Vec<String> = options.iter().map(|s| s.to_string()).collect();
+    let pos = opts.iter().position(|o| o == &cur).unwrap_or(0);
+    let next = opts[(pos + 1) % opts.len()].clone();
+    let shown = cur.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default()
+        + cur.chars().skip(1).collect::<String>().as_str();
+    h_flex()
+        .items_center()
+        .justify_between()
+        .text_xs()
+        .border_b_1()
+        .border_color(cx.theme().border)
+        .child(div().text_color(cx.theme().muted_foreground).child(label.to_string()))
+        .child(
+            div()
+                .id(id)
+                .test_support()
+                .cursor_pointer()
+                .px_2()
+                .py_0p5()
+                .min_w(px(90.))
+                .rounded_sm()
+                .bg(cx.theme().muted)
+                .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                .text_color(cx.theme().foreground)
+                .text_center()
+                .child(shown)
+                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    s_set.update(cx, |s, cx| {
+                        let _ = set(s, &lid, &next);
+                        cx.notify();
+                    });
+                }),
+        )
+        .into_any_element()
+}
+
+/// "Add Trim Path" button for shape STROKE sections without a trim effect.
+fn add_trim_path_row(state: &Entity<EditorState>, cx: &App) -> AnyElement {
+    let s_trim = state.clone();
+    div()
+        .id("shape_trim_path_add")
+        .test_support()
+        .cursor_pointer()
+        .px_2()
+        .py_0p5()
+        .rounded_sm()
+        .bg(cx.theme().muted)
+        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+        .text_xs()
+        .text_color(cx.theme().foreground)
+        .child("Add Trim Path")
+        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+            s_trim.update(cx, |s, cx| {
+                let _ = s.add_effect_to_selected_layer(
+                    project::EffectType::trim_path(0.0, 100.0, 0.0),
+                );
+                cx.notify();
+            });
+        })
+        .into_any_element()
+}
+
+/// STROKE parameter group for shape layers (Ends / Joints / Trim /
+/// Dash): one collapsible card shared by Rectangle / Ellipse / Path.
+/// Trim rows edit the layer's Trim Path effect in place (same widgets as
+/// the Effects panel — no duplicated state); without the effect an
+/// "Add Trim Path" button shows instead.
+#[allow(clippy::too_many_arguments)]
+fn shape_stroke_section<F>(
+    state: &Entity<EditorState>,
+    panel_entity: &Entity<PropertiesPanel>,
+    layer: &project::Layer,
+    line_cap: &str,
+    line_join: &str,
+    dash: &project::Property<f32>,
+    dash_gap: &project::Property<f32>,
+    dash_offset: &project::Property<f32>,
+    expanded: bool,
+    on_toggle: F,
+    cx: &App,
+) -> AnyElement
+where
+    F: Fn(&mut App) + 'static,
+{
+    let lid = layer.id.clone();
+    let mut body = v_flex()
+        .gap_2()
+        .child(shape_enum_pill(
+            state,
+            &lid,
+            SharedString::from("shape_line_cap"),
+            "Stroke Ends",
+            line_cap,
+            &["butt", "round", "square"],
+            EditorState::set_layer_shape_line_cap,
+            cx,
+        ))
+        .child(shape_enum_pill(
+            state,
+            &lid,
+            SharedString::from("shape_line_join"),
+            "Stroke Joints",
+            line_join,
+            &["miter", "round", "bevel"],
+            EditorState::set_layer_shape_line_join,
+            cx,
+        ));
+    // Trim Start/End/Offset (bound to the Trim Path effect when present).
+    let trim = layer.effects.iter().find(|e| {
+        matches!(e.effect_type, project::EffectType::TrimPath { .. })
+    });
+    match trim {
+        Some(eff) => {
+            for (field, label) in [("start", "Trim Start"), ("end", "Trim End"), ("offset", "Trim Offset")] {
+                let (val, anim) = eff
+                    .get_param_property(field)
+                    .map(|p| (p.value, p.is_animated()))
+                    .unwrap_or((0.0, false));
+                body = body.child(crate::widgets::widget_scalar(
+                    state,
+                    panel_entity,
+                    &lid,
+                    &eff.id,
+                    field,
+                    label,
+                    format!("{val:.1}%"),
+                    1.0,
+                    100.0,
+                    anim,
+                    crate::widgets::ScalarCommit::Effect,
+                    cx,
+                ));
+            }
+        }
+        None => {
+            body = body.child(add_trim_path_row(state, cx));
+        }
+    }
+    // Dash pattern (stopwatch + scrub/type, same pipeline as geometry).
+    for (key, path, label, prop) in [
+        ("shape_dash", "shape.dash", "Dash", dash),
+        ("shape_dash_gap", "shape.dash_gap", "Dash Gap", dash_gap),
+        ("shape_dash_offset", "shape.dash_offset", "Dash Offset", dash_offset),
+    ] {
+        body = body.child(
+            h_flex()
+                .items_center()
+                .justify_between()
+                .text_xs()
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .items_center()
+                        .child(property_stopwatch(state, &lid, path, prop.is_animated(), cx))
+                        .child(div().text_color(cx.theme().muted_foreground).child(label)),
+                )
+                .child(scrub_field(
+                    SharedString::from(format!("{key}_field")),
+                    key.to_string(),
+                    format!("{:.1}", prop.value),
+                    None,
+                    None,
+                    state,
+                    panel_entity,
+                    cx,
+                    move |_| {},
+                    move |_| {},
+                )),
+        );
+    }
+    prop_section(
+        "shape_stroke_section",
+        "Stroke".to_string(),
+        IconName::Pen,
+        expanded,
+        on_toggle,
+        cx,
+        Some(body.into_any_element()),
+    )
 }
 
 /// Nested twirl-down group inside an open card (applied-effect parameter
@@ -13934,10 +14158,12 @@ impl Render for PropertiesPanel {
                             }
                             LayerSource::Shape { shape_type } => {
                                 match shape_type {
-                                    ShapeType::Rectangle { width, height, corner_radius, fill, stroke, stroke_width, .. } => {
+                                    ShapeType::Rectangle { width, height, corner_radius, fill, stroke, stroke_width, size_linked, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
                                         let w = width.value;
                                         let h = height.value;
                                         let cr = corner_radius.value;
+                                        let linked = *size_linked;
+                                        let s_link = self.state.clone();
                                         let fill_col = fill.value;
                                         let lid_fill = layer.id.clone();
                                         let shape_hex = format!(
@@ -13962,6 +14188,66 @@ impl Render for PropertiesPanel {
                                             .id("shape_properties_section")
                                             .test_support()
                                             .gap_2()
+                                            .child(
+                                                h_flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .text_xs()
+                                                    .child(
+                                                        h_flex()
+                                                            .gap_1()
+                                                            .items_center()
+                                                            .child(
+                                                                div()
+                                                                    .id("rect_size_link")
+                                                                    .test_support()
+                                                                    .cursor_pointer()
+                                                                    .p_0p5()
+                                                                    .rounded_sm()
+                                                                    .hover(|s| s.bg(cx.theme().muted))
+                                                                    .text_color(if linked { cx.theme().primary } else { cx.theme().muted_foreground })
+                                                                    .child(icon_box(IconName::Link))
+                                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                                        s_link.update(cx, |s, cx| {
+                                                                            if let Some(lid) = s.selected_layer_id.clone() {
+                                                                                let _ = s.set_layer_shape_size_linked(&lid, !linked);
+                                                                                cx.notify();
+                                                                            }
+                                                                        });
+                                                                    }),
+                                                            )
+                                                            .child(div().text_color(cx.theme().muted_foreground).child("Size")),
+                                                    )
+                                                    .child(
+                                                        h_flex()
+                                                            .gap_1()
+                                                            .items_center()
+                                                            .child(scrub_field(
+                                                                "rect_w_field",
+                                                                "rect_w".to_string(),
+                                                                format!("{w:.1}"),
+                                                                None,
+                                                                None,
+                                                                &self.state,
+                                                                &panel_entity,
+                                                                cx,
+                                                                move |_| {},
+                                                                move |_| {},
+                                                            ))
+                                                            .child(scrub_field(
+                                                                "rect_h_field",
+                                                                "rect_h".to_string(),
+                                                                format!("{h:.1}"),
+                                                                None,
+                                                                None,
+                                                                &self.state,
+                                                                &panel_entity,
+                                                                cx,
+                                                                move |_| {},
+                                                                move |_| {},
+                                                            )),
+                                                    ),
+                                            )
                                             .child(
                                                 h_flex()
                                                     .items_center()
@@ -14022,44 +14308,6 @@ impl Render for PropertiesPanel {
                                                     .items_center()
                                                     .justify_between()
                                                     .text_xs()
-                                                    .child(div().text_color(cx.theme().muted_foreground).child("Width"))
-                                                    .child(scrub_field(
-                                                        "rect_w_field",
-                                                        "rect_w".to_string(),
-                                                        format!("{w:.0} px"),
-                                                        None,
-                                                        None,
-                                                        &self.state,
-                                                        &panel_entity,
-                                                        cx,
-                                                        move |_| {},
-                                                        move |_| {},
-                                                    )),
-                                            )
-                                            .child(
-                                                h_flex()
-                                                    .items_center()
-                                                    .justify_between()
-                                                    .text_xs()
-                                                    .child(div().text_color(cx.theme().muted_foreground).child("Height"))
-                                                    .child(scrub_field(
-                                                        "rect_h_field",
-                                                        "rect_h".to_string(),
-                                                        format!("{h:.0} px"),
-                                                        None,
-                                                        None,
-                                                        &self.state,
-                                                        &panel_entity,
-                                                        cx,
-                                                        move |_| {},
-                                                        move |_| {},
-                                                    )),
-                                            )
-                                            .child(
-                                                h_flex()
-                                                    .items_center()
-                                                    .justify_between()
-                                                    .text_xs()
                                                     .child(div().text_color(cx.theme().muted_foreground).child("Corner Radius"))
                                                     .child(scrub_field(
                                                         "rect_cr_field",
@@ -14098,10 +14346,33 @@ impl Render for PropertiesPanel {
                                             Some(rect_body.into_any_element()),
                                         );
                                         props_items.push(rect_section);
+                                        {
+                                            let p_stroke = panel_entity.clone();
+                                            props_items.push(shape_stroke_section(
+                                                &self.state,
+                                                &panel_entity,
+                                                layer,
+                                                line_cap,
+                                                line_join,
+                                                dash,
+                                                dash_gap,
+                                                dash_offset,
+                                                self.stroke_section_expanded,
+                                                move |cx| {
+                                                    p_stroke.update(cx, |this, cx| {
+                                                        this.stroke_section_expanded = !this.stroke_section_expanded;
+                                                        cx.notify();
+                                                    });
+                                                },
+                                                cx,
+                                            ));
+                                        }
                                     }
-                                    ShapeType::Ellipse { radius_x, radius_y, fill, stroke, stroke_width, .. } => {
+                                    ShapeType::Ellipse { radius_x, radius_y, fill, stroke, stroke_width, size_linked, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
                                         let rx = radius_x.value;
                                         let ry = radius_y.value;
+                                        let linked = *size_linked;
+                                        let s_link = self.state.clone();
                                         let fill_col = fill.value;
                                         let lid_fill = layer.id.clone();
                                         let shape_hex = format!(
@@ -14126,6 +14397,66 @@ impl Render for PropertiesPanel {
                                             .id("shape_properties_section")
                                             .test_support()
                                             .gap_2()
+                                            .child(
+                                                h_flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .text_xs()
+                                                    .child(
+                                                        h_flex()
+                                                            .gap_1()
+                                                            .items_center()
+                                                            .child(
+                                                                div()
+                                                                    .id("ellipse_size_link")
+                                                                    .test_support()
+                                                                    .cursor_pointer()
+                                                                    .p_0p5()
+                                                                    .rounded_sm()
+                                                                    .hover(|s| s.bg(cx.theme().muted))
+                                                                    .text_color(if linked { cx.theme().primary } else { cx.theme().muted_foreground })
+                                                                    .child(icon_box(IconName::Link))
+                                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                                        s_link.update(cx, |s, cx| {
+                                                                            if let Some(lid) = s.selected_layer_id.clone() {
+                                                                                let _ = s.set_layer_shape_size_linked(&lid, !linked);
+                                                                                cx.notify();
+                                                                            }
+                                                                        });
+                                                                    }),
+                                                            )
+                                                            .child(div().text_color(cx.theme().muted_foreground).child("Size")),
+                                                    )
+                                                    .child(
+                                                        h_flex()
+                                                            .gap_1()
+                                                            .items_center()
+                                                            .child(scrub_field(
+                                                                "ellipse_sw_field",
+                                                                "ellipse_sw".to_string(),
+                                                                format!("{:.1}", rx * 2.0),
+                                                                None,
+                                                                None,
+                                                                &self.state,
+                                                                &panel_entity,
+                                                                cx,
+                                                                move |_| {},
+                                                                move |_| {},
+                                                            ))
+                                                            .child(scrub_field(
+                                                                "ellipse_sh_field",
+                                                                "ellipse_sh".to_string(),
+                                                                format!("{:.1}", ry * 2.0),
+                                                                None,
+                                                                None,
+                                                                &self.state,
+                                                                &panel_entity,
+                                                                cx,
+                                                                move |_| {},
+                                                                move |_| {},
+                                                            )),
+                                                    ),
+                                            )
                                             .child(
                                                 h_flex()
                                                     .items_center()
@@ -14181,44 +14512,6 @@ impl Render for PropertiesPanel {
                                                     ),
                                             )
                                             .children(shape_dialog)
-                                            .child(
-                                                h_flex()
-                                                    .items_center()
-                                                    .justify_between()
-                                                    .text_xs()
-                                                    .child(div().text_color(cx.theme().muted_foreground).child("Radius X"))
-                                                    .child(scrub_field(
-                                                        "ellipse_rx_field",
-                                                        "ellipse_rx".to_string(),
-                                                        format!("{rx:.0} px"),
-                                                        None,
-                                                        None,
-                                                        &self.state,
-                                                        &panel_entity,
-                                                        cx,
-                                                        move |_| {},
-                                                        move |_| {},
-                                                    )),
-                                            )
-                                            .child(
-                                                h_flex()
-                                                    .items_center()
-                                                    .justify_between()
-                                                    .text_xs()
-                                                    .child(div().text_color(cx.theme().muted_foreground).child("Radius Y"))
-                                                    .child(scrub_field(
-                                                        "ellipse_ry_field",
-                                                        "ellipse_ry".to_string(),
-                                                        format!("{ry:.0} px"),
-                                                        None,
-                                                        None,
-                                                        &self.state,
-                                                        &panel_entity,
-                                                        cx,
-                                                        move |_| {},
-                                                        move |_| {},
-                                                    )),
-                                            )
                                             .children(shape_stroke_rows(
                                                 stroke,
                                                 stroke_width,
@@ -14243,8 +14536,29 @@ impl Render for PropertiesPanel {
                                             Some(ellipse_body.into_any_element()),
                                         );
                                         props_items.push(ellipse_section);
+                                        {
+                                            let p_stroke = panel_entity.clone();
+                                            props_items.push(shape_stroke_section(
+                                                &self.state,
+                                                &panel_entity,
+                                                layer,
+                                                line_cap,
+                                                line_join,
+                                                dash,
+                                                dash_gap,
+                                                dash_offset,
+                                                self.stroke_section_expanded,
+                                                move |cx| {
+                                                    p_stroke.update(cx, |this, cx| {
+                                                        this.stroke_section_expanded = !this.stroke_section_expanded;
+                                                        cx.notify();
+                                                    });
+                                                },
+                                                cx,
+                                            ));
+                                        }
                                     }
-                                    ShapeType::Path { path_data, stroke, stroke_width, .. } => {
+                                    ShapeType::Path { path_data, stroke, stroke_width, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
                                         let path_body = v_flex()
                                             .id("shape_properties_section")
                                             .test_support()
@@ -14262,41 +14576,9 @@ impl Render for PropertiesPanel {
                                             &self.state,
                                             cx,
                                         ));
-                                        // Trim shortcut lives with the path it
-                                        // trims (not in tool settings, which
-                                        // hide on selection). Shown only
-                                        // until the first TrimPath lands.
-                                        let has_trim = layer.effects.iter().any(|e| {
-                                            matches!(e.effect_type, project::EffectType::TrimPath { .. })
-                                        });
-                                        let path_body = if has_trim {
-                                            path_body
-                                        } else {
-                                            let s_trim = self.state.clone();
-                                            path_body.child(
-                                                div()
-                                                    .id("shape_trim_path_add")
-                                                    .test_support()
-                                                    .cursor_pointer()
-                                                    .px_2()
-                                                    .py_0p5()
-                                                    .rounded_sm()
-                                                    .bg(cx.theme().muted)
-                                                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-                                                    .text_xs()
-                                                    .text_color(cx.theme().foreground)
-                                                    .child("Add Trim Path")
-                                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                        s_trim.update(cx, |s, cx| {
-                                                            let _ = s.add_effect_to_selected_layer(
-                                                                project::EffectType::trim_path(0.0, 100.0, 0.0),
-                                                            );
-                                                            cx.notify();
-                                                        });
-                                                    }),
-                                            )
-                                        };
-
+                                        // Trim lives in the STROKE section below
+                                        // (Add Trim Path button, then bound
+                                        // Start/End/Offset rows).
                                         let p_src = panel_entity.clone();
                                         let path_section = prop_section(
                                             "shape_source",
@@ -14313,6 +14595,27 @@ impl Render for PropertiesPanel {
                                             Some(path_body.into_any_element()),
                                         );
                                         props_items.push(path_section);
+                                        {
+                                            let p_stroke = panel_entity.clone();
+                                            props_items.push(shape_stroke_section(
+                                                &self.state,
+                                                &panel_entity,
+                                                layer,
+                                                line_cap,
+                                                line_join,
+                                                dash,
+                                                dash_gap,
+                                                dash_offset,
+                                                self.stroke_section_expanded,
+                                                move |cx| {
+                                                    p_stroke.update(cx, |this, cx| {
+                                                        this.stroke_section_expanded = !this.stroke_section_expanded;
+                                                        cx.notify();
+                                                    });
+                                                },
+                                                cx,
+                                            ));
+                                        }
                                     }
                                 }
                             }
@@ -16884,7 +17187,8 @@ fn graph_unit(path: &str) -> &'static str {    let base = match path.rsplit_once
         "transform.scale" | "opacity" => "%",
         "transform.rotation" => "°",
         "text.font_size" | "shape.rect_width" | "shape.rect_height" | "shape.corner_radius"
-        | "shape.ellipse_rx" | "shape.ellipse_ry" => "px",
+        | "shape.ellipse_rx" | "shape.ellipse_ry" | "shape.dash" | "shape.dash_gap"
+        | "shape.dash_offset" => "px",
         _ => "",
     }
 }

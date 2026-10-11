@@ -18,7 +18,7 @@ use super::stock::apply_stock;
 use super::pixel::{gradient_axis, sample_fill_gradient, Px};
 use super::shapes::{
     fill_ellipse, fill_ellipse_gradient, fill_path, fill_path_gradient, fill_rect,
-    fill_rect_gradient, stroke_path, stroke_path_gradient,
+    fill_rect_gradient, stroke_path, stroke_path_gradient, StrokeStyle,
 };
 use super::text::{StrokePos, TextSpec, raster_text};
 
@@ -111,10 +111,14 @@ pub fn raster_content(
             let (w, h) = (base_w.max(2.0), base_h.max(2.0));
             let mut buf = FloatBuf::clear(w.ceil() as u32, h.ceil() as u32);
             match shape_type {
-                ShapeType::Rectangle { corner_radius, fill, fill_gradient, stroke, stroke_width, .. } => {
+                ShapeType::Rectangle { corner_radius, fill, fill_gradient, stroke, stroke_width, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
                     // Corner radius is stored unscaled; content is unscaled.
-                    // Stroke reuses the shared path stroker over a rounded-
-                    // rectangle path so corners match the fill exactly.
+                    // Strokes run over a rounded-rectangle path so corners
+                    // match the fill exactly. An enabled Trim Path effect
+                    // trims through the same path pipeline (trim windows
+                    // never expand bounds, so the fixed box stays valid);
+                    // without trim the fast SDF fills apply.
+                    let style = StrokeStyle::from_shape(line_cap, line_join, dash.value, dash_gap.value, dash_offset.value);
                     let nib = stroke_width.value.max(0.0);
                     let do_fill = fill.value.a > 0.0;
                     let do_stroke = nib > 0.0
@@ -124,29 +128,52 @@ pub fn raster_content(
                     } else {
                         fill.value
                     };
-                    let rr_svg = project::Path::rounded_rectangle(0.0, 0.0, w, h, corner_radius.value).to_svg();
-                    match fill_gradient {
-                        Some(gradient) => {
-                            if do_fill {
-                                fill_rect_gradient(&mut buf, w, h, corner_radius.value, gradient);
+                    let base = project::Path::rounded_rectangle(0.0, 0.0, w, h, corner_radius.value);
+                    if has_trim_path(&layer.effects) {
+                        let shaped_svg = apply_trim_only(&base, &layer.effects).to_svg();
+                        match fill_gradient {
+                            Some(gradient) => {
+                                if do_fill {
+                                    fill_path_gradient(&mut buf, &shaped_svg, gradient, Vec2::ZERO, (w, h));
+                                }
+                                if do_stroke {
+                                    stroke_path_gradient(&mut buf, &shaped_svg, nib, gradient, Vec2::ZERO, (w, h), style);
+                                }
                             }
-                            if do_stroke {
-                                stroke_path_gradient(&mut buf, &rr_svg, nib, gradient, Vec2::ZERO, (w, h));
+                            None => {
+                                if do_fill {
+                                    fill_path(&mut buf, &shaped_svg, Px::from_color(fill.value), Vec2::ZERO);
+                                }
+                                if do_stroke {
+                                    stroke_path(&mut buf, &shaped_svg, nib, Px::from_color(sc), Vec2::ZERO, style);
+                                }
                             }
                         }
-                        None => {
-                            if do_fill {
-                                fill_rect(&mut buf, w, h, corner_radius.value, Px::from_color(fill.value));
+                    } else {
+                        let rr_svg = base.to_svg();
+                        match fill_gradient {
+                            Some(gradient) => {
+                                if do_fill {
+                                    fill_rect_gradient(&mut buf, w, h, corner_radius.value, gradient);
+                                }
+                                if do_stroke {
+                                    stroke_path_gradient(&mut buf, &rr_svg, nib, gradient, Vec2::ZERO, (w, h), style);
+                                }
                             }
-                            if do_stroke {
-                                stroke_path(&mut buf, &rr_svg, nib, Px::from_color(sc), Vec2::ZERO);
+                            None => {
+                                if do_fill {
+                                    fill_rect(&mut buf, w, h, corner_radius.value, Px::from_color(fill.value));
+                                }
+                                if do_stroke {
+                                    stroke_path(&mut buf, &rr_svg, nib, Px::from_color(sc), Vec2::ZERO, style);
+                                }
                             }
                         }
                     }
                 }
-                ShapeType::Ellipse { fill, fill_gradient, stroke, stroke_width, .. } => {
-                    // Stroke reuses the shared path stroker over an ellipse
-                    // path so the outline matches the fill exactly.
+                ShapeType::Ellipse { fill, fill_gradient, stroke, stroke_width, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
+                    // Same trim routing as Rectangle (see above).
+                    let style = StrokeStyle::from_shape(line_cap, line_join, dash.value, dash_gap.value, dash_offset.value);
                     let nib = stroke_width.value.max(0.0);
                     let do_fill = fill.value.a > 0.0;
                     let do_stroke = nib > 0.0
@@ -156,27 +183,50 @@ pub fn raster_content(
                     } else {
                         fill.value
                     };
-                    let el_svg = project::Path::ellipse(w / 2.0, h / 2.0, w / 2.0, h / 2.0).to_svg();
-                    match fill_gradient {
-                        Some(gradient) => {
-                            if do_fill {
-                                fill_ellipse_gradient(&mut buf, w / 2.0, h / 2.0, gradient);
+                    let base = project::Path::ellipse(w / 2.0, h / 2.0, w / 2.0, h / 2.0);
+                    if has_trim_path(&layer.effects) {
+                        let shaped_svg = apply_trim_only(&base, &layer.effects).to_svg();
+                        match fill_gradient {
+                            Some(gradient) => {
+                                if do_fill {
+                                    fill_path_gradient(&mut buf, &shaped_svg, gradient, Vec2::ZERO, (w, h));
+                                }
+                                if do_stroke {
+                                    stroke_path_gradient(&mut buf, &shaped_svg, nib, gradient, Vec2::ZERO, (w, h), style);
+                                }
                             }
-                            if do_stroke {
-                                stroke_path_gradient(&mut buf, &el_svg, nib, gradient, Vec2::ZERO, (w, h));
+                            None => {
+                                if do_fill {
+                                    fill_path(&mut buf, &shaped_svg, Px::from_color(fill.value), Vec2::ZERO);
+                                }
+                                if do_stroke {
+                                    stroke_path(&mut buf, &shaped_svg, nib, Px::from_color(sc), Vec2::ZERO, style);
+                                }
                             }
                         }
-                        None => {
-                            if do_fill {
-                                fill_ellipse(&mut buf, w / 2.0, h / 2.0, Px::from_color(fill.value));
+                    } else {
+                        let el_svg = base.to_svg();
+                        match fill_gradient {
+                            Some(gradient) => {
+                                if do_fill {
+                                    fill_ellipse_gradient(&mut buf, w / 2.0, h / 2.0, gradient);
+                                }
+                                if do_stroke {
+                                    stroke_path_gradient(&mut buf, &el_svg, nib, gradient, Vec2::ZERO, (w, h), style);
+                                }
                             }
-                            if do_stroke {
-                                stroke_path(&mut buf, &el_svg, nib, Px::from_color(sc), Vec2::ZERO);
+                            None => {
+                                if do_fill {
+                                    fill_ellipse(&mut buf, w / 2.0, h / 2.0, Px::from_color(fill.value));
+                                }
+                                if do_stroke {
+                                    stroke_path(&mut buf, &el_svg, nib, Px::from_color(sc), Vec2::ZERO, style);
+                                }
                             }
                         }
                     }
                 }
-                ShapeType::Path { path_data, fill, fill_gradient, stroke, stroke_width, .. } => {
+                ShapeType::Path { path_data, fill, fill_gradient, stroke, stroke_width, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
                     // Vector path effects run pre-flatten on the parsed
                     // path; re-serialize for the SVG-string rasterizers.
                     let shaped = apply_path_fx(
@@ -190,6 +240,7 @@ pub fn raster_content(
                     };
                     // Transparent stroke = legacy look (outline in the fill
                     // color); width 0 (or transparent fill+stroke) skips.
+                    let style = StrokeStyle::from_shape(line_cap, line_join, dash.value, dash_gap.value, dash_offset.value);
                     let nib = stroke_width.value.max(0.0);
                     let do_fill = fill.value.a > 0.0;
                     let do_stroke = nib > 0.0
@@ -200,7 +251,7 @@ pub fn raster_content(
                                 fill_path_gradient(&mut buf, &shaped_svg, gradient, origin, (fw, fh));
                             }
                             if do_stroke {
-                                stroke_path_gradient(&mut buf, &shaped_svg, nib, gradient, origin, (fw, fh));
+                                stroke_path_gradient(&mut buf, &shaped_svg, nib, gradient, origin, (fw, fh), style);
                             }
                         }
                         None => {
@@ -224,6 +275,7 @@ pub fn raster_content(
                                     nib,
                                     Px::from_color(sc),
                                     origin,
+                                    style,
                                 );
                             }
                         }
@@ -1493,6 +1545,29 @@ pub(crate) fn path_frame(path_data: &str) -> (Vec2, f32, f32) {    match project
 /// Apply vector path effects (trim/sine) to an already-parsed path.
 /// Runs at raster time: trim changes topology per frame, so it can never
 /// be a keyframed `Property<Path>`.
+/// True when an enabled Trim Path effect is present.
+fn has_trim_path(effects: &[EvaluatedEffect]) -> bool {
+    effects.iter().any(|eff| {
+        eff.enabled && matches!(eff.effect_type, EvaluatedEffectType::TrimPath { .. })
+    })
+}
+
+/// Trim-only subset of [`apply_path_fx`] for Rectangle/Ellipse shapes:
+/// trim windows never expand bounds, so the fixed content box stays valid.
+/// (SinePath can push outlines past the box — Path shapes only.)
+fn apply_trim_only(path: &project::Path, effects: &[EvaluatedEffect]) -> project::Path {
+    let mut out = path.clone();
+    for eff in effects {
+        if !eff.enabled {
+            continue;
+        }
+        if let EvaluatedEffectType::TrimPath { start, end, offset } = &eff.effect_type {
+            out = apply_trim_path(&out, *start, *end, *offset);
+        }
+    }
+    out
+}
+
 fn apply_path_fx(path: &project::Path, effects: &[EvaluatedEffect]) -> project::Path {
     let mut out = path.clone();
     for eff in effects {
@@ -2091,6 +2166,11 @@ mod tests {
                 fill_gradient: None,
                 stroke: project::Property::new("Stroke", Color::TRANSPARENT),
                 stroke_width: project::Property::new("Stroke Width", 2.0),
+                line_cap: "round".to_string(),
+                line_join: "round".to_string(),
+                dash: project::Property::new("Dash", 0.0),
+                dash_gap: project::Property::new("Dash Gap", 0.0),
+                dash_offset: project::Property::new("Dash Offset", 0.0),
             },
             tc,
             out,
@@ -2173,6 +2253,12 @@ mod tests {
                 fill: project::Property::new("Fill", Color::rgb(1.0, 0.0, 0.0)), fill_gradient: None,
                 stroke: project::Property::new("Stroke", Color::TRANSPARENT),
                 stroke_width: project::Property::new("Stroke Width", 0.0),
+                size_linked: true,
+                line_cap: "round".to_string(),
+                line_join: "round".to_string(),
+                dash: project::Property::new("Dash", 0.0),
+                dash_gap: project::Property::new("Dash Gap", 0.0),
+                dash_offset: project::Property::new("Dash Offset", 0.0),
             },
             tc,
             out,
@@ -2217,6 +2303,11 @@ mod tests {
                 fill_gradient: None,
                 stroke: project::Property::new("Stroke", Color::TRANSPARENT),
                 stroke_width: project::Property::new("Stroke Width", 2.0),
+                line_cap: "round".to_string(),
+                line_join: "round".to_string(),
+                dash: project::Property::new("Dash", 0.0),
+                dash_gap: project::Property::new("Dash Gap", 0.0),
+                dash_offset: project::Property::new("Dash Offset", 0.0),
             },
             tc,
             out,
@@ -2271,8 +2362,173 @@ mod tests {
         assert!(a3 > a1 * 1.5, "triple {a3} vs single {a1}");
     }
 
-    fn masked_solid_project(mode: project::MaskMode, invert: bool) -> (Project, String) {
+    fn open_stroke_project(
+        line_cap: &str,
+        line_join: &str,
+        dash: f32,
+        dash_gap: f32,
+        dash_offset: f32,
+    ) -> (Project, String) {
         let mut project = Project::new("p", "P");
+        let mut comp = Composition::hd_1080p_30fps("c", "C", 5.0);
+        let tc = TimeCode::from_frames(0, 30.0);
+        let out = TimeCode::from_frames(150, 30.0);
+        // Horizontal open path: arclength == x - 20, nib 4.
+        comp.add_layer(project::Layer::shape(
+            "l1",
+            "L",
+            project::ShapeType::Path {
+                path_data: "M 20 30 L 80 30".to_string(),
+                fill: project::Property::new("Fill", Color::TRANSPARENT),
+                fill_gradient: None,
+                stroke: project::Property::new("Stroke", Color::rgb(1.0, 0.0, 0.0)),
+                stroke_width: project::Property::new("Stroke Width", 4.0),
+                line_cap: line_cap.to_string(),
+                line_join: line_join.to_string(),
+                dash: project::Property::new("Dash", dash),
+                dash_gap: project::Property::new("Dash Gap", dash_gap),
+                dash_offset: project::Property::new("Dash Offset", dash_offset),
+            },
+            tc,
+            out,
+        ))
+        .unwrap();
+        project.add_composition(comp).unwrap();
+        (project, "c".to_string())
+    }
+
+    /// Content raster for the open-stroke project: the path frame pads by
+    /// 8px, so path (x, 30) lands at buffer (x - 12, 8).
+    fn open_stroke_content(project: &Project, comp_id: &str) -> FloatBuf {
+        use std::collections::HashMap;
+        let layer = eval_first(project, comp_id);
+        let assets: HashMap<String, std::sync::Arc<image::RgbaImage>> = HashMap::new();
+        let (base_w, base_h) = layer_base_dims(&layer, 1920.0, 1080.0, &assets);
+        raster_content(&layer, base_w, base_h).expect("content")
+    }
+
+    #[test]
+    fn stroke_caps_clip_or_extend_open_ends() {
+        // Round (default): nib discs extend past the end point (x=20).
+        let (project, comp_id) = open_stroke_project("round", "round", 0.0, 0.0, 0.0);
+        let buf = open_stroke_content(&project, &comp_id);
+        assert!(buf.get(38, 8).a > 0.5, "mid-line must hold ink");
+        assert!(buf.get(4, 8).a > 0.1, "round cap extends past x=20");
+        // Butt: flat cut at the end point.
+        let (project, comp_id) = open_stroke_project("butt", "round", 0.0, 0.0, 0.0);
+        let buf = open_stroke_content(&project, &comp_id);
+        assert!(buf.get(38, 8).a > 0.5, "mid-line must hold ink");
+        assert!(buf.get(3, 8).a < 0.05, "butt cap must not pass x=20");
+        assert!(buf.get(9, 8).a > 0.5, "butt cap keeps the line start");
+        // Square: extends one nib, flat.
+        let (project, comp_id) = open_stroke_project("square", "round", 0.0, 0.0, 0.0);
+        let buf = open_stroke_content(&project, &comp_id);
+        assert!(buf.get(5, 8).a > 0.1, "square cap extends toward x=16");
+        assert!(buf.get(3, 8).a < 0.05, "square cap stops at x=16");
+    }
+
+    #[test]
+    fn stroke_dash_gates_along_arclength() {
+        // dash 10 / gap 14 from x=20: islands [20,30), [44,54); the gap
+        // probe sits farther than one nib from any island (disc bleed).
+        let (project, comp_id) = open_stroke_project("round", "round", 10.0, 14.0, 0.0);
+        let buf = open_stroke_content(&project, &comp_id);
+        assert!(buf.get(11, 8).a > 0.3, "dash island must hold ink");
+        assert!(buf.get(25, 8).a < 0.05, "dash gap must stay transparent");
+        assert!(buf.get(35, 8).a > 0.3, "second island must hold ink");
+    }
+
+    #[test]
+    fn stroke_joins_shape_angled_vertices() {
+        // Open V with an ~83° apex (path apex (60,15) → buf (48,8), nib
+        // 4): the bevel chord cuts cover above buf row 5 while round and
+        // miter keep it. (With disc-stamp coverage the miter spike hides
+        // inside the round envelope, so miter ≈ round here by design.)
+        let v_project = |join: &str| {
+            let mut project = Project::new("p", "P");
+            let mut comp = Composition::hd_1080p_30fps("c", "C", 5.0);
+            let tc = TimeCode::from_frames(0, 30.0);
+            let out = TimeCode::from_frames(150, 30.0);
+            comp.add_layer(project::Layer::shape(
+                "l1",
+                "L",
+                project::ShapeType::Path {
+                    path_data: "M 20 50 L 60 15 L 100 50".to_string(),
+                    fill: project::Property::new("Fill", Color::TRANSPARENT),
+                    fill_gradient: None,
+                    stroke: project::Property::new("Stroke", Color::rgb(1.0, 0.0, 0.0)),
+                    stroke_width: project::Property::new("Stroke Width", 4.0),
+                    line_cap: "round".to_string(),
+                    line_join: join.to_string(),
+                    dash: project::Property::new("Dash", 0.0),
+                    dash_gap: project::Property::new("Dash Gap", 0.0),
+                    dash_offset: project::Property::new("Dash Offset", 0.0),
+                },
+                tc,
+                out,
+            ))
+            .unwrap();
+            project.add_composition(comp).unwrap();
+            open_stroke_content(&project, "c")
+        };
+        let miter = v_project("miter");
+        assert!(miter.get(48, 4).a > 0.2, "miter keeps the apex cover");
+        let bevel = v_project("bevel");
+        assert!(bevel.get(48, 4).a < 0.05, "bevel must cut the apex flat");
+        let round = v_project("round");
+        assert!(round.get(48, 4).a > 0.2, "round bulge covers the apex");
+        // All three keep the arms themselves inked.
+        for buf in [&miter, &bevel, &round] {
+            assert!(buf.get(28, 25).a > 0.3, "arms must hold ink");
+        }
+    }
+
+    #[test]
+    fn trim_path_applies_to_rect_stroke() {
+        use std::collections::HashMap;
+        let mut project = Project::new("p", "P");
+        let mut comp = Composition::hd_1080p_30fps("c", "C", 5.0);
+        let tc = TimeCode::from_frames(0, 30.0);
+        let out = TimeCode::from_frames(150, 30.0);
+        let mut layer = project::Layer::shape(
+            "l1",
+            "L",
+            project::ShapeType::Rectangle {
+                width: project::Property::new("W", 60.0),
+                height: project::Property::new("H", 60.0),
+                corner_radius: project::Property::new("R", 0.0),
+                size_linked: true,
+                fill: project::Property::new("Fill", Color::TRANSPARENT),
+                fill_gradient: None,
+                stroke: project::Property::new("Stroke", Color::rgb(1.0, 0.0, 0.0)),
+                stroke_width: project::Property::new("Stroke Width", 4.0),
+                line_cap: "round".to_string(),
+                line_join: "round".to_string(),
+                dash: project::Property::new("Dash", 0.0),
+                dash_gap: project::Property::new("Dash Gap", 0.0),
+                dash_offset: project::Property::new("Dash Offset", 0.0),
+            },
+            tc,
+            out,
+        );
+        // 50–100% of the clockwise perimeter starting top-left: right
+        // edge (25–50%) drops out, left edge (75–100%) stays.
+        layer.effects.push(project::Effect::trim_path("t", 50.0, 100.0, 0.0));
+        comp.add_layer(layer).unwrap();
+        project.add_composition(comp).unwrap();
+        let layer = eval_first(&project, "c");
+        let assets: HashMap<String, std::sync::Arc<image::RgbaImage>> = HashMap::new();
+        let (base_w, base_h) = layer_base_dims(&layer, 1920.0, 1080.0, &assets);
+        let (buf, _avg, empty) = rasterize_layer(
+            &layer, base_w, base_h, 64, 64, 1920.0, 1080.0, Color::BLACK, None, 0.0, 0,
+            false, 5.0, &assets,
+        );
+        assert!(!empty, "trimmed rect must hold ink");
+        assert!(buf.get(2, 32).a > 0.1, "left edge survives the trim: {:?}", buf.get(2, 32));
+        assert!(buf.get(61, 32).a < 0.05, "right edge is trimmed away: {:?}", buf.get(61, 32));
+    }
+
+    fn masked_solid_project(mode: project::MaskMode, invert: bool) -> (Project, String) {        let mut project = Project::new("p", "P");
         let mut comp = Composition::hd_1080p_30fps("c", "C", 5.0);
         let tc = TimeCode::from_frames(0, 30.0);
         let out = TimeCode::from_frames(150, 30.0);
@@ -2314,6 +2570,12 @@ mod tests {
                 fill_gradient: None,
                 stroke: project::Property::new("Stroke", red),
                 stroke_width: project::Property::new("Stroke Width", 4.0),
+                size_linked: true,
+                line_cap: "round".to_string(),
+                line_join: "round".to_string(),
+                dash: project::Property::new("Dash", 0.0),
+                dash_gap: project::Property::new("Dash Gap", 0.0),
+                dash_offset: project::Property::new("Dash Offset", 0.0),
             },
             // Sharp corners take the fill-only fast path in
             // `rasterize_layer` — the stroke must opt out of it.
@@ -2325,6 +2587,12 @@ mod tests {
                 fill_gradient: None,
                 stroke: project::Property::new("Stroke", red),
                 stroke_width: project::Property::new("Stroke Width", 4.0),
+                size_linked: true,
+                line_cap: "round".to_string(),
+                line_join: "round".to_string(),
+                dash: project::Property::new("Dash", 0.0),
+                dash_gap: project::Property::new("Dash Gap", 0.0),
+                dash_offset: project::Property::new("Dash Offset", 0.0),
             },
             project::ShapeType::Ellipse {
                 radius_x: project::Property::new("RX", 30.0),
@@ -2333,6 +2601,12 @@ mod tests {
                 fill_gradient: None,
                 stroke: project::Property::new("Stroke", red),
                 stroke_width: project::Property::new("Stroke Width", 4.0),
+                size_linked: true,
+                line_cap: "round".to_string(),
+                line_join: "round".to_string(),
+                dash: project::Property::new("Dash", 0.0),
+                dash_gap: project::Property::new("Dash Gap", 0.0),
+                dash_offset: project::Property::new("Dash Offset", 0.0),
             },
         ] {
             let mut project = Project::new("p", "P");

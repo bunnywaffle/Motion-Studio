@@ -6910,6 +6910,53 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
     }
 
     #[test]
+    fn test_shape_stroke_params_and_linked_size() {
+        use crate::state::EditorState;
+        use project::LayerSource;
+
+        let mut state = EditorState::new();
+        let rid = state.add_rectangle_shape_layer(200.0, 100.0, None).expect("rect");
+        // Dash / cap / join setters (all three variants share them).
+        assert!(state.set_layer_shape_dash(&rid, "dash", 6.0).is_ok());
+        assert!(state.set_layer_shape_dash(&rid, "dash_gap", 3.0).is_ok());
+        assert!(state.set_layer_shape_dash(&rid, "bogus", 1.0).is_err());
+        assert!(state.set_layer_shape_line_cap(&rid, "butt").is_ok());
+        assert!(state.set_layer_shape_line_join(&rid, "bevel").is_ok());
+        assert!(state.set_layer_shape_line_cap(&rid, "weird").is_ok());
+        let shape_of = |s: &EditorState| {
+            s.active_composition().unwrap().get_layer(&rid).unwrap().source.clone()
+        };
+        match shape_of(&state) {
+            LayerSource::Shape { shape_type: project::ShapeType::Rectangle { dash, line_cap, line_join, .. } } => {
+                assert_eq!(dash.value, 6.0);
+                assert_eq!(line_cap, "round");
+                assert_eq!(line_join, "bevel");
+            }
+            _ => panic!("expected rectangle"),
+        }
+        // Linked Size (the default): editing W scales H proportionally.
+        state.select_layer(Some(rid.clone()));
+        assert!(state.set_scrub_value("rect_w", 400.0));
+        match shape_of(&state) {
+            LayerSource::Shape { shape_type: project::ShapeType::Rectangle { width, height, .. } } => {
+                assert_eq!(width.value, 400.0);
+                assert_eq!(height.value, 200.0);
+            }
+            _ => panic!("expected rectangle"),
+        }
+        // Unlinked: W edits alone.
+        state.set_layer_shape_size_linked(&rid, false).expect("unlink");
+        assert!(state.set_scrub_value("rect_h", 50.0));
+        match shape_of(&state) {
+            LayerSource::Shape { shape_type: project::ShapeType::Rectangle { width, height, .. } } => {
+                assert_eq!(width.value, 400.0);
+                assert_eq!(height.value, 50.0);
+            }
+            _ => panic!("expected rectangle"),
+        }
+    }
+
+    #[test]
     fn test_dropdown_anchor_sits_above_button() {
         // Popup origins are computed from the button position (the old
         // code pinned both popups to a fixed window corner).
@@ -7081,6 +7128,41 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             app_view.read_with(cx, |view, cx| view.state().read(cx).active_tool),
             crate::state::EditorTool::ShapeStar
         );
+    }
+
+    #[gpui_kit::test]
+    fn test_shape_stroke_section_renders(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                let rid = s.add_rectangle_shape_layer(200.0, 100.0, None).expect("rect");
+                s.select_layer(Some(rid));
+                cx.notify();
+            });
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            for id in ["rect_size_link", "shape_line_cap", "shape_line_join", "shape_trim_path_add", "shape_dash_field", "shape_dash_gap_field", "shape_dash_offset_field"] {
+                assert!(window.find(id).visible(), "{id} must render in the shape panel");
+            }
+            // Adding trim swaps the button for bound Start/End/Offset rows.
+            window.click("shape_trim_path_add", cx);
+            window.render_frame(cx);
+            for id in ["param_start_fx_trim_path_1", "param_end_fx_trim_path_1", "param_offset_fx_trim_path_1"] {
+                assert!(window.find(id).visible(), "{id} must appear after Add Trim Path");
+            }
+        })
+        .expect("update_window failed");
     }
 
     #[gpui_kit::test]

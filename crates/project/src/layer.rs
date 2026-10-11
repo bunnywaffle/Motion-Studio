@@ -32,6 +32,24 @@ fn default_shape_stroke_width_prop() -> Property<f32> {
     Property::new("Stroke Width", 2.0)
 }
 
+/// Zero width for shapes that never had strokes (Rectangle/Ellipse): old
+/// files must render exactly as before (no outline).
+fn default_shape_stroke_width_zero_prop() -> Property<f32> {
+    Property::new("Stroke Width", 0.0)
+}
+
+fn default_size_linked() -> bool {
+    true
+}
+
+fn default_line_cap() -> String {
+    "round".to_string()
+}
+
+fn default_line_join() -> String {
+    "round".to_string()
+}
+
 fn default_no_gradient() -> Option<Property<FillGradient>> {
     None
 }
@@ -312,6 +330,9 @@ pub enum ShapeType {
         width: Property<f32>,
         height: Property<f32>,
         corner_radius: Property<f32>,
+        /// Linked Size editing (proportional W/H, AE-style). Defaults on.
+        #[serde(default = "default_size_linked")]
+        size_linked: bool,
         #[serde(default = "default_shape_fill_prop", deserialize_with = "crate::property::de_property_or_value")]
         fill: Property<Color>,
         /// Linear fill gradient (None = solid `fill`).
@@ -321,13 +342,32 @@ pub enum ShapeType {
         /// "outline in the fill color".
         #[serde(default = "default_shape_stroke_prop", deserialize_with = "crate::property::de_property_or_value")]
         stroke: Property<Color>,
-        /// Stroke width in px (0 = no stroke).
-        #[serde(default = "default_shape_stroke_width_prop", deserialize_with = "crate::property::de_property_or_value")]
+        /// Stroke width in px (0 = no stroke; old files default to 0 so
+        /// they render exactly as before).
+        #[serde(default = "default_shape_stroke_width_zero_prop", deserialize_with = "crate::property::de_property_or_value")]
         stroke_width: Property<f32>,
+        /// Line cap: "butt" | "round" | "square".
+        #[serde(default = "default_line_cap")]
+        line_cap: String,
+        /// Line join: "miter" | "round" | "bevel".
+        #[serde(default = "default_line_join")]
+        line_join: String,
+        /// Dash length in px (0 = solid).
+        #[serde(default)]
+        dash: Property<f32>,
+        /// Gap length in px.
+        #[serde(default)]
+        dash_gap: Property<f32>,
+        /// Dash pattern offset in px.
+        #[serde(default)]
+        dash_offset: Property<f32>,
     },
     Ellipse {
         radius_x: Property<f32>,
         radius_y: Property<f32>,
+        /// Linked Size editing (proportional diameters). Defaults on.
+        #[serde(default = "default_size_linked")]
+        size_linked: bool,
         #[serde(default = "default_shape_fill_prop", deserialize_with = "crate::property::de_property_or_value")]
         fill: Property<Color>,
         /// Linear fill gradient (None = solid `fill`).
@@ -337,9 +377,25 @@ pub enum ShapeType {
         /// "outline in the fill color".
         #[serde(default = "default_shape_stroke_prop", deserialize_with = "crate::property::de_property_or_value")]
         stroke: Property<Color>,
-        /// Stroke width in px (0 = no stroke).
-        #[serde(default = "default_shape_stroke_width_prop", deserialize_with = "crate::property::de_property_or_value")]
+        /// Stroke width in px (0 = no stroke; old files default to 0 so
+        /// they render exactly as before).
+        #[serde(default = "default_shape_stroke_width_zero_prop", deserialize_with = "crate::property::de_property_or_value")]
         stroke_width: Property<f32>,
+        /// Line cap: "butt" | "round" | "square".
+        #[serde(default = "default_line_cap")]
+        line_cap: String,
+        /// Line join: "miter" | "round" | "bevel".
+        #[serde(default = "default_line_join")]
+        line_join: String,
+        /// Dash length in px (0 = solid).
+        #[serde(default)]
+        dash: Property<f32>,
+        /// Gap length in px.
+        #[serde(default)]
+        dash_gap: Property<f32>,
+        /// Dash pattern offset in px.
+        #[serde(default)]
+        dash_offset: Property<f32>,
     },
     Path {
         path_data: String,
@@ -355,6 +411,21 @@ pub enum ShapeType {
         /// Stroke width in px (0 = no stroke).
         #[serde(default = "default_shape_stroke_width_prop", deserialize_with = "crate::property::de_property_or_value")]
         stroke_width: Property<f32>,
+        /// Line cap: "butt" | "round" | "square".
+        #[serde(default = "default_line_cap")]
+        line_cap: String,
+        /// Line join: "miter" | "round" | "bevel".
+        #[serde(default = "default_line_join")]
+        line_join: String,
+        /// Dash length in px (0 = solid).
+        #[serde(default)]
+        dash: Property<f32>,
+        /// Gap length in px.
+        #[serde(default)]
+        dash_gap: Property<f32>,
+        /// Dash pattern offset in px.
+        #[serde(default)]
+        dash_offset: Property<f32>,
     },
 }
 
@@ -903,31 +974,40 @@ impl Layer {
                 }
             }
             LayerSource::Shape { shape_type } => match shape_type {
-                ShapeType::Rectangle { width, height, corner_radius, fill, fill_gradient, stroke, stroke_width } => {
+                ShapeType::Rectangle { width, height, corner_radius, fill, fill_gradient, stroke, stroke_width, dash, dash_gap, dash_offset, .. } => {
                     width.migrate_frame_rate(new_fps);
                     height.migrate_frame_rate(new_fps);
                     corner_radius.migrate_frame_rate(new_fps);
                     fill.migrate_frame_rate(new_fps);
                     stroke.migrate_frame_rate(new_fps);
                     stroke_width.migrate_frame_rate(new_fps);
+                    dash.migrate_frame_rate(new_fps);
+                    dash_gap.migrate_frame_rate(new_fps);
+                    dash_offset.migrate_frame_rate(new_fps);
                     if let Some(fg) = fill_gradient {
                         fg.migrate_frame_rate(new_fps);
                     }
                 }
-                ShapeType::Ellipse { radius_x, radius_y, fill, fill_gradient, stroke, stroke_width } => {
+                ShapeType::Ellipse { radius_x, radius_y, fill, fill_gradient, stroke, stroke_width, dash, dash_gap, dash_offset, .. } => {
                     radius_x.migrate_frame_rate(new_fps);
                     radius_y.migrate_frame_rate(new_fps);
                     fill.migrate_frame_rate(new_fps);
                     stroke.migrate_frame_rate(new_fps);
                     stroke_width.migrate_frame_rate(new_fps);
+                    dash.migrate_frame_rate(new_fps);
+                    dash_gap.migrate_frame_rate(new_fps);
+                    dash_offset.migrate_frame_rate(new_fps);
                     if let Some(fg) = fill_gradient {
                         fg.migrate_frame_rate(new_fps);
                     }
                 }
-                ShapeType::Path { fill, fill_gradient, stroke, stroke_width, .. } => {
+                ShapeType::Path { fill, fill_gradient, stroke, stroke_width, dash, dash_gap, dash_offset, .. } => {
                     fill.migrate_frame_rate(new_fps);
                     stroke.migrate_frame_rate(new_fps);
                     stroke_width.migrate_frame_rate(new_fps);
+                    dash.migrate_frame_rate(new_fps);
+                    dash_gap.migrate_frame_rate(new_fps);
+                    dash_offset.migrate_frame_rate(new_fps);
                     if let Some(fg) = fill_gradient {
                         fg.migrate_frame_rate(new_fps);
                     }
