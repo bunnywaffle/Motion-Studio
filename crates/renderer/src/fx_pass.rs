@@ -356,6 +356,31 @@ impl FxPass {
                 "fx_stock_liquify_c(uv, color, u.params[0].xy, u.params[0].z, u.params[0].w, u.params[1].x, RES)",
                 true,
             ),
+            StockPlugin::Halo => (
+                ef::stock_halo().wgsl,
+                "fx_stock_halo(uv, color, u.params[0].x, u.params[0].y, u.params[0].z, RES)",
+                false,
+            ),
+            StockPlugin::Streaks => (
+                ef::stock_streaks().wgsl,
+                "fx_stock_streaks(uv, color, u.params[0].x, u.params[0].y, u.params[0].z, RES)",
+                true,
+            ),
+            StockPlugin::LightRays => (
+                ef::stock_light_rays().wgsl,
+                "fx_stock_light_rays(uv, color, u.params[0], u.params[1], u.params[2], u.colors[0].rgb, RES)",
+                true,
+            ),
+            StockPlugin::GodRays => (
+                ef::stock_god_rays().wgsl,
+                "fx_stock_god_rays(uv, color, u.params[0], u.params[1], u.params[2], u.colors[0].rgb, RES)",
+                true,
+            ),
+            StockPlugin::LensFlare => (
+                ef::stock_lens_flare().wgsl,
+                "fx_stock_lens_flare(uv, color, u.params[0], u.params[1], u.params[2], u.colors[0].rgb, RES)",
+                true,
+            ),
             StockPlugin::Curves => (
                 ef::stock_curves().wgsl,
                 "fx_stock_curves(uv, color, u.params[0].xyzw, u.params[1].x)",
@@ -491,11 +516,12 @@ impl FxPass {
                 "fx_oil_paint(uv, color, u.params[0].x, u.params[0].y, vec2<f32>(u.misc.y, u.misc.z))",
                 true,
             ),
-            "outer_glow" => (
-                ef::outer_glow().wgsl,
-                "fx_outer_glow(uv, color, u.params[0].xyz, u.params[0].w, u.params[1].x, u.params[1].y, vec2<f32>(u.misc.y, u.misc.z))",
-                false,
-            ),
+            // NOTE: no "outer_glow" arm on purpose. Outer glow is a
+            // blit-stage effect (blurred silhouette under content); a
+            // chain twin would double-apply against the blit pass, and the
+            // analytic twin cannot reproduce the blur anyway. It previews
+            // on CPU (its silhouette blur already takes the GPU compute
+            // path inside `blur_buffer`).
             "checkerboard" => (
                 ef::checkerboard().wgsl,
                 "fx_checkerboard(uv, color, u.params[0].xy, u.params[1].xyz, u.params[2].xyz, 1.0)",
@@ -653,6 +679,24 @@ impl FxPass {
             BODY,
             "fx_bright_extract(uv, color)",
             &[],
+        )
+    }
+
+    /// Long-shadow march stage for the multi-stage stock Long Shadow path:
+    /// extrusion mask with fade + tint (see `effect_filters::
+    /// stock_long_shadow_march`). Params/colors travel in the shared
+    /// uniforms; needs the resampling helper for the mask taps.
+    pub fn shadow_march(
+        gpu: &GpuContext,
+        target_format: wgpu::TextureFormat,
+    ) -> Result<Self, String> {
+        Self::compile_resample(
+            gpu,
+            "FxPass_shadow_march",
+            target_format,
+            crate::effect_filters::stock_long_shadow_march().wgsl,
+            "fx_stock_long_shadow_march(uv, color, vec2<f32>(u.misc.y, u.misc.z))",
+            true,
         )
     }
 }
@@ -822,6 +866,27 @@ struct FxUniforms {
         )
     }
 
+    /// Long-shadow under-merge: source over the blurred shadow layer
+    /// (`u.params[0].x` = mode 0 behind / 1 cutout / 2 only). The shadow
+    /// layer holds straight bytes (tint, alpha — exactly the CPU
+    /// `to_rgba8` feed), so the composite re-premultiplies explicitly —
+    /// mirroring `k_long_shadow`'s odd-but-exact `d + s * (1 - s.a)` form
+    /// rather than "fixing" it.
+    pub fn shadow_under(
+        gpu: &GpuContext,
+        target_format: wgpu::TextureFormat,
+    ) -> Result<Self, String> {
+        // Gate skips only for behind/cutout (shadow-only must emit the
+        // shadow layer untouched, including its transparent pixels).
+        Self::from_calls(
+            gpu,
+            target_format,
+            "FxMerge_shadow_under",
+            "b.a <= 0.0 && u.params[0].x < 1.5",
+            "select(select(vec4<f32>((o.rgb * o.a + b.rgb * b.a * (1.0 - b.a)) / max(o.a + b.a * (1.0 - o.a), 0.000001), o.a + b.a * (1.0 - o.a)), b, u.params[0].x >= 1.5), o, u.params[0].x >= 0.5 && u.params[0].x < 1.5 && o.a > 0.01)",
+        )
+    }
+
     /// Record the merge into `encoder`: `(view_a, view_b)` -> `target`.
     pub fn record_into(
         &self,
@@ -894,8 +959,11 @@ struct FxUniforms {
 /// CPU path, as does export. Saber is excluded too: its twin is a fixed
 /// beam generator while the CPU kernel is mask-driven with a blur-based
 /// glow, so the two cannot agree — it needs a multi-stage (blur + merge)
-/// pass before it can rejoin this set.
-pub const CHAIN_SAFE_STOCK: [StockPlugin; 33] = [
+/// pass before it can rejoin this set. Stock Glow is excluded as well:
+/// threshold presence flips across the u8 boundary while the white
+/// screen amplifies any nonzero mask to full strength — unboundable in
+/// a u8 chain for the same reason as Threshold.
+pub const CHAIN_SAFE_STOCK: [StockPlugin; 39] = [
     StockPlugin::Posterize,
     StockPlugin::TemperatureTint,
     StockPlugin::SpillSuppress,
@@ -929,13 +997,19 @@ pub const CHAIN_SAFE_STOCK: [StockPlugin; 33] = [
     StockPlugin::CornerPin,
     StockPlugin::Reframe,
     StockPlugin::Liquify,
+    StockPlugin::LongShadow,
+    StockPlugin::Halo,
+    StockPlugin::Streaks,
+    StockPlugin::LightRays,
+    StockPlugin::GodRays,
+    StockPlugin::LensFlare,
 ];
 
 /// Built-in (non-stock) evaluated effects whose WGSL twin reproduces the
 /// CPU kernel within u8 rounding (gentle point math, no time seeds, no
 /// spatial resampling): the set the live GPU chain may take without
 /// visual change. Same audit bar as [`CHAIN_SAFE_STOCK`].
-pub const CHAIN_SAFE_BUILTIN: [&str; 17] = [
+pub const CHAIN_SAFE_BUILTIN: [&str; 16] = [
     "brightness_contrast",
     "tint",
     "levels",
@@ -950,7 +1024,6 @@ pub const CHAIN_SAFE_BUILTIN: [&str; 17] = [
     "displacement",
     "warp",
     "oil_paint",
-    "outer_glow",
     "checkerboard",
     "gradient_ramp",
 ];
@@ -973,7 +1046,6 @@ pub fn builtin_gpu_id(effect: &compositor::EvaluatedEffectType) -> Option<&'stat
         E::DisplacementMap { .. } => Some("displacement"),
         E::Warp { .. } => Some("warp"),
         E::OilPaint { .. } => Some("oil_paint"),
-        E::OuterGlow { .. } => Some("outer_glow"),
         E::Checkerboard { .. } => Some("checkerboard"),
         E::GradientRamp { .. } => Some("gradient_ramp"),
         _ => None,
@@ -1120,6 +1192,11 @@ mod tests {
             S::GridGen,
             S::Shapes,
             S::Saber,
+            S::Halo,
+            S::Streaks,
+            S::LightRays,
+            S::GodRays,
+            S::LensFlare,
         ] {
             FxPass::for_stock(&gpu, plugin, wgpu::TextureFormat::Rgba8Unorm)
                 .unwrap_or_else(|e| panic!("for_stock {plugin:?} failed: {e}"));
@@ -1135,11 +1212,45 @@ mod tests {
             FxPass::for_builtin(&gpu, id, wgpu::TextureFormat::Rgba8Unorm)
                 .unwrap_or_else(|e| panic!("for_builtin {id} failed: {e}"));
         }
-        // Merge machinery both variants compile.
+        // Merge machinery variants compile (screen doubles for bloom-style
+        // stages; shadow_under serves the stock Long Shadow path).
         FxMergePass::unsharp(&gpu, wgpu::TextureFormat::Rgba8Unorm).expect("unsharp compiles");
         FxMergePass::screen(&gpu, wgpu::TextureFormat::Rgba8Unorm).expect("screen compiles");
+        FxMergePass::shadow_under(&gpu, wgpu::TextureFormat::Rgba8Unorm).expect("shadow_under compiles");
         FxPass::bright_extract(&gpu, wgpu::TextureFormat::Rgba8Unorm).expect("bright compiles");
+        FxPass::shadow_march(&gpu, wgpu::TextureFormat::Rgba8Unorm).expect("march compiles");
         FxPass::blit(&gpu, wgpu::TextureFormat::Rgba8Unorm).expect("blit compiles");
+    }
+
+    /// Identity blit round-trip over a gradient: upload + linear sample +
+    /// store must preserve bytes (isolates transport from twin math).
+    #[test]
+    fn blit_round_trips_gradient_bytes() {
+        use crate::device::RenderTarget;
+        let Ok(gpu) = GpuContext::new_headless() else { return };
+        let fmt = wgpu::TextureFormat::Rgba8Unorm;
+        // Identity blit round-trip over a gradient: upload + linear
+        // sample + store must preserve bytes (isolates transport from
+        // twin math).
+        let big = RenderTarget::with_format(&gpu, 64, 64, fmt).expect("big");
+        let bigout = RenderTarget::with_format(&gpu, 64, 64, fmt).expect("bigout");
+        let mut grad = vec![0u8; 64 * 64 * 4];
+        for y in 0..64 {
+            for x in 0..64 {
+                let i = (y * 64 + x) * 4;
+                grad[i] = (x as f32 / 63.0 * 255.0).round() as u8;
+                grad[i + 1] = (y as f32 / 63.0 * 255.0).round() as u8;
+                grad[i + 2] = 102u8;
+                grad[i + 3] = 255u8;
+            }
+        }
+        big.write_texture_rgba(&gpu, &grad);
+        let blitpass = FxPass::blit(&gpu, fmt).expect("blit compiles");
+        let bu = FxUniforms::pack(&[], &[], 0.0, 64.0, 64.0, 0.0);
+        blitpass.render(&gpu, big.view(), &bigout, bu);
+        let pxc = bigout.read_texture_to_cpu(&gpu).expect("readback");
+        let j = (11 * 64 + 32) * 4;
+        assert_eq!(&pxc[j..j + 4], &[130u8, 45, 102, 255], "blit must round-trip, got {:?}", &pxc[j..j + 4]);
     }
 
     /// Fragment passes must agree with the CPU row convention (row 0 =

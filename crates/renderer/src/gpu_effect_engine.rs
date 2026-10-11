@@ -28,6 +28,9 @@ pub struct GpuEffectEngine {
     merge_pass_cache: std::collections::HashMap<&'static str, FxMergePass>,
     bright_pass: Option<FxPass>,
     blit_pass: Option<FxPass>,
+    /// Long-shadow march stage pass for the multi-stage stock path
+    /// (march → blur → under-merge).
+    march_pass: Option<FxPass>,
     /// Scratch target for multi-stage spatial effects (sharpen blur source,
     /// bloom blurred glow): same size as the ping-pong pair, pooled.
     scratch: Option<RenderTarget>,
@@ -80,6 +83,7 @@ impl GpuEffectEngine {
             merge_pass_cache: std::collections::HashMap::new(),
             bright_pass: None,
             blit_pass: None,
+            march_pass: None,
             scratch: None,
             readback: None,
         })
@@ -138,18 +142,31 @@ impl GpuEffectEngine {
         Ok(&self.builtin_pass_cache[id])
     }
 
-    /// Get or create a two-texture merge pass ("unsharp" / "screen").
+    /// Get or create a two-texture merge pass ("unsharp" / "screen" /
+    /// "shadow_under"; Glow reuses "screen" since its blurred layer holds
+    /// straight bytes exactly like the bloom stage).
     fn get_or_create_merge_pass(&mut self, id: &'static str) -> Result<&FxMergePass, GpuError> {
         if !self.merge_pass_cache.contains_key(id) {
             let format = wgpu::TextureFormat::Rgba8Unorm;
             let pass = match id {
                 "screen" => FxMergePass::screen(&self.gpu, format),
+                "shadow_under" => FxMergePass::shadow_under(&self.gpu, format),
                 _ => FxMergePass::unsharp(&self.gpu, format),
             }
             .map_err(GpuError::ShaderCompilation)?;
             self.merge_pass_cache.insert(id, pass);
         }
         Ok(&self.merge_pass_cache[id])
+    }
+
+    /// Get or create the long-shadow march stage.
+    fn get_or_create_march_pass(&mut self) -> Result<&FxPass, GpuError> {
+        if self.march_pass.is_none() {
+            let format = wgpu::TextureFormat::Rgba8Unorm;
+            self.march_pass =
+                Some(FxPass::shadow_march(&self.gpu, format).map_err(GpuError::ShaderCompilation)?);
+        }
+        Ok(self.march_pass.as_ref().expect("just created"))
     }
 
     /// Get or create the bright-pass extract stage.
@@ -268,7 +285,7 @@ impl GpuEffectEngine {
                 continue;
             }
             match &eff.effect_type {
-                compositor::EvaluatedEffectType::Stock { plugin, .. } => {
+                compositor::EvaluatedEffectType::Stock { plugin, params, .. } => {
                     if matches!(
                         plugin,
                         StockPlugin::EdgeDetect
@@ -281,6 +298,41 @@ impl GpuEffectEngine {
                         )
                     {
                         return false;
+                    }
+                    // Multi-stage Glow stays CPU (see CHAIN_SAFE_STOCK):
+                    // threshold presence flips across the u8 boundary
+                    // while the white screen amplifies any nonzero mask
+                    // to full strength — unboundable in a u8 chain.
+                    if *plugin == StockPlugin::Glow {
+                        return false;
+                    }
+                    // Light Rays screen-blend mode screens with the tint
+                    // wherever the march is merely nonzero: a single tap
+                    // straddling the smoothstep floor flips presence, and
+                    // the screen amplifies that LSB into a full lift.
+                    // Additive mode stays magnitude-proportional and safe.
+                    if *plugin == StockPlugin::LightRays {
+                        use compositor::fx::stock_p;
+                        if stock_p(*plugin, params, 10).round() >= 1.0 {
+                            return false;
+                        }
+                    }
+                    // (Lens Flare streaks need no gate: the 48-tap streak
+                    // footprint makes exact-zero straddles uninhabitable
+                    // on real gradients — the parity test guards this.)
+                    if *plugin == StockPlugin::LongShadow {
+                        use compositor::fx::stock_p;
+                        if stock_p(*plugin, params, 5) > 8.0 {
+                            return false;
+                        }
+                        if self.get_or_create_march_pass().is_err()
+                            || self.get_or_create_merge_pass("shadow_under").is_err()
+                            || self.get_or_create_blit_pass().is_err()
+                        {
+                            return false;
+                        }
+                        any = true;
+                        continue;
                     }
                     if !crate::fx_pass::CHAIN_SAFE_STOCK.contains(plugin) {
                         return false;
@@ -384,6 +436,12 @@ impl GpuEffectEngine {
         // Pre-create any required passes before borrowing targets
         for eff in &active_effects {
             if let EvaluatedEffectType::Stock { plugin, .. } = &eff.effect_type {
+                if *plugin == StockPlugin::LongShadow {
+                    let _ = self.get_or_create_march_pass();
+                    let _ = self.get_or_create_merge_pass("shadow_under");
+                    let _ = self.get_or_create_blit_pass();
+                    continue;
+                }
                 let _ = self.get_or_create_fx_pass(*plugin);
             } else if matches!(&eff.effect_type, EvaluatedEffectType::Sharpen { .. }) {
                 let _ = self.get_or_create_merge_pass("unsharp");
@@ -489,6 +547,83 @@ impl GpuEffectEngine {
                             }
                         }
                     }
+                    // Stock Long Shadow: march → gaussian blur → under
+                    // merge (same stage shape; degenerate params skip
+                    // exactly like the CPU early-out, in every mode).
+                    if *plugin == StockPlugin::LongShadow {
+                        use compositor::fx::stock_p;
+                        let dist = stock_p(*plugin, params, 1).clamp(0.0, 1024.0);
+                        let strength = (stock_p(*plugin, params, 8) / 100.0).clamp(0.0, 1.0);
+                        if dist < 0.5 || strength <= 0.001 {
+                            continue;
+                        }
+                        let soft = stock_p(*plugin, params, 5).clamp(0.0, 60.0);
+                        let mode = stock_p(*plugin, params, 7).round().clamp(0.0, 2.0);
+                        let scratch = self.scratch.as_ref().expect("targets allocated");
+                        if let Some(march) = self.march_pass.as_ref() {
+                            let full = FxUniforms::pack(
+                                params,
+                                &stock_uniform_colors(*plugin, colors),
+                                time_s,
+                                width as f32,
+                                height as f32,
+                                0.0,
+                            );
+                            march.record_into(
+                                &self.gpu,
+                                &mut encoder,
+                                targets.read_target().view(),
+                                scratch,
+                                full,
+                            );
+                        }
+                        if soft > 0.5 {
+                            self.blur_pipeline.record_blur(
+                                &self.gpu,
+                                &mut encoder,
+                                scratch,
+                                intermediate,
+                                targets.write_target(),
+                                soft,
+                            );
+                        } else if let Some(blit) = self.blit_pass.as_ref() {
+                            blit.record_into(
+                                &self.gpu,
+                                &mut encoder,
+                                scratch.view(),
+                                targets.write_target(),
+                                FxUniforms::pack(&[], &[], time_s, width as f32, height as f32, 0.0),
+                            );
+                        }
+                        if let Some(merge) = self.merge_pass_cache.get("shadow_under") {
+                            let uniforms = FxUniforms::pack(
+                                &[mode],
+                                &[],
+                                time_s,
+                                width as f32,
+                                height as f32,
+                                0.0,
+                            );
+                            merge.record_into(
+                                &self.gpu,
+                                &mut encoder,
+                                targets.read_target().view(),
+                                targets.write_target().view(),
+                                intermediate,
+                                uniforms,
+                            );
+                        }
+                        if let Some(blit) = self.blit_pass.as_ref() {
+                            blit.record_into(
+                                &self.gpu,
+                                &mut encoder,
+                                intermediate.view(),
+                                targets.read_target(),
+                                FxUniforms::pack(&[], &[], time_s, width as f32, height as f32, 0.0),
+                            );
+                        }
+                        continue;
+                    }
                     if let Some(pass) = self.fx_pass_cache.get(plugin) {
                         let uniforms = FxUniforms::pack(params, &stock_uniform_colors(*plugin, colors), time_s, width as f32, height as f32, 0.0);
                         pass.record_into(
@@ -588,10 +723,10 @@ impl GpuEffectEngine {
                         EvaluatedEffectType::OilPaint { radius, amount } => {
                             ("oil_paint", [*radius, *amount, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
                         }
-                        EvaluatedEffectType::OuterGlow { size, spread, opacity, color, .. } => (
-                            "outer_glow",
-                            [color.r, color.g, color.b, *size, *spread, *opacity, 0.0, 0.0, 0.0, 0.0],
-                        ),
+                        // NOTE: no OuterGlow branch on purpose (blit-stage
+                        // effect; a chain pass would double-apply, see the
+                        // for_builtin note). It falls to `_ => continue`
+                        // below, declining the chain to the exact CPU path.
                         EvaluatedEffectType::Checkerboard { size, color_a, color_b } => {
                             let s = size.max(2.0);
                             let cx = (width as f32 / s).max(1.0);
@@ -723,5 +858,86 @@ impl GpuEffectEngine {
             effect_type: EvaluatedEffectType::GaussianBlur { radius },
         };
         self.process_rgba_frame(src_rgba, width, height, &[eff], 0.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// LightRays end to end on an opaque dark field with a bright bar:
+    /// additive rays must appear tinted (covers the uniform path).
+    #[test]
+    fn rays_engine_additive() {
+        let Ok(gpu) = GpuContext::new_headless() else { return };
+        let Ok(mut engine) = GpuEffectEngine::new(gpu) else { return };
+        // Opaque dark field with a bright horizontal bar (rows 2-3).
+        let mut src = vec![0u8; 8 * 8 * 4];
+        for y in 0..8 {
+            for x in 0..8 {
+                let i = (y * 8 + x) * 4;
+                src[i] = 10;
+                src[i + 1] = 10;
+                src[i + 2] = 10;
+                src[i + 3] = 255;
+            }
+        }
+        for y in 2..4 {
+            for x in 0..8 {
+                let i = (y * 8 + x) * 4;
+                src[i] = 255;
+                src[i + 1] = 255;
+                src[i + 2] = 255;
+            }
+        }
+        let eff = EvaluatedEffect {
+            id: "rays".to_string(),
+            name: "Rays".to_string(),
+            enabled: true,
+            effect_type: EvaluatedEffectType::Stock {
+                plugin: StockPlugin::LightRays,
+                params: vec![50.0, 20.0, 90.0, 20.0, 12.0, 60.0, 96.0, 80.0, 24.0, 0.0, 0.0, 80.0],
+                colors: vec![project::Color::rgba(1.0, 0.9, 0.7, 1.0)],
+            },
+        };
+        assert!(engine.supports_fx_chain(std::slice::from_ref(&eff)));
+        let out = engine.process_rgba_frame(&src, 8, 8, std::slice::from_ref(&eff), 0.0).expect("process");
+        let j = (6 * 8 + 4) * 4;
+        eprintln!("RAYS-ENGINE dark px={:?}", &out[j..j + 4]);
+        assert!(out[j] > 20, "rays must reach dark areas, got {:?}", &out[j..j + 4]);
+    }
+
+    /// GPU compute blur vs the CPU fallback kernel on identical bytes:
+    /// outputs must agree (same math both sides, guards the shared-blur
+    /// parity the multi-stage stock paths rely on).
+    #[test]
+    fn blur_paths_agree() {
+        let Ok(gpu) = GpuContext::new_headless() else { return };
+        let Ok(mut engine) = GpuEffectEngine::new(gpu) else { return };
+        // White mask (64 gray) on transparent, 16x16 with a bright block.
+        let mut src = vec![0u8; 16 * 16 * 4];
+        for y in 4..12 {
+            for x in 4..12 {
+                let i = (y * 16 + x) * 4;
+                src[i] = 64;
+                src[i + 1] = 64;
+                src[i + 2] = 64;
+                src[i + 3] = 64;
+            }
+        }
+        let gpu_out = engine.blur_rgba(&src, 16, 16, 4.0).expect("blur");
+        let mut cpu_out = src.clone();
+        crate::blur::gaussian_blur_rgba(&mut cpu_out, 16, 16, 4.0);
+        let mut worst = 0i32;
+        let mut at = 0usize;
+        for i in 0..cpu_out.len() {
+            let d = (cpu_out[i] as i32 - gpu_out[i] as i32).abs();
+            if d > worst {
+                worst = d;
+                at = i;
+            }
+        }
+        eprintln!("BLUR-PATHS worst={worst} at byte {at} cpu={} gpu={}", cpu_out[at], gpu_out[at]);
+        assert!(worst <= 2, "blur paths must agree, worst {worst}");
     }
 }

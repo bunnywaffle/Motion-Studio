@@ -2973,8 +2973,138 @@ mod tests {
     }
 
     #[test]
-    fn gpu_generator_batch_matches_cpu_within_tolerance() {
+    fn gpu_multistage_batch_matches_cpu_within_tolerance() {
         use compositor::{EvaluatedEffect, EvaluatedEffectType};
+        if !crate::raster::buffer::gpu_accelerated() {
+            return;
+        }
+        let stock = |plugin: StockPlugin, params: Vec<f32>, colors: Vec<Color>| EvaluatedEffect {
+            id: format!("fx_{plugin:?}"),
+            name: format!("{plugin:?}"),
+            enabled: true,
+            effect_type: EvaluatedEffectType::Stock { plugin, params, colors },
+        };
+        // Stock Long Shadow (march → blur → under) runs 3 u8 stages;
+        // the bar covers the cascade like the merge batch.
+        let shadow_cols = vec![
+            Color::rgba(0.0, 0.0, 0.0, 0.8),
+            Color::rgba(0.1, 0.1, 0.4, 0.0),
+        ];
+        for (plugin, params, colors) in [
+            (
+                StockPlugin::LongShadow,
+                vec![135.0, 40.0, 24.0, 60.0, 85.0, 2.0, 0.0, 0.0, 100.0, 1.0],
+                shadow_cols.clone(),
+            ),
+            (
+                StockPlugin::LongShadow,
+                vec![90.0, 24.0, 16.0, 40.0, 90.0, 0.0, 0.0, 1.0, 100.0, 2.0],
+                shadow_cols.clone(),
+            ),
+            (
+                StockPlugin::LongShadow,
+                vec![45.0, 32.0, 20.0, 70.0, 100.0, 1.5, 5.0, 2.0, 90.0, 1.0],
+                shadow_cols.clone(),
+            ),
+        ] {
+            let single = vec![stock(plugin, params, colors)];
+            let w = gpu_parity_worst(&gpu_parity_base(), &single);
+            assert!(w < 0.04, "GPU {plugin:?} must match CPU within cascade rounding: {w}");
+        }
+        // Wide blur radii decline to the exact CPU path (compute apron).
+        let ctx = RasterFx { time_s: 0.0, frame: 0, res_w: 64.0, res_h: 64.0, duration_s: 0.0, playing: false };
+        for (plugin, params) in [(
+            StockPlugin::LongShadow,
+            vec![135.0, 40.0, 24.0, 60.0, 85.0, 24.0, 0.0, 0.0, 100.0, 1.0],
+        )] {
+            let single = vec![stock(plugin, params, Vec::new())];
+            let mut cpu = gpu_parity_base();
+            apply_layer_fx(&mut cpu, 64.0, 64.0, &single, &ctx, false);
+            let mut gpu = gpu_parity_base();
+            apply_layer_fx(&mut gpu, 64.0, 64.0, &single, &ctx, true);
+            let mut worst = 0.0f32;
+            for (c, g) in cpu.px.iter().zip(gpu.px.iter()) {
+                for (cc, gg) in [c.r, c.g, c.b, c.a].into_iter().zip([g.r, g.g, g.b, g.a]) {
+                    worst = worst.max((cc - gg).abs());
+                }
+            }
+            assert!(worst < 1e-5, "{plugin:?} wide radius must fall back to CPU exactly: {worst}");
+        }
+    }
+
+        #[test]
+    fn gpu_light_batch_matches_cpu_within_tolerance() {
+        use compositor::{EvaluatedEffect, EvaluatedEffectType};
+        if !crate::raster::buffer::gpu_accelerated() {
+            return;
+        }
+        let stock = |plugin: StockPlugin, params: Vec<f32>, colors: Vec<Color>| EvaluatedEffect {
+            id: format!("fx_{plugin:?}"),
+            name: format!("{plugin:?}"),
+            enabled: true,
+            effect_type: EvaluatedEffectType::Stock { plugin, params, colors },
+        };
+        // Analytic/additive light effects: single-pass float throughout,
+        // magnitude-proportional composites, smooth masks — u8 rounding
+        // stays sub-LSB (the documented no-normalization contract).
+        let tint = vec![Color::rgba(1.0, 0.9, 0.7, 1.0)];
+        for (plugin, params, colors) in [
+            (StockPlugin::Halo, vec![50.0, 35.0, 40.0], Vec::new()),
+            (StockPlugin::Streaks, vec![60.0, 80.0, 0.0], Vec::new()),
+            (
+                StockPlugin::LightRays,
+                vec![50.0, 80.0, 90.0, 55.0, 12.0, 60.0, 96.0, 80.0, 24.0, 1.0, 0.0, 80.0],
+                tint.clone(),
+            ),
+            (
+                StockPlugin::LightRays,
+                vec![70.0, 120.0, 45.0, 40.0, 20.0, 70.0, 90.0, 100.0, 32.0, 1.0, 1.0, 90.0],
+                tint.clone(),
+            ),
+            (
+                StockPlugin::GodRays,
+                vec![50.0, 60.0, 96.0, 50.0, 35.0, 55.0, 12.0, 40.0, 80.0, 32.0, 1.0, 30.0],
+                tint.clone(),
+            ),
+            (
+                StockPlugin::LensFlare,
+                vec![60.0, 30.0, 4.0, 50.0, 50.0, 60.0, 55.0, 40.0, 45.0, 1.5, 0.0, 0.0],
+                tint.clone(),
+            ),
+            // Hotspot only (no ghosts/halo/streak): isolates the hot
+            // spot + gate + tint path.
+            (
+                StockPlugin::LensFlare,
+                vec![80.0, 50.0, 0.0, 50.0, 50.0, 0.0, 55.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                tint.clone(),
+            ),
+            // Halo only (no ghosts, no streak): isolates the halo ring.
+            (
+                StockPlugin::LensFlare,
+                vec![80.0, 50.0, 0.0, 50.0, 50.0, 0.0, 55.0, 60.0, 70.0, 0.0, 0.0, 0.0],
+                tint.clone(),
+            ),
+            // Threshold 0 forces the heat gate fully open on both paths,
+            // isolating ghost/halo/streak geometry from gate sampling.
+            (
+                StockPlugin::LensFlare,
+                vec![80.0, 50.0, 6.0, 30.0, 70.0, 0.0, 60.0, 50.0, 60.0, 2.0, 0.0, 0.0],
+                tint.clone(),
+            ),
+            (
+                StockPlugin::LensFlare,
+                vec![80.0, 50.0, 6.0, 30.0, 70.0, 45.0, 60.0, 50.0, 60.0, 2.0, 60.0, 40.0],
+                tint.clone(),
+            ),
+        ] {
+            let single = vec![stock(plugin, params, colors)];
+            let w = gpu_parity_worst(&gpu_parity_base(), &single);
+            assert!(w < 0.04, "GPU {plugin:?} must match CPU within cascade rounding: {w}");
+        }
+    }
+
+    #[test]
+    fn gpu_generator_batch_matches_cpu_within_tolerance() {        use compositor::{EvaluatedEffect, EvaluatedEffectType};
         if !crate::raster::buffer::gpu_accelerated() {
             return;
         }

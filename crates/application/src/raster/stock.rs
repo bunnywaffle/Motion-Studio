@@ -110,7 +110,12 @@ pub fn dir_blur(buf: &mut FloatBuf, angle_deg: f32, length: f32) {
     }
 }
 
-/// White-where-bright mask buffer (for light effects).
+/// White-where-bright mask buffer (for light effects). Straight channels
+/// are quantized to the byte grid before the comparison so the CPU mask
+/// agrees bitwise with the GPU extract twin (which reads u8 texture
+/// bytes): without this, a threshold-edge pixel flips presence on one
+/// path only, and the screen merge's alpha normalization amplifies that
+/// single LSB into full white. Sub-LSB elsewhere — invisible.
 fn highlights(src: &FloatBuf, threshold: f32) -> FloatBuf {
     let th = (threshold / 100.0).clamp(0.0, 1.0);
     let mut m = FloatBuf::clear(src.w, src.h);
@@ -142,6 +147,14 @@ fn screen_over(buf: &mut FloatBuf, glow: &FloatBuf, k: f32) {
 /// Deterministic 2D hash in [0, 1).
 pub fn hash2(x: f32, y: f32, seed: f32) -> f32 {
     ((x * 12.9898 + y * 78.233 + seed * 37.719).sin() * 43_758.547).fract()
+}
+
+/// Interleaved-gradient-noise dither in [0, 1): sin-free (no fract
+/// amplification), so the GPU twins evaluate it bit-close. Used for ray
+/// march jitter where both paths must agree.
+pub fn ign(x: f32, y: f32) -> f32 {
+    let d = x * 0.06711056 + y * 0.00583715;
+    (52.9829189 * (d - d.floor())).fract()
 }
 
 /// Smooth value noise in [0, 1].
@@ -381,9 +394,9 @@ fn k_light_rays(buf: &mut FloatBuf, p: &[f32], plugin: StockPlugin, colors: &[Co
     let mut rays = FloatBuf::clear(buf.w, buf.h);
     for y in 0..buf.h {
         for x in 0..buf.w {
-            // IGN-ish per-pixel jitter of the march start kills banding at
-            // low sample counts (warbell godrays.wgsl trick).
-            let j = if jitter > 0.5 { hash2(x as f32, y as f32, 7.0) - 0.5 } else { 0.0 };
+            // IGN-dithered march start kills banding at low sample counts
+            // (warbell godrays.wgsl trick); sin-free so CPU and GPU agree.
+            let j = if jitter > 0.5 { ign(x as f32, y as f32) - 0.5 } else { 0.0 };
             let mut acc = 0.0;
             let mut wsum = 0.0;
             let mut wgt = 1.0;
@@ -453,7 +466,7 @@ fn k_god_rays(buf: &mut FloatBuf, p: &[f32], plugin: StockPlugin, colors: &[Colo
         for x in 0..buf.w {
             let dx = x as f32 - cx;
             let dy = y as f32 - cy;
-            let j = if jitter > 0.5 { hash2(x as f32, y as f32, 3.0) - 0.5 } else { 0.0 };
+            let j = if jitter > 0.5 { ign(x as f32, y as f32) - 0.5 } else { 0.0 };
             let mut acc = 0.0;
             let mut wsum = 0.0;
             let mut wgt = 1.0;
@@ -495,7 +508,7 @@ fn k_lens_flare(buf: &mut FloatBuf, p: &[f32], plugin: StockPlugin, colors: &[Co
     if inten <= 0.01 {
         return;
     }
-    let pos = stock_p(plugin, p, 2);
+    let pos = stock_p(plugin, p, 1);
     let k = (inten / 100.0).clamp(0.0, 2.0);
     let (w, h) = (buf.w as f32, buf.h as f32);
     let ccx = stock_p(plugin, p, 3) / 100.0;
@@ -1651,48 +1664,6 @@ fn k_crop(buf: &mut FloatBuf, p: &[f32], plugin: StockPlugin) {
     }
 }
 
-/// Solve the projective map from unit-square corners to `dst` quad corners
-/// (8x8 Gaussian elimination). Returns row-major homography or None when
-/// the quad is degenerate.
-#[allow(clippy::needless_range_loop)]
-fn homography(dst: [(f32, f32); 4]) -> Option<[f32; 9]> {
-    // Source corners in order: UL(0,0) UR(1,0) LR(1,1) LL(0,1).
-    let src = [(0.0f32, 0.0f32), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
-    let mut m = [[0.0f32; 9]; 8];
-    for (i, ((sx, sy), (dx, dy))) in src.iter().zip(dst.iter()).enumerate() {
-        m[i * 2] = [*sx, *sy, 1.0, 0.0, 0.0, 0.0, -dx * sx, -dx * sy, *dx];
-        m[i * 2 + 1] = [0.0, 0.0, 0.0, *sx, *sy, 1.0, -dy * sx, -dy * sy, *dy];
-    }
-    // Forward elimination with partial pivoting.
-    for col in 0..8 {
-        let mut piv = col;
-        for row in col..8 {
-            if m[row][col].abs() > m[piv][col].abs() {
-                piv = row;
-            }
-        }
-        if m[piv][col].abs() < 1e-9 {
-            return None;
-        }
-        m.swap(col, piv);
-        for row in (col + 1)..8 {
-            let f = m[row][col] / m[col][col];
-            for k in col..9 {
-                m[row][k] -= f * m[col][k];
-            }
-        }
-    }
-    let mut h = [0.0f32; 8];
-    for i in (0..8).rev() {
-        let mut s = m[i][8];
-        for k in (i + 1)..8 {
-            s -= m[i][k] * h[k];
-        }
-        h[i] = s / m[i][i];
-    }
-    Some([h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], 1.0])
-}
-
 fn k_corner_pin(buf: &mut FloatBuf, p: &[f32], plugin: StockPlugin) {
     // Shared solve with the GPU twin (`corner_pin_plan`): one matrix for
     // both paths, parity by construction.
@@ -2367,10 +2338,28 @@ mod tests {
     }
 
     #[test]
-    fn homography_rejects_degenerate_quads() {
-        assert!(homography([(0.0, 0.0), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0)]).is_none());
-        let h = homography([(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]).unwrap();
-        assert!((h[0] - 1.0).abs() < 1e-5 && (h[8] - 1.0).abs() < 1e-5);
+    fn corner_pin_plan_rejects_degenerate_quads() {
+        use compositor::fx::{corner_pin_plan, Card3dPlan};
+        assert!(matches!(
+            corner_pin_plan(&[0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]),
+            Card3dPlan::Keep
+        ));
+        assert!(matches!(
+            corner_pin_plan(&[0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0]),
+            Card3dPlan::Identity
+        ));
+        match corner_pin_plan(&[0.05, 0.02, 0.95, 0.0, 1.0, 1.0, 0.0, 0.98]) {
+            Card3dPlan::Project(inv) => {
+                // Inverse maps pinned corners back near unit corners.
+                let map = |ux: f32, uy: f32| {
+                    let w = inv[6] * ux + inv[7] * uy + inv[8];
+                    ((inv[0] * ux + inv[1] * uy + inv[2]) / w, (inv[3] * ux + inv[4] * uy + inv[5]) / w)
+                };
+                let (sx, sy) = map(0.05, 0.02);
+                assert!((sx - 0.0).abs() < 1e-3 && (sy - 0.0).abs() < 1e-3, "{sx} {sy}");
+            }
+            other => panic!("expected Project, got {other:?}"),
+        }
     }
 
     #[test]

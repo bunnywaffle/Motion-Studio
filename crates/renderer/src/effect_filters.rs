@@ -1107,28 +1107,6 @@ fn fx_stock_saber(
     )
 }
 
-/// Outer glow halo generator for silhouettes.
-pub fn outer_glow() -> ColorFilter {
-    color_filter!(
-        "outer_glow",
-        r#"fn fx_outer_glow(uv: vec2<f32>, color: vec4<f32>, glow_color: vec3<f32>, size: f32, spread: f32, opacity: f32, res: vec2<f32>) -> vec4<f32> {
-    let k = clamp(opacity / 100.0, 0.0, 1.0);
-    if (k <= 0.001 || size <= 0.1) {
-        return color;
-    }
-    let radius = max(size, 0.5);
-    let inv_r = 1.0 / radius;
-    // Fast analytical radial silhouette approximation
-    let a = color.a;
-    let glow_falloff = exp(-pow(max(1.0 - a, 0.0) * radius * 0.2, 2.0)) * k;
-    let add_glow = glow_color * glow_falloff * (1.0 - a);
-    let new_rgb = clamp(color.rgb + add_glow, vec3<f32>(0.0), vec3<f32>(1.0));
-    let new_a = clamp(color.a + glow_falloff * (1.0 - color.a), 0.0, 1.0);
-    return vec4<f32>(new_rgb, new_a);
-}"#
-    )
-}
-
 /// Rectangular crop (transparent outside). Coordinates follow the CPU
 /// kernel's texel-corner convention (`x / w`, not the pixel-center uv),
 /// so both paths cut the same pixels.
@@ -1990,7 +1968,429 @@ pub fn stock_pixelate_resample() -> ColorFilter {
     )
 }
 
-/// Stock mosaic (mirrors `k_pixelate` with color quantization): straight-
+/// Stock long-shadow march stage (mirrors `k_long_shadow` up to the blur):
+/// max mask alpha along the shadow ray with distance fade, near→far tint.
+/// Emits straight bytes (tint, alpha) exactly like the CPU `to_rgba8`
+/// feeds its blur, so the shared gaussian + under-merge stages agree by
+/// construction. Params/colors come from uniforms.
+pub fn stock_long_shadow_march() -> ColorFilter {
+    color_filter!(
+        "stock_long_shadow_march",
+        r#"fn fx_stock_long_shadow_march(uv: vec2<f32>, color: vec4<f32>, res: vec2<f32>) -> vec4<f32> {
+    let angle = radians(u.params[0].x);
+    let dist = clamp(u.params[0].y, 0.0, 1024.0);
+    let steps = i32(clamp(floor(u.params[0].z + 0.5), 1.0, 64.0));
+    let fade = clamp(u.params[0].w / 100.0, 0.0, 1.0);
+    let opacity = clamp(u.params[1].x / 100.0, 0.0, 1.0);
+    let expand = clamp(u.params[1].z, -50.0, 50.0) / 100.0;
+    let mode = floor(u.params[1].w + 0.5);
+    let strength = clamp(u.params[2].x / 100.0, 0.0, 1.0);
+    let stride = clamp(u.params[2].y, 1.0, 8.0);
+    let near = u.colors[0].rgb;
+    let far = u.colors[1].rgb;
+    if (dist < 0.5 || strength <= 0.001) {
+        return vec4<f32>(0.0);
+    }
+    let X = uv * res - vec2<f32>(0.5);
+    let dir = vec2<f32>(cos(angle), sin(angle));
+    let exp = 1.0 + fade * 3.0;
+    var best = 0.0;
+    var best_t = 0.0;
+    var t = stride;
+    for (var i = 0; i < 64; i += 1) {
+        if (i >= steps || t > dist) {
+            break;
+        }
+        let m = clamp(fx_sample_cpu(X - dir * t, res).a + expand, 0.0, 1.0);
+        var tq = t;
+        if (stride > 1.0) {
+            tq = floor(t / stride) * stride;
+        }
+        let fall = 1.0 - clamp(tq / max(dist, 1.0), 0.0, 1.0);
+        let v = m * pow(fall, exp);
+        if (v > best) {
+            best = v;
+            best_t = clamp(tq / max(dist, 1.0), 0.0, 1.0);
+        }
+        t += stride;
+    }
+    if (best <= 0.003) {
+        return vec4<f32>(0.0);
+    }
+    if (mode < 1.5 && color.a > 0.5) {
+        return vec4<f32>(0.0);
+    }
+    let a = min(best * opacity * strength, 1.0);
+    if (a <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let tint = mix(near, far, best_t);
+    return vec4<f32>(tint, a);
+}"#
+    )
+}
+
+/// Stock halo ring (mirrors `k_halo`): analytic centered ring with
+/// warmth-tinted falloff. Pure point math — no sampling — so
+/// single-pass parity is exact. Composites in premultiplied space
+/// exactly like the CPU kernel, then straightens for the chain (the
+/// same op order as the CPU write-back).
+pub fn stock_halo() -> ColorFilter {
+    color_filter!(
+        "stock_halo",
+        r#"fn fx_stock_halo(uv: vec2<f32>, color: vec4<f32>, intensity: f32, radius: f32, warmth: f32, res: vec2<f32>) -> vec4<f32> {
+    let k = clamp(intensity / 100.0, 0.0, 1.0);
+    if (k <= 0.001 || color.a <= 0.0) {
+        return color;
+    }
+    let w = max(res.x, 1.0);
+    let h = max(res.y, 1.0);
+    let r0 = clamp(radius / 100.0, 0.02, 1.0) * min(w, h) * 0.5;
+    let wt = warmth / 100.0;
+    let X = uv * res - vec2<f32>(0.5);
+    let dc = length(vec2<f32>(X.x - w * 0.5, X.y - h * 0.5));
+    let sig = r0 * 0.45 + 1.0;
+    let ring = exp(-((dc - r0) * (dc - r0)) / (2.0 * sig * sig));
+    let a = color.a;
+    let m = min(ring * k * a, 1.0);
+    let tint = vec3<f32>(0.7 + 0.3 * wt, 0.6, 0.55 - 0.3 * wt);
+    let rgb = min(color.rgb * a + m * tint, vec3<f32>(1.0));
+    return vec4<f32>(rgb / max(a, 0.000001), a);
+}"#
+    )
+}
+
+/// Stock streaks (mirrors `k_streaks`): 1D highlight smear screened over
+/// the source. Single pass, all float: the mask is smooth-to-zero at its
+/// contour, the 48-tap footprint makes exact-zero straddles uninhabitable
+/// on real gradients, and magnitudes agree sub-LSB (no Glow-style u8
+/// store + normalize anywhere in the path).
+pub fn stock_streaks() -> ColorFilter {
+    color_filter!(
+        "stock_streaks",
+        r#"fn fx_streaks_mask(s: vec4<f32>, threshold: f32) -> f32 {
+    let th = clamp(threshold / 100.0, 0.0, 1.0);
+    let l = dot(s.rgb, vec3<f32>(0.299, 0.587, 0.114));
+    if (l <= th) {
+        return 0.0;
+    }
+    return clamp((l - th) / max(1.0 - th, 0.001), 0.0, 1.0);
+}
+fn fx_stock_streaks(uv: vec2<f32>, color: vec4<f32>, intensity: f32, length: f32, angle_deg: f32, res: vec2<f32>) -> vec4<f32> {
+    if (intensity <= 0.01 || color.a <= 0.0) {
+        return color;
+    }
+    let len = clamp(max(length, 8.0), 0.0, 200.0);
+    let rad = radians(angle_deg);
+    let dir = vec2<f32>(cos(rad), sin(rad));
+    // Rust `as usize` truncates: match it exactly (not round).
+    let taps = i32(clamp(floor(len), 2.0, 48.0));
+    let X = uv * res - vec2<f32>(0.5);
+    var acc = vec4<f32>(0.0);
+    for (var i = 0; i < 48; i += 1) {
+        if (i >= taps) {
+            break;
+        }
+        let t = (f32(i) / max(f32(taps - 1), 1.0) - 0.5) * len;
+        let s = fx_sample_cpu(X + dir * t, res);
+        let m = fx_streaks_mask(s, 55.0) * s.a;
+        acc += vec4<f32>(m, m, m, m);
+    }
+    let st = acc / max(f32(taps), 1.0);
+    let k = clamp(intensity / 100.0, 0.0, 1.0);
+    if (st.a <= 0.0) {
+        return color;
+    }
+    // color.rgb is already straight (chain convention); the streak
+    // accumulator is premult-style, so only it gets straightened —
+    // mirroring screen_over's (d*r*ia, g*r*ib) inputs exactly.
+    let ib = 1.0 / max(st.a, 0.000001);
+    let screened = vec3<f32>(1.0) - (vec3<f32>(1.0) - color.rgb) * (vec3<f32>(1.0) - (st.rgb * ib) * k);
+    return vec4<f32>(clamp(screened, vec3<f32>(0.0), vec3<f32>(1.0)), color.a);
+}"#
+    )
+}
+
+/// Stock light rays (mirrors `k_light_rays`): thresholded-mask march
+/// with decay toward a light angle, tinted and added over the source.
+/// Single pass, all float: the mask is smooth-to-zero at its contour
+/// and the composite is magnitude-proportional, so u8 rounding stays
+/// sub-LSB. Jitter uses interleaved-gradient noise (bit-close on CPU
+/// and GPU — unlike sin-hash, which fract-amplifies float error).
+pub fn stock_light_rays() -> ColorFilter {
+    color_filter!(
+        "stock_light_rays",
+        r#"fn fx_rays_ign(p: vec2<f32>) -> f32 {
+    return fract(52.9829189 * fract(dot(p, vec2<f32>(0.06711056, 0.00583715))));
+}
+fn fx_rays_mask(s: vec4<f32>, th: f32, knee: f32) -> f32 {
+    let m = clamp((dot(s.rgb, vec3<f32>(0.299, 0.587, 0.114)) - th) / (knee + 0.001) + 0.5, 0.0, 1.0);
+    return m * m * (3.0 - 2.0 * m);
+}
+fn fx_stock_light_rays(uv: vec2<f32>, color: vec4<f32>, p0: vec4<f32>, p1: vec4<f32>, p2: vec4<f32>, tint: vec3<f32>, res: vec2<f32>) -> vec4<f32> {
+    let inten = p0.x;
+    let len = p0.y;
+    if (inten <= 0.01 || len < 0.5 || color.a <= 0.0) {
+        return color;
+    }
+    let th = clamp(p0.w / 100.0, 0.0, 1.0);
+    let knee = max(clamp(p1.x, 0.0, 50.0), 1.0) / 100.0 + 0.001;
+    let density = 0.4 + p1.y / 100.0 * 1.4;
+    let decay = clamp(p1.z / 100.0, 0.8, 1.0);
+    let exposure = p1.w / 100.0;
+    let taps = i32(clamp(floor(p2.x + 0.5), 8.0, 64.0));
+    let jitter = clamp(p2.y, 0.0, 1.0);
+    let blend_screen = floor(p2.z + 0.5) >= 1.0;
+    let mixv = clamp(p2.w / 100.0, 0.0, 1.0);
+    let rad = radians(p0.z);
+    let dir = vec2<f32>(cos(rad), sin(rad));
+    let k = clamp(inten / 100.0, 0.0, 2.0) * mixv * (0.4 + exposure);
+    let X = uv * res - vec2<f32>(0.5);
+    var j = 0.0;
+    if (jitter > 0.5) {
+        j = fx_rays_ign(X) - 0.5;
+    }
+    var acc = 0.0;
+    var wsum = 0.0;
+    var wgt = 1.0;
+    for (var i = 0; i < 64; i += 1) {
+        if (i >= taps) {
+            break;
+        }
+        let t = (f32(i) + 0.5 + j) / f32(taps) * len * density;
+        let s = fx_sample_cpu(X - dir * t, res);
+        acc += fx_rays_mask(s, th, knee) * s.a * wgt;
+        wsum += wgt;
+        wgt *= decay;
+    }
+    let v = min(acc / max(wsum, 0.00001) * k, 2.0);
+    if (v <= 0.0) {
+        return color;
+    }
+    let oa = color.a;
+    let ray = v * tint;
+    if (blend_screen) {
+        let screened = vec3<f32>(1.0) - (vec3<f32>(1.0) - color.rgb) * (vec3<f32>(1.0) - tint);
+        return vec4<f32>(clamp(screened, vec3<f32>(0.0), vec3<f32>(1.0)), oa);
+    }
+    let rgb = min(color.rgb * oa + ray * oa, vec3<f32>(1.0));
+    return vec4<f32>(rgb / max(oa, 0.000001), oa);
+}"#
+    )
+}
+
+/// Stock god rays (mirrors `k_god_rays`): radial march toward a light
+/// center with decay, beam modulation, and additive composite. Same
+/// single-pass float contract as light rays (smooth mask, IGN jitter,
+/// magnitude-proportional add).
+pub fn stock_god_rays() -> ColorFilter {
+    color_filter!(
+        "stock_god_rays",
+        r#"fn fx_god_ign(p: vec2<f32>) -> f32 {
+    return fract(52.9829189 * fract(dot(p, vec2<f32>(0.06711056, 0.00583715))));
+}
+fn fx_god_mask(s: vec4<f32>, th: f32, knee: f32) -> f32 {
+    let m = clamp((dot(s.rgb, vec3<f32>(0.299, 0.587, 0.114)) - th) / (knee + 0.001) + 0.5, 0.0, 1.0);
+    return m * m * (3.0 - 2.0 * m);
+}
+fn fx_stock_god_rays(uv: vec2<f32>, color: vec4<f32>, p0: vec4<f32>, p1: vec4<f32>, p2: vec4<f32>, tint: vec3<f32>, res: vec2<f32>) -> vec4<f32> {
+    let inten = p0.x;
+    if (inten <= 0.01 || color.a <= 0.0) {
+        return color;
+    }
+    let cx = max(res.x, 1.0) * p0.w / 100.0;
+    let cy = max(res.y, 1.0) * p1.x / 100.0;
+    let th = clamp(p1.y / 100.0, 0.0, 1.0);
+    let knee = max(clamp(p1.z, 0.0, 50.0), 1.0) / 100.0 + 0.001;
+    let weight = p1.w / 100.0;
+    let exposure = p2.x / 100.0;
+    let taps = i32(clamp(floor(p2.y + 0.5), 8.0, 64.0));
+    let jitter = clamp(p2.z, 0.0, 1.0);
+    let beams = clamp(p2.w / 100.0, 0.0, 1.0);
+    let density = 0.5 + p0.y / 100.0 * 1.5;
+    let dk = clamp(p0.z, 0.8, 1.0);
+    let k = clamp(inten / 100.0, 0.0, 2.0) * (0.3 + weight * 1.4) * (0.4 + exposure);
+    let X = uv * res - vec2<f32>(0.5);
+    let dx = X.x - cx;
+    let dy = X.y - cy;
+    var j = 0.0;
+    if (jitter > 0.5) {
+        j = fx_god_ign(X) - 0.5;
+    }
+    var acc = 0.0;
+    var wsum = 0.0;
+    var wgt = 1.0;
+    for (var i = 0; i < 64; i += 1) {
+        if (i >= taps) {
+            break;
+        }
+        let t = (f32(i) + 0.5 + j) / f32(taps) * density;
+        let s = fx_sample_cpu(vec2<f32>(cx + dx * (1.0 - t * 0.5), cy + dy * (1.0 - t * 0.5)), res);
+        acc += fx_god_mask(s, th, knee) * s.a * wgt;
+        wsum += wgt;
+        wgt *= dk;
+    }
+    var v = acc / max(wsum, 0.00001) * k;
+    if (beams > 0.01) {
+        let ang = atan2(dy, dx);
+        let beam = 0.72 + 0.28 * (0.6 * sin(ang * 9.0) + 0.4 * sin(ang * 17.0 + 1.7));
+        v *= 1.0 - beams + beams * beam;
+    }
+    if (v <= 0.0) {
+        return color;
+    }
+    let oa = color.a;
+    let rgb = min(color.rgb * oa + (v * tint) * oa, vec3<f32>(1.0));
+    return vec4<f32>(rgb / max(oa, 0.000001), oa);
+}"#
+    )
+}
+
+/// Stock lens flare (mirrors `k_lens_flare`): hot spot + mirrored ghost
+/// discs with chromatic fringing + halo ring, gated by scene heat, plus
+/// an anamorphic streak stage. All additive/analytic in one pass (the
+/// streak helper is inlined — twins stay self-contained); the heat gate
+/// is continuous so u8 rounding stays proportional.
+pub fn stock_lens_flare() -> ColorFilter {
+    color_filter!(
+        "stock_lens_flare",
+        r#"fn fx_flare_add(p: vec2<f32>, hx: f32, hy: f32, cx: f32, cy: f32, ghosts: i32, dispersal: f32, halo_w: f32, halo_k: f32, chroma: f32, min_d: f32) -> vec3<f32> {
+    var ar = 0.0;
+    var ag = 0.0;
+    var ab = 0.0;
+    let dh = length(vec2<f32>(p.x - hx, p.y - hy)) / min_d;
+    let hot = exp(-dh * dh * 60.0) * 1.2;
+    ar += hot;
+    ag += hot;
+    ab += hot;
+    for (var i = 1; i <= 10; i += 1) {
+        if (i > ghosts) {
+            break;
+        }
+        let f = f32(i) / max(f32(ghosts), 1.0) * dispersal;
+        let gx = cx + (cx - hx) * f * 1.4;
+        let gy = cy + (cy - hy) * f * 1.4;
+        let r = 0.02 + 0.05 * (f32(i) / max(f32(ghosts), 1.0));
+        let dg = length(vec2<f32>(p.x - gx, p.y - gy)) / min_d;
+        let px = chroma * 0.004;
+        let denom = 0.004 + 0.01 * r;
+        ar += exp(-((max(dg - px, 0.0) - r) * (max(dg - px, 0.0) - r)) / denom) * 0.35;
+        ag += exp(-((dg - r) * (dg - r)) / denom) * 0.35;
+        ab += exp(-((dg + px - r) * (dg + px - r)) / denom) * 0.35;
+    }
+    let dc = length(vec2<f32>(p.x - cx, p.y - cy)) / min_d;
+    let hd = (dc - 0.30 * (0.5 + halo_w)) / (0.12 + halo_w * 0.2 + 0.001);
+    let halo = exp(-hd * hd) * halo_k;
+    ar += halo;
+    ag += halo * 0.9;
+    ab += halo * 0.8;
+    return vec3<f32>(ar, ag, ab);
+}
+fn fx_flare_mask_straight(lum: f32, threshold: f32) -> f32 {
+    let th = clamp(threshold / 100.0, 0.0, 1.0);
+    if (lum <= th) {
+        return 0.0;
+    }
+    return clamp((lum - th) / max(1.0 - th, 0.001), 0.0, 1.0);
+}
+fn fx_stock_lens_flare(uv: vec2<f32>, color: vec4<f32>, p0: vec4<f32>, p1: vec4<f32>, p2: vec4<f32>, tint: vec3<f32>, res: vec2<f32>) -> vec4<f32> {
+    let inten = p0.x;
+    if (inten <= 0.01 || color.a <= 0.0) {
+        return color;
+    }
+    let w = max(res.x, 1.0);
+    let h = max(res.y, 1.0);
+    let iw = i32(max(res.x, 1.0));
+    let ih = i32(max(res.y, 1.0));
+    let pos = p0.y;
+    let ghosts = i32(clamp(floor(p0.z + 0.5), 0.0, 10.0));
+    let cx = w * p0.w / 100.0;
+    let cy = h * p1.x / 100.0;
+    let th = clamp(p1.y / 100.0, 0.0, 1.0);
+    let dispersal = 0.4 + p1.z / 100.0 * 1.4;
+    let halo_w = p1.w / 100.0;
+    let halo_k = clamp(p2.x / 100.0, 0.0, 2.0);
+    let chroma = clamp(p2.y, 0.0, 8.0);
+    let streak_len = p2.z;
+    let streak_k = clamp(p2.w / 100.0, 0.0, 2.0);
+    // Scene-heat gate on the CPU lattice (every 16th pixel, capped):
+    // matches the CPU mean structurally so the smooth gate agrees.
+    var mean = 0.0;
+    var n = 0.0;
+    let total = iw * ih;
+    for (var kk = 0; kk < 1024; kk += 1) {
+        let idx = kk * 16;
+        if (idx >= total) {
+            break;
+        }
+        let sx = idx % iw;
+        let sy = idx / iw;
+        let s = textureLoad(src_tex, vec2<i32>(sx, sy), 0);
+        mean += dot(s.rgb, vec3<f32>(0.299, 0.587, 0.114)) * s.a;
+        n += 1.0;
+    }
+    mean /= max(n, 1.0);
+    let heat = clamp((mean - th) * 4.0 + 0.5, 0.0, 1.0);
+    let gate = heat * heat * (3.0 - 2.0 * heat);
+    if (gate <= 0.01) {
+        return color;
+    }
+    let t = clamp(pos / 100.0, 0.0, 1.0);
+    let hx = w * (0.2 + 0.6 * t);
+    let hy = h * 0.35;
+    let min_d = max(min(w, h), 1.0);
+    let X = uv * res - vec2<f32>(0.5);
+    let k = clamp(inten / 100.0, 0.0, 2.0);
+    let oa = color.a;
+    let g = min(k * gate * oa, 1.5);
+    let add0 = fx_flare_add(X, hx, hy, cx, cy, ghosts, dispersal, halo_w, halo_k, chroma, min_d);
+    var pr = color.r * oa + add0.x * g * tint.r;
+    var pg = color.g * oa + add0.y * g * tint.g;
+    var pb = color.b * oa + add0.z * g * tint.b;
+    // Anamorphic streak stage samples the *flared* buffer like the CPU
+    // tail (which snapshots buf after the main loop): per tap evaluate
+    // the analytic main add, threshold its straight luminance at 60.
+    if (streak_k > 0.01 && streak_len > 0.5) {
+        let slen = max(streak_len, 8.0);
+        let taps = i32(clamp(floor(slen), 2.0, 48.0));
+        var acc = vec4<f32>(0.0);
+        for (var i = 0; i < 48; i += 1) {
+            if (i >= taps) {
+                break;
+            }
+            let tt = (f32(i) / max(f32(taps - 1), 1.0) - 0.5) * slen;
+            let tp = vec2<f32>(X.x + tt, X.y);
+            let s = fx_sample_cpu(tp, res);
+            var m = 0.0;
+            if (s.a > 0.0) {
+                let addt = fx_flare_add(tp, hx, hy, cx, cy, ghosts, dispersal, halo_w, halo_k, chroma, min_d);
+                let g2 = min(k * gate * s.a, 1.5);
+                let fr = s.rgb * s.a + addt * g2 * tint;
+                let lum = dot(fr / max(s.a, 0.000001), vec3<f32>(0.299, 0.587, 0.114));
+                m = fx_flare_mask_straight(lum, 60.0) * s.a;
+            }
+            acc += vec4<f32>(m, m, m, m);
+        }
+        let st = acc / max(f32(taps), 1.0);
+        if (st.a > 0.0) {
+            let sk = streak_k * gate * 0.7;
+            let ib = 1.0 / max(st.a, 0.000001);
+            let ioa = 1.0 / max(oa, 0.000001);
+            var sr = pr * ioa;
+            var sg = pg * ioa;
+            var sb = pb * ioa;
+            sr = 1.0 - (1.0 - sr) * (1.0 - (st.r * ib) * sk);
+            sg = 1.0 - (1.0 - sg) * (1.0 - (st.g * ib) * sk);
+            sb = 1.0 - (1.0 - sb) * (1.0 - (st.b * ib) * sk);
+            pr = sr * oa;
+            pg = sg * oa;
+            pb = sb * oa;
+        }
+    }
+    return vec4<f32>(clamp(vec3<f32>(pr, pg, pb), vec3<f32>(0.0), vec3<f32>(1.0)) / max(oa, 0.000001), oa);
+}"#
+    )
+}
 /// space quantization matches the CPU premultiplied-then-store math.
 pub fn stock_mosaic_resample() -> ColorFilter {
     color_filter!(
@@ -2038,6 +2438,10 @@ pub fn resample_filters() -> Vec<ColorFilter> {
         stock_corner_pin_resample(),
         stock_reframe_resample(),
         stock_liquify_resample(),
+        stock_streaks(),
+        stock_light_rays(),
+        stock_god_rays(),
+        stock_lens_flare(),
         cel_shade_resample(),
         oil_paint_resample(),
     ]
@@ -2077,6 +2481,7 @@ pub fn all_color_filters() -> Vec<ColorFilter> {
         stock_difference_key(),
         stock_spill_suppress(),
         stock_light_leak(),
+        stock_halo(),
         stock_scanlines(),
         stock_film_grain(),
         stock_fractal_noise(),
@@ -2091,7 +2496,6 @@ pub fn all_color_filters() -> Vec<ColorFilter> {
         stock_plasma(),
         stock_particles(),
         stock_saber(),
-        outer_glow(),
         stock_crop(),
         stock_mosaic(),
         drop_shadow_core(),
@@ -2216,6 +2620,10 @@ mod tests {
             ("stock_corner_pin_resample", "fx_stock_corner_pin_c(uv, color, u.params[0].xyz, u.params[1].xyz, u.params[2].xyz, RES)"),
             ("stock_reframe_resample", "fx_stock_reframe_c(uv, color, u.params[0].x, u.params[0].y, u.params[0].z, RES)"),
             ("stock_liquify_resample", "fx_stock_liquify_c(uv, color, u.params[0].xy, u.params[0].z, u.params[0].w, u.params[1].x, RES)"),
+            ("stock_streaks", "fx_stock_streaks(uv, color, u.params[0].x, u.params[0].y, u.params[0].z, RES)"),
+            ("stock_light_rays", "fx_stock_light_rays(uv, color, u.params[0], u.params[1], u.params[2], u.colors[0].rgb, RES)"),
+            ("stock_god_rays", "fx_stock_god_rays(uv, color, u.params[0], u.params[1], u.params[2], u.colors[0].rgb, RES)"),
+            ("stock_lens_flare", "fx_stock_lens_flare(uv, color, u.params[0], u.params[1], u.params[2], u.colors[0].rgb, RES)"),
             ("cel_shade_resample", "fx_cel_shade(uv, color, u.params[0].x, u.params[0].y, RES)"),
             ("oil_paint_resample", "fx_oil_paint(uv, color, u.params[0].x, u.params[0].y, RES)"),
         ];
