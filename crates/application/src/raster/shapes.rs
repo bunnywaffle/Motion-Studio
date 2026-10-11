@@ -237,11 +237,6 @@ pub(crate) struct StrokeStyle {
 }
 
 impl StrokeStyle {
-    /// Round caps/joins, solid line (legacy stroker behavior).
-    pub(crate) fn solid() -> Self {
-        Self { cap: LineCap::Round, join: LineJoin::Round, dash: 0.0, gap: 0.0, offset: 0.0 }
-    }
-
     /// Parse shape `line_cap`/`line_join` strings (unknown → round) with
     /// dash params in px (0 = solid).
     pub(crate) fn from_shape(cap: &str, join: &str, dash: f32, gap: f32, offset: f32) -> Self {

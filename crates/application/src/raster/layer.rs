@@ -582,26 +582,29 @@ pub fn layer_cache_key(
             }
         }
         LayerSource::Shape { shape_type } => match shape_type {
-            ShapeType::Rectangle { width, height, corner_radius, fill, fill_gradient, .. } => {
+            ShapeType::Rectangle { width, height, corner_radius, fill, fill_gradient, stroke, stroke_width, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
                 4u8.hash(&mut h);
                 width.value.to_bits().hash(&mut h);
                 height.value.to_bits().hash(&mut h);
                 corner_radius.value.to_bits().hash(&mut h);
                 color_hash(&fill.value, &mut h);
                 gradient_hash(fill_gradient, &mut h);
+                shape_stroke_hash(stroke, stroke_width, line_cap, line_join, dash, dash_gap, dash_offset, &mut h);
             }
-            ShapeType::Ellipse { radius_x, radius_y, fill, fill_gradient, .. } => {
+            ShapeType::Ellipse { radius_x, radius_y, fill, fill_gradient, stroke, stroke_width, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
                 5u8.hash(&mut h);
                 radius_x.value.to_bits().hash(&mut h);
                 radius_y.value.to_bits().hash(&mut h);
                 color_hash(&fill.value, &mut h);
                 gradient_hash(fill_gradient, &mut h);
+                shape_stroke_hash(stroke, stroke_width, line_cap, line_join, dash, dash_gap, dash_offset, &mut h);
             }
-            ShapeType::Path { path_data, fill, fill_gradient, .. } => {
+            ShapeType::Path { path_data, fill, fill_gradient, stroke, stroke_width, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
                 6u8.hash(&mut h);
                 path_data.hash(&mut h);
                 color_hash(&fill.value, &mut h);
                 gradient_hash(fill_gradient, &mut h);
+                shape_stroke_hash(stroke, stroke_width, line_cap, line_join, dash, dash_gap, dash_offset, &mut h);
             }
         },
         LayerSource::Adjustment => {
@@ -653,6 +656,28 @@ fn color_hash(c: &Color, h: &mut DefaultHasher) {
     c.g.to_bits().hash(h);
     c.b.to_bits().hash(h);
     c.a.to_bits().hash(h);
+}
+
+/// Stroke-affecting shape values for the layer cache key: without these,
+/// stroke edits hash identically and the viewer serves stale bitmaps.
+#[allow(clippy::too_many_arguments)]
+fn shape_stroke_hash(
+    stroke: &project::Property<Color>,
+    stroke_width: &project::Property<f32>,
+    line_cap: &str,
+    line_join: &str,
+    dash: &project::Property<f32>,
+    dash_gap: &project::Property<f32>,
+    dash_offset: &project::Property<f32>,
+    h: &mut DefaultHasher,
+) {
+    color_hash(&stroke.value, h);
+    stroke_width.value.to_bits().hash(h);
+    line_cap.hash(h);
+    line_join.hash(h);
+    dash.value.to_bits().hash(h);
+    dash_gap.value.to_bits().hash(h);
+    dash_offset.value.to_bits().hash(h);
 }
 
 fn gradient_hash(g: &Option<project::Property<project::FillGradient>>, h: &mut DefaultHasher) {
@@ -2555,6 +2580,49 @@ mod tests {
             false, 5.0, &assets,
         );
         (buf, empty)
+    }
+
+    #[test]
+    fn shape_stroke_changes_cache_key() {
+        // Stroke edits must invalidate the cached bitmap (stale-key
+        // regression: the key used to hash fill only).
+        let tc = TimeCode::from_frames(0, 30.0);
+        let out = TimeCode::from_frames(150, 30.0);
+        let rect = |sw: f32, cap: &str| {
+            project::Layer::shape(
+                "l1",
+                "L",
+                project::ShapeType::Rectangle {
+                    width: project::Property::new("W", 60.0),
+                    height: project::Property::new("H", 60.0),
+                    corner_radius: project::Property::new("R", 0.0),
+                    size_linked: true,
+                    fill: project::Property::new("Fill", Color::WHITE),
+                    fill_gradient: None,
+                    stroke: project::Property::new("Stroke", Color::rgb(1.0, 0.0, 0.0)),
+                    stroke_width: project::Property::new("Stroke Width", sw),
+                    line_cap: cap.to_string(),
+                    line_join: "round".to_string(),
+                    dash: project::Property::new("Dash", 0.0),
+                    dash_gap: project::Property::new("Dash Gap", 0.0),
+                    dash_offset: project::Property::new("Dash Offset", 0.0),
+                },
+                tc,
+                out,
+            )
+        };
+        let key_of = |layer: &project::Layer| {
+            let mut p = Project::new("p", "P");
+            let mut c = Composition::hd_1080p_30fps("c", "C", 5.0);
+            c.add_layer(layer.clone()).unwrap();
+            p.add_composition(c).unwrap();
+            let eval = eval_first(&p, "c");
+            layer_cache_key(&eval, 0, 64, 64, false, 0)
+        };
+        let base = key_of(&rect(4.0, "round"));
+        assert_eq!(base, key_of(&rect(4.0, "round")), "identical strokes share cache");
+        assert_ne!(base, key_of(&rect(8.0, "round")), "width must invalidate");
+        assert_ne!(base, key_of(&rect(4.0, "butt")), "cap must invalidate");
     }
 
     #[test]
