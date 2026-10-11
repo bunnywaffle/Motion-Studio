@@ -317,6 +317,13 @@ pub enum ShapeType {
         /// Linear fill gradient (None = solid `fill`).
         #[serde(default = "default_no_gradient", skip_serializing_if = "Option::is_none", deserialize_with = "crate::property::de_opt_property_or_value")]
         fill_gradient: Option<Property<FillGradient>>,
+        /// Stroke color. Transparent (the default for old files) means
+        /// "outline in the fill color".
+        #[serde(default = "default_shape_stroke_prop", deserialize_with = "crate::property::de_property_or_value")]
+        stroke: Property<Color>,
+        /// Stroke width in px (0 = no stroke).
+        #[serde(default = "default_shape_stroke_width_prop", deserialize_with = "crate::property::de_property_or_value")]
+        stroke_width: Property<f32>,
     },
     Ellipse {
         radius_x: Property<f32>,
@@ -326,6 +333,13 @@ pub enum ShapeType {
         /// Linear fill gradient (None = solid `fill`).
         #[serde(default = "default_no_gradient", skip_serializing_if = "Option::is_none", deserialize_with = "crate::property::de_opt_property_or_value")]
         fill_gradient: Option<Property<FillGradient>>,
+        /// Stroke color. Transparent (the default for old files) means
+        /// "outline in the fill color".
+        #[serde(default = "default_shape_stroke_prop", deserialize_with = "crate::property::de_property_or_value")]
+        stroke: Property<Color>,
+        /// Stroke width in px (0 = no stroke).
+        #[serde(default = "default_shape_stroke_width_prop", deserialize_with = "crate::property::de_property_or_value")]
+        stroke_width: Property<f32>,
     },
     Path {
         path_data: String,
@@ -889,25 +903,31 @@ impl Layer {
                 }
             }
             LayerSource::Shape { shape_type } => match shape_type {
-                ShapeType::Rectangle { width, height, corner_radius, fill, fill_gradient } => {
+                ShapeType::Rectangle { width, height, corner_radius, fill, fill_gradient, stroke, stroke_width } => {
                     width.migrate_frame_rate(new_fps);
                     height.migrate_frame_rate(new_fps);
                     corner_radius.migrate_frame_rate(new_fps);
                     fill.migrate_frame_rate(new_fps);
+                    stroke.migrate_frame_rate(new_fps);
+                    stroke_width.migrate_frame_rate(new_fps);
                     if let Some(fg) = fill_gradient {
                         fg.migrate_frame_rate(new_fps);
                     }
                 }
-                ShapeType::Ellipse { radius_x, radius_y, fill, fill_gradient } => {
+                ShapeType::Ellipse { radius_x, radius_y, fill, fill_gradient, stroke, stroke_width } => {
                     radius_x.migrate_frame_rate(new_fps);
                     radius_y.migrate_frame_rate(new_fps);
                     fill.migrate_frame_rate(new_fps);
+                    stroke.migrate_frame_rate(new_fps);
+                    stroke_width.migrate_frame_rate(new_fps);
                     if let Some(fg) = fill_gradient {
                         fg.migrate_frame_rate(new_fps);
                     }
                 }
-                ShapeType::Path { fill, fill_gradient, .. } => {
+                ShapeType::Path { fill, fill_gradient, stroke, stroke_width, .. } => {
                     fill.migrate_frame_rate(new_fps);
+                    stroke.migrate_frame_rate(new_fps);
+                    stroke_width.migrate_frame_rate(new_fps);
                     if let Some(fg) = fill_gradient {
                         fg.migrate_frame_rate(new_fps);
                     }

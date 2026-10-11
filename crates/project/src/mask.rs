@@ -16,9 +16,12 @@
 //! it, opacity blends it toward the mode neutral, then modes combine in
 //! mask order — Add / Subtract / Intersect / Difference / None.
 
+use crate::keyframe::Keyframe;
 use crate::path::Path;
 use crate::property::Property;
+use crate::timecode::TimeCode;
 use crate::transform::Transform;
+use crate::vec2::Vec2;
 use serde::{Deserialize, Serialize};
 
 /// How one mask combines into the layer's accumulated alpha.
@@ -253,11 +256,146 @@ impl Mask {
             false
         }
     }
+
+    /// Transform component names served to the inspector scrub pipeline:
+    /// `position.x`, `position.y`, `rotation`, `scale.x`, `scale.y`.
+    /// Vec2 components animate on the parent `Property<Vec2>` (same as
+    /// layer transform scrub).
+    pub fn transform_value(&self, name: &str, time: &TimeCode) -> Option<f32> {
+        match name.to_lowercase().as_str() {
+            "position.x" => Some(self.transform.position.evaluate_at(time).x),
+            "position.y" => Some(self.transform.position.evaluate_at(time).y),
+            "rotation" => Some(self.transform.rotation.evaluate_at(time)),
+            "scale.x" => Some(self.transform.scale.evaluate_at(time).x),
+            "scale.y" => Some(self.transform.scale.evaluate_at(time).y),
+            _ => None,
+        }
+    }
+
+    /// True when the property behind a transform component name is animated.
+    pub fn transform_animated(&self, name: &str) -> bool {
+        match name.to_lowercase().as_str() {
+            "position.x" | "position.y" => self.transform.position.is_animated(),
+            "rotation" => self.transform.rotation.is_animated(),
+            "scale.x" | "scale.y" => self.transform.scale.is_animated(),
+            _ => false,
+        }
+    }
+
+    /// Toggle animation on the property behind a transform component name
+    /// (stopwatch behavior: clear keyframes, else key the current value).
+    /// Returns false for unknown names.
+    pub fn toggle_transform_animation(&mut self, name: &str, time: TimeCode) -> bool {
+        match name.to_lowercase().as_str() {
+            "position.x" | "position.y" => {
+                let p = &mut self.transform.position;
+                if p.is_animated() {
+                    p.clear_keyframes();
+                } else {
+                    let v = p.value;
+                    p.add_keyframe(Keyframe::new(time, v));
+                }
+                true
+            }
+            "rotation" => {
+                let p = &mut self.transform.rotation;
+                if p.is_animated() {
+                    p.clear_keyframes();
+                } else {
+                    let v = p.value;
+                    p.add_keyframe(Keyframe::new(time, v));
+                }
+                true
+            }
+            "scale.x" | "scale.y" => {
+                let p = &mut self.transform.scale;
+                if p.is_animated() {
+                    p.clear_keyframes();
+                } else {
+                    let v = p.value;
+                    p.add_keyframe(Keyframe::new(time, v));
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Nudge a transform component (evaluated-when-animated, keyframed
+    /// when animated — mirrors layer position/scale nudging). Scale clamps
+    /// at 0.1 to avoid degenerate flips. Returns false for unknown names.
+    pub fn nudge_transform(&mut self, name: &str, delta: f32, time: &TimeCode) -> bool {
+        match name.to_lowercase().as_str() {
+            "position.x" | "position.y" => {
+                let p = &mut self.transform.position;
+                let cur = if p.is_animated() { p.evaluate_at(time) } else { p.value };
+                let new_val = if name.ends_with(".x") {
+                    Vec2::new(cur.x + delta, cur.y)
+                } else {
+                    Vec2::new(cur.x, cur.y + delta)
+                };
+                p.set_value(new_val);
+                if p.is_animated() {
+                    p.add_keyframe(Keyframe::new(*time, new_val));
+                }
+                true
+            }
+            "rotation" => {
+                let p = &mut self.transform.rotation;
+                let cur = if p.is_animated() { p.evaluate_at(time) } else { p.value };
+                p.set_value(cur + delta);
+                if p.is_animated() {
+                    p.add_keyframe(Keyframe::new(*time, cur + delta));
+                }
+                true
+            }
+            "scale.x" | "scale.y" => {
+                let p = &mut self.transform.scale;
+                let cur = if p.is_animated() { p.evaluate_at(time) } else { p.value };
+                let new_val = if name.ends_with(".x") {
+                    Vec2::new((cur.x + delta).max(0.1), cur.y)
+                } else {
+                    Vec2::new(cur.x, (cur.y + delta).max(0.1))
+                };
+                p.set_value(new_val);
+                if p.is_animated() {
+                    p.add_keyframe(Keyframe::new(*time, new_val));
+                }
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transform_components_roundtrip() {
+        let tc = TimeCode::from_frames(10, 30.0);
+        let mut m = Mask::with_path("m", "M", Path::rectangle(0.0, 0.0, 10.0, 10.0));
+        // Defaults: pos 0, rot 0, scale 100.
+        assert_eq!(m.transform_value("position.x", &tc), Some(0.0));
+        assert_eq!(m.transform_value("scale.x", &tc), Some(100.0));
+        assert_eq!(m.transform_value("bogus", &tc), None);
+        assert!(!m.transform_animated("rotation"));
+        // Nudge writes through to the parent property.
+        assert!(m.nudge_transform("position.x", 5.0, &tc));
+        assert!(m.nudge_transform("scale.y", -10.0, &tc));
+        assert!(m.nudge_transform("rotation", 45.0, &tc));
+        assert!(!m.nudge_transform("bogus", 1.0, &tc));
+        assert_eq!(m.transform_value("position.x", &tc), Some(5.0));
+        assert_eq!(m.transform_value("scale.y", &tc), Some(90.0));
+        assert_eq!(m.transform_value("rotation", &tc), Some(45.0));
+        // Stopwatch toggles animation on the parent property.
+        assert!(m.toggle_transform_animation("position.x", tc));
+        assert!(m.transform_animated("position.y"));
+        assert!(m.toggle_transform_animation("position.x", tc));
+        assert!(!m.transform_animated("position.x"));
+        assert!(!m.toggle_transform_animation("bogus", tc));
+    }
 
     #[test]
     fn combine_modes_behave() {

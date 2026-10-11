@@ -225,6 +225,13 @@ pub struct EditorState {
     pub selected_layer_id: Option<String>,
     pub is_playing: bool,
     pub active_tool: EditorTool,
+    /// Remembered shape-group variant (rectangle/ellipse/triangle/polygon/
+    /// star): the grouped slot in both toolbars shows this when a non-shape
+    /// tool is active. Synced by [`Self::set_tool`].
+    pub last_shape_tool: EditorTool,
+    /// Whether the shape-group flyout (right-click tool variants) is open.
+    /// Shared by the top toolbar and the viewer tool strip.
+    pub tool_flyout: bool,
     pub timeline_full_width: bool,
     /// Viewport snapping toggle (top toolbar magnet).
     pub snapping: bool,
@@ -896,6 +903,8 @@ impl EditorState {
             selected_layer_id,
             is_playing: false,
             active_tool: EditorTool::Move,
+            last_shape_tool: EditorTool::ShapeRect,
+            tool_flyout: false,
             timeline_full_width: false,
             snapping: true,
             value_edit_key: None,
@@ -2573,6 +2582,9 @@ impl EditorState {
         if mask.locked {
             return Err(format!("Mask {mask_id} is locked"));
         }
+        if mask.nudge_transform(param_name, delta, &current_tc) {
+            return Ok(());
+        }
         if let Some(prop) = mask.get_param_property_mut(param_name) {
             let cur = if prop.is_animated() {
                 prop.evaluate_at(&current_tc)
@@ -2928,6 +2940,9 @@ impl EditorState {
             .ok_or_else(|| format!("Mask {mask_id} not found on layer"))?;
         if mask.locked {
             return Err(format!("Mask {mask_id} is locked"));
+        }
+        if mask.toggle_transform_animation(param_name, current_tc) {
+            return Ok(());
         }
         let prop = mask
             .get_param_property_mut(param_name)
@@ -4411,14 +4426,18 @@ impl EditorState {
                                 Some(m) => m,
                                 None => return false,
                             };
-                            let prop = match mask.get_param_property(param) {
-                                Some(p) => p,
-                                None => return false,
-                            };
-                            if prop.is_animated() {
-                                prop.evaluate_at(&current_tc)
+                            if let Some(v) = mask.transform_value(param, &current_tc) {
+                                v
                             } else {
-                                prop.value
+                                let prop = match mask.get_param_property(param) {
+                                    Some(p) => p,
+                                    None => return false,
+                                };
+                                if prop.is_animated() {
+                                    prop.evaluate_at(&current_tc)
+                                } else {
+                                    prop.value
+                                }
                             }
                         };
                         return self.nudge_mask_param(lid, mid, param, v - cur).is_ok();
@@ -4668,7 +4687,7 @@ impl EditorState {
         }
     }
 
-    /// Set a pen-path shape's stroke color (Path shapes only).
+    /// Set a shape layer's stroke color (Rectangle, Ellipse, Path).
     pub fn set_layer_shape_stroke(&mut self, layer_id: &str, color: Color) -> Result<(), String> {
         self.checkpoint();
         let current_tc = self.clock.timecode();
@@ -4680,6 +4699,12 @@ impl EditorState {
             .ok_or_else(|| format!("Layer {layer_id} not found"))?;
         match &mut layer.source {
             LayerSource::Shape {
+                shape_type: ShapeType::Rectangle { stroke, .. },
+            }
+            | LayerSource::Shape {
+                shape_type: ShapeType::Ellipse { stroke, .. },
+            }
+            | LayerSource::Shape {
                 shape_type: ShapeType::Path { stroke, .. },
             } => {
                 stroke.set_value(color);
@@ -4688,11 +4713,11 @@ impl EditorState {
                 }
                 Ok(())
             }
-            _ => Err("Not a path shape layer".to_string()),
+            _ => Err("Not a shape layer".to_string()),
         }
     }
 
-    /// Set a pen-path shape's stroke width in px (Path shapes only).
+    /// Set a shape layer's stroke width in px (Rectangle, Ellipse, Path).
     pub fn set_layer_shape_stroke_width(&mut self, layer_id: &str, width: f32) -> Result<(), String> {
         self.checkpoint();
         let current_tc = self.clock.timecode();
@@ -4704,6 +4729,12 @@ impl EditorState {
             .ok_or_else(|| format!("Layer {layer_id} not found"))?;
         match &mut layer.source {
             LayerSource::Shape {
+                shape_type: ShapeType::Rectangle { stroke_width, .. },
+            }
+            | LayerSource::Shape {
+                shape_type: ShapeType::Ellipse { stroke_width, .. },
+            }
+            | LayerSource::Shape {
                 shape_type: ShapeType::Path { stroke_width, .. },
             } => {
                 stroke_width.set_value(width.max(0.0));
@@ -4712,7 +4743,7 @@ impl EditorState {
                 }
                 Ok(())
             }
-            _ => Err("Not a path shape layer".to_string()),
+            _ => Err("Not a shape layer".to_string()),
         }
     }
 
@@ -7647,19 +7678,27 @@ impl EditorState {
                     width,
                     height,
                     corner_radius,
+                    stroke,
+                    stroke_width,
                     ..
                 } => {
                     width.clear_keyframes();
                     height.clear_keyframes();
                     corner_radius.clear_keyframes();
+                    stroke.clear_keyframes();
+                    stroke_width.clear_keyframes();
                 }
                 project::ShapeType::Ellipse {
                     radius_x,
                     radius_y,
+                    stroke,
+                    stroke_width,
                     ..
                 } => {
                     radius_x.clear_keyframes();
                     radius_y.clear_keyframes();
+                    stroke.clear_keyframes();
+                    stroke_width.clear_keyframes();
                 }
                 _ => {}
             },
@@ -8497,16 +8536,21 @@ impl EditorState {
     /// Set the active editor tool (Move, Hand, Rotate, Pen, Text, shapes).
     pub fn set_tool(&mut self, tool: EditorTool) {
         self.active_tool = tool;
+        if tool.is_shape_tool() {
+            self.last_shape_tool = tool;
+        }
+        self.tool_flyout = false;
     }
 
     /// Cycle to the next variant in the active tool's group (the shape
     /// group rotates rectangle → ellipse → triangle → polygon → star).
     pub fn cycle_shape_tool(&mut self) {
-        self.active_tool = if self.active_tool.is_shape_tool() {
+        let next = if self.active_tool.is_shape_tool() {
             self.active_tool.group_next()
         } else {
-            EditorTool::ShapeRect
+            self.last_shape_tool
         };
+        self.set_tool(next);
     }
 
     /// Add a new Text layer with given text and optional position.
@@ -8607,6 +8651,8 @@ impl EditorState {
                 corner_radius: Property::new("Corner Radius", 0.0),
                 fill: Property::new("Fill", fill),
                 fill_gradient: None,
+                stroke: Property::new("Stroke", Color::TRANSPARENT),
+                stroke_width: Property::new("Stroke Width", 0.0),
             },
             in_pt,
             out_pt,
@@ -8666,6 +8712,8 @@ impl EditorState {
                 radius_y: Property::new("Radius Y", radius_y),
                 fill: Property::new("Fill", fill),
                 fill_gradient: None,
+                stroke: Property::new("Stroke", Color::TRANSPARENT),
+                stroke_width: Property::new("Stroke Width", 0.0),
             },
             in_pt,
             out_pt,

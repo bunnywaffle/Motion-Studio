@@ -3146,10 +3146,6 @@ pub struct CompositionViewerPanel {
     pub down_on_layer: bool,
     /// Window-space position of an empty-canvas press (click = deselect).
     pub empty_down: Option<(f32, f32)>,
-    /// Remembered rectangle/ellipse variant for the grouped Shape tool.
-    pub shape_variant: EditorTool,
-    /// Whether the shape-group flyout (right-click tool variants) is open.
-    pub tool_flyout: bool,
     /// Measured canvas-wrap size in window px (responsive fit).
     pub viewport_px: Option<(f32, f32)>,
     /// Measured canvas-wrap origin in window px (for cursor mapping).
@@ -3338,8 +3334,6 @@ impl CompositionViewerPanel {
             last_canvas_mouse: None,
             down_on_layer: false,
             empty_down: None,
-            shape_variant: EditorTool::ShapeRect,
-            tool_flyout: false,
             viewport_px: None,
             viewport_origin: None,
             frame_origin: None,
@@ -5119,14 +5113,12 @@ impl Render for CompositionViewerPanel {
         };
         let active_tool = state.active_tool;
         let s_side = self.state.clone();
-        let panel_entity = cx.entity().clone();
         // Semantic tool buttons (kit Button: focus, keyboard, tooltip and
         // cursor contracts included; toggled marks the active tool).
         // Any tool pick also dismisses the shape-group flyout.
         let tool_btn = |tool: EditorTool, icon: IconName, label: &'static str, tip: &'static str, _cx: &App| {
             let is_active = active_tool == tool;
             let s_click = s_side.clone();
-            let p_close = panel_entity.clone();
             div()
                 .id(SharedString::from(format!("side_tool_btn_{label}")))
                 .test_support()
@@ -5138,11 +5130,8 @@ impl Render for CompositionViewerPanel {
                         .child(icon_box(icon))
                         .on_click(move |_, _, cx| {
                             s_click.update(cx, |s, cx| {
+                                // set_tool also dismisses the shape-group flyout.
                                 s.set_tool(tool);
-                                cx.notify();
-                            });
-                            p_close.update(cx, |this, cx| {
-                                this.tool_flyout = false;
                                 cx.notify();
                             });
                         }),
@@ -5152,11 +5141,12 @@ impl Render for CompositionViewerPanel {
         let s_add = self.state.clone();
         // Grouped Shape tool: shows the active variant; left-click
         // selects (again = next variant, same as `Q`); right-click opens
-        // the variant flyout (Photoshop-style tool group).
+        // the variant flyout (Photoshop-style tool group). Variant memory
+        // lives on EditorState so the top toolbar shares the same group.
         let shown_shape = if active_tool.is_shape_tool() {
             active_tool
         } else {
-            self.shape_variant
+            self.state.read(cx).last_shape_tool
         };
         let shape_label = match shown_shape {
             EditorTool::ShapeEllipse => "ellipse",
@@ -5184,10 +5174,10 @@ impl Render for CompositionViewerPanel {
             .child(tool_btn(EditorTool::Pen, IconName::Pen, "pen", "Pen Tool (G)", cx))
             .child(tool_btn(EditorTool::Text, IconName::Type, "text", "Text Tool (T)", cx))
             .child({
-                let p_shape = panel_entity.clone();
-                let p_click = p_shape.clone();
-                let p_rclick = p_shape.clone();
-                let flyout_open = self.tool_flyout;
+                let s_click = self.state.clone();
+                let s_rclick = self.state.clone();
+                let s_pick = self.state.clone();
+                let flyout_open = self.state.read(cx).tool_flyout;
                 let mut slot = div()
                     .id(SharedString::from(format!("side_tool_btn_{shape_label}")))
                     .test_support()
@@ -5197,34 +5187,37 @@ impl Render for CompositionViewerPanel {
                             .compact()
                             .toggled(shape_is_active)
                             .tooltip("Shape Tools (Q) — left-click selects (again = next shape), right-click shows all 5")
-                            .child(icon_box(shown_shape.icon()))
+                            .child(
+                                div()
+                                    .relative()
+                                    .child(icon_box(shown_shape.icon()))
+                                    // Group badge (Photoshop's corner tick).
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .right(px(-2.))
+                                            .bottom(px(-4.))
+                                            .text_size(px(7.))
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child("▾"),
+                                    ),
+                            )
                             .on_click(move |_, _, cx| {
-                                p_click.update(cx, |this, cx| {
+                                s_click.update(cx, |s, cx| {
                                     // Clicking the grouped tool selects it; clicking
                                     // again advances the variant (same as `Q`).
-                                    let next = {
-                                        let cur = this.state.read(cx).active_tool;
-                                        if cur.is_shape_tool() {
-                                            cur.group_next()
-                                        } else {
-                                            this.shape_variant
-                                        }
-                                    };
-                                    this.shape_variant = next;
-                                    this.tool_flyout = false;
-                                    this.state.update(cx, |s, cx| {
-                                        s.set_tool(next);
-                                        cx.notify();
-                                    });
+                                    s.cycle_shape_tool();
                                     cx.notify();
                                 });
                             }),
                     )
-                    .on_mouse_down(MouseButton::Right, move |_, _, cx| {
-                        p_rclick.update(cx, |this, cx| {
-                            this.tool_flyout = !this.tool_flyout;
-                            cx.notify();
-                        });
+                    .on_mouse_down(MouseButton::Right, {
+                        move |_, _, cx| {
+                            s_rclick.update(cx, |s, cx| {
+                                s.tool_flyout = !s.tool_flyout;
+                                cx.notify();
+                            });
+                        }
                     });
                 // Variant flyout: one row per group member (icon + label).
                 if flyout_open {
@@ -5242,7 +5235,6 @@ impl Render for CompositionViewerPanel {
                         .p_1()
                         .gap_0p5();
                     for tool in EditorTool::SHAPE_TOOLS {
-                        let p_pick = p_shape.clone();
                         let picked = *tool;
                         rows = rows.child(
                             div()
@@ -5258,16 +5250,14 @@ impl Render for CompositionViewerPanel {
                                 .hover(|s| s.bg(cx.theme().accent))
                                 .child(icon_box(picked.icon()))
                                 .child(picked.label().to_string())
-                                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                                    p_pick.update(cx, |this, cx| {
-                                        this.shape_variant = picked;
-                                        this.tool_flyout = false;
-                                        this.state.update(cx, |s, cx| {
+                                .on_mouse_down(MouseButton::Left, {
+                                    let s_row = s_pick.clone();
+                                    move |_, _, cx| {
+                                        s_row.update(cx, |s, cx| {
                                             s.set_tool(picked);
                                             cx.notify();
                                         });
-                                        cx.notify();
-                                    });
+                                    }
                                 }),
                         );
                     }
@@ -9045,6 +9035,179 @@ where
         .into_any_element()
 }
 
+/// Shared Stroke color + Stroke Width rows for the Rectangle / Ellipse /
+/// Path shape inspectors (one copy; commits go through the selected layer
+/// so a single `shape_stroke` editor entity serves all three arms).
+/// Returns `[stroke_row, editor_if_open, width_row]` for `.children()`.
+/// Current stroke width of the selected Rectangle / Ellipse / Path shape
+/// (`fallback` when the selection is not a shape layer). Free function so
+/// the ±1 steppers in [`shape_stroke_rows`] can share it.
+fn selected_shape_stroke_width(
+    state: &Entity<EditorState>,
+    cx: &App,
+    fallback: f32,
+) -> f32 {
+    state
+        .read(cx)
+        .selected_layer()
+        .and_then(|l| match &l.source {
+            LayerSource::Shape {
+                shape_type:
+                    ShapeType::Rectangle { stroke_width, .. }
+                    | ShapeType::Ellipse { stroke_width, .. }
+                    | ShapeType::Path { stroke_width, .. },
+            } => Some(stroke_width.value),
+            _ => None,
+        })
+        .unwrap_or(fallback)
+}
+
+/// Shared Stroke color + Stroke Width rows for the Rectangle / Ellipse /
+/// Path shape inspectors (one copy; commits go through the selected layer
+/// so a single `shape_stroke` editor entity serves all three arms).
+/// Returns `[stroke_row, editor_if_open, width_row]` for `.children()`.
+fn shape_stroke_rows(
+    stroke: &project::Property<project::Color>,
+    stroke_width: &project::Property<f32>,
+    stroke_editor: &Entity<InspectorColorPicker>,
+    state: &Entity<EditorState>,
+    cx: &App,
+) -> Vec<AnyElement> {
+    let sc = stroke.value;
+    let sw = stroke_width.value;
+    let sc_hex = format!(
+        "#{:02X}{:02X}{:02X}",
+        (sc.r * 255.0).round() as u8,
+        (sc.g * 255.0).round() as u8,
+        (sc.b * 255.0).round() as u8
+    );
+    let open = stroke_editor.read(cx).expanded;
+    let ed_toggle = stroke_editor.clone();
+    let ed_render = stroke_editor.clone();
+    let s_sw_m = state.clone();
+    let s_sw_p = state.clone();
+    let stroke_row = h_flex()
+        .items_center()
+        .justify_between()
+        .text_xs()
+        .border_b_1()
+        .border_color(cx.theme().border)
+        .child(
+            h_flex()
+                .gap_1p5()
+                .items_center()
+                .child(div().text_color(cx.theme().muted_foreground).child("Stroke"))
+                .child(
+                    div()
+                        .id("shape_stroke_swatch")
+                        .test_support()
+                        .w(px(20.))
+                        .h(px(14.))
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .bg(Rgba { r: sc.r, g: sc.g, b: sc.b, a: sc.a }),
+                )
+                .child(div().text_xs().text_color(cx.theme().foreground).child(sc_hex))
+                .child(
+                    div()
+                        .id("shape_stroke_wheel")
+                        .test_support()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .text_xs()
+                        .text_color(if open { cx.theme().accent_foreground } else { cx.theme().muted_foreground })
+                        .bg(if open { cx.theme().accent } else { cx.theme().muted })
+                        .child(if open { "Close" } else { "Edit" })
+                        .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                            ed_toggle.update(cx, |this, cx| {
+                                this.set_expanded(!open, sc);
+                                cx.notify();
+                            });
+                            if !open {
+                                InspectorColorPicker::sync_inputs(&ed_toggle, None, window, cx);
+                            }
+                        }),
+                ),
+        )
+        .into_any_element();
+    let width_row = h_flex()
+        .items_center()
+        .justify_between()
+        .text_xs()
+        .border_b_1()
+        .border_color(cx.theme().border)
+        .child(div().text_color(cx.theme().muted_foreground).child("Stroke Width"))
+        .child(
+            h_flex()
+                .gap_1()
+                .items_center()
+                .child(
+                    div()
+                        .id("shape_stroke_w_minus")
+                        .test_support()
+                        .cursor_pointer()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(cx.theme().muted)
+                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                        .child("−1")
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            let cur = selected_shape_stroke_width(&s_sw_m, cx, sw);
+                            s_sw_m.update(cx, |s, cx| {
+                                if let Some(lid) = s.selected_layer_id.clone() {
+                                    let _ = s.set_layer_shape_stroke_width(&lid, cur - 1.0);
+                                    cx.notify();
+                                }
+                            });
+                        }),
+                )
+                .child(
+                    div()
+                        .id("shape_stroke_w_value")
+                        .test_support()
+                        .text_color(cx.theme().foreground)
+                        .child(format!("{sw:.0}px")),
+                )
+                .child(
+                    div()
+                        .id("shape_stroke_w_plus")
+                        .test_support()
+                        .cursor_pointer()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(cx.theme().muted)
+                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                        .child("+1")
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            let cur = selected_shape_stroke_width(&s_sw_p, cx, sw);
+                            s_sw_p.update(cx, |s, cx| {
+                                if let Some(lid) = s.selected_layer_id.clone() {
+                                    let _ = s.set_layer_shape_stroke_width(&lid, cur + 1.0);
+                                    cx.notify();
+                                }
+                            });
+                        }),
+                ),
+        )
+        .into_any_element();
+    let mut rows = vec![stroke_row];
+    if open {
+        rows.push(crate::color_editor::render_color_editor(
+            &ed_render,
+            "shape_stroke",
+            sc,
+            cx,
+        ));
+    }
+    rows.push(width_row);
+    rows
+}
+
 /// Nested twirl-down group inside an open card (applied-effect parameter
 /// groups, AE Character / Paragraph groups, Shader Lab groups). The caret
 /// pill is the only toggle hit-target so sibling controls (eye, trash,
@@ -9155,6 +9318,143 @@ fn mask_param_row(
             move |_| {},
         ))
         .into_any_element()
+}
+
+/// Transform rows (Position / Rotation / Scale) for a mask's own
+/// transform. Same scrub pipeline as [`mask_param_row`] — keys route
+/// through the `mask:` scrub prefix (`position.x`, `position.y`,
+/// `rotation`, `scale.x`, `scale.y`) — with a stopwatch per property.
+fn mask_transform_rows(
+    state: &Entity<EditorState>,
+    panel_entity: &Entity<PropertiesPanel>,
+    layer_id: &str,
+    mask_id: &str,
+    mask: &project::Mask,
+    cx: &App,
+) -> Vec<AnyElement> {
+    // Stopwatch toggle for one transform component name.
+    let stopwatch = |param: &'static str, animated: bool| {
+        let s_t = state.clone();
+        let lid_t = layer_id.to_string();
+        let mid_t = mask_id.to_string();
+        div()
+            .cursor_pointer()
+            .p_0p5()
+            .rounded_sm()
+            .hover(|s| s.bg(cx.theme().muted))
+            .text_color(if animated {
+                cx.theme().primary
+            } else {
+                cx.theme().muted_foreground
+            })
+            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                s_t.update(cx, |s, cx| {
+                    let _ = s.toggle_mask_param_animation(&lid_t, &mid_t, param);
+                    cx.notify();
+                });
+            })
+            .child(icon_box(IconName::Timer))
+    };
+    // Single-component scrub field.
+    let field = |id: String, param: &'static str, display: String, mult: i64| {
+        scrub_field(
+            SharedString::from(id),
+            format!("mask:{layer_id}:{mask_id}:{param}:{mult}"),
+            display,
+            None,
+            None,
+            state,
+            panel_entity,
+            cx,
+            move |_| {},
+            move |_| {},
+        )
+    };
+    let pos = mask.transform.position.value;
+    let rot = mask.transform.rotation.value;
+    let scl = mask.transform.scale.value;
+    let pos_row = h_flex()
+        .items_center()
+        .justify_between()
+        .text_xs()
+        .border_b_1()
+        .border_color(cx.theme().border)
+        .child(
+            h_flex()
+                .gap_1()
+                .items_center()
+                .child(stopwatch("position.x", mask.transform_animated("position.x")))
+                .child(icon_box(IconName::Move))
+                .child(div().text_color(cx.theme().muted_foreground).child("Position")),
+        )
+        .child(
+            h_flex().gap_1().items_center()
+                .child(field(
+                    format!("param_mask_position_x_{mask_id}"),
+                    "position.x",
+                    format!("X: {:.1}", pos.x),
+                    100,
+                ))
+                .child(field(
+                    format!("param_mask_position_y_{mask_id}"),
+                    "position.y",
+                    format!("Y: {:.1}", pos.y),
+                    100,
+                )),
+        )
+        .into_any_element();
+    let rot_row = h_flex()
+        .items_center()
+        .justify_between()
+        .text_xs()
+        .border_b_1()
+        .border_color(cx.theme().border)
+        .child(
+            h_flex()
+                .gap_1()
+                .items_center()
+                .child(stopwatch("rotation", mask.transform_animated("rotation")))
+                .child(icon_box(IconName::RotateCw))
+                .child(div().text_color(cx.theme().muted_foreground).child("Rotation")),
+        )
+        .child(field(
+            format!("param_mask_rotation_{mask_id}"),
+            "rotation",
+            format!("{rot:.1}°"),
+            100,
+        ))
+        .into_any_element();
+    let scl_row = h_flex()
+        .items_center()
+        .justify_between()
+        .text_xs()
+        .border_b_1()
+        .border_color(cx.theme().border)
+        .child(
+            h_flex()
+                .gap_1()
+                .items_center()
+                .child(stopwatch("scale.x", mask.transform_animated("scale.x")))
+                .child(icon_box(IconName::Maximize2))
+                .child(div().text_color(cx.theme().muted_foreground).child("Scale")),
+        )
+        .child(
+            h_flex().gap_1().items_center()
+                .child(field(
+                    format!("param_mask_scale_x_{mask_id}"),
+                    "scale.x",
+                    format!("X: {:.1}%", scl.x),
+                    100,
+                ))
+                .child(field(
+                    format!("param_mask_scale_y_{mask_id}"),
+                    "scale.y",
+                    format!("Y: {:.1}%", scl.y),
+                    100,
+                )),
+        )
+        .into_any_element();
+    vec![pos_row, rot_row, scl_row]
 }
 
 /// Compact scalar row for a keyframable text property: stopwatch (toggles
@@ -10103,11 +10403,13 @@ fn render_masks_section(
                 ),
         );
 
-        // Scalar rows: opacity / feather / expansion.
+        // Scalar rows: opacity / feather / expansion, then the mask's own
+        // transform (Position / Rotation / Scale).
         box_el = box_el
             .child(mask_param_row(state, panel_entity, &lid, &mid, "opacity", "Opacity", format!("{:.0}%", mask.opacity.value), 1.0, cx))
             .child(mask_param_row(state, panel_entity, &lid, &mid, "feather", "Feather", format!("{:.1} px", mask.feather.value), 0.5, cx))
-            .child(mask_param_row(state, panel_entity, &lid, &mid, "expansion", "Expansion", format!("{:+.1} px", mask.expansion.value), 0.5, cx));
+            .child(mask_param_row(state, panel_entity, &lid, &mid, "expansion", "Expansion", format!("{:+.1} px", mask.expansion.value), 0.5, cx))
+            .children(mask_transform_rows(state, panel_entity, &lid, &mid, mask, cx));
 
         // Mask Shape dialog (numeric bounding box, AE parity).
         if let Some(view) = shape_view.clone() {
@@ -13632,7 +13934,7 @@ impl Render for PropertiesPanel {
                             }
                             LayerSource::Shape { shape_type } => {
                                 match shape_type {
-                                    ShapeType::Rectangle { width, height, corner_radius, fill, .. } => {
+                                    ShapeType::Rectangle { width, height, corner_radius, fill, stroke, stroke_width, .. } => {
                                         let w = width.value;
                                         let h = height.value;
                                         let cr = corner_radius.value;
@@ -13771,7 +14073,14 @@ impl Render for PropertiesPanel {
                                                         move |_| {},
                                                         move |_| {},
                                                     )),
-                                            );
+                                            )
+                                            .children(shape_stroke_rows(
+                                                stroke,
+                                                stroke_width,
+                                                &shape_stroke_editor,
+                                                &self.state,
+                                                cx,
+                                            ));
 
                                         let p_src = panel_entity.clone();
                                         let rect_section = prop_section(
@@ -13790,7 +14099,7 @@ impl Render for PropertiesPanel {
                                         );
                                         props_items.push(rect_section);
                                     }
-                                    ShapeType::Ellipse { radius_x, radius_y, fill, .. } => {
+                                    ShapeType::Ellipse { radius_x, radius_y, fill, stroke, stroke_width, .. } => {
                                         let rx = radius_x.value;
                                         let ry = radius_y.value;
                                         let fill_col = fill.value;
@@ -13909,7 +14218,14 @@ impl Render for PropertiesPanel {
                                                         move |_| {},
                                                         move |_| {},
                                                     )),
-                                            );
+                                            )
+                                            .children(shape_stroke_rows(
+                                                stroke,
+                                                stroke_width,
+                                                &shape_stroke_editor,
+                                                &self.state,
+                                                cx,
+                                            ));
 
                                         let p_src = panel_entity.clone();
                                         let ellipse_section = prop_section(
@@ -13939,142 +14255,13 @@ impl Render for PropertiesPanel {
                                                     .text_color(cx.theme().muted_foreground)
                                                     .child(format!("Path: {}", if path_data.len() > 40 { format!("{}...", &path_data[..40]) } else { path_data.clone() })),
                                             );
-                                        let sc = stroke.value;
-                                        let sw = stroke_width.value;
-                                        let sc_hex = format!("#{:02X}{:02X}{:02X}", (sc.r * 255.0).round() as u8, (sc.g * 255.0).round() as u8, (sc.b * 255.0).round() as u8);
-                                        let open = shape_stroke_editor.read(cx).expanded;
-                                        let ed_toggle = shape_stroke_editor.clone();
-                                        let ed_render = shape_stroke_editor.clone();
-                                        let s_sw_m = self.state.clone();
-                                        let s_sw_p = self.state.clone();
-                                        let path_body = path_body
-                                            .child(
-                                                h_flex()
-                                                    .items_center()
-                                                    .justify_between()
-                                                    .text_xs()
-                                                    .border_b_1()
-                                                    .border_color(cx.theme().border)
-                                                    .child(
-                                                        h_flex()
-                                                            .gap_1p5()
-                                                            .items_center()
-                                                            .child(div().text_color(cx.theme().muted_foreground).child("Stroke"))
-                                                            .child(
-                                                                div()
-                                                                    .id("shape_stroke_swatch")
-                                                                    .test_support()
-                                                                    .w(px(20.))
-                                                                    .h(px(14.))
-                                                                    .rounded_sm()
-                                                                    .border_1()
-                                                                    .border_color(cx.theme().border)
-                                                                    .bg(Rgba { r: sc.r, g: sc.g, b: sc.b, a: sc.a }),
-                                                            )
-                                                            .child(div().text_xs().text_color(cx.theme().foreground).child(sc_hex))
-                                                            .child(
-                                                                div()
-                                                                    .id("shape_stroke_wheel")
-                                                                    .test_support()
-                                                                    .px_2()
-                                                                    .py_0p5()
-                                                                    .rounded_sm()
-                                                                    .cursor_pointer()
-                                                                    .text_xs()
-                                                                    .text_color(if open { cx.theme().accent_foreground } else { cx.theme().muted_foreground })
-                                                                    .bg(if open { cx.theme().accent } else { cx.theme().muted })
-                                                                    .child(if open { "Close" } else { "Edit" })
-                                                                    .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-                                                                        ed_toggle.update(cx, |this, cx| {
-                                                                            this.set_expanded(!open, sc);
-                                                                            cx.notify();
-                                                                        });
-                                                                        if !open {
-                                                                            InspectorColorPicker::sync_inputs(&ed_toggle, None, window, cx);
-                                                                        }
-                                                                    }),
-                                                            ),
-                                                    ),
-                                            );
-                                        let path_body = if open {
-                                            path_body.child(crate::color_editor::render_color_editor(
-                                                &ed_render,
-                                                "shape_stroke",
-                                                sc,
-                                                cx,
-                                            ))
-                                        } else {
-                                            path_body
-                                        };
-                                        let path_body = path_body.child(
-                                            h_flex()
-                                                .items_center()
-                                                .justify_between()
-                                                .text_xs()
-                                                .border_b_1()
-                                                .border_color(cx.theme().border)
-                                                .child(div().text_color(cx.theme().muted_foreground).child("Stroke Width"))
-                                                .child(
-                                                    h_flex()
-                                                        .gap_1()
-                                                        .items_center()
-                                                        .child(
-                                                            div()
-                                                                .id("shape_stroke_w_minus")
-                                                                .test_support()
-                                                                .cursor_pointer()
-                                                                .px_2()
-                                                                .py_0p5()
-                                                                .rounded_sm()
-                                                                .bg(cx.theme().muted)
-                                                                .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-                                                                .child("−1")
-                                                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                                    let cur = s_sw_m.read(cx).selected_layer().and_then(|l| match &l.source {
-                                                                        LayerSource::Shape { shape_type: ShapeType::Path { stroke_width, .. } } => Some(stroke_width.value),
-                                                                        _ => None,
-                                                                    }).unwrap_or(sw);
-                                                                    s_sw_m.update(cx, |s, cx| {
-                                                                        if let Some(lid) = s.selected_layer_id.clone() {
-                                                                            let _ = s.set_layer_shape_stroke_width(&lid, cur - 1.0);
-                                                                            cx.notify();
-                                                                        }
-                                                                    });
-                                                                }),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .id("shape_stroke_w_value")
-                                                                .test_support()
-                                                                .text_color(cx.theme().foreground)
-                                                                .child(format!("{sw:.0}px")),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .id("shape_stroke_w_plus")
-                                                                .test_support()
-                                                                .cursor_pointer()
-                                                                .px_2()
-                                                                .py_0p5()
-                                                                .rounded_sm()
-                                                                .bg(cx.theme().muted)
-                                                                .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-                                                                .child("+1")
-                                                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                                    let cur = s_sw_p.read(cx).selected_layer().and_then(|l| match &l.source {
-                                                                        LayerSource::Shape { shape_type: ShapeType::Path { stroke_width, .. } } => Some(stroke_width.value),
-                                                                        _ => None,
-                                                                    }).unwrap_or(sw);
-                                                                    s_sw_p.update(cx, |s, cx| {
-                                                                        if let Some(lid) = s.selected_layer_id.clone() {
-                                                                            let _ = s.set_layer_shape_stroke_width(&lid, cur + 1.0);
-                                                                            cx.notify();
-                                                                        }
-                                                                    });
-                                                                }),
-                                                        ),
-                                                ),
-                                        );
+                                        let path_body = path_body.children(shape_stroke_rows(
+                                            stroke,
+                                            stroke_width,
+                                            &shape_stroke_editor,
+                                            &self.state,
+                                            cx,
+                                        ));
                                         // Trim shortcut lives with the path it
                                         // trims (not in tool settings, which
                                         // hide on selection). Shown only

@@ -199,7 +199,42 @@ impl Path {
         }
     }
 
-    /// Closed regular polygon (corner nodes, first vertex at the top).
+    /// Closed rounded rectangle (corner nodes on the straight edges,
+    /// smooth kappa nodes on the corner arcs). `r` clamps to half the
+    /// smaller side; `r <= 0` degrades to [`Path::rectangle`].
+    pub fn rounded_rectangle(x: f32, y: f32, w: f32, h: f32, r: f32) -> Self {
+        const KAPPA: f32 = 0.552_284_8;
+        let r = r.clamp(0.0, w.min(h) / 2.0);
+        if r <= 0.0 {
+            return Self::rectangle(x, y, w, h);
+        }
+        let k = KAPPA * r;
+        let (x0, y0, x1, y1) = (x, y, x + w, y + h);
+        Self {
+            // Clockwise: each arc-end smooth node carries the kappa
+            // handles (in = back along travel, out = forward), straight
+            // edges are corner-to-corner segments.
+            points: vec![
+                // Top-left arc end (= top edge start).
+                PathPoint::smooth(Vec2::new(x0 + r, y0), Vec2::new(-k, 0.0), Vec2::new(k, 0.0)),
+                // Top edge, left -> right.
+                PathPoint::corner(Vec2::new(x1 - r, y0)),
+                // Top-right arc end.
+                PathPoint::smooth(Vec2::new(x1, y0 + r), Vec2::new(0.0, -k), Vec2::new(0.0, k)),
+                // Right edge, top -> bottom.
+                PathPoint::corner(Vec2::new(x1, y1 - r)),
+                // Bottom-right arc end.
+                PathPoint::smooth(Vec2::new(x1 - r, y1), Vec2::new(k, 0.0), Vec2::new(-k, 0.0)),
+                // Bottom edge, right -> left.
+                PathPoint::corner(Vec2::new(x0 + r, y1)),
+                // Bottom-left arc end.
+                PathPoint::smooth(Vec2::new(x0, y1 - r), Vec2::new(0.0, k), Vec2::new(0.0, -k)),
+                // Left edge, bottom -> top (closes via top-left arc).
+                PathPoint::corner(Vec2::new(x0, y0 + r)),
+            ],
+            closed: true,
+        }
+    }
     /// `sides` below 3 degrades to a triangle.
     pub fn polygon(cx: f32, cy: f32, r: f32, sides: usize) -> Self {
         let n = sides.max(3);
@@ -1481,6 +1516,34 @@ mod tests {
     fn area_sum(polys: &[Vec<Vec2>]) -> f32 {
         polys.iter().map(|p| polygon_area(p).abs()).sum()
     }
+    #[test]
+    fn rounded_rectangle_degrades_and_covers_edges() {
+        // r <= 0 degrades to a sharp rectangle.
+        let sharp = Path::rounded_rectangle(0.0, 0.0, 60.0, 40.0, 0.0);
+        assert_eq!(sharp.points.len(), 4);
+        // Positive radius: 8 nodes, closed, radius clamps to half-min-side.
+        let rr = Path::rounded_rectangle(0.0, 0.0, 60.0, 40.0, 10.0);
+        assert_eq!(rr.points.len(), 8);
+        assert!(rr.closed);
+        let huge = Path::rounded_rectangle(0.0, 0.0, 60.0, 40.0, 999.0);
+        let (mn, mx) = huge.bounds().unwrap();
+        assert!((mn.x - 0.0).abs() < 1e-3 && (mx.x - 60.0).abs() < 1e-3);
+        assert!((mn.y - 0.0).abs() < 1e-3 && (mx.y - 40.0).abs() < 1e-3);
+        // Flattened outline touches all four edges (stroke coverage sanity)
+        // and never leaves the box.
+        let flat = rr.flatten(0.5);
+        assert!(!flat.is_empty());
+        for p in &flat {
+            assert!(p.x >= -1e-3 && p.x <= 60.0 + 1e-3, "x {p:?}");
+            assert!(p.y >= -1e-3 && p.y <= 40.0 + 1e-3, "y {p:?}");
+        }
+        let min_x = flat.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
+        let max_x = flat.iter().map(|p| p.x).fold(f32::NEG_INFINITY, f32::max);
+        let min_y = flat.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
+        let max_y = flat.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max);
+        assert!(min_x < 1.0 && max_x > 59.0 && min_y < 1.0 && max_y > 39.0);
+    }
+
     #[test]
     fn rect_path_roundtrips_svg() {
         let p = Path::rectangle(10.0, 20.0, 100.0, 50.0);

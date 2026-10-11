@@ -111,17 +111,69 @@ pub fn raster_content(
             let (w, h) = (base_w.max(2.0), base_h.max(2.0));
             let mut buf = FloatBuf::clear(w.ceil() as u32, h.ceil() as u32);
             match shape_type {
-                ShapeType::Rectangle { corner_radius, fill, fill_gradient, .. } => {
+                ShapeType::Rectangle { corner_radius, fill, fill_gradient, stroke, stroke_width, .. } => {
                     // Corner radius is stored unscaled; content is unscaled.
+                    // Stroke reuses the shared path stroker over a rounded-
+                    // rectangle path so corners match the fill exactly.
+                    let nib = stroke_width.value.max(0.0);
+                    let do_fill = fill.value.a > 0.0;
+                    let do_stroke = nib > 0.0
+                        && (stroke.value.a > 0.0 || fill.value.a > 0.0);
+                    let sc = if stroke.value.a > 0.0 {
+                        stroke.value
+                    } else {
+                        fill.value
+                    };
+                    let rr_svg = project::Path::rounded_rectangle(0.0, 0.0, w, h, corner_radius.value).to_svg();
                     match fill_gradient {
-                        Some(gradient) => fill_rect_gradient(&mut buf, w, h, corner_radius.value, gradient),
-                        None => fill_rect(&mut buf, w, h, corner_radius.value, Px::from_color(fill.value)),
+                        Some(gradient) => {
+                            if do_fill {
+                                fill_rect_gradient(&mut buf, w, h, corner_radius.value, gradient);
+                            }
+                            if do_stroke {
+                                stroke_path_gradient(&mut buf, &rr_svg, nib, gradient, Vec2::ZERO, (w, h));
+                            }
+                        }
+                        None => {
+                            if do_fill {
+                                fill_rect(&mut buf, w, h, corner_radius.value, Px::from_color(fill.value));
+                            }
+                            if do_stroke {
+                                stroke_path(&mut buf, &rr_svg, nib, Px::from_color(sc), Vec2::ZERO);
+                            }
+                        }
                     }
                 }
-                ShapeType::Ellipse { fill, fill_gradient, .. } => {
+                ShapeType::Ellipse { fill, fill_gradient, stroke, stroke_width, .. } => {
+                    // Stroke reuses the shared path stroker over an ellipse
+                    // path so the outline matches the fill exactly.
+                    let nib = stroke_width.value.max(0.0);
+                    let do_fill = fill.value.a > 0.0;
+                    let do_stroke = nib > 0.0
+                        && (stroke.value.a > 0.0 || fill.value.a > 0.0);
+                    let sc = if stroke.value.a > 0.0 {
+                        stroke.value
+                    } else {
+                        fill.value
+                    };
+                    let el_svg = project::Path::ellipse(w / 2.0, h / 2.0, w / 2.0, h / 2.0).to_svg();
                     match fill_gradient {
-                        Some(gradient) => fill_ellipse_gradient(&mut buf, w / 2.0, h / 2.0, gradient),
-                        None => fill_ellipse(&mut buf, w / 2.0, h / 2.0, Px::from_color(fill.value)),
+                        Some(gradient) => {
+                            if do_fill {
+                                fill_ellipse_gradient(&mut buf, w / 2.0, h / 2.0, gradient);
+                            }
+                            if do_stroke {
+                                stroke_path_gradient(&mut buf, &el_svg, nib, gradient, Vec2::ZERO, (w, h));
+                            }
+                        }
+                        None => {
+                            if do_fill {
+                                fill_ellipse(&mut buf, w / 2.0, h / 2.0, Px::from_color(fill.value));
+                            }
+                            if do_stroke {
+                                stroke_path(&mut buf, &el_svg, nib, Px::from_color(sc), Vec2::ZERO);
+                            }
+                        }
                     }
                 }
                 ShapeType::Path { path_data, fill, fill_gradient, stroke, stroke_width, .. } => {
@@ -941,8 +993,11 @@ pub fn rasterize_layer(
     }
 
     // Direct zero-allocation fast-path for non-rounded rectangular shapes with no effects and no masks:
-    if let LayerSource::Shape { shape_type: ShapeType::Rectangle { corner_radius, fill, fill_gradient: None, .. } } = &layer.source {
-        if corner_radius.value <= 0.01 {
+    // skipped when a visible stroke exists (the fill-only blit below
+    // cannot draw outlines — the full path in `raster_content` handles it).
+    if let LayerSource::Shape { shape_type: ShapeType::Rectangle { corner_radius, fill, fill_gradient: None, stroke, stroke_width, .. } } = &layer.source {
+        let stroked = stroke_width.value > 0.0 && (stroke.value.a > 0.0 || fill.value.a > 0.0);
+        if corner_radius.value <= 0.01 && !stroked {
             let has_active_fx = layer.effects.iter().any(|e| e.enabled);
             if !has_active_fx && layer.masks.is_empty() {
                 let wm = layer.world_matrix();
@@ -2116,6 +2171,8 @@ mod tests {
                 height: project::Property::new("H", 100.0),
                 corner_radius: project::Property::new("R", 0.0),
                 fill: project::Property::new("Fill", Color::rgb(1.0, 0.0, 0.0)), fill_gradient: None,
+                stroke: project::Property::new("Stroke", Color::TRANSPARENT),
+                stroke_width: project::Property::new("Stroke Width", 0.0),
             },
             tc,
             out,
@@ -2242,6 +2299,66 @@ mod tests {
             false, 5.0, &assets,
         );
         (buf, empty)
+    }
+
+    #[test]
+    fn rect_and_ellipse_stroke_outlines_transparent_fill() {
+        use std::collections::HashMap;
+        let red = Color::rgb(1.0, 0.0, 0.0);
+        for shape_type in [
+            project::ShapeType::Rectangle {
+                width: project::Property::new("W", 60.0),
+                height: project::Property::new("H", 60.0),
+                corner_radius: project::Property::new("R", 8.0),
+                fill: project::Property::new("Fill", Color::TRANSPARENT),
+                fill_gradient: None,
+                stroke: project::Property::new("Stroke", red),
+                stroke_width: project::Property::new("Stroke Width", 4.0),
+            },
+            // Sharp corners take the fill-only fast path in
+            // `rasterize_layer` — the stroke must opt out of it.
+            project::ShapeType::Rectangle {
+                width: project::Property::new("W", 60.0),
+                height: project::Property::new("H", 60.0),
+                corner_radius: project::Property::new("R", 0.0),
+                fill: project::Property::new("Fill", Color::TRANSPARENT),
+                fill_gradient: None,
+                stroke: project::Property::new("Stroke", red),
+                stroke_width: project::Property::new("Stroke Width", 4.0),
+            },
+            project::ShapeType::Ellipse {
+                radius_x: project::Property::new("RX", 30.0),
+                radius_y: project::Property::new("RY", 30.0),
+                fill: project::Property::new("Fill", Color::TRANSPARENT),
+                fill_gradient: None,
+                stroke: project::Property::new("Stroke", red),
+                stroke_width: project::Property::new("Stroke Width", 4.0),
+            },
+        ] {
+            let mut project = Project::new("p", "P");
+            let mut comp = Composition::hd_1080p_30fps("c", "C", 5.0);
+            let tc = TimeCode::from_frames(0, 30.0);
+            let out = TimeCode::from_frames(150, 30.0);
+            comp.add_layer(project::Layer::shape("l1", "L", shape_type, tc, out)).unwrap();
+            project.add_composition(comp).unwrap();
+            let layer = eval_first(&project, "c");
+            let assets: HashMap<String, std::sync::Arc<image::RgbaImage>> = HashMap::new();
+            let (base_w, base_h) = layer_base_dims(&layer, 1920.0, 1080.0, &assets);
+            let (buf, _avg, empty) = rasterize_layer(
+                &layer, base_w, base_h, 64, 64, 1920.0, 1080.0, Color::BLACK, None, 0.0, 0,
+                false, 5.0, &assets,
+            );
+            assert!(!empty, "stroked shape must hold ink (base {base_w}x{base_h}, buf {}x{})", buf.w, buf.h);
+            // Center stays transparent (no fill, stroke lives on the outline).
+            assert!(
+                buf.get(32, 32).a < 0.05,
+                "center must stay transparent: {:?}",
+                buf.get(32, 32)
+            );
+            // Outline carries red ink.
+            let edge = buf.get(2, 32);
+            assert!(edge.a > 0.1 && edge.r > 0.5, "edge must be stroked: {edge:?}");
+        }
     }
 
     #[test]

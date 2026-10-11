@@ -1664,12 +1664,19 @@ fn render_toolbar(state: &Entity<EditorState>, cx: &App) -> impl IntoElement {
         (EditorTool::Rotate, gpui_kit::assets::IconName::RotateCw, "W", "Rotate (W)"),
         (EditorTool::Pen, gpui_kit::assets::IconName::Pen, "G", "Pen (G)"),
         (EditorTool::Text, gpui_kit::assets::IconName::Type, "T", "Text (T)"),
-        (EditorTool::ShapeRect, gpui_kit::assets::IconName::Square, "Q", "Rectangle (Q)"),
-        (EditorTool::ShapeEllipse, gpui_kit::assets::IconName::Circle, "Q", "Ellipse (Q)"),
-        (EditorTool::ShapeTriangle, gpui_kit::assets::IconName::Triangle, "Q", "Triangle (Q)"),
-        (EditorTool::ShapePolygon, gpui_kit::assets::IconName::Hexagon, "Q", "Polygon (Q)"),
-        (EditorTool::ShapeStar, gpui_kit::assets::IconName::Star, "Q", "Star (Q)"),
     ];
+    // Grouped Shape slot: one button for all 5 variants (rectangle /
+    // ellipse / triangle / polygon / star). Left-click selects (again =
+    // next variant, same as `Q`); right-click opens the variant flyout.
+    // Variant memory + open flag live on EditorState, shared with the
+    // viewer tool strip's group slot.
+    let shown_shape = if active_tool.is_shape_tool() {
+        active_tool
+    } else {
+        s_read.last_shape_tool
+    };
+    let shape_selected = active_tool.is_shape_tool();
+    let flyout_open = s_read.tool_flyout;
 
     let (active_tool_name, active_tool_key) = match active_tool {
         EditorTool::Move => ("Selection", "V"),
@@ -1731,6 +1738,105 @@ fn render_toolbar(state: &Entity<EditorState>, cx: &App) -> impl IntoElement {
                         .child(icon)
                 ),
         );
+    }
+
+    // Grouped Shape slot (same group as the viewer strip): badge tick marks
+    // it as a group; the flyout drops below the bar.
+    {
+        let s_click = state.clone();
+        let s_rclick = state.clone();
+        let s_pick = state.clone();
+        let mut slot = div()
+            .id("top_tool_btn_shape")
+            .test_support()
+            .relative()
+            .cursor_pointer()
+            .w(px(28.))
+            .h(px(28.))
+            .rounded_md()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(if shape_selected { rgba(0x00d2ff1f) } else { rgba(0x00000000) })
+            .border_1()
+            .border_color(if shape_selected { cyan_acc } else { rgba(0x00000000) })
+            .text_color(if shape_selected { cyan_acc } else { dim_col })
+            .hover(|s| if shape_selected { s } else { s.bg(hov_bg).text_color(txt_col) })
+            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                s_click.update(cx, |s, cx| {
+                    s.cycle_shape_tool();
+                    cx.notify();
+                });
+            })
+            .on_mouse_down(MouseButton::Right, move |_event, _window, cx| {
+                s_rclick.update(cx, |s, cx| {
+                    s.tool_flyout = !s.tool_flyout;
+                    cx.notify();
+                });
+            })
+            .child(
+                div()
+                    .w(px(16.))
+                    .h(px(16.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(shown_shape.icon()),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .right(px(1.))
+                    .bottom(px(0.))
+                    .text_size(px(7.))
+                    .child("▾"),
+            );
+        if flyout_open {
+            let mut rows = div()
+                .id("top_flyout")
+                .test_support()
+                .absolute()
+                .top(px(32.))
+                .left(px(0.))
+                .min_w(px(150.))
+                .rounded_md()
+                .border_1()
+                .border_color(bdr_col)
+                .bg(ctl_bg)
+                .p_1()
+                .flex()
+                .flex_col()
+                .gap_0p5();
+            for tool in EditorTool::SHAPE_TOOLS {
+                let picked = *tool;
+                rows = rows.child(
+                    div()
+                        .id(format!("top_flyout_{}", picked.label().to_lowercase()))
+                        .test_support()
+                        .cursor_pointer()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .hover(|s| s.bg(hov_bg))
+                        .child(picked.icon())
+                        .child(picked.label().to_string())
+                        .on_mouse_down(MouseButton::Left, {
+                            let s_row = s_pick.clone();
+                            move |_event, _window, cx| {
+                                s_row.update(cx, |s, cx| {
+                                    s.set_tool(picked);
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                );
+            }
+            slot = slot.child(rows);
+        }
+        tool_buttons = tool_buttons.child(slot);
     }
 
     h_flex()
@@ -6939,6 +7045,42 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             app_view.read_with(cx, |view, cx| view.state().read(cx).active_tool),
             crate::state::EditorTool::ShapePolygon
         );
+        // Top toolbar carries the same group: one slot, right-click
+        // flyout, variant memory shared with the side strip.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("top_tool_btn_shape").visible());
+            window.right_click("top_tool_btn_shape", cx);
+            window.render_frame(cx);
+            for id in ["top_flyout_rectangle", "top_flyout_ellipse", "top_flyout_triangle", "top_flyout_polygon", "top_flyout_star"] {
+                assert!(window.find(id).visible(), "{id} must show in the top flyout");
+            }
+            window.click("top_flyout_star", cx);
+            window.render_frame(cx);
+        })
+        .expect("update_window failed");
+        assert_eq!(
+            app_view.read_with(cx, |view, cx| view.state().read(cx).active_tool),
+            crate::state::EditorTool::ShapeStar
+        );
+        // Leaving the group and clicking the slot restores the last
+        // variant (Star), not Rectangle.
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.set_tool(crate::state::EditorTool::Move);
+                cx.notify();
+            });
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("top_tool_btn_shape", cx);
+            window.render_frame(cx);
+        })
+        .expect("update_window failed");
+        assert_eq!(
+            app_view.read_with(cx, |view, cx| view.state().read(cx).active_tool),
+            crate::state::EditorTool::ShapeStar
+        );
     }
 
     #[gpui_kit::test]
@@ -8069,6 +8211,14 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         assert!(state.active_composition().unwrap().get_layer(layer_id).unwrap().get_mask(&mid).unwrap().invert);
         assert!(state.nudge_mask_param(layer_id, &mid, "feather", 6.0).is_ok());
         assert!(!state.nudge_mask_param(layer_id, &mid, "nope", 1.0).is_ok());
+        // Mask's own transform routes through the same param funnel.
+        assert!(state.nudge_mask_param(layer_id, &mid, "position.x", 12.0).is_ok());
+        assert!(state.toggle_mask_param_animation(layer_id, &mid, "rotation").is_ok());
+        {
+            let m = state.active_composition().unwrap().get_layer(layer_id).unwrap().get_mask(&mid).unwrap().clone();
+            assert_eq!(m.transform.position.value.x, 12.0);
+            assert!(m.transform.rotation.is_animated());
+        }
 
         // Node edits.
         let before = state.active_composition().unwrap().get_layer(layer_id).unwrap().get_mask(&mid).unwrap().path.value.points.len();
