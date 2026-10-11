@@ -1666,6 +1666,9 @@ fn render_toolbar(state: &Entity<EditorState>, cx: &App) -> impl IntoElement {
         (EditorTool::Text, gpui_kit::assets::IconName::Type, "T", "Text (T)"),
         (EditorTool::ShapeRect, gpui_kit::assets::IconName::Square, "Q", "Rectangle (Q)"),
         (EditorTool::ShapeEllipse, gpui_kit::assets::IconName::Circle, "Q", "Ellipse (Q)"),
+        (EditorTool::ShapeTriangle, gpui_kit::assets::IconName::Triangle, "Q", "Triangle (Q)"),
+        (EditorTool::ShapePolygon, gpui_kit::assets::IconName::Hexagon, "Q", "Polygon (Q)"),
+        (EditorTool::ShapeStar, gpui_kit::assets::IconName::Star, "Q", "Star (Q)"),
     ];
 
     let (active_tool_name, active_tool_key) = match active_tool {
@@ -1676,6 +1679,9 @@ fn render_toolbar(state: &Entity<EditorState>, cx: &App) -> impl IntoElement {
         EditorTool::Text => ("Text", "T"),
         EditorTool::ShapeRect => ("Rectangle", "Q"),
         EditorTool::ShapeEllipse => ("Ellipse", "Q"),
+        EditorTool::ShapeTriangle => ("Triangle", "Q"),
+        EditorTool::ShapePolygon => ("Polygon", "Q"),
+        EditorTool::ShapeStar => ("Star", "Q"),
     };
     let next_tool = match active_tool {
         EditorTool::Move => EditorTool::Hand,
@@ -1684,7 +1690,10 @@ fn render_toolbar(state: &Entity<EditorState>, cx: &App) -> impl IntoElement {
         EditorTool::Pen => EditorTool::Text,
         EditorTool::Text => EditorTool::ShapeRect,
         EditorTool::ShapeRect => EditorTool::ShapeEllipse,
-        EditorTool::ShapeEllipse => EditorTool::Move,
+        EditorTool::ShapeEllipse => EditorTool::ShapeTriangle,
+        EditorTool::ShapeTriangle => EditorTool::ShapePolygon,
+        EditorTool::ShapePolygon => EditorTool::ShapeStar,
+        EditorTool::ShapeStar => EditorTool::Move,
     };
     let s_cycler = state.clone();
 
@@ -6890,6 +6899,49 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
     }
 
     #[gpui_kit::test]
+    fn test_shape_tool_flyout_lists_five_and_picks_triangle(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        // Right-click the shape slot opens the 5-variant flyout.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("side_tool_btn_rect").visible());
+            window.right_click("side_tool_btn_rect", cx);
+            window.render_frame(cx);
+            for id in ["tool_flyout_rectangle", "tool_flyout_ellipse", "tool_flyout_triangle", "tool_flyout_polygon", "tool_flyout_star"] {
+                assert!(window.find(id).visible(), "{id} must show in the flyout");
+            }
+            window.click("tool_flyout_triangle", cx);
+            window.render_frame(cx);
+        })
+        .expect("update_window failed");
+        assert_eq!(
+            app_view.read_with(cx, |view, cx| view.state().read(cx).active_tool),
+            crate::state::EditorTool::ShapeTriangle
+        );
+        // Left-clicking the slot again advances within the group (same as Q).
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("side_tool_btn_triangle_btn", cx);
+            window.render_frame(cx);
+        })
+        .expect("update_window failed");
+        assert_eq!(
+            app_view.read_with(cx, |view, cx| view.state().read(cx).active_tool),
+            crate::state::EditorTool::ShapePolygon
+        );
+    }
+
+    #[gpui_kit::test]
     fn test_kit_components_drive_commands(cx: &mut TestAppContext) {
         use gpui_kit::test::TestWindowExt;
 
@@ -8261,11 +8313,22 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         state.set_tool(EditorTool::ShapeRect);
         assert_eq!(state.active_tool, EditorTool::ShapeRect);
 
-        // Cycle shape tool
+        // Cycle shape tool through the 5-variant group.
         state.cycle_shape_tool();
         assert_eq!(state.active_tool, EditorTool::ShapeEllipse);
         state.cycle_shape_tool();
+        assert_eq!(state.active_tool, EditorTool::ShapeTriangle);
+        state.cycle_shape_tool();
+        assert_eq!(state.active_tool, EditorTool::ShapePolygon);
+        state.cycle_shape_tool();
+        assert_eq!(state.active_tool, EditorTool::ShapeStar);
+        state.cycle_shape_tool();
         assert_eq!(state.active_tool, EditorTool::ShapeRect);
+        // Group helpers stay generic.
+        assert_eq!(EditorTool::SHAPE_TOOLS.len(), 5);
+        assert!(EditorTool::ShapeStar.is_shape_tool());
+        assert!(!EditorTool::Pen.is_shape_tool());
+        assert_eq!(EditorTool::Pen.group_next(), EditorTool::Pen);
 
         // Add Text layer
         let text_id = state.add_text_layer("Motion Effect Title", None).unwrap();
@@ -8289,6 +8352,23 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             let comp = state.active_composition().unwrap();
             let ellipse_layer = comp.get_layer(&ellipse_id).unwrap();
             assert!(matches!(&ellipse_layer.source, LayerSource::Shape { shape_type: ShapeType::Ellipse { radius_x, radius_y, .. } } if radius_x.value == 120.0 && radius_y.value == 120.0));
+        }
+
+        // Add Path shape layers (triangle/polygon/star tools share one builder).
+        for (name, path) in [
+            ("Triangle Shape", project::Path::triangle(0.0, 0.0, 100.0)),
+            ("Polygon Shape", project::Path::polygon(0.0, 0.0, 100.0, 6)),
+            ("Star Shape", project::Path::star(0.0, 0.0, 100.0, 50.0, 5)),
+        ] {
+            let pid = state.add_path_shape_layer(name, path, None).unwrap();
+            let comp = state.active_composition().unwrap();
+            let player = comp.get_layer(&pid).unwrap();
+            assert!(
+                matches!(&player.source, LayerSource::Shape { shape_type: ShapeType::Path { path_data, .. } }
+                    if project::Path::from_svg(path_data).points.len() >= 3),
+                "{name} must store a closed polygon path"
+            );
+            assert_eq!(player.name.as_str(), name);
         }
 
         // Add Pen point -> new path layer

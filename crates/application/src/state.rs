@@ -21,6 +21,78 @@ pub enum EditorTool {
     Text,          // 'T' Text layer placement
     ShapeRect,     // 'Q' Rectangle shape
     ShapeEllipse,  // 'Q' Ellipse shape
+    ShapeTriangle, // 'Q' Triangle shape (Path layer)
+    ShapePolygon,  // 'Q' Hexagon shape (Path layer)
+    ShapeStar,     // 'Q' Star shape (Path layer)
+}
+
+impl EditorTool {
+    /// Tools sharing one toolbar slot, in flyout order (Photoshop-style
+    /// group: right-click the slot to pick a variant).
+    pub const SHAPE_TOOLS: &'static [EditorTool] = &[
+        Self::ShapeRect,
+        Self::ShapeEllipse,
+        Self::ShapeTriangle,
+        Self::ShapePolygon,
+        Self::ShapeStar,
+    ];
+
+    /// True for any shape-group variant (rectangle/ellipse/path shapes).
+    pub const fn is_shape_tool(self) -> bool {
+        matches!(
+            self,
+            Self::ShapeRect
+                | Self::ShapeEllipse
+                | Self::ShapeTriangle
+                | Self::ShapePolygon
+                | Self::ShapeStar
+        )
+    }
+
+    /// Next variant in the shape group (wraps); non-shape tools return self.
+    pub const fn group_next(self) -> Self {
+        match self {
+            Self::ShapeRect => Self::ShapeEllipse,
+            Self::ShapeEllipse => Self::ShapeTriangle,
+            Self::ShapeTriangle => Self::ShapePolygon,
+            Self::ShapePolygon => Self::ShapeStar,
+            Self::ShapeStar => Self::ShapeRect,
+            _ => self,
+        }
+    }
+
+    /// Toolbar icon for the tool.
+    pub const fn icon(self) -> gpui_kit::assets::IconName {
+        use gpui_kit::assets::IconName;
+        match self {
+            Self::Move => IconName::Move,
+            Self::Hand => IconName::Hand,
+            Self::Rotate => IconName::RotateCw,
+            Self::Pen => IconName::Pen,
+            Self::Text => IconName::Type,
+            Self::ShapeRect => IconName::Square,
+            Self::ShapeEllipse => IconName::Circle,
+            Self::ShapeTriangle => IconName::Triangle,
+            Self::ShapePolygon => IconName::Hexagon,
+            Self::ShapeStar => IconName::Star,
+        }
+    }
+
+    /// Human label for menus and tooltips.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Move => "Move",
+            Self::Hand => "Hand",
+            Self::Rotate => "Rotate",
+            Self::Pen => "Pen",
+            Self::Text => "Text",
+            Self::ShapeRect => "Rectangle",
+            Self::ShapeEllipse => "Ellipse",
+            Self::ShapeTriangle => "Triangle",
+            Self::ShapePolygon => "Polygon",
+            Self::ShapeStar => "Star",
+        }
+    }
 }
 
 /// Query and cache all installed system fonts across Windows, macOS, and Linux.
@@ -8422,16 +8494,18 @@ impl EditorState {
         Ok(self.evaluator.evaluate(&graph, &current_tc))
     }
 
-    /// Set the active editor tool (Move, Hand, Rotate, Pen, Text, ShapeRect, ShapeEllipse).
+    /// Set the active editor tool (Move, Hand, Rotate, Pen, Text, shapes).
     pub fn set_tool(&mut self, tool: EditorTool) {
         self.active_tool = tool;
     }
 
-    /// Cycle between Shape tool variants (Rectangle <-> Ellipse).
+    /// Cycle to the next variant in the active tool's group (the shape
+    /// group rotates rectangle → ellipse → triangle → polygon → star).
     pub fn cycle_shape_tool(&mut self) {
-        self.active_tool = match self.active_tool {
-            EditorTool::ShapeRect => EditorTool::ShapeEllipse,
-            _ => EditorTool::ShapeRect,
+        self.active_tool = if self.active_tool.is_shape_tool() {
+            self.active_tool.group_next()
+        } else {
+            EditorTool::ShapeRect
         };
     }
 
@@ -8612,7 +8686,70 @@ impl EditorState {
         Ok(layer_id)
     }
 
-    /// Pen press at a composition-space point with the topmost picked
+    /// Add a Path shape layer from a ready-made [`Path`] (triangle,
+    /// polygon, star tools). The path is centered on its own bounding box
+    /// so position/anchor behave like the rectangle/ellipse builders.
+    pub fn add_path_shape_layer(
+        &mut self,
+        name: &str,
+        path: Path,
+        pos: Option<Vec2>,
+    ) -> Result<String, String> {
+        self.checkpoint();
+        let (_comp_w, _comp_h, frame_rate, duration) = {
+            let comp = self
+                .active_composition()
+                .ok_or_else(|| "No active composition".to_string())?;
+            (comp.width, comp.height, comp.frame_rate, comp.duration)
+        };
+
+        let layer_id = {
+            let comp = self
+                .active_composition()
+                .ok_or_else(|| "No active composition".to_string())?;
+            let mut counter = comp.layers.len() + 1;
+            let mut id = format!("layer_path_{counter}");
+            while comp.get_layer(&id).is_some() {
+                counter += 1;
+                id = format!("layer_path_{counter}");
+            }
+            id
+        };
+
+        let in_pt = TimeCode::zero(frame_rate);
+        let out_pt = duration;
+        let (min, size) = path
+            .frame(0.0)
+            .unwrap_or((Vec2::ZERO, Vec2::new(100.0, 100.0)));
+        let center_local = Vec2::new(min.x + size.x / 2.0, min.y + size.y / 2.0);
+        let mut layer = Layer::shape(
+            &layer_id,
+            name,
+            ShapeType::Path {
+                path_data: path.to_svg(),
+                fill: Property::new("Fill", self.tool_shape_fill),
+                fill_gradient: None,
+                stroke: Property::new("Stroke", Color::TRANSPARENT),
+                stroke_width: Property::new("Stroke Width", 0.0),
+            },
+            in_pt,
+            out_pt,
+        );
+
+        let target_pos = pos.unwrap_or(Vec2::ZERO);
+        layer.transform.position.set_value(target_pos);
+        layer.transform.anchor_point.set_value(center_local);
+
+        let comp_mut = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        comp_mut
+            .insert_layer(0, layer)
+            .map_err(|e| format!("Failed to add path layer: {e:?}"))?;
+
+        self.selected_layer_id = Some(layer_id.clone());
+        Ok(layer_id)
+    }
     /// layer (if any). Deterministic routing that does not depend on prior
     /// selection or sibling hit-test order:
     /// 1. active mask edit target → append (layer-local),

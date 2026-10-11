@@ -3148,6 +3148,8 @@ pub struct CompositionViewerPanel {
     pub empty_down: Option<(f32, f32)>,
     /// Remembered rectangle/ellipse variant for the grouped Shape tool.
     pub shape_variant: EditorTool,
+    /// Whether the shape-group flyout (right-click tool variants) is open.
+    pub tool_flyout: bool,
     /// Measured canvas-wrap size in window px (responsive fit).
     pub viewport_px: Option<(f32, f32)>,
     /// Measured canvas-wrap origin in window px (for cursor mapping).
@@ -3293,7 +3295,7 @@ pub struct ShapeDragState {
     pub start_comp: Vec2,
     pub current_comp: Vec2,
     pub target_layer: Option<String>,
-    pub is_ellipse: bool,
+    pub tool: EditorTool,
 }
 
 /// Viewport transform-gizmo drag state (After Effects-style direct
@@ -3337,6 +3339,7 @@ impl CompositionViewerPanel {
             down_on_layer: false,
             empty_down: None,
             shape_variant: EditorTool::ShapeRect,
+            tool_flyout: false,
             viewport_px: None,
             viewport_origin: None,
             frame_origin: None,
@@ -3938,8 +3941,7 @@ impl Render for CompositionViewerPanel {
                                 || p_drag_layer.read(cx).puppet_drag.is_some()
                                 || p_drag_layer.read(cx).mask_edit_point.is_some()
                                 || sel_state.read(cx).active_tool == EditorTool::Pen
-                                || sel_state.read(cx).active_tool == EditorTool::ShapeRect
-                                || sel_state.read(cx).active_tool == EditorTool::ShapeEllipse
+                                || sel_state.read(cx).active_tool.is_shape_tool()
                                 || sel_state.read(cx).active_mask_edit.is_some();
                             if skip {
                                 return;
@@ -5117,11 +5119,14 @@ impl Render for CompositionViewerPanel {
         };
         let active_tool = state.active_tool;
         let s_side = self.state.clone();
+        let panel_entity = cx.entity().clone();
         // Semantic tool buttons (kit Button: focus, keyboard, tooltip and
         // cursor contracts included; toggled marks the active tool).
+        // Any tool pick also dismisses the shape-group flyout.
         let tool_btn = |tool: EditorTool, icon: IconName, label: &'static str, tip: &'static str, _cx: &App| {
             let is_active = active_tool == tool;
             let s_click = s_side.clone();
+            let p_close = panel_entity.clone();
             div()
                 .id(SharedString::from(format!("side_tool_btn_{label}")))
                 .test_support()
@@ -5136,23 +5141,31 @@ impl Render for CompositionViewerPanel {
                                 s.set_tool(tool);
                                 cx.notify();
                             });
+                            p_close.update(cx, |this, cx| {
+                                this.tool_flyout = false;
+                                cx.notify();
+                            });
                         }),
                 )
         };
 
         let s_add = self.state.clone();
-        let panel_entity = cx.entity().clone();
-        // Grouped Shape tool: shows the active variant (rectangle/ellipse).
-        // Click selects it; clicking again toggles the variant (same as `Q`).
-        let shown_shape = match active_tool {
-            EditorTool::ShapeRect | EditorTool::ShapeEllipse => active_tool,
-            _ => self.shape_variant,
+        // Grouped Shape tool: shows the active variant; left-click
+        // selects (again = next variant, same as `Q`); right-click opens
+        // the variant flyout (Photoshop-style tool group).
+        let shown_shape = if active_tool.is_shape_tool() {
+            active_tool
+        } else {
+            self.shape_variant
         };
-        let (shape_icon, shape_label) = match shown_shape {
-            EditorTool::ShapeEllipse => (IconName::Circle, "ellipse"),
-            _ => (IconName::Square, "rect"),
+        let shape_label = match shown_shape {
+            EditorTool::ShapeEllipse => "ellipse",
+            EditorTool::ShapeTriangle => "triangle",
+            EditorTool::ShapePolygon => "polygon",
+            EditorTool::ShapeStar => "star",
+            _ => "rect",
         };
-        let shape_is_active = matches!(active_tool, EditorTool::ShapeRect | EditorTool::ShapeEllipse);
+        let shape_is_active = active_tool.is_shape_tool();
 
         let side_toolbar = v_flex()
             .id("viewer_tool_strip")
@@ -5172,25 +5185,33 @@ impl Render for CompositionViewerPanel {
             .child(tool_btn(EditorTool::Text, IconName::Type, "text", "Text Tool (T)", cx))
             .child({
                 let p_shape = panel_entity.clone();
-                div()
+                let p_click = p_shape.clone();
+                let p_rclick = p_shape.clone();
+                let flyout_open = self.tool_flyout;
+                let mut slot = div()
                     .id(SharedString::from(format!("side_tool_btn_{shape_label}")))
                     .test_support()
+                    .relative()
                     .child(
                         Button::new(SharedString::from(format!("side_tool_btn_{shape_label}_btn")))
                             .compact()
                             .toggled(shape_is_active)
-                            .tooltip("Shape Tool (Q) — click again to toggle rectangle/ellipse")
-                            .child(icon_box(shape_icon))
+                            .tooltip("Shape Tools (Q) — left-click selects (again = next shape), right-click shows all 5")
+                            .child(icon_box(shown_shape.icon()))
                             .on_click(move |_, _, cx| {
-                                p_shape.update(cx, |this, cx| {
+                                p_click.update(cx, |this, cx| {
                                     // Clicking the grouped tool selects it; clicking
-                                    // again toggles rectangle/ellipse (same as `Q`).
-                                    let next = match this.state.read(cx).active_tool {
-                                        EditorTool::ShapeRect => EditorTool::ShapeEllipse,
-                                        EditorTool::ShapeEllipse => EditorTool::ShapeRect,
-                                        _ => this.shape_variant,
+                                    // again advances the variant (same as `Q`).
+                                    let next = {
+                                        let cur = this.state.read(cx).active_tool;
+                                        if cur.is_shape_tool() {
+                                            cur.group_next()
+                                        } else {
+                                            this.shape_variant
+                                        }
                                     };
                                     this.shape_variant = next;
+                                    this.tool_flyout = false;
                                     this.state.update(cx, |s, cx| {
                                         s.set_tool(next);
                                         cx.notify();
@@ -5199,6 +5220,60 @@ impl Render for CompositionViewerPanel {
                                 });
                             }),
                     )
+                    .on_mouse_down(MouseButton::Right, move |_, _, cx| {
+                        p_rclick.update(cx, |this, cx| {
+                            this.tool_flyout = !this.tool_flyout;
+                            cx.notify();
+                        });
+                    });
+                // Variant flyout: one row per group member (icon + label).
+                if flyout_open {
+                    let mut rows = v_flex()
+                        .id("tool_flyout")
+                        .test_support()
+                        .absolute()
+                        .left(px(34.))
+                        .top(px(0.))
+                        .min_w(px(150.))
+                        .rounded_md()
+                        .border_1()
+                        .border_color(ae::border())
+                        .bg(ae::panel())
+                        .p_1()
+                        .gap_0p5();
+                    for tool in EditorTool::SHAPE_TOOLS {
+                        let p_pick = p_shape.clone();
+                        let picked = *tool;
+                        rows = rows.child(
+                            div()
+                                .id(SharedString::from(format!("tool_flyout_{}", picked.label().to_lowercase())))
+                                .test_support()
+                                .cursor_pointer()
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .hover(|s| s.bg(cx.theme().accent))
+                                .child(icon_box(picked.icon()))
+                                .child(picked.label().to_string())
+                                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                    p_pick.update(cx, |this, cx| {
+                                        this.shape_variant = picked;
+                                        this.tool_flyout = false;
+                                        this.state.update(cx, |s, cx| {
+                                            s.set_tool(picked);
+                                            cx.notify();
+                                        });
+                                        cx.notify();
+                                    });
+                                }),
+                        );
+                    }
+                    slot = slot.child(rows);
+                }
+                slot
             })
             .child(div().w(px(20.)).h(px(1.)).bg(ae::border()).my_1())
             // Single contextual action: creates a layer of the active tool
@@ -5223,6 +5298,17 @@ impl Render for CompositionViewerPanel {
                                 }
                                 EditorTool::ShapeEllipse => {
                                     let _ = s.add_ellipse_shape_layer(150.0, 150.0, None);
+                                }
+                                tool if tool.is_shape_tool() => {
+                                    // Path tools share one centered-shape
+                                    // helper (triangle/polygon/star).
+                                    let r = 150.0;
+                                    let (name, path) = match tool {
+                                        EditorTool::ShapeTriangle => ("Triangle Shape", project::Path::triangle(0.0, 0.0, r)),
+                                        EditorTool::ShapeStar => ("Star Shape", project::Path::star(0.0, 0.0, r, r * 0.5, 5)),
+                                        _ => ("Polygon Shape", project::Path::polygon(0.0, 0.0, r, 6)),
+                                    };
+                                    let _ = s.add_path_shape_layer(name, path, None);
                                 }
                                 EditorTool::Pen => {
                                     let _ = s.add_pen_point(project::Vec2::ZERO);
@@ -5646,17 +5732,37 @@ impl Render for CompositionViewerPanel {
                     let center = Vec2::new((min_x + max_x) / 2.0, (min_y + max_y) / 2.0);
                     let s = this.state.clone();
                     s.update(cx, |s, cx| {
-                        if let Some(lid) = sdrag.target_layer {
-                            let kind = if sdrag.is_ellipse {
-                                project::MaskShapeKind::Ellipse
-                            } else {
-                                project::MaskShapeKind::Rectangle
-                            };
-                            let _ = s.add_shaped_mask_at(&lid, kind, Some(center), Some((drag_w, drag_h)));
-                        } else if sdrag.is_ellipse {
-                            let _ = s.add_ellipse_shape_layer(drag_w, drag_h, Some(center));
-                        } else {
-                            let _ = s.add_rectangle_shape_layer(drag_w, drag_h, Some(center));
+                        // Masks only support rectangle/ellipse kinds; path
+                        // tools always create shape layers instead.
+                        match sdrag.tool {
+                            EditorTool::ShapeEllipse if sdrag.target_layer.is_some() => {
+                                let lid = sdrag.target_layer.clone().unwrap();
+                                let _ = s.add_shaped_mask_at(&lid, project::MaskShapeKind::Ellipse, Some(center), Some((drag_w, drag_h)));
+                            }
+                            EditorTool::ShapeRect if sdrag.target_layer.is_some() => {
+                                let lid = sdrag.target_layer.clone().unwrap();
+                                let _ = s.add_shaped_mask_at(&lid, project::MaskShapeKind::Rectangle, Some(center), Some((drag_w, drag_h)));
+                            }
+                            EditorTool::ShapeRect => {
+                                let _ = s.add_rectangle_shape_layer(drag_w, drag_h, Some(center));
+                            }
+                            EditorTool::ShapeEllipse => {
+                                let _ = s.add_ellipse_shape_layer(drag_w, drag_h, Some(center));
+                            }
+                            tool => {
+                                let r = drag_w.min(drag_h) / 2.0;
+                                let path = match tool {
+                                    EditorTool::ShapeTriangle => project::Path::triangle(center.x, center.y, r),
+                                    EditorTool::ShapeStar => project::Path::star(center.x, center.y, r, r * 0.5, 5),
+                                    _ => project::Path::polygon(center.x, center.y, r, 6),
+                                };
+                                let name = match tool {
+                                    EditorTool::ShapeTriangle => "Triangle Shape",
+                                    EditorTool::ShapeStar => "Star Shape",
+                                    _ => "Polygon Shape",
+                                };
+                                let _ = s.add_path_shape_layer(name, path, Some(center));
+                            }
                         }
                         s.preview_fast = false;
                         cx.notify();
@@ -5924,8 +6030,7 @@ impl Render for CompositionViewerPanel {
                                             let is_mask_or_pen = s_tool.read(cx).active_mask_edit.is_some()
                                                 || p_drag.read(cx).mask_edit_point.is_some()
                                                 || active_tool == EditorTool::Pen
-                                                || active_tool == EditorTool::ShapeRect
-                                                || active_tool == EditorTool::ShapeEllipse;
+                                                || active_tool.is_shape_tool();
                                             if active_tool == EditorTool::Move && !is_mask_or_pen {
                                                 if let Some(picked) = p_drag.read(cx).pick_top_at(comp_x, comp_y) {
                                                     on_layer = true;
@@ -5986,26 +6091,14 @@ impl Render for CompositionViewerPanel {
                                                         cx.notify();
                                                     });
                                                 }
-                                                EditorTool::ShapeRect => {
+                                                tool if tool.is_shape_tool() => {
                                                     let target_layer = s_tool.read(cx).selected_layer_id.clone();
                                                     p_drag.update(cx, |this, cx| {
                                                         this.shape_drag = Some(ShapeDragState {
                                                             start_comp: Vec2::new(comp_x, comp_y),
                                                             current_comp: Vec2::new(comp_x, comp_y),
                                                             target_layer,
-                                                            is_ellipse: false,
-                                                        });
-                                                        cx.notify();
-                                                    });
-                                                }
-                                                EditorTool::ShapeEllipse => {
-                                                    let target_layer = s_tool.read(cx).selected_layer_id.clone();
-                                                    p_drag.update(cx, |this, cx| {
-                                                        this.shape_drag = Some(ShapeDragState {
-                                                            start_comp: Vec2::new(comp_x, comp_y),
-                                                            current_comp: Vec2::new(comp_x, comp_y),
-                                                            target_layer,
-                                                            is_ellipse: true,
+                                                            tool,
                                                         });
                                                         cx.notify();
                                                     });
@@ -6077,8 +6170,10 @@ impl Render for CompositionViewerPanel {
                                     let c_y = (s_min_y + comp_h / 2.0) * current_scale;
                                     let c_w = s_w * current_scale;
                                     let c_h = s_h * current_scale;
-                                    let is_ellipse = sdrag.is_ellipse;
-                                    let is_mask = sdrag.target_layer.is_some();
+                                    // Ellipse previews round; other shapes
+                                    // preview their bounds marquee.
+                                    let is_ellipse = sdrag.tool == EditorTool::ShapeEllipse;
+                                    let is_mask = sdrag.target_layer.is_some() && matches!(sdrag.tool, EditorTool::ShapeRect | EditorTool::ShapeEllipse);
                                     let border_col = if is_mask {
                                         rgb(0xf59e0b) // amber for mask
                                     } else {
@@ -8651,6 +8746,9 @@ fn render_tool_settings(state: &Entity<EditorState>, cx: &App) -> AnyElement {
         EditorTool::Text => ("Text", IconName::Type),
         EditorTool::ShapeRect => ("Rectangle", IconName::Square),
         EditorTool::ShapeEllipse => ("Ellipse", IconName::Circle),
+        EditorTool::ShapeTriangle => ("Triangle", IconName::Triangle),
+        EditorTool::ShapePolygon => ("Polygon", IconName::Hexagon),
+        EditorTool::ShapeStar => ("Star", IconName::Star),
     };
     // Option chip (selectable value).
     let chip = |id: String, label: String, selected: bool, cx: &App| {
@@ -8741,7 +8839,7 @@ fn render_tool_settings(state: &Entity<EditorState>, cx: &App) -> AnyElement {
                         .child("Font family follows your system default; pick any installed family in the Text section below."),
                 );
         }
-        EditorTool::ShapeRect | EditorTool::ShapeEllipse => {
+        tool if tool.is_shape_tool() => {
             let mut cols = h_flex().gap_1().items_center().flex_wrap();
             for (hex_str, col_val) in palette {
                 let s_c = state.clone();

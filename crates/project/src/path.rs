@@ -199,6 +199,37 @@ impl Path {
         }
     }
 
+    /// Closed regular polygon (corner nodes, first vertex at the top).
+    /// `sides` below 3 degrades to a triangle.
+    pub fn polygon(cx: f32, cy: f32, r: f32, sides: usize) -> Self {
+        let n = sides.max(3);
+        let mut points = Vec::with_capacity(n);
+        for i in 0..n {
+            // Start at the top (-90°) so triangles/polygons sit upright.
+            let a = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::TAU / n as f32;
+            points.push(PathPoint::corner(Vec2::new(cx + r * a.cos(), cy + r * a.sin())));
+        }
+        Self { points, closed: true }
+    }
+
+    /// Closed upright triangle (radius = circumradius).
+    pub fn triangle(cx: f32, cy: f32, r: f32) -> Self {
+        Self::polygon(cx, cy, r, 3)
+    }
+
+    /// Closed star (alternating outer/inner corner nodes, first point up).
+    /// `points` below 3 degrades to a 3-point star.
+    pub fn star(cx: f32, cy: f32, outer: f32, inner: f32, points: usize) -> Self {
+        let n = points.max(3);
+        let mut pts = Vec::with_capacity(2 * n);
+        for i in 0..2 * n {
+            let r = if i % 2 == 0 { outer } else { inner };
+            let a = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / n as f32;
+            pts.push(PathPoint::corner(Vec2::new(cx + r * a.cos(), cy + r * a.sin())));
+        }
+        Self { points: pts, closed: true }
+    }
+
     /// Number of nodes.
     pub fn len(&self) -> usize {
         self.points.len()
@@ -1667,5 +1698,30 @@ mod tests {
         assert!((o2.x - 42.0).abs() < 1e-3, "{o2:?}");
         assert!((s2.x - 116.0).abs() < 1e-3, "{s2:?}");
         assert!(Path::new().frame(8.0).is_none());
+    }
+
+    #[test]
+    fn regular_shapes_are_closed_and_upright() {
+        let t = Path::triangle(0.0, 0.0, 100.0);
+        assert!(t.closed && t.points.len() == 3);
+        // First vertex at the top, base below the center.
+        assert!(t.points[0].pos.y < 0.0);
+        assert!(t.points[1].pos.y > 0.0 && t.points[2].pos.y > 0.0);
+        // Circumradius preserved.
+        assert!((t.points[0].pos.length() - 100.0).abs() < 1e-3);
+        // Degenerate side counts clamp.
+        assert_eq!(Path::polygon(0.0, 0.0, 10.0, 0).points.len(), 3);
+        let hex = Path::polygon(0.0, 0.0, 100.0, 6);
+        assert!(hex.closed && hex.points.len() == 6);
+        assert!((hex.points[0].pos.y + 100.0).abs() < 1e-3);
+        let star = Path::star(0.0, 0.0, 100.0, 50.0, 5);
+        assert!(star.closed && star.points.len() == 10);
+        assert!((star.points[0].pos.length() - 100.0).abs() < 1e-3);
+        assert!((star.points[1].pos.length() - 50.0).abs() < 1e-3);
+        assert_eq!(Path::star(0.0, 0.0, 10.0, 5.0, 1).points.len(), 6);
+        // Round-trip through SVG (the shape-layer storage form).
+        let back = Path::from_svg(&star.to_svg());
+        assert_eq!(back.points.len(), 10);
+        assert!(back.closed);
     }
 }
