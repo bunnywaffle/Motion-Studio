@@ -508,7 +508,7 @@ impl FxPass {
             ),
             "cel_shading" => (
                 ef::cel_shade_resample().wgsl,
-                "fx_cel_shade(uv, color, u.params[0].x, u.params[0].y, vec2<f32>(u.misc.y, u.misc.z))",
+                "fx_cel_shade(uv, color, u.params[0].x, u.params[0].y, u.params[0].z, u.params[0].w, u.colors[0].rgb, u.params[1].x, u.colors[1].rgb, u.params[1].y, vec2<f32>(u.misc.y, u.misc.z))",
                 true,
             ),
             "oil_paint" => (

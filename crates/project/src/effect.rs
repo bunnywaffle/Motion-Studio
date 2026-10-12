@@ -48,6 +48,18 @@ fn default_warp_cols() -> Property<f32> {
     Property::new("Columns", 4.0)
 }
 
+fn default_cel_highlight_intensity() -> Property<f32> {
+    Property::new("Highlight Intensity", 100.0)
+}
+
+fn default_cel_shadow_intensity() -> Property<f32> {
+    Property::new("Shadow Intensity", 100.0)
+}
+
+fn default_cel_tint_amount() -> Property<f32> {
+    Property::new("Tint Amount", 0.0)
+}
+
 fn default_warp_rows() -> Property<f32> {
     Property::new("Rows", 4.0)
 }
@@ -630,6 +642,22 @@ pub enum EffectType {
     CelShading {
         levels: Property<f32>,
         edge: Property<f32>,
+        /// Highlight gain in % (100 = legacy look).
+        #[serde(default = "default_cel_highlight_intensity")]
+        highlight_intensity: Property<f32>,
+        /// Shadow floor in % (100 = legacy 0.3 floor).
+        #[serde(default = "default_cel_shadow_intensity")]
+        shadow_intensity: Property<f32>,
+        #[serde(deserialize_with = "crate::property::de_property_or_value", default)]
+        highlight_tint: Property<Color>,
+        /// Highlight tint strength in % (0 = off, legacy look).
+        #[serde(default = "default_cel_tint_amount")]
+        highlight_tint_amount: Property<f32>,
+        #[serde(deserialize_with = "crate::property::de_property_or_value", default)]
+        shadow_tint: Property<Color>,
+        /// Shadow tint strength in % (0 = off, legacy look).
+        #[serde(default = "default_cel_tint_amount")]
+        shadow_tint_amount: Property<f32>,
     },
     /// Oil painting: classic Kuwahara smoothing (spatial, min-variance).
     /// OFX plug-in `net.sf.openfx.oil_paint`.
@@ -1134,6 +1162,12 @@ impl EffectType {
         Self::CelShading {
             levels: Property::new("Levels", levels.clamp(2.0, 8.0)),
             edge: Property::new("Edge", edge.clamp(0.0, 100.0)),
+            highlight_intensity: Property::new("Highlight Intensity", 100.0),
+            shadow_intensity: Property::new("Shadow Intensity", 100.0),
+            highlight_tint: Property::new("Highlight Tint", Color::WHITE),
+            highlight_tint_amount: Property::new("Highlight Tint Amount", 0.0),
+            shadow_tint: Property::new("Shadow Tint", Color::BLACK),
+            shadow_tint_amount: Property::new("Shadow Tint Amount", 0.0),
         }
     }
 
@@ -1657,6 +1691,17 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     color.set_value(next);
                     true
                 }
+            EffectType::CelShading { highlight_tint, shadow_tint, .. } => {
+                if field.eq_ignore_ascii_case("highlight_tint") {
+                    highlight_tint.set_value(next);
+                    true
+                } else if field.eq_ignore_ascii_case("shadow_tint") {
+                    shadow_tint.set_value(next);
+                    true
+                } else {
+                    false
+                }
+            }
             _ => false,
         }
     }
@@ -1718,6 +1763,15 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 if field.eq_ignore_ascii_case("color") =>
             {
                 Some(color)
+            }
+            EffectType::CelShading { highlight_tint, shadow_tint, .. } => {
+                if field.eq_ignore_ascii_case("highlight_tint") {
+                    Some(highlight_tint)
+                } else if field.eq_ignore_ascii_case("shadow_tint") {
+                    Some(shadow_tint)
+                } else {
+                    None
+                }
             }
             EffectType::Stock { plugin, colors, .. } => {
                 let idx = crate::stock::stock_color_slots(*plugin)
@@ -1786,6 +1840,15 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 if field.eq_ignore_ascii_case("color") =>
             {
                 Some(color)
+            }
+            EffectType::CelShading { highlight_tint, shadow_tint, .. } => {
+                if field.eq_ignore_ascii_case("highlight_tint") {
+                    Some(highlight_tint)
+                } else if field.eq_ignore_ascii_case("shadow_tint") {
+                    Some(shadow_tint)
+                } else {
+                    None
+                }
             }
             EffectType::Stock { plugin, colors, .. } => {
                 let idx = crate::stock::stock_color_slots(*plugin)
@@ -2417,12 +2480,24 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     return true;
                 }
             }
-            EffectType::CelShading { levels, edge } => {
+            EffectType::CelShading { levels, edge, highlight_intensity, shadow_intensity, highlight_tint_amount, shadow_tint_amount, .. } => {
                 if param_name.eq_ignore_ascii_case("levels") {
                     levels.set_value((levels.value + delta).clamp(2.0, 8.0).round());
                     return true;
                 } else if param_name.eq_ignore_ascii_case("edge") {
                     edge.set_value((edge.value + delta).clamp(0.0, 100.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("highlight_intensity") {
+                    highlight_intensity.set_value((highlight_intensity.value + delta).clamp(0.0, 200.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("shadow_intensity") {
+                    shadow_intensity.set_value((shadow_intensity.value + delta).clamp(0.0, 100.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("highlight_tint_amount") {
+                    highlight_tint_amount.set_value((highlight_tint_amount.value + delta).clamp(0.0, 100.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("shadow_tint_amount") {
+                    shadow_tint_amount.set_value((shadow_tint_amount.value + delta).clamp(0.0, 100.0));
                     return true;
                 }
             }
@@ -2857,11 +2932,19 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     None
                 }
             }
-            EffectType::CelShading { levels, edge } => {
+            EffectType::CelShading { levels, edge, highlight_intensity, shadow_intensity, highlight_tint_amount, shadow_tint_amount, .. } => {
                 if param_name.eq_ignore_ascii_case("levels") {
                     Some(levels)
                 } else if param_name.eq_ignore_ascii_case("edge") {
                     Some(edge)
+                } else if param_name.eq_ignore_ascii_case("highlight_intensity") {
+                    Some(highlight_intensity)
+                } else if param_name.eq_ignore_ascii_case("shadow_intensity") {
+                    Some(shadow_intensity)
+                } else if param_name.eq_ignore_ascii_case("highlight_tint_amount") {
+                    Some(highlight_tint_amount)
+                } else if param_name.eq_ignore_ascii_case("shadow_tint_amount") {
+                    Some(shadow_tint_amount)
                 } else {
                     None
                 }
@@ -3267,11 +3350,19 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     None
                 }
             }
-            EffectType::CelShading { levels, edge } => {
+            EffectType::CelShading { levels, edge, highlight_intensity, shadow_intensity, highlight_tint_amount, shadow_tint_amount, .. } => {
                 if param_name.eq_ignore_ascii_case("levels") {
                     Some(levels)
                 } else if param_name.eq_ignore_ascii_case("edge") {
                     Some(edge)
+                } else if param_name.eq_ignore_ascii_case("highlight_intensity") {
+                    Some(highlight_intensity)
+                } else if param_name.eq_ignore_ascii_case("shadow_intensity") {
+                    Some(shadow_intensity)
+                } else if param_name.eq_ignore_ascii_case("highlight_tint_amount") {
+                    Some(highlight_tint_amount)
+                } else if param_name.eq_ignore_ascii_case("shadow_tint_amount") {
+                    Some(shadow_tint_amount)
                 } else {
                     None
                 }
@@ -3710,9 +3801,15 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 scalar("amount", "Amount", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), amount),
                 scalar("softness", "Softness", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), softness),
             ],
-            EffectType::CelShading { levels, edge } => vec![
+            EffectType::CelShading { levels, edge, highlight_intensity, shadow_intensity, highlight_tint, highlight_tint_amount, shadow_tint, shadow_tint_amount } => vec![
                 scalar("levels", "Levels", WidgetKind::Slider, px1(2.0, 8.0, 1.0, 4.0), levels),
                 scalar("edge", "Edge", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 60.0), edge),
+                scalar("highlight_intensity", "Highlight Intensity", WidgetKind::Percentage, ParamMeta::slider(0.0, 200.0, 5.0, 0, "%", 100.0), highlight_intensity),
+                PropDecl::color("highlight_tint", "Highlight Tint", highlight_tint.value, highlight_tint.is_animated()),
+                scalar("highlight_tint_amount", "Highlight Tint Amount", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 0.0), highlight_tint_amount),
+                scalar("shadow_intensity", "Shadow Intensity", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), shadow_intensity),
+                PropDecl::color("shadow_tint", "Shadow Tint", shadow_tint.value, shadow_tint.is_animated()),
+                scalar("shadow_tint_amount", "Shadow Tint Amount", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 0.0), shadow_tint_amount),
             ],
             EffectType::OilPaint { radius, amount } => vec![
                 scalar("radius", "Radius", WidgetKind::Slider, px1(1.0, 4.0, 1.0, 2.0), radius),
@@ -3779,6 +3876,8 @@ mod tests {
                 "color_b",
             ),
             (Effect::text_outline("o", 3.0, Color::BLACK), "color"),
+            (Effect::cel_shading("c", 4.0, 60.0), "highlight_tint"),
+            (Effect::cel_shading("c", 4.0, 60.0), "shadow_tint"),
         ];
         for (fx, field) in cases.iter_mut() {
             assert!(fx.set_color_value(field, red()), "{field}");
@@ -3852,7 +3951,37 @@ mod tests {
                 _ => None,
             },
             EffectType::TextOutline { color, .. } => Some(color.value),
+            EffectType::CelShading { highlight_tint, shadow_tint, .. } => match field {
+                "highlight_tint" => Some(highlight_tint.value),
+                "shadow_tint" => Some(shadow_tint.value),
+                _ => None,
+            },
             _ => None,
         }
+    }
+
+    #[test]
+    fn cel_shading_legacy_files_load_with_defaults() {
+        // Pre-option files store only levels/edge; everything else defaults
+        // to the legacy look (intensities 100, amounts 0).
+        let fx: Effect = serde_json::from_str(
+            r#"{"id": "c", "name": "Cel", "effect_type": {"type": "cel_shading", "levels": {"name": "Levels", "value": 4.0, "default_value": 4.0}, "edge": {"name": "Edge", "value": 60.0, "default_value": 60.0}}}"#,
+        )
+        .unwrap();
+        match &fx.effect_type {
+            EffectType::CelShading { highlight_intensity, shadow_intensity, highlight_tint_amount, shadow_tint_amount, .. } => {
+                assert_eq!(highlight_intensity.value, 100.0);
+                assert_eq!(shadow_intensity.value, 100.0);
+                assert_eq!(highlight_tint_amount.value, 0.0);
+                assert_eq!(shadow_tint_amount.value, 0.0);
+            }
+            _ => panic!("expected cel shading"),
+        }
+        // Declarations expose all eight rows (scalars + tints).
+        let names: Vec<String> = fx.declarations().iter().map(|d| d.field.clone()).collect();
+        assert_eq!(
+            names,
+            ["levels", "edge", "highlight_intensity", "highlight_tint", "highlight_tint_amount", "shadow_intensity", "shadow_tint", "shadow_tint_amount"],
+        );
     }
 }

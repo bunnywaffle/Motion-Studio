@@ -1605,7 +1605,7 @@ pub fn stock_halftone_resample() -> ColorFilter {
 pub fn cel_shade_resample() -> ColorFilter {
     color_filter!(
         "cel_shade_resample",
-        r#"fn fx_cel_shade(uv: vec2<f32>, color: vec4<f32>, levels: f32, edge: f32, res: vec2<f32>) -> vec4<f32> {
+        r#"fn fx_cel_shade(uv: vec2<f32>, color: vec4<f32>, levels: f32, edge: f32, hi_int: f32, sh_int: f32, hi_tint: vec3<f32>, hi_amt: f32, sh_tint: vec3<f32>, sh_amt: f32, res: vec2<f32>) -> vec4<f32> {
     if (color.a <= 0.0) {
         return color;
     }
@@ -1613,10 +1613,15 @@ pub fn cel_shade_resample() -> ColorFilter {
     let lum = dot(color.rgb, vec3<f32>(0.299, 0.587, 0.114));
     let n = clamp(floor(levels + 0.5), 2.0, 8.0);
     let band = floor(lum * (n - 1.0) + 0.5) / (n - 1.0);
-    let shade = 0.3 + 0.7 * band;
+    let floor_v = 0.3 * clamp(sh_int / 100.0, 0.0, 1.0);
+    let gain = clamp(hi_int / 100.0, 0.0, 2.0);
+    let shade = floor_v + (gain - floor_v) * band;
+    var rgb = color.rgb * shade;
+    rgb = mix(rgb, hi_tint, clamp(hi_amt / 100.0, 0.0, 1.0) * band);
+    rgb = mix(rgb, sh_tint, clamp(sh_amt / 100.0, 0.0, 1.0) * (1.0 - band));
     let e = fx_sobel_mag(X, res);
     let ink = 1.0 - clamp(e * edge / 100.0 * 2.0, 0.0, 1.0);
-    return vec4<f32>(clamp(color.rgb * shade * ink, vec3<f32>(0.0), vec3<f32>(1.0)), color.a);
+    return vec4<f32>(clamp(rgb * ink, vec3<f32>(0.0), vec3<f32>(1.0)), color.a);
 }"#
     )
 }
@@ -2624,7 +2629,7 @@ mod tests {
             ("stock_light_rays", "fx_stock_light_rays(uv, color, u.params[0], u.params[1], u.params[2], u.colors[0].rgb, RES)"),
             ("stock_god_rays", "fx_stock_god_rays(uv, color, u.params[0], u.params[1], u.params[2], u.colors[0].rgb, RES)"),
             ("stock_lens_flare", "fx_stock_lens_flare(uv, color, u.params[0], u.params[1], u.params[2], u.colors[0].rgb, RES)"),
-            ("cel_shade_resample", "fx_cel_shade(uv, color, u.params[0].x, u.params[0].y, RES)"),
+            ("cel_shade_resample", "fx_cel_shade(uv, color, u.params[0].x, u.params[0].y, u.params[0].z, u.params[0].w, u.colors[0].rgb, u.params[1].x, u.colors[1].rgb, u.params[1].y, RES)"),
             ("oil_paint_resample", "fx_oil_paint(uv, color, u.params[0].x, u.params[0].y, RES)"),
         ];
         let twins = resample_filters();

@@ -929,9 +929,15 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
             amount.to_bits().hash(h);
             softness.to_bits().hash(h);
         }
-        EvaluatedEffectType::CelShading { levels, edge } => {
+        EvaluatedEffectType::CelShading { levels, edge, highlight_intensity, shadow_intensity, highlight_tint, highlight_tint_amount, shadow_tint, shadow_tint_amount } => {
             levels.to_bits().hash(h);
             edge.to_bits().hash(h);
+            highlight_intensity.to_bits().hash(h);
+            shadow_intensity.to_bits().hash(h);
+            color_hash(highlight_tint, h);
+            highlight_tint_amount.to_bits().hash(h);
+            color_hash(shadow_tint, h);
+            shadow_tint_amount.to_bits().hash(h);
         }
         EvaluatedEffectType::OilPaint { radius, amount } => {
             radius.to_bits().hash(h);

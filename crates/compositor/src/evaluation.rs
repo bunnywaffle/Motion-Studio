@@ -600,6 +600,12 @@ pub enum EvaluatedEffectType {
     CelShading {
         levels: f32,
         edge: f32,
+        highlight_intensity: f32,
+        shadow_intensity: f32,
+        highlight_tint: Color,
+        highlight_tint_amount: f32,
+        shadow_tint: Color,
+        shadow_tint_amount: f32,
     },
     OilPaint {
         radius: f32,
@@ -2163,10 +2169,16 @@ impl LayerStackEvaluator {
                                 softness: eval_eff_prop("softness", softness.evaluate_at(time)),
                             }
                         }
-                        EffectType::CelShading { levels, edge } => {
+                        EffectType::CelShading { levels, edge, highlight_intensity, shadow_intensity, highlight_tint, highlight_tint_amount, shadow_tint, shadow_tint_amount } => {
                             EvaluatedEffectType::CelShading {
                                 levels: eval_eff_prop("levels", levels.evaluate_at(time)),
                                 edge: eval_eff_prop("edge", edge.evaluate_at(time)),
+                                highlight_intensity: eval_eff_prop("highlight_intensity", highlight_intensity.evaluate_at(time)),
+                                shadow_intensity: eval_eff_prop("shadow_intensity", shadow_intensity.evaluate_at(time)),
+                                highlight_tint: highlight_tint.evaluate_at(time),
+                                highlight_tint_amount: eval_eff_prop("highlight_tint_amount", highlight_tint_amount.evaluate_at(time)),
+                                shadow_tint: shadow_tint.evaluate_at(time),
+                                shadow_tint_amount: eval_eff_prop("shadow_tint_amount", shadow_tint_amount.evaluate_at(time)),
                             }
                         }
                         EffectType::OilPaint { radius, amount } => {

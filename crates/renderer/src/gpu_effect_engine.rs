@@ -717,8 +717,13 @@ impl GpuEffectEngine {
                         EvaluatedEffectType::Warp { amount, scale, .. } => {
                             ("warp", [*amount, *scale, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
                         }
-                        EvaluatedEffectType::CelShading { levels, edge } => {
-                            ("cel_shading", [*levels, *edge, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+                        EvaluatedEffectType::CelShading { levels, edge, highlight_intensity, shadow_intensity, highlight_tint_amount, shadow_tint_amount, .. } => {
+                            // Scalars ride params[0..1]; tints ride the
+                            // colors array (the 10-slot convention is full).
+                            (
+                                "cel_shading",
+                                [*levels, *edge, *highlight_intensity, *shadow_intensity, *highlight_tint_amount, *shadow_tint_amount, 0.0, 0.0, 0.0, 0.0],
+                            )
                         }
                         EvaluatedEffectType::OilPaint { radius, amount } => {
                             ("oil_paint", [*radius, *amount, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
@@ -740,8 +745,17 @@ impl GpuEffectEngine {
                         }
                         _ => continue,
                     };
+                    // Cel tints ride the colors array (params convention is
+                    // full at 10 slots); every other builtin uses none.
+                    let tint_colors: [[f32; 4]; 2] = match eff_type {
+                        EvaluatedEffectType::CelShading { highlight_tint, shadow_tint, .. } => [
+                            [highlight_tint.r, highlight_tint.g, highlight_tint.b, 1.0],
+                            [shadow_tint.r, shadow_tint.g, shadow_tint.b, 1.0],
+                        ],
+                        _ => [[0.0; 4]; 2],
+                    };
                     if let Some(pass) = self.builtin_pass_cache.get(id) {
-                        let uniforms = FxUniforms::pack(&params, &[], time_s, width as f32, height as f32, 0.0);
+                        let uniforms = FxUniforms::pack(&params, &tint_colors, time_s, width as f32, height as f32, 0.0);
                         pass.record_into(
                             &self.gpu,
                             &mut encoder,

@@ -8512,6 +8512,7 @@ fn fx_color_fields(effect: &project::Effect) -> Vec<&'static str> {
         EffectType::Checkerboard { .. } => vec!["color_a", "color_b"],
         EffectType::GradientRamp { .. } => vec!["color_a", "color_b"],
         EffectType::TextOutline { .. } => vec!["color"],
+        EffectType::CelShading { .. } => vec!["highlight_tint", "shadow_tint"],
         _ => effect.color_slots(),
     }
 }

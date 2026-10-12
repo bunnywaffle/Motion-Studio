@@ -342,8 +342,16 @@ pub fn apply_effect_pixels(
         EvaluatedEffectType::Sharpen { amount, radius } => {
             apply_sharpen(buf, *amount, *radius);
         }
-        EvaluatedEffectType::CelShading { levels, edge } => {
-            apply_cel_shade(buf, *levels, *edge);
+        EvaluatedEffectType::CelShading { levels, edge, highlight_intensity, shadow_intensity, highlight_tint, highlight_tint_amount, shadow_tint, shadow_tint_amount } => {
+            apply_cel_shade(
+                buf,
+                *levels,
+                *edge,
+                *highlight_intensity,
+                *shadow_intensity,
+                (*highlight_tint, *highlight_tint_amount),
+                (*shadow_tint, *shadow_tint_amount),
+            );
         }
         EvaluatedEffectType::OilPaint { radius, amount } => {
             apply_oil_paint(buf, *radius, *amount);
@@ -691,9 +699,23 @@ pub fn apply_vignette(buf: &mut FloatBuf, amount: f32, softness: f32) {
 /// Cel shading in place: luminance tone bands plus inked Sobel edges.
 /// `levels` 2..8 posterizes luminance into that many bands (anchored at
 /// 30% so shadows stay readable); `edge` 0..100 scales the ink.
-pub fn apply_cel_shade(buf: &mut FloatBuf, levels: f32, edge: f32) {
+pub fn apply_cel_shade(
+    buf: &mut FloatBuf,
+    levels: f32,
+    edge: f32,
+    highlight_intensity: f32,
+    shadow_intensity: f32,
+    highlight_tint: (Color, f32),
+    shadow_tint: (Color, f32),
+) {
     let n = levels.round().clamp(2.0, 8.0);
     let ek = (edge / 100.0).clamp(0.0, 1.0);
+    // Highlight gain (default 1.0) and shadow floor (default 0.3) reduce
+    // to the legacy `0.3 + 0.7 * band` at defaults, bit for bit.
+    let gain = (highlight_intensity / 100.0).clamp(0.0, 2.0);
+    let floor_v = 0.3 * (shadow_intensity / 100.0).clamp(0.0, 1.0);
+    let (hi_col, hi_amt) = (highlight_tint.0, (highlight_tint.1 / 100.0).clamp(0.0, 1.0));
+    let (sh_col, sh_amt) = (shadow_tint.0, (shadow_tint.1 / 100.0).clamp(0.0, 1.0));
     if buf.w == 0 || buf.h == 0 {
         return;
     }
@@ -709,13 +731,23 @@ pub fn apply_cel_shade(buf: &mut FloatBuf, levels: f32, edge: f32) {
             let c = p.to_color();
             let lum = 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
             let band = ((lum * (n - 1.0)).round() / (n - 1.0)).clamp(0.0, 1.0);
-            let shade = 0.3 + 0.7 * band;
+            let shade = floor_v + (gain - floor_v) * band;
+            let (mut r, mut g, mut b) = (c.r * shade, c.g * shade, c.b * shade);
+            // Shadow tint weights dark bands, highlight tint bright bands.
+            let sw = sh_amt * (1.0 - band);
+            r += (sh_col.r - r) * sw;
+            g += (sh_col.g - g) * sw;
+            b += (sh_col.b - b) * sw;
+            let hw = hi_amt * band;
+            r += (hi_col.r - r) * hw;
+            g += (hi_col.g - g) * hw;
+            b += (hi_col.b - b) * hw;
             let e = super::stock::sobel(&snap, x, y);
             let ink = 1.0 - (e * ek * 2.0).clamp(0.0, 1.0);
             let out = Color::rgba(
-                (c.r * shade * ink).clamp(0.0, 1.0),
-                (c.g * shade * ink).clamp(0.0, 1.0),
-                (c.b * shade * ink).clamp(0.0, 1.0),
+                (r * ink).clamp(0.0, 1.0),
+                (g * ink).clamp(0.0, 1.0),
+                (b * ink).clamp(0.0, 1.0),
                 c.a,
             );
             buf.px[idx] = Px::from_color(out);
@@ -805,6 +837,7 @@ mod tests {
 
     #[test]
     fn cel_shade_bands_luminance_and_inks_edges() {
+        use project::Color;
         // Mid-gray bands to a flat tone; a hard black/white edge inks dark.
         let mut buf = FloatBuf {
             w: 8,
@@ -815,7 +848,7 @@ mod tests {
             buf.px[x as usize] = Px { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
             buf.px[(8 + x) as usize] = Px { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
         }
-        apply_cel_shade(&mut buf, 4.0, 60.0);
+        apply_cel_shade(&mut buf, 4.0, 60.0, 100.0, 100.0, (Color::WHITE, 0.0), (Color::BLACK, 0.0));
         // Flat gray region (x=6,7 clear of the blocks): banded to one
         // tone, no ink (no edges).
         let g0 = buf.px[6 + 8].to_color();
@@ -824,6 +857,39 @@ mod tests {
         // The black/white boundary pixel inks darker than either neighbor.
         let edge = buf.px[3].to_color();
         assert!(edge.r < 0.4, "edge must ink, got {edge:?}");
+    }
+
+    #[test]
+    fn cel_shade_tints_and_intensities() {
+        use project::Color;
+        // Uniform dark gray: shadow tint at full amount recolors shadows.
+        let mut buf = FloatBuf {
+            w: 4,
+            h: 1,
+            px: vec![Px { r: 0.1, g: 0.1, b: 0.1, a: 1.0 }; 4],
+        };
+        apply_cel_shade(&mut buf, 4.0, 0.0, 100.0, 100.0, (Color::WHITE, 0.0), (Color::rgb(1.0, 0.0, 0.0), 100.0));
+        let s = buf.px[1].to_color();
+        assert!(s.r > 0.9 && s.g < 0.1, "shadow must tint red, got {s:?}");
+        // Uniform bright gray: highlight tint at full amount recolors.
+        let mut buf = FloatBuf {
+            w: 4,
+            h: 1,
+            px: vec![Px { r: 0.9, g: 0.9, b: 0.9, a: 1.0 }; 4],
+        };
+        apply_cel_shade(&mut buf, 4.0, 0.0, 100.0, 100.0, (Color::rgb(0.0, 0.0, 1.0), 100.0), (Color::BLACK, 0.0));
+        let s = buf.px[1].to_color();
+        assert!(s.b > 0.9 && s.r < 0.1, "highlight must tint blue, got {s:?}");
+        // Shadow intensity 0 lifts the floor: same dark gray renders at band.
+        let mut buf = FloatBuf {
+            w: 4,
+            h: 1,
+            px: vec![Px { r: 0.5, g: 0.5, b: 0.5, a: 1.0 }; 4],
+        };
+        apply_cel_shade(&mut buf, 4.0, 0.0, 100.0, 0.0, (Color::WHITE, 0.0), (Color::BLACK, 0.0));
+        let s = buf.px[1].to_color();
+        // band = round(0.5*3)/3 = 2/3, shade = 0 + 1*2/3 -> 0.5*2/3.
+        assert!((s.r - 1.0 / 3.0).abs() < 1e-4, "floor 0 must lift to band, got {s:?}");
     }
 
     #[test]
