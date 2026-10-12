@@ -784,10 +784,10 @@ fn render_menubar(
         .px_3()
         .gap_1()
         .items_center()
-        .bg(rgb(0x111317))
+        .bg(rgb(0x0e0e11))
         .border_b_1()
-        .border_color(rgb(0x272a33))
-        .text_color(rgb(0xe2e5eb));
+        .border_color(rgb(0x26262b))
+        .text_color(rgb(0xe4e4e7));
 
     // Stitch Brand Pill: [ M ] Motion Studio Pro [v24.2.0]
     bar = bar.child(
@@ -796,19 +796,19 @@ fn render_menubar(
             .items_center()
             .pr_3()
             .border_r_1()
-            .border_color(rgb(0x272a33))
+            .border_color(rgb(0x26262b))
             .child(
                 div()
                     .w(px(20.))
                     .h(px(20.))
                     .rounded_md()
-                    .bg(rgb(0x00d2ff))
+                    .bg(rgb(0xffffff))
                     .flex()
                     .items_center()
                     .justify_center()
                     .text_xs()
                     .font_bold()
-                    .text_color(rgb(0x0b0d11))
+                    .text_color(rgb(0x09090b))
                     .child("M"),
             )
             .child(
@@ -823,9 +823,9 @@ fn render_menubar(
                     .px_1p5()
                     .py_0p5()
                     .rounded_sm()
-                    .bg(rgb(0x1a1f2c))
+                    .bg(rgb(0x1b1b1f))
                     .text_xs()
-                    .text_color(rgb(0x7e8494))
+                    .text_color(rgb(0x71717a))
                     .child("v24.2"),
             ),
     );
@@ -841,8 +841,8 @@ fn render_menubar(
             .py_1()
             .rounded_sm()
             .text_xs()
-            .text_color(if is_open { rgb(0xffffff) } else { rgb(0xc5c9d3) })
-            .hover(|s| s.bg(rgb(0x252d3d)).text_color(rgb(0xffffff)))
+            .text_color(if is_open { rgb(0xffffff) } else { rgb(0xc9c9cf) })
+            .hover(|s| s.bg(rgb(0x26262c)).text_color(rgb(0xffffff)))
             .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                 a_toggle.update(cx, |this, cx| {
                     this.open_menu = if this.open_menu == Some(menu) { None } else { Some(menu) };
@@ -851,7 +851,7 @@ fn render_menubar(
             })
             .child(menu.label());
         if is_open {
-            btn = btn.bg(rgb(0x252d3d));
+            btn = btn.bg(rgb(0x26262c));
         }
         bar = bar.child(btn);
     }
@@ -869,7 +869,7 @@ fn render_menubar(
             .child(
                 div()
                     .font_semibold()
-                    .text_color(rgb(0xe2e5eb))
+                    .text_color(rgb(0xe4e4e7))
                     .truncate()
                     .child(proj_name),
             )
@@ -880,21 +880,21 @@ fn render_menubar(
                     .px_2()
                     .py_0p5()
                     .rounded_full()
-                    .bg(rgba(0x10b98118))
+                    .bg(rgba(0x8f8f9922))
                     .border_1()
-                    .border_color(rgba(0x10b98144))
+                    .border_color(rgba(0x8f8f9955))
                     .child(
                         div()
                             .w(px(5.))
                             .h(px(5.))
                             .rounded_full()
-                            .bg(rgb(0x10b981)),
+                            .bg(rgb(0x8f8f99)),
                     )
                     .child(
                         div()
                             .text_xs()
                             .font_medium()
-                            .text_color(rgb(0x10b981))
+                            .text_color(rgb(0x8f8f99))
                             .child("Autosaved"),
                     ),
             ),
@@ -909,7 +909,7 @@ fn render_menubar(
                     .max_w(px(240.))
                     .truncate()
                     .text_xs()
-                    .text_color(rgb(0x00d2ff))
+                    .text_color(rgb(0xffffff))
                     .child(menu_note.unwrap_or_default()),
             )
             .child(
@@ -919,15 +919,15 @@ fn render_menubar(
                     .px_2()
                     .py_0p5()
                     .rounded_sm()
-                    .bg(rgb(0x1a1f2c))
+                    .bg(rgb(0x1b1b1f))
                     .text_xs()
-                    .text_color(rgb(0x7e8494))
+                    .text_color(rgb(0x71717a))
                     .child(
                         div()
                             .w(px(6.))
                             .h(px(6.))
                             .rounded_full()
-                            .bg(if crate::raster::gpu_accelerated() { rgb(0x10b981) } else { rgb(0xf59e0b) }),
+                            .bg(if crate::raster::gpu_accelerated() { rgb(0xffffff) } else { rgb(0x52525b) }),
                     )
                     .child(div().child(if crate::raster::gpu_accelerated() { "GPU: ON" } else { "GPU: OFF" })),
             ),
@@ -1650,13 +1650,13 @@ fn render_toolbar(state: &Entity<EditorState>, cx: &App) -> impl IntoElement {
     let s_full = state.clone();
 
     // Stitch chrome tokens
-    let bar_bg = rgb(0x13171f);
-    let ctl_bg = rgb(0x1a1f2c);
-    let hov_bg = rgb(0x252d3d);
-    let bdr_col = rgb(0x272a33);
-    let txt_col = rgb(0xe2e5eb);
-    let dim_col = rgb(0x7e8494);
-    let cyan_acc = rgb(0x00d2ff);
+    let bar_bg = rgb(0x131316);
+    let ctl_bg = rgb(0x1b1b1f);
+    let hov_bg = rgb(0x26262c);
+    let bdr_col = rgb(0x26262b);
+    let txt_col = rgb(0xe4e4e7);
+    let dim_col = rgb(0x71717a);
+    let accent = rgb(0xffffff);
 
     let tools = [
         (EditorTool::Move, gpui_kit::assets::IconName::Move, "V", "Selection (V)"),
@@ -1710,6 +1710,8 @@ fn render_toolbar(state: &Entity<EditorState>, cx: &App) -> impl IntoElement {
         let s_set = state.clone();
         tool_buttons = tool_buttons.child(
             div()
+                .id(format!("top_tool_btn_{}", tool.label().to_lowercase()))
+                .test_support()
                 .cursor_pointer()
                 .w(px(28.))
                 .h(px(28.))
@@ -1717,10 +1719,10 @@ fn render_toolbar(state: &Entity<EditorState>, cx: &App) -> impl IntoElement {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(if is_selected { rgba(0x00d2ff1f) } else { rgba(0x00000000) })
+                .bg(if is_selected { rgba(0xffffff1f) } else { rgba(0x00000000) })
                 .border_1()
-                .border_color(if is_selected { cyan_acc } else { rgba(0x00000000) })
-                .text_color(if is_selected { cyan_acc } else { dim_col })
+                .border_color(if is_selected { accent } else { rgba(0x00000000) })
+                .text_color(if is_selected { accent } else { dim_col })
                 .hover(|s| if is_selected { s } else { s.bg(hov_bg).text_color(txt_col) })
                 .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                     s_set.update(cx, |s, cx| {
@@ -1757,10 +1759,10 @@ fn render_toolbar(state: &Entity<EditorState>, cx: &App) -> impl IntoElement {
             .flex()
             .items_center()
             .justify_center()
-            .bg(if shape_selected { rgba(0x00d2ff1f) } else { rgba(0x00000000) })
+            .bg(if shape_selected { rgba(0xffffff1f) } else { rgba(0x00000000) })
             .border_1()
-            .border_color(if shape_selected { cyan_acc } else { rgba(0x00000000) })
-            .text_color(if shape_selected { cyan_acc } else { dim_col })
+            .border_color(if shape_selected { accent } else { rgba(0x00000000) })
+            .text_color(if shape_selected { accent } else { dim_col })
             .hover(|s| if shape_selected { s } else { s.bg(hov_bg).text_color(txt_col) })
             .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                 s_click.update(cx, |s, cx| {
@@ -1839,6 +1841,71 @@ fn render_toolbar(state: &Entity<EditorState>, cx: &App) -> impl IntoElement {
         tool_buttons = tool_buttons.child(slot);
     }
 
+    // Quick-add (relocated from the removed viewer strip): creates a layer
+    // of the active tool type at the viewport center.
+    {
+        let s_add = state.clone();
+        tool_buttons = tool_buttons.child(
+            div()
+                .id("quick_add_center_button")
+                .test_support()
+                .cursor_pointer()
+                .w(px(28.))
+                .h(px(28.))
+                .rounded_md()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(dim_col)
+                .hover(|s| s.bg(hov_bg).text_color(txt_col))
+                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    s_add.update(cx, |s, cx| {
+                        match s.active_tool {
+                            EditorTool::Text => {
+                                let _ = s.add_text_layer("New Text", None);
+                            }
+                            EditorTool::ShapeRect => {
+                                let _ = s.add_rectangle_shape_layer(400.0, 300.0, None);
+                            }
+                            EditorTool::ShapeEllipse => {
+                                let _ = s.add_ellipse_shape_layer(150.0, 150.0, None);
+                            }
+                            tool if tool.is_shape_tool() => {
+                                let r = 150.0;
+                                let (name, path) = match tool {
+                                    EditorTool::ShapeTriangle => ("Triangle Shape", project::Path::triangle(0.0, 0.0, r)),
+                                    EditorTool::ShapeStar => ("Star Shape", project::Path::star(0.0, 0.0, r, r * 0.5, 5)),
+                                    _ => ("Polygon Shape", project::Path::polygon(0.0, 0.0, r, 6)),
+                                };
+                                let _ = s.add_path_shape_layer(name, path, None);
+                            }
+                            EditorTool::Pen => {
+                                let _ = s.add_pen_point(project::Vec2::ZERO);
+                            }
+                            _ => {
+                                let _ = s.add_solid_layer(
+                                    "New Solid",
+                                    s.tool_solid_color,
+                                    0,
+                                    0,
+                                );
+                            }
+                        }
+                        cx.notify();
+                    });
+                })
+                .child(
+                    div()
+                        .w(px(16.))
+                        .h(px(16.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(gpui_kit::assets::IconName::Plus),
+                ),
+        );
+    }
+
     h_flex()
         .id("top_toolbar")
         .test_support()
@@ -1884,7 +1951,7 @@ fn render_toolbar(state: &Entity<EditorState>, cx: &App) -> impl IntoElement {
                                 .gap_1p5()
                                 .items_center()
                                 .child(div().text_color(dim_col).child("Tool:"))
-                                .child(div().font_medium().text_color(cyan_acc).child(format!("{active_tool_name} ({active_tool_key})"))),
+                                .child(div().font_medium().text_color(accent).child(format!("{active_tool_name} ({active_tool_key})"))),
                         ),
                 )
                 .child(div().w(px(1.)).h(px(18.)).bg(bdr_col))
@@ -1912,7 +1979,7 @@ fn render_toolbar(state: &Entity<EditorState>, cx: &App) -> impl IntoElement {
                                         .rounded_sm()
                                         .bg(Rgba { r: fill.r, g: fill.g, b: fill.b, a: 1.0 })
                                         .border_1()
-                                        .border_color(rgb(0x3a4254)),
+                                        .border_color(rgb(0x3d3d43)),
                                 )
                                 .child(div().font_medium().text_color(txt_col).child(fill_hex)),
                         )
@@ -1943,10 +2010,10 @@ fn render_toolbar(state: &Entity<EditorState>, cx: &App) -> impl IntoElement {
                         .flex()
                         .items_center()
                         .gap_1p5()
-                        .bg(if snapping { rgba(0x00d2ff22) } else { ctl_bg })
+                        .bg(if snapping { rgba(0xffffff22) } else { ctl_bg })
                         .border_1()
-                        .border_color(if snapping { cyan_acc } else { bdr_col })
-                        .text_color(if snapping { cyan_acc } else { txt_col })
+                        .border_color(if snapping { accent } else { bdr_col })
+                        .text_color(if snapping { accent } else { txt_col })
                         .hover(|s| s.bg(hov_bg))
                         .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                             s_snap.update(cx, |s, cx| {
@@ -1998,10 +2065,10 @@ fn render_toolbar(state: &Entity<EditorState>, cx: &App) -> impl IntoElement {
                         .flex()
                         .items_center()
                         .gap_1p5()
-                        .bg(if is_full_width { rgba(0x00d2ff22) } else { ctl_bg })
+                        .bg(if is_full_width { rgba(0xffffff22) } else { ctl_bg })
                         .border_1()
-                        .border_color(if is_full_width { cyan_acc } else { bdr_col })
-                        .text_color(if is_full_width { cyan_acc } else { txt_col })
+                        .border_color(if is_full_width { accent } else { bdr_col })
+                        .text_color(if is_full_width { accent } else { txt_col })
                         .hover(|s| s.bg(hov_bg))
                         .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                             s_full.update(cx, |s, cx| {
@@ -3197,9 +3264,9 @@ impl Render for AppView {
                                 .px_3()
                                 .py_1p5()
                                 .rounded_full()
-                                .bg(rgb(0x1e293b))
+                                .bg(rgb(0x1f1f24))
                                 .border_1()
-                                .border_color(rgb(0x3b82f6))
+                                .border_color(rgb(0x9a9aa2))
                                 .shadow_lg()
                                 .child(
                                     div()
@@ -3207,21 +3274,21 @@ impl Render for AppView {
                                         .h(px(14.))
                                         .items_center()
                                         .justify_center()
-                                        .text_color(rgb(0x60a5fa))
+                                        .text_color(rgb(0xa3a3ab))
                                         .child(gpui_kit::assets::IconName::Link),
                                 )
                                 .child(
                                     div()
                                         .text_xs()
                                         .font_medium()
-                                        .text_color(rgb(0xf8fafc))
+                                        .text_color(rgb(0xfafafa))
                                         .child(toast_text),
                                 )
                                 .child(
                                     div()
                                         .cursor_pointer()
                                         .text_xs()
-                                        .text_color(rgb(0x94a3b8))
+                                        .text_color(rgb(0x8f8f99))
                                         .hover(|s| s.text_color(rgb(0xffffff)))
                                         .child("✕")
                                         .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
@@ -7076,16 +7143,16 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             Root::new(view, window, cx)
         });
         let app_view = app_view_entity.expect("AppView created");
-        // Right-click the shape slot opens the 5-variant flyout.
+        // Right-click the top-bar shape slot opens the 5-variant flyout.
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            assert!(window.find("side_tool_btn_rect").visible());
-            window.right_click("side_tool_btn_rect", cx);
+            assert!(window.find("top_tool_btn_shape").visible());
+            window.right_click("top_tool_btn_shape", cx);
             window.render_frame(cx);
-            for id in ["tool_flyout_rectangle", "tool_flyout_ellipse", "tool_flyout_triangle", "tool_flyout_polygon", "tool_flyout_star"] {
+            for id in ["top_flyout_rectangle", "top_flyout_ellipse", "top_flyout_triangle", "top_flyout_polygon", "top_flyout_star"] {
                 assert!(window.find(id).visible(), "{id} must show in the flyout");
             }
-            window.click("tool_flyout_triangle", cx);
+            window.click("top_flyout_triangle", cx);
             window.render_frame(cx);
         })
         .expect("update_window failed");
@@ -7096,7 +7163,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         // Left-clicking the slot again advances within the group (same as Q).
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            window.click("side_tool_btn_triangle_btn", cx);
+            window.click("top_tool_btn_shape", cx);
             window.render_frame(cx);
         })
         .expect("update_window failed");
@@ -7104,8 +7171,8 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             app_view.read_with(cx, |view, cx| view.state().read(cx).active_tool),
             crate::state::EditorTool::ShapePolygon
         );
-        // Top toolbar carries the same group: one slot, right-click
-        // flyout, variant memory shared with the side strip.
+        // Variant memory: leaving the group and clicking the slot restores
+        // the last variant (Star), not Rectangle.
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert!(window.find("top_tool_btn_shape").visible());
@@ -7335,11 +7402,11 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             app_view.read_with(cx, |view, cx| view.state().read(cx).active_tool),
             crate::state::EditorTool::Pen
         );
-        // Side-strip Text button (kit Button) selects Text.
+        // Top-bar Text button selects Text.
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            assert!(window.find("side_tool_btn_text").visible());
-            window.click("side_tool_btn_text", cx);
+            assert!(window.find("top_tool_btn_text").visible());
+            window.click("top_tool_btn_text", cx);
         })
         .expect("update_window failed");
         assert_eq!(
@@ -8119,12 +8186,13 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         });
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            // AE top bar.
+            // AE top bar (single tool home: shape group + quick-add).
             assert!(window.find("active_tool_pill").visible());
             assert!(window.find("snapping_toggle").visible());
             assert!(window.find("toggle_timeline_full_width_button").visible());
-            // Viewer strip + transport.
-            assert!(window.find("viewer_tool_strip").visible());
+            // Top-bar tool group + quick-add, transport.
+            assert!(window.find("top_tool_btn_shape").visible());
+            assert!(window.find("quick_add_center_button").visible());
             assert!(window.find("timecode_display").visible());
             assert!(window.find("transport_play").visible());
         })

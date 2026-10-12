@@ -199,9 +199,10 @@ impl Path {
         }
     }
 
-    /// Closed rounded rectangle (corner nodes on the straight edges,
-    /// smooth kappa nodes on the corner arcs). `r` clamps to half the
-    /// smaller side; `r <= 0` degrades to [`Path::rectangle`].
+    /// Closed rounded rectangle. Junction nodes are smooth with a zero
+    /// handle facing the straight edge (straights stay exact) and a kappa
+    /// tangent facing the arc (true quarter circles). `r` clamps to half
+    /// the smaller side; `r <= 0` degrades to [`Path::rectangle`].
     pub fn rounded_rectangle(x: f32, y: f32, w: f32, h: f32, r: f32) -> Self {
         const KAPPA: f32 = 0.552_284_8;
         let r = r.clamp(0.0, w.min(h) / 2.0);
@@ -211,26 +212,24 @@ impl Path {
         let k = KAPPA * r;
         let (x0, y0, x1, y1) = (x, y, x + w, y + h);
         Self {
-            // Clockwise: each arc-end smooth node carries the kappa
-            // handles (in = back along travel, out = forward), straight
-            // edges are corner-to-corner segments.
+            // Clockwise from the top edge.
             points: vec![
-                // Top-left arc end (= top edge start).
-                PathPoint::smooth(Vec2::new(x0 + r, y0), Vec2::new(-k, 0.0), Vec2::new(k, 0.0)),
-                // Top edge, left -> right.
-                PathPoint::corner(Vec2::new(x1 - r, y0)),
-                // Top-right arc end.
-                PathPoint::smooth(Vec2::new(x1, y0 + r), Vec2::new(0.0, -k), Vec2::new(0.0, k)),
-                // Right edge, top -> bottom.
-                PathPoint::corner(Vec2::new(x1, y1 - r)),
-                // Bottom-right arc end.
-                PathPoint::smooth(Vec2::new(x1 - r, y1), Vec2::new(k, 0.0), Vec2::new(-k, 0.0)),
-                // Bottom edge, right -> left.
-                PathPoint::corner(Vec2::new(x0 + r, y1)),
-                // Bottom-left arc end.
-                PathPoint::smooth(Vec2::new(x0, y1 - r), Vec2::new(0.0, k), Vec2::new(0.0, -k)),
-                // Left edge, bottom -> top (closes via top-left arc).
-                PathPoint::corner(Vec2::new(x0, y0 + r)),
+                // Top edge, left -> right (arc-end / edge-start).
+                PathPoint::smooth(Vec2::new(x0 + r, y0), Vec2::new(-k, 0.0), Vec2::ZERO),
+                // Top edge end / top-right arc start.
+                PathPoint::smooth(Vec2::new(x1 - r, y0), Vec2::ZERO, Vec2::new(k, 0.0)),
+                // Top-right arc end / right edge start.
+                PathPoint::smooth(Vec2::new(x1, y0 + r), Vec2::new(0.0, -k), Vec2::ZERO),
+                // Right edge end / bottom-right arc start.
+                PathPoint::smooth(Vec2::new(x1, y1 - r), Vec2::ZERO, Vec2::new(0.0, k)),
+                // Bottom-right arc end / bottom edge start.
+                PathPoint::smooth(Vec2::new(x1 - r, y1), Vec2::new(k, 0.0), Vec2::ZERO),
+                // Bottom edge end / bottom-left arc start.
+                PathPoint::smooth(Vec2::new(x0 + r, y1), Vec2::ZERO, Vec2::new(-k, 0.0)),
+                // Bottom-left arc end / left edge start.
+                PathPoint::smooth(Vec2::new(x0, y1 - r), Vec2::new(0.0, k), Vec2::ZERO),
+                // Left edge end / top-left arc start (closes via node 0).
+                PathPoint::smooth(Vec2::new(x0, y0 + r), Vec2::ZERO, Vec2::new(0.0, -k)),
             ],
             closed: true,
         }
@@ -1542,6 +1541,30 @@ mod tests {
         let min_y = flat.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
         let max_y = flat.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max);
         assert!(min_x < 1.0 && max_x > 59.0 && min_y < 1.0 && max_y > 39.0);
+        // Arc midpoints sit on the true corner circles (chamfer/lump
+        // regression: junction handles must not bend straights or arcs).
+        let q = 10.0 * std::f32::consts::FRAC_1_SQRT_2;
+        for (tx, ty) in [(10.0 - q, 10.0 - q), (50.0 + q, 10.0 - q), (50.0 + q, 30.0 + q), (10.0 - q, 30.0 + q)] {
+            let best = flat
+                .iter()
+                .map(|p| (p.x - tx).hypot(p.y - ty))
+                .fold(f32::INFINITY, f32::min);
+            assert!(best < 1.0, "arc near ({tx:.1},{ty:.1}) deviates {best:.2}");
+        }
+        // Every flattened point stays on the true outline (flat segments
+        // emit endpoints only, so check deviation instead of coverage).
+        for p in &flat {
+            let on_h_edge = (p.y.abs() < 0.6 || (p.y - 40.0).abs() < 0.6)
+                && p.x > 10.0 - 0.6
+                && p.x < 50.0 + 0.6;
+            let on_v_edge = (p.x.abs() < 0.6 || (p.x - 60.0).abs() < 0.6)
+                && p.y > 10.0 - 0.6
+                && p.y < 30.0 + 0.6;
+            let on_arc = [(10.0, 10.0), (50.0, 10.0), (50.0, 30.0), (10.0, 30.0)]
+                .iter()
+                .any(|(cx, cy)| ((p.x - cx).hypot(p.y - cy) - 10.0).abs() < 0.6);
+            assert!(on_h_edge || on_v_edge || on_arc, "stray point {p:?}");
+        }
     }
 
     #[test]

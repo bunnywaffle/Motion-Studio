@@ -45,67 +45,67 @@ pub mod ae {
 
     /// Deepest app background (timeline lanes, canvas letterbox void).
     pub fn bg() -> Rgba {
-        rgb(0x0b0d11)
+        rgb(0x09090b)
     }
     /// Raised panel surfaces (cards, headers, side rails - Stitch Surface Layer 1).
     pub fn panel() -> Rgba {
-        rgb(0x13171f)
+        rgb(0x131316)
     }
     /// Controls / pills / wells (Stitch Surface Layer 2).
     pub fn control() -> Rgba {
-        rgb(0x1a1f2c)
+        rgb(0x1b1b1f)
     }
     /// Hover / active highlight (Stitch Surface Layer 3).
     pub fn hover() -> Rgba {
-        rgb(0x252d3d)
+        rgb(0x26262c)
     }
     /// Hairline borders (Stitch subtle hair border).
     pub fn border() -> Rgba {
-        rgb(0x272a33)
+        rgb(0x26262b)
     }
     /// Primary text.
     pub fn text() -> Rgba {
-        rgb(0xe2e5eb)
+        rgb(0xe4e4e7)
     }
     /// Secondary / header text (muted).
     pub fn dim() -> Rgba {
-        rgb(0x7e8494)
+        rgb(0x71717a)
     }
     /// Dimmed tertiary text.
     #[allow(dead_code)]
     pub fn dimmed() -> Rgba {
-        rgb(0x505565)
+        rgb(0x52525b)
     }
-    /// Electric Cyan selection & primary action accent.
+    /// Selection & primary action accent (neutral white).
     pub fn accent() -> Rgba {
-        rgb(0x00d2ff)
+        rgb(0xffffff)
     }
-    /// Electric Cyan accent.
+    /// Neutral white accent.
     #[allow(dead_code)]
     pub fn cyan() -> Rgba {
-        rgb(0x00d2ff)
+        rgb(0xffffff)
     }
-    /// Vivid Violet secondary accent.
+    /// Neutral gray secondary accent.
     #[allow(dead_code)]
     pub fn violet() -> Rgba {
-        rgb(0x7c3aed)
+        rgb(0x8a8a92)
     }
-    /// Timeline layer span deep blue.
+    /// Neutral timeline layer span.
     pub fn span() -> Rgba {
-        rgb(0x1d3557)
+        rgb(0x2c2c32)
     }
-    /// Autosaved / success emerald.
+    /// Neutral success marker.
     #[allow(dead_code)]
     pub fn green() -> Rgba {
-        rgb(0x10b981)
+        rgb(0xe4e4e7)
     }
-    /// Timecode readout Electric Cyan.
+    /// Timecode readout (neutral white).
     pub fn timecode() -> Rgba {
-        rgb(0x00d2ff)
+        rgb(0xffffff)
     }
-    /// Keyframe diamond amber.
+    /// Keyframe diamond (neutral light gray).
     pub fn amber() -> Rgba {
-        rgb(0xf59e0b)
+        rgb(0xd4d4d8)
     }
 
     /// Small-caps dim section header: `▾ TITLE ......... count`.
@@ -1335,9 +1335,9 @@ impl ProjectPanel {
                     .w(px(380.))
                     .p_4()
                     .rounded_lg()
-                    .bg(rgb(0x18191c))
+                    .bg(rgb(0x18181b))
                     .border_1()
-                    .border_color(rgb(0x2a2b30))
+                    .border_color(rgb(0x2b2b30))
                     .shadow_xl()
                     .gap_3()
                     .child(
@@ -1348,16 +1348,16 @@ impl ProjectPanel {
                                 h_flex()
                                     .gap_2()
                                     .items_center()
-                                    .child(icon_box_color(IconName::Info, rgb(0x38bdf8)))
-                                    .child(div().font_bold().text_sm().text_color(rgb(0xf8fafc)).child("Footage Properties & Interpret"))
+                                    .child(icon_box_color(IconName::Info, rgb(0xb5b5bd)))
+                                    .child(div().font_bold().text_sm().text_color(rgb(0xfafafa)).child("Footage Properties & Interpret"))
                             )
                             .child(
                                 div()
                                     .cursor_pointer()
                                     .p_1()
                                     .rounded_sm()
-                                    .text_color(rgb(0x94a3b8))
-                                    .hover(|s| s.bg(rgb(0x27282d)).text_color(rgb(0xffffff)))
+                                    .text_color(rgb(0x8f8f99))
+                                    .hover(|s| s.bg(rgb(0x27272b)).text_color(rgb(0xffffff)))
                                     .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
                                         p_close.update(cx, |this, cx| {
                                             this.show_interpret_dialog = false;
@@ -1372,21 +1372,21 @@ impl ProjectPanel {
                             .gap_2()
                             .p_3()
                             .rounded_md()
-                            .bg(rgb(0x131417))
+                            .bg(rgb(0x141416))
                             .border_1()
-                            .border_color(rgb(0x232428))
-                            .child(h_flex().justify_between().child(div().text_xs().text_color(rgb(0x94a3b8)).child("Name:")).child(div().text_xs().font_semibold().text_color(rgb(0xf1f5f9)).child(title)))
-                            .child(h_flex().justify_between().child(div().text_xs().text_color(rgb(0x94a3b8)).child("File Size:")).child(div().text_xs().text_color(rgb(0xf1f5f9)).child(size_str)))
-                            .child(h_flex().justify_between().child(div().text_xs().text_color(rgb(0x94a3b8)).child("Dimensions:")).child(div().text_xs().text_color(rgb(0xf1f5f9)).child(dims_str)))
-                            .child(h_flex().justify_between().child(div().text_xs().text_color(rgb(0x94a3b8)).child("Frame Rate:")).child(div().text_xs().text_color(rgb(0xf1f5f9)).child(fps_str)))
-                            .child(h_flex().justify_between().child(div().text_xs().text_color(rgb(0x94a3b8)).child("Duration:")).child(div().text_xs().text_color(rgb(0xf1f5f9)).child(dur_str)))
-                            .child(h_flex().justify_between().child(div().text_xs().text_color(rgb(0x94a3b8)).child("Pixel Aspect Ratio:")).child(div().text_xs().text_color(rgb(0xf1f5f9)).child("1.00 (Square Pixels)")))
-                            .child(h_flex().justify_between().child(div().text_xs().text_color(rgb(0x94a3b8)).child("Alpha Channel:")).child(div().text_xs().text_color(rgb(0xf1f5f9)).child("Straight / Premultiplied")))
+                            .border_color(rgb(0x232326))
+                            .child(h_flex().justify_between().child(div().text_xs().text_color(rgb(0x8f8f99)).child("Name:")).child(div().text_xs().font_semibold().text_color(rgb(0xfafafa)).child(title)))
+                            .child(h_flex().justify_between().child(div().text_xs().text_color(rgb(0x8f8f99)).child("File Size:")).child(div().text_xs().text_color(rgb(0xfafafa)).child(size_str)))
+                            .child(h_flex().justify_between().child(div().text_xs().text_color(rgb(0x8f8f99)).child("Dimensions:")).child(div().text_xs().text_color(rgb(0xfafafa)).child(dims_str)))
+                            .child(h_flex().justify_between().child(div().text_xs().text_color(rgb(0x8f8f99)).child("Frame Rate:")).child(div().text_xs().text_color(rgb(0xfafafa)).child(fps_str)))
+                            .child(h_flex().justify_between().child(div().text_xs().text_color(rgb(0x8f8f99)).child("Duration:")).child(div().text_xs().text_color(rgb(0xfafafa)).child(dur_str)))
+                            .child(h_flex().justify_between().child(div().text_xs().text_color(rgb(0x8f8f99)).child("Pixel Aspect Ratio:")).child(div().text_xs().text_color(rgb(0xfafafa)).child("1.00 (Square Pixels)")))
+                            .child(h_flex().justify_between().child(div().text_xs().text_color(rgb(0x8f8f99)).child("Alpha Channel:")).child(div().text_xs().text_color(rgb(0xfafafa)).child("Straight / Premultiplied")))
                             .child(
                                 v_flex()
                                     .gap_0p5()
-                                    .child(div().text_xs().text_color(rgb(0x94a3b8)).child("File Path:"))
-                                    .child(div().text_xs().text_color(rgb(0x64748b)).truncate().child(path_str))
+                                    .child(div().text_xs().text_color(rgb(0x8f8f99)).child("File Path:"))
+                                    .child(div().text_xs().text_color(rgb(0x71717a)).truncate().child(path_str))
                             )
                     )
                     .child(
@@ -1400,7 +1400,7 @@ impl ProjectPanel {
                                     .px_3()
                                     .py_1p5()
                                     .rounded_md()
-                                    .bg(rgb(0x3b82f6))
+                                    .bg(rgb(0x9a9aa2))
                                     .text_color(rgb(0xffffff))
                                     .text_xs()
                                     .font_semibold()
@@ -1480,11 +1480,11 @@ fn project_grid_card(
         .rounded_md()
         .text_xs()
         .items_center()
-        .bg(if is_selected { rgb(0x1e2638) } else { rgb(0x1c1d21) })
+        .bg(if is_selected { rgb(0x1f1f24) } else { rgb(0x1c1c20) })
         .border_1()
-        .border_color(if is_selected { rgb(0x38bdf8) } else { rgb(0x2a2b30) })
-        .text_color(rgb(0xf1f5f9))
-        .hover(|s| s.bg(rgb(0x27282d)))
+        .border_color(if is_selected { rgb(0xb5b5bd) } else { rgb(0x2b2b30) })
+        .text_color(rgb(0xfafafa))
+        .hover(|s| s.bg(rgb(0x27272b)))
         .cursor_pointer()
         .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
             p_select.update(cx, |this, cx| {
@@ -1500,7 +1500,7 @@ fn project_grid_card(
                     .w(px(56.))
                     .h(px(56.))
                     .rounded_sm()
-                    .bg(rgb(0x121316))
+                    .bg(rgb(0x121214))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -1509,7 +1509,7 @@ fn project_grid_card(
             }
         })
         .child(div().font_semibold().truncate().w_full().text_center().child(row.name.clone()))
-        .child(div().text_color(rgb(0x94a3b8)).child(row.type_name.clone()))
+        .child(div().text_color(rgb(0x8f8f99)).child(row.type_name.clone()))
         .into_any_element()
 }
 
@@ -1556,7 +1556,7 @@ impl Render for ProjectPanel {
                 id: comp.id.clone(),
                 name: comp.name.clone(),
                 type_name: "Composition".to_string(),
-                type_color: rgb(0xf59e0b),
+                type_color: rgb(0xd4d4d8),
                 badge,
                 size_bytes: 0,
                 size_formatted: "—".to_string(),
@@ -1566,7 +1566,7 @@ impl Render for ProjectPanel {
                     format!("{:.2}", comp.frame_rate)
                 },
                 icon: IconName::Film,
-                icon_color: rgb(0xf59e0b),
+                icon_color: rgb(0xd4d4d8),
                 selection: ProjectSelection::Composition(comp.id.clone()),
                 path: None,
                 dimensions: Some((comp.width, comp.height)),
@@ -1606,10 +1606,10 @@ impl Render for ProjectPanel {
                         };
                         (
                             type_str.to_string(),
-                            rgb(0x38bdf8),
+                            rgb(0xb5b5bd),
                             badge.to_string(),
                             IconName::Film,
-                            rgb(0x38bdf8),
+                            rgb(0xb5b5bd),
                             "25".to_string(),
                             Some((1920, 1080)),
                             Some("00:00:23:14 · 48.000 kHz / 16-bit / Stereo".to_string()),
@@ -1627,10 +1627,10 @@ impl Render for ProjectPanel {
                         };
                         (
                             type_str.to_string(),
-                            rgb(0xc084fc),
+                            rgb(0xb2b2ba),
                             badge.to_string(),
                             IconName::Image,
-                            rgb(0xc084fc),
+                            rgb(0xb2b2ba),
                             fps.to_string(),
                             Some((w, h)),
                             Some(format!("{w} × {h} · 32-bit RGBA · (1.00 PAR)")),
@@ -1638,30 +1638,30 @@ impl Render for ProjectPanel {
                     }
                     project::AssetType::Audio => (
                         "Wave Audio".to_string(),
-                        rgb(0x4ade80),
+                        rgb(0xc9c9cf),
                         "WAV".to_string(),
                         IconName::Music,
-                        rgb(0x4ade80),
+                        rgb(0xc9c9cf),
                         "48.0k".to_string(),
                         None,
                         Some("48.000 kHz / 16-bit / Stereo".to_string()),
                     ),
                     project::AssetType::Vector => (
                         "Vector Graphic".to_string(),
-                        rgb(0xfb923c),
+                        rgb(0xc9c9cf),
                         "SVG".to_string(),
                         IconName::Pen,
-                        rgb(0xfb923c),
+                        rgb(0xc9c9cf),
                         "Vector".to_string(),
                         None,
                         Some("Scalable Vector Graphic · (1.00 PAR)".to_string()),
                     ),
                     _ => (
                         "Media File".to_string(),
-                        rgb(0x94a3b8),
+                        rgb(0x8f8f99),
                         "FILE".to_string(),
                         IconName::Folder,
-                        rgb(0x94a3b8),
+                        rgb(0x8f8f99),
                         "—".to_string(),
                         None,
                         None,
@@ -1694,7 +1694,7 @@ impl Render for ProjectPanel {
                         id: layer.id.clone(),
                         name: layer.name.clone(),
                         type_name: "Solid Footage".to_string(),
-                        type_color: rgb(0xec4899),
+                        type_color: rgb(0xc9c9cf),
                         badge: "SOLID".to_string(),
                         size_bytes: 0,
                         size_formatted: "—".to_string(),
@@ -1715,7 +1715,7 @@ impl Render for ProjectPanel {
                         id: layer.id.clone(),
                         name: layer.name.clone(),
                         type_name: "Adjustment".to_string(),
-                        type_color: rgb(0xf43f5e),
+                        type_color: rgb(0xc9c9cf),
                         badge: "ADJUST".to_string(),
                         size_bytes: 0,
                         size_formatted: "—".to_string(),
@@ -1725,7 +1725,7 @@ impl Render for ProjectPanel {
                             format!("{:.2}", comp.frame_rate)
                         },
                         icon: IconName::SlidersHorizontal,
-                        icon_color: rgb(0xf43f5e),
+                        icon_color: rgb(0xc9c9cf),
                         selection: ProjectSelection::Adjustment(layer.id.clone()),
                         path: None,
                         dimensions: Some((comp.width, comp.height)),
@@ -1794,16 +1794,16 @@ impl Render for ProjectPanel {
             .px_3()
             .py_2()
             .border_b_1()
-            .border_color(rgb(0x272a33))
-            .bg(rgb(0x13171f))
+            .border_color(rgb(0x26262b))
+            .bg(rgb(0x131316))
             .items_center()
             .justify_between()
             .child(
                 h_flex()
                     .gap_2()
                     .items_center()
-                    .child(icon_box_color(IconName::GripVertical, rgb(0x505565)))
-                    .child(icon_box_color(IconName::Folder, rgb(0x00d2ff)))
+                    .child(icon_box_color(IconName::GripVertical, rgb(0x52525b)))
+                    .child(icon_box_color(IconName::Folder, rgb(0xffffff)))
                     .child(
                         div()
                             .font_bold()
@@ -1816,7 +1816,7 @@ impl Render for ProjectPanel {
                             .w(px(6.))
                             .h(px(6.))
                             .rounded_full()
-                            .bg(rgb(0x10b981))
+                            .bg(rgb(0xe4e4e7))
                     )
             )
             .child(
@@ -1828,8 +1828,8 @@ impl Render for ProjectPanel {
                             .cursor_pointer()
                             .p_1()
                             .rounded_sm()
-                            .text_color(rgb(0x7e8494))
-                            .hover(|s| s.bg(rgb(0x252d3d)).text_color(rgb(0xffffff)))
+                            .text_color(rgb(0x71717a))
+                            .hover(|s| s.bg(rgb(0x26262c)).text_color(rgb(0xffffff)))
                             .child(icon_box(IconName::Copy))
                     )
                     .child(
@@ -1837,8 +1837,8 @@ impl Render for ProjectPanel {
                             .cursor_pointer()
                             .p_1()
                             .rounded_sm()
-                            .text_color(rgb(0x7e8494))
-                            .hover(|s| s.bg(rgb(0x252d3d)).text_color(rgb(0xffffff)))
+                            .text_color(rgb(0x71717a))
+                            .hover(|s| s.bg(rgb(0x26262c)).text_color(rgb(0xffffff)))
                             .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
                                 let pos = event.position;
                                 p_more_menu.update(cx, |this, cx| {
@@ -1876,9 +1876,9 @@ impl Render for ProjectPanel {
                 .my_2()
                 .p_2p5()
                 .rounded_lg()
-                .bg(rgb(0x1a1f2c))
+                .bg(rgb(0x1b1b1f))
                 .border_1()
-                .border_color(rgb(0x272a33))
+                .border_color(rgb(0x26262b))
                 .items_center()
                 .justify_between()
                 .gap_2p5()
@@ -1893,9 +1893,9 @@ impl Render for ProjectPanel {
                                 .w(px(58.))
                                 .h(px(52.))
                                 .rounded_md()
-                                .bg(rgb(0x13171f))
+                                .bg(rgb(0x131316))
                                 .border_1()
-                                .border_color(rgb(0x272a33))
+                                .border_color(rgb(0x26262b))
                                 .relative()
                                 .flex()
                                 .items_center()
@@ -1914,7 +1914,7 @@ impl Render for ProjectPanel {
                                         .right(px(3.))
                                         .text_xs()
                                         .font_bold()
-                                        .text_color(rgb(0x7e8494))
+                                        .text_color(rgb(0x71717a))
                                         .child(thumb_badge)
                                 )
                         )
@@ -1943,24 +1943,24 @@ impl Render for ProjectPanel {
                                                 .rounded_sm()
                                                 .text_xs()
                                                 .font_semibold()
-                                                .bg(rgba(0x00d2ff22))
+                                                .bg(rgba(0xffffff22))
                                                 .border_1()
-                                                .border_color(rgba(0x00d2ff55))
-                                                .text_color(rgb(0x00d2ff))
+                                                .border_color(rgba(0xffffff55))
+                                                .text_color(rgb(0xffffff))
                                                 .child(item.badge.clone())
                                         )
                                  )
                                 .child(
                                     div()
                                         .text_xs()
-                                        .text_color(rgb(0x7e8494))
+                                        .text_color(rgb(0x71717a))
                                         .truncate()
                                         .child(dims_line)
                                 )
                                 .child(
                                     div()
                                         .text_xs()
-                                        .text_color(rgb(0x505565))
+                                        .text_color(rgb(0x52525b))
                                         .truncate()
                                         .child(dur_line)
                                 )
@@ -1970,7 +1970,7 @@ impl Render for ProjectPanel {
                     div()
                         .text_xs()
                         .font_medium()
-                        .text_color(rgb(0x7e8494))
+                        .text_color(rgb(0x71717a))
                         .child(item.size_formatted.clone())
                 )
                 .into_any_element()
@@ -1980,13 +1980,13 @@ impl Render for ProjectPanel {
                 .my_2()
                 .p_2p5()
                 .rounded_lg()
-                .bg(rgb(0x1a1f2c))
+                .bg(rgb(0x1b1b1f))
                 .border_1()
-                .border_color(rgb(0x272a33))
+                .border_color(rgb(0x26262b))
                 .items_center()
                 .justify_between()
                 .child(
-                    div().text_xs().text_color(rgb(0x7e8494)).child("No media selected · Import media to start")
+                    div().text_xs().text_color(rgb(0x71717a)).child("No media selected · Import media to start")
                 )
                 .into_any_element()
         };
@@ -2008,12 +2008,12 @@ impl Render for ProjectPanel {
                     .h(px(28.))
                     .px_2()
                     .rounded_md()
-                    .bg(rgb(0x1a1f2c))
+                    .bg(rgb(0x1b1b1f))
                     .border_1()
-                    .border_color(rgb(0x272a33))
+                    .border_color(rgb(0x26262b))
                     .items_center()
                     .gap_1p5()
-                    .child(icon_box_color(IconName::Search, rgb(0x505565)))
+                    .child(icon_box_color(IconName::Search, rgb(0x52525b)))
                     .child(
                         Input::new(&search_input.read(cx).0)
                             .id("project_search_input")
@@ -2024,7 +2024,7 @@ impl Render for ProjectPanel {
                         div()
                             .cursor_pointer()
                             .p_0p5()
-                            .text_color(rgb(0x7e8494))
+                            .text_color(rgb(0x71717a))
                             .hover(|s| s.text_color(rgb(0xffffff)))
                             .on_mouse_down(MouseButton::Left, move |_e, window, cx| {
                                 s_inp.update(cx, |inp, cx| inp.set_value("", window, cx));
@@ -2043,9 +2043,9 @@ impl Render for ProjectPanel {
                 h_flex()
                     .h(px(28.))
                     .rounded_md()
-                    .bg(rgb(0x1a1f2c))
+                    .bg(rgb(0x1b1b1f))
                     .border_1()
-                    .border_color(rgb(0x272a33))
+                    .border_color(rgb(0x26262b))
                     .p_0p5()
                     .gap_0p5()
                     .child(
@@ -2056,8 +2056,8 @@ impl Render for ProjectPanel {
                             .px_1p5()
                             .py_0p5()
                             .rounded_sm()
-                            .bg(if !is_grid { rgb(0x252d3d) } else { rgba(0x00000000) })
-                            .text_color(if !is_grid { rgb(0xffffff) } else { rgb(0x7e8494) })
+                            .bg(if !is_grid { rgb(0x26262c) } else { rgba(0x00000000) })
+                            .text_color(if !is_grid { rgb(0xffffff) } else { rgb(0x71717a) })
                             .hover(|s| s.text_color(rgb(0xffffff)))
                             .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
                                 p_view_list.update(cx, |this, cx| {
@@ -2075,8 +2075,8 @@ impl Render for ProjectPanel {
                             .px_1p5()
                             .py_0p5()
                             .rounded_sm()
-                            .bg(if is_grid { rgb(0x252d3d) } else { rgba(0x00000000) })
-                            .text_color(if is_grid { rgb(0xffffff) } else { rgb(0x7e8494) })
+                            .bg(if is_grid { rgb(0x26262c) } else { rgba(0x00000000) })
+                            .text_color(if is_grid { rgb(0xffffff) } else { rgb(0x71717a) })
                             .hover(|s| s.text_color(rgb(0xffffff)))
                             .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
                                 p_view_grid.update(cx, |this, cx| {
@@ -2110,12 +2110,12 @@ impl Render for ProjectPanel {
         let table_header = h_flex()
             .h(px(24.))
             .px_2p5()
-            .bg(rgb(0x13171f))
+            .bg(rgb(0x131316))
             .border_y_1()
-            .border_color(rgb(0x272a33))
+            .border_color(rgb(0x26262b))
             .text_xs()
             .font_medium()
-            .text_color(rgb(0x7e8494))
+            .text_color(rgb(0x71717a))
             .items_center()
             .child(
                 h_flex()
@@ -2139,7 +2139,7 @@ impl Render for ProjectPanel {
                     })
                     .child(format!("Name {name_arrow}"))
             )
-            .child(div().w(px(1.)).h(px(12.)).bg(rgb(0x272a33)).mx_1())
+            .child(div().w(px(1.)).h(px(12.)).bg(rgb(0x26262b)).mx_1())
             .child(
                 h_flex()
                     .id("project_sort_type")
@@ -2160,10 +2160,10 @@ impl Render for ProjectPanel {
                             cx.notify();
                         });
                     })
-                    .child(icon_box_color(IconName::Tag, rgb(0x505565)))
+                    .child(icon_box_color(IconName::Tag, rgb(0x52525b)))
                     .child(format!("Type {type_arrow}"))
             )
-            .child(div().w(px(1.)).h(px(12.)).bg(rgb(0x272a33)).mx_1())
+            .child(div().w(px(1.)).h(px(12.)).bg(rgb(0x26262b)).mx_1())
             .child(
                 div()
                     .id("project_sort_size")
@@ -2185,7 +2185,7 @@ impl Render for ProjectPanel {
                     })
                     .child(format!("Size {size_arrow}"))
             )
-            .child(div().w(px(1.)).h(px(12.)).bg(rgb(0x272a33)).mx_1())
+            .child(div().w(px(1.)).h(px(12.)).bg(rgb(0x26262b)).mx_1())
             .child(
                 div()
                     .id("project_sort_framerate")
@@ -2239,8 +2239,8 @@ impl Render for ProjectPanel {
                 .rounded_sm()
                 .cursor_pointer()
                 .items_center()
-                .bg(if is_selected { rgb(0x1e2638) } else { rgba(0x00000000) })
-                .hover(|s| if is_selected { s } else { s.bg(rgb(0x1a1b20)) })
+                .bg(if is_selected { rgb(0x1f1f24) } else { rgba(0x00000000) })
+                .hover(|s| if is_selected { s } else { s.bg(rgb(0x1a1a1e)) })
                 .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
                     p_select.update(cx, |this, cx| {
                         this.selected_item = Some(sel_for_click.clone());
@@ -2283,7 +2283,7 @@ impl Render for ProjectPanel {
                                 .truncate()
                                 .font_medium()
                                 .text_xs()
-                                .text_color(if is_selected { rgb(0xffffff) } else { rgb(0xe2e8f0) })
+                                .text_color(if is_selected { rgb(0xffffff) } else { rgb(0xfafafa) })
                                 .child(row.name.clone())
                         )
                 )
@@ -2300,7 +2300,7 @@ impl Render for ProjectPanel {
                             div()
                                 .truncate()
                                 .text_xs()
-                                .text_color(rgb(0x94a3b8))
+                                .text_color(rgb(0x8f8f99))
                                 .child(row.type_name.clone())
                         )
                 )
@@ -2309,7 +2309,7 @@ impl Render for ProjectPanel {
                         .w(px(65.))
                         .text_right()
                         .text_xs()
-                        .text_color(if is_selected { rgb(0xffffff) } else { rgb(0x94a3b8) })
+                        .text_color(if is_selected { rgb(0xffffff) } else { rgb(0x8f8f99) })
                         .child(row.size_formatted.clone())
                 )
                 .child(
@@ -2317,7 +2317,7 @@ impl Render for ProjectPanel {
                         .w(px(70.))
                         .text_right()
                         .text_xs()
-                        .text_color(rgb(0x94a3b8))
+                        .text_color(rgb(0x8f8f99))
                         .child(row.fps_display.clone())
                 );
 
@@ -2364,8 +2364,8 @@ impl Render for ProjectPanel {
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(0x555a64))
-                    .hover(|s| s.text_color(rgb(0x94a3b8)))
+                    .text_color(rgb(0x63636b))
+                    .hover(|s| s.text_color(rgb(0x8f8f99)))
                     .child("+ Drag media anywhere to import")
             );
 
@@ -2380,16 +2380,16 @@ impl Render for ProjectPanel {
         let bottom_bar = h_flex()
             .h(px(32.))
             .px_3()
-            .bg(rgb(0x13171f))
+            .bg(rgb(0x131316))
             .border_t_1()
-            .border_color(rgb(0x272a33))
+            .border_color(rgb(0x26262b))
             .items_center()
             .justify_between()
             .child(
                 div()
                     .font_bold()
                     .text_xs()
-                    .text_color(rgb(0xe2e5eb))
+                    .text_color(rgb(0xe4e4e7))
                     .child(format!("{total_items} items  ·  {total_size_formatted}"))
             )
             .child(
@@ -2403,8 +2403,8 @@ impl Render for ProjectPanel {
                             .cursor_pointer()
                             .p_1()
                             .rounded_sm()
-                            .text_color(rgb(0x7e8494))
-                            .hover(|s| s.bg(rgb(0x252d3d)).text_color(rgb(0xffffff)))
+                            .text_color(rgb(0x71717a))
+                            .hover(|s| s.bg(rgb(0x26262c)).text_color(rgb(0xffffff)))
                             .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
                                 let s_imp = p_bottom_folder.clone();
                                 cx.spawn(|cx: &mut AsyncApp| {
@@ -2449,8 +2449,8 @@ impl Render for ProjectPanel {
                             .cursor_pointer()
                             .p_1()
                             .rounded_sm()
-                            .text_color(rgb(0x7e8494))
-                            .hover(|s| s.bg(rgb(0x252d3d)).text_color(rgb(0xffffff)))
+                            .text_color(rgb(0x71717a))
+                            .hover(|s| s.bg(rgb(0x26262c)).text_color(rgb(0xffffff)))
                             .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
                                 p_bottom_comp.update(cx, |this, cx| {
                                     this.show_new_comp = true;
@@ -2468,8 +2468,8 @@ impl Render for ProjectPanel {
                             .cursor_pointer()
                             .p_1()
                             .rounded_sm()
-                            .text_color(rgb(0x7e8494))
-                            .hover(|s| s.bg(rgb(0x252d3d)).text_color(rgb(0xffffff)))
+                            .text_color(rgb(0x71717a))
+                            .hover(|s| s.bg(rgb(0x26262c)).text_color(rgb(0xffffff)))
                             .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
                                 p_bottom_solid.update(cx, |s, cx| {
                                     let color = Color::from_rgba_u8(245, 158, 11, 255);
@@ -2486,8 +2486,8 @@ impl Render for ProjectPanel {
                             .cursor_pointer()
                             .p_1()
                             .rounded_sm()
-                            .text_color(rgb(0x7e8494))
-                            .hover(|s| s.bg(rgb(0x252d3d)).text_color(rgb(0xffffff)))
+                            .text_color(rgb(0x71717a))
+                            .hover(|s| s.bg(rgb(0x26262c)).text_color(rgb(0xffffff)))
                             .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
                                 p_bottom_info.update(cx, |this, cx| {
                                     this.show_interpret_dialog = !this.show_interpret_dialog;
@@ -2503,7 +2503,7 @@ impl Render for ProjectPanel {
                             .cursor_pointer()
                             .p_1()
                             .rounded_sm()
-                            .text_color(rgb(0x7e8494))
+                            .text_color(rgb(0x71717a))
                             .hover(|s| s.bg(rgb(0xef4444)).text_color(rgb(0xffffff)))
                             .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
                                 let sel = current_sel.clone();
@@ -2537,7 +2537,7 @@ impl Render for ProjectPanel {
             .flex_col()
             .relative()
             .overflow_hidden()
-            .bg(rgb(0x111317))
+            .bg(rgb(0x0e0e11))
             .text_color(cx.theme().foreground)
             .child(panel_header)
             .child(preview_card)
@@ -4010,7 +4010,7 @@ impl Render for CompositionViewerPanel {
                                 .size_full()
                                 .border_1()
                                 .border_dashed()
-                                .border_color(if is_selected { rgb(0x00d2ff) } else { Rgba { r: 0.8, g: 0.8, b: 0.8, a: 0.15 } })
+                                .border_color(if is_selected { rgb(0xffffff) } else { Rgba { r: 0.8, g: 0.8, b: 0.8, a: 0.15 } })
                                 .flex()
                                 .items_end()
                                 .justify_start()
@@ -4021,7 +4021,7 @@ impl Render for CompositionViewerPanel {
                                         .px_1()
                                         .rounded_sm()
                                         .bg(Rgba { r: 0.1, g: 0.1, b: 0.1, a: 0.6 })
-                                        .text_color(if is_selected { rgb(0x00d2ff) } else { Rgba { r: 1.0, g: 1.0, b: 1.0, a: 0.4 } })
+                                        .text_color(if is_selected { rgb(0xffffff) } else { Rgba { r: 1.0, g: 1.0, b: 1.0, a: 0.4 } })
                                         .child(adj_label),
                                 ),
                         );
@@ -4068,7 +4068,7 @@ impl Render for CompositionViewerPanel {
                         let c01 = w2c(g01);
                         let anchor_l = layer.transform.anchor_point;
                         let anchor_c = w2c(anchor_l);
-                        let accent = rgb(0x00d2ff);
+                        let accent = rgb(0xffffff);
                         let white = Rgba { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
 
                         // Window px -> composition px for drag starts (fresh
@@ -5111,212 +5111,8 @@ impl Render for CompositionViewerPanel {
                 (Vec::new(), Vec::new())
             }
         };
-        let active_tool = state.active_tool;
-        let s_side = self.state.clone();
-        // Semantic tool buttons (kit Button: focus, keyboard, tooltip and
-        // cursor contracts included; toggled marks the active tool).
-        // Any tool pick also dismisses the shape-group flyout.
-        let tool_btn = |tool: EditorTool, icon: IconName, label: &'static str, tip: &'static str, _cx: &App| {
-            let is_active = active_tool == tool;
-            let s_click = s_side.clone();
-            div()
-                .id(SharedString::from(format!("side_tool_btn_{label}")))
-                .test_support()
-                .child(
-                    Button::new(SharedString::from(format!("side_tool_btn_{label}_btn")))
-                        .compact()
-                        .toggled(is_active)
-                        .tooltip(tip)
-                        .child(icon_box(icon))
-                        .on_click(move |_, _, cx| {
-                            s_click.update(cx, |s, cx| {
-                                // set_tool also dismisses the shape-group flyout.
-                                s.set_tool(tool);
-                                cx.notify();
-                            });
-                        }),
-                )
-        };
-
-        let s_add = self.state.clone();
-        // Grouped Shape tool: shows the active variant; left-click
-        // selects (again = next variant, same as `Q`); right-click opens
-        // the variant flyout (Photoshop-style tool group). Variant memory
-        // lives on EditorState so the top toolbar shares the same group.
-        let shown_shape = if active_tool.is_shape_tool() {
-            active_tool
-        } else {
-            self.state.read(cx).last_shape_tool
-        };
-        let shape_label = match shown_shape {
-            EditorTool::ShapeEllipse => "ellipse",
-            EditorTool::ShapeTriangle => "triangle",
-            EditorTool::ShapePolygon => "polygon",
-            EditorTool::ShapeStar => "star",
-            _ => "rect",
-        };
-        let shape_is_active = active_tool.is_shape_tool();
-
-        let side_toolbar = v_flex()
-            .id("viewer_tool_strip")
-            .test_support()
-            .w(px(36.))
-            .h_full()
-            .py_2()
-            .gap_1p5()
-            .items_center()
-            .border_r_1()
-            .border_color(ae::border())
-            .bg(ae::panel())
-            .child(tool_btn(EditorTool::Move, IconName::Move, "move", "Move Tool (V)", cx))
-            .child(tool_btn(EditorTool::Hand, IconName::Hand, "hand", "Hand Tool (H)", cx))
-            .child(tool_btn(EditorTool::Rotate, IconName::RotateCw, "rotate", "Rotate Tool (W)", cx))
-            .child(tool_btn(EditorTool::Pen, IconName::Pen, "pen", "Pen Tool (G)", cx))
-            .child(tool_btn(EditorTool::Text, IconName::Type, "text", "Text Tool (T)", cx))
-            .child({
-                let s_click = self.state.clone();
-                let s_rclick = self.state.clone();
-                let s_pick = self.state.clone();
-                let flyout_open = self.state.read(cx).tool_flyout;
-                let mut slot = div()
-                    .id(SharedString::from(format!("side_tool_btn_{shape_label}")))
-                    .test_support()
-                    .relative()
-                    .child(
-                        Button::new(SharedString::from(format!("side_tool_btn_{shape_label}_btn")))
-                            .compact()
-                            .toggled(shape_is_active)
-                            .tooltip("Shape Tools (Q) — left-click selects (again = next shape), right-click shows all 5")
-                            .child(
-                                div()
-                                    .relative()
-                                    .child(icon_box(shown_shape.icon()))
-                                    // Group badge (Photoshop's corner tick).
-                                    .child(
-                                        div()
-                                            .absolute()
-                                            .right(px(-2.))
-                                            .bottom(px(-4.))
-                                            .text_size(px(7.))
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child("▾"),
-                                    ),
-                            )
-                            .on_click(move |_, _, cx| {
-                                s_click.update(cx, |s, cx| {
-                                    // Clicking the grouped tool selects it; clicking
-                                    // again advances the variant (same as `Q`).
-                                    s.cycle_shape_tool();
-                                    cx.notify();
-                                });
-                            }),
-                    )
-                    .on_mouse_down(MouseButton::Right, {
-                        move |_, _, cx| {
-                            s_rclick.update(cx, |s, cx| {
-                                s.tool_flyout = !s.tool_flyout;
-                                cx.notify();
-                            });
-                        }
-                    });
-                // Variant flyout: one row per group member (icon + label).
-                if flyout_open {
-                    let mut rows = v_flex()
-                        .id("tool_flyout")
-                        .test_support()
-                        .absolute()
-                        .left(px(34.))
-                        .top(px(0.))
-                        .min_w(px(150.))
-                        .rounded_md()
-                        .border_1()
-                        .border_color(ae::border())
-                        .bg(ae::panel())
-                        .p_1()
-                        .gap_0p5();
-                    for tool in EditorTool::SHAPE_TOOLS {
-                        let picked = *tool;
-                        rows = rows.child(
-                            div()
-                                .id(SharedString::from(format!("tool_flyout_{}", picked.label().to_lowercase())))
-                                .test_support()
-                                .cursor_pointer()
-                                .px_2()
-                                .py_1()
-                                .rounded_sm()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .hover(|s| s.bg(cx.theme().accent))
-                                .child(icon_box(picked.icon()))
-                                .child(picked.label().to_string())
-                                .on_mouse_down(MouseButton::Left, {
-                                    let s_row = s_pick.clone();
-                                    move |_, _, cx| {
-                                        s_row.update(cx, |s, cx| {
-                                            s.set_tool(picked);
-                                            cx.notify();
-                                        });
-                                    }
-                                }),
-                        );
-                    }
-                    slot = slot.child(rows);
-                }
-                slot
-            })
-            .child(div().w(px(20.)).h(px(1.)).bg(ae::border()).my_1())
-            // Single contextual action: creates a layer of the active tool
-            // type at the viewport center (click the canvas to place freely).
-            .child(
-                div()
-                    .id("quick_add_center_button")
-                    .test_support()
-                    .child(
-                        Button::new("quick_add_center_btn")
-                            .compact()
-                            .tooltip("Add layer of the active tool at viewport center")
-                            .child(icon_box(IconName::Plus))
-                            .on_click(move |_, _, cx| {
-                                s_add.update(cx, |s, cx| {
-                            match s.active_tool {
-                                EditorTool::Text => {
-                                    let _ = s.add_text_layer("New Text", None);
-                                }
-                                EditorTool::ShapeRect => {
-                                    let _ = s.add_rectangle_shape_layer(400.0, 300.0, None);
-                                }
-                                EditorTool::ShapeEllipse => {
-                                    let _ = s.add_ellipse_shape_layer(150.0, 150.0, None);
-                                }
-                                tool if tool.is_shape_tool() => {
-                                    // Path tools share one centered-shape
-                                    // helper (triangle/polygon/star).
-                                    let r = 150.0;
-                                    let (name, path) = match tool {
-                                        EditorTool::ShapeTriangle => ("Triangle Shape", project::Path::triangle(0.0, 0.0, r)),
-                                        EditorTool::ShapeStar => ("Star Shape", project::Path::star(0.0, 0.0, r, r * 0.5, 5)),
-                                        _ => ("Polygon Shape", project::Path::polygon(0.0, 0.0, r, 6)),
-                                    };
-                                    let _ = s.add_path_shape_layer(name, path, None);
-                                }
-                                EditorTool::Pen => {
-                                    let _ = s.add_pen_point(project::Vec2::ZERO);
-                                }
-                                _ => {
-                                    let _ = s.add_solid_layer(
-                                        "New Solid",
-                                        s.tool_solid_color,
-                                        0,
-                                        0,
-                                    );
-                                }
-                            }
-                            cx.notify();
-                        });
-                    })
-                )
-            );
+        // (Viewer tool strip removed: the top toolbar is the single tool
+        // home; its quick-add [+] button moved there too.)
 
         div()
             .id("composition_panel")
@@ -5857,14 +5653,13 @@ impl Render for CompositionViewerPanel {
                             .child(div().font_bold().child("+")),
                     ),
             )
-            // Composition Canvas area with vertical side toolbar
+            // Composition Canvas area (single tool home: the top toolbar)
             .child(
                 h_flex()
                     .id("composition_viewer")
                     .test_support()
                     .flex_1()
                     .size_full()
-                    .child(side_toolbar)
                     .child(
                         v_flex()
                             .id("canvas_viewport_wrap")
@@ -6165,9 +5960,9 @@ impl Render for CompositionViewerPanel {
                                     let is_ellipse = sdrag.tool == EditorTool::ShapeEllipse;
                                     let is_mask = sdrag.target_layer.is_some() && matches!(sdrag.tool, EditorTool::ShapeRect | EditorTool::ShapeEllipse);
                                     let border_col = if is_mask {
-                                        rgb(0xf59e0b) // amber for mask
+                                        rgb(0xd4d4d8) // amber for mask
                                     } else {
-                                        rgb(0x38bdf8) // sky blue for shape layer
+                                        rgb(0xb5b5bd) // sky blue for shape layer
                                     };
                                     let mut preview_div = div()
                                         .id("shape_drag_preview")
@@ -6828,12 +6623,27 @@ impl PropertiesPanel {
                 }
                 "rect_w" => {
                     if let Some(lid) = s.selected_layer_id.clone() {
-                        let _ = s.nudge_layer_rect_dimensions(&lid, dx * 2.0, 0.0, 0.0);
+                        // Linked Size scales proportionally (typed entry
+                        // in set_scrub_value mirrors this). Nudge (not set)
+                        // so drags don't flood the undo history.
+                        let (w, h, linked) = match s.selected_layer().map(|l| &l.source) {
+                            Some(LayerSource::Shape { shape_type: ShapeType::Rectangle { width, height, size_linked, .. } }) => (width.value, height.value, *size_linked),
+                            _ => (0.0, 0.0, false),
+                        };
+                        let nw = (w + dx * 2.0).max(1.0);
+                        let nh = if linked && w > 0.0 { (h * nw / w).max(1.0) } else { h.max(1.0) };
+                        let _ = s.nudge_layer_rect_dimensions(&lid, nw - w, nh - h, 0.0);
                     }
                 }
                 "rect_h" => {
                     if let Some(lid) = s.selected_layer_id.clone() {
-                        let _ = s.nudge_layer_rect_dimensions(&lid, 0.0, dx * 2.0, 0.0);
+                        let (w, h, linked) = match s.selected_layer().map(|l| &l.source) {
+                            Some(LayerSource::Shape { shape_type: ShapeType::Rectangle { width, height, size_linked, .. } }) => (width.value, height.value, *size_linked),
+                            _ => (0.0, 0.0, false),
+                        };
+                        let nh = (h + dx * 2.0).max(1.0);
+                        let nw = if linked && h > 0.0 { (w * nh / h).max(1.0) } else { w.max(1.0) };
+                        let _ = s.nudge_layer_rect_dimensions(&lid, nw - w, nh - h, 0.0);
                     }
                 }
                 "rect_cr" => {
@@ -6849,6 +6659,47 @@ impl PropertiesPanel {
                 "ellipse_ry" => {
                     if let Some(lid) = s.selected_layer_id.clone() {
                         let _ = s.nudge_layer_ellipse_radii(&lid, 0.0, dx * 1.0);
+                    }
+                }
+                // Ellipse Size row drags diameters (halved into radii),
+                // linked proportionally like rectangles.
+                "ellipse_sw" => {
+                    if let Some(lid) = s.selected_layer_id.clone() {
+                        let (rx, ry, linked) = match s.selected_layer().map(|l| &l.source) {
+                            Some(LayerSource::Shape { shape_type: ShapeType::Ellipse { radius_x, radius_y, size_linked, .. } }) => (radius_x.value, radius_y.value, *size_linked),
+                            _ => (0.0, 0.0, false),
+                        };
+                        let nrx = (rx + dx * 1.0).max(1.0);
+                        let nry = if linked && rx > 0.0 { (ry * nrx / rx).max(1.0) } else { ry.max(1.0) };
+                        let _ = s.nudge_layer_ellipse_radii(&lid, nrx - rx, nry - ry);
+                    }
+                }
+                "ellipse_sh" => {
+                    if let Some(lid) = s.selected_layer_id.clone() {
+                        let (rx, ry, linked) = match s.selected_layer().map(|l| &l.source) {
+                            Some(LayerSource::Shape { shape_type: ShapeType::Ellipse { radius_x, radius_y, size_linked, .. } }) => (radius_x.value, radius_y.value, *size_linked),
+                            _ => (0.0, 0.0, false),
+                        };
+                        let nry = (ry + dx * 1.0).max(1.0);
+                        let nrx = if linked && ry > 0.0 { (rx * nry / ry).max(1.0) } else { rx.max(1.0) };
+                        let _ = s.nudge_layer_ellipse_radii(&lid, nrx - rx, nry - ry);
+                    }
+                }
+                "shape_stroke_width" => {
+                    if let Some(lid) = s.selected_layer_id.clone() {
+                        let cur = s.scrub_current_value("shape_stroke_width").unwrap_or(0.0);
+                        let _ = s.set_layer_shape_stroke_width(&lid, cur + dx * 1.0);
+                    }
+                }
+                "shape_dash" | "shape_dash_gap" | "shape_dash_offset" => {
+                    if let Some(lid) = s.selected_layer_id.clone() {
+                        let field = match prop {
+                            "shape_dash_gap" => "dash_gap",
+                            "shape_dash_offset" => "dash_offset",
+                            _ => "dash",
+                        };
+                        let cur = s.scrub_current_value(prop).unwrap_or(0.0);
+                        let _ = s.set_layer_shape_dash(&lid, field, cur + dx * 1.0);
                     }
                 }
                 "font_weight" | "text_weight" => {
@@ -7227,16 +7078,16 @@ where
 
             if is_linked {
                 val_view = val_view
-                    .bg(rgb(0x2d1515))
+                    .bg(rgb(0x232326))
                     .border_color(rgb(0xef4444))
                     .text_color(rgb(0xef4444))
                     .cursor_not_allowed();
             } else if has_modifier {
                 val_view = val_view
-                    .bg(rgba(0xa855f718))
-                    .border_color(rgb(0xa855f7))
-                    .text_color(rgb(0xc084fc))
-                    .hover(|s| s.bg(rgba(0xa855f730)))
+                    .bg(rgba(0x9a9aa218))
+                    .border_color(rgb(0x9a9aa2))
+                    .text_color(rgb(0xb2b2ba))
+                    .hover(|s| s.bg(rgba(0x9a9aa230)))
                     .cursor_col_resize();
             } else {
                 val_view = val_view
@@ -7372,7 +7223,7 @@ where
                                     .h(px(12.))
                                     .items_center()
                                     .justify_center()
-                                    .text_color(rgb(0xa855f7))
+                                    .text_color(rgb(0x9a9aa2))
                                     .cursor_pointer()
                                     .hover(|s| s.opacity(0.8))
                                     .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
@@ -7491,18 +7342,18 @@ where
             if is_linked {
                 val_view = val_view
                     .text_color(rgb(0xef4444))
-                    .bg(rgba(0xef444420))
+                    .bg(rgba(0xe4e4e720))
                     .cursor_not_allowed();
             } else if has_modifier {
                 val_view = val_view
-                    .text_color(rgb(0xa855f7))
-                    .bg(rgba(0xa855f720))
-                    .hover(|s| s.text_color(rgb(0xc084fc)).bg(rgba(0xa855f730)))
+                    .text_color(rgb(0x9a9aa2))
+                    .bg(rgba(0x9a9aa220))
+                    .hover(|s| s.text_color(rgb(0xb2b2ba)).bg(rgba(0x9a9aa230)))
                     .cursor_col_resize();
             } else {
                 val_view = val_view
-                    .text_color(rgb(0x3b82f6))
-                    .hover(|s| s.text_color(rgb(0x60a5fa)).bg(rgba(0x3b82f620)))
+                    .text_color(rgb(0x9a9aa2))
+                    .hover(|s| s.text_color(rgb(0xa3a3ab)).bg(rgba(0x9a9aa220)))
                     .cursor_col_resize();
             }
 
@@ -7612,7 +7463,7 @@ where
                                     .h(px(12.))
                                     .items_center()
                                     .justify_center()
-                                    .text_color(rgb(0xa855f7))
+                                    .text_color(rgb(0x9a9aa2))
                                     .cursor_pointer()
                                     .hover(|s| s.opacity(0.8))
                                     .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
@@ -8406,8 +8257,8 @@ fn property_keyframe_controls(
                 .cursor_pointer()
                 .p_0p5()
                 .rounded_sm()
-                .text_color(rgb(0xa855f7))
-                .hover(|s| s.bg(rgba(0xa855f720)))
+                .text_color(rgb(0x9a9aa2))
+                .hover(|s| s.bg(rgba(0x9a9aa220)))
                 .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                     crate::modifier_graph_view::open_modifier_graph_window(
                         s_mg.clone(),
@@ -8451,7 +8302,7 @@ fn property_keyframe_controls(
                 .cursor_pointer()
                 .px_0p5()
                 .text_xs()
-                .text_color(if has_kf_at_playhead { rgb(0xf59e0b).into() } else { cx.theme().muted_foreground })
+                .text_color(if has_kf_at_playhead { rgb(0xd4d4d8).into() } else { cx.theme().muted_foreground })
                 .hover(|s| s.text_color(rgb(0xffffff)))
                 .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                     s_kf.update(cx, |s, cx| {
@@ -8573,8 +8424,8 @@ pub(crate) fn effect_param_keyframe_controls(
                 .cursor_pointer()
                 .p_0p5()
                 .rounded_sm()
-                .text_color(rgb(0xa855f7))
-                .hover(|s| s.bg(rgba(0xa855f720)))
+                .text_color(rgb(0x9a9aa2))
+                .hover(|s| s.bg(rgba(0x9a9aa220)))
                 .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                     crate::modifier_graph_view::open_modifier_graph_window(
                         s_mg.clone(),
@@ -8618,7 +8469,7 @@ pub(crate) fn effect_param_keyframe_controls(
                 .cursor_pointer()
                 .px_0p5()
                 .text_xs()
-                .text_color(if has_kf_at_playhead { rgb(0xf59e0b).into() } else { cx.theme().muted_foreground })
+                .text_color(if has_kf_at_playhead { rgb(0xd4d4d8).into() } else { cx.theme().muted_foreground })
                 .hover(|s| s.text_color(rgb(0xffffff)))
                 .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                     s_kf.update(cx, |s, cx| {
@@ -10579,7 +10430,7 @@ fn render_masks_section(
                                 .test_support()
                                 .cursor_pointer()
                                 .px_0p5()
-                                .text_color(if path_kf { rgb(0xf59e0b).into() } else { cx.theme().muted_foreground })
+                                .text_color(if path_kf { rgb(0xd4d4d8).into() } else { cx.theme().muted_foreground })
                                 .hover(|s| s.text_color(rgb(0xffffff)))
                                 .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                                     s_p.update(cx, |s, cx| {
@@ -10876,10 +10727,10 @@ fn render_applied_effects(
                                     .px_1p5()
                                     .py_0p5()
                                     .rounded_sm()
-                                    .bg(rgba(0xa855f720))
+                                    .bg(rgba(0x9a9aa220))
                                     .border_1()
-                                    .border_color(rgb(0xa855f7))
-                                    .text_color(rgb(0xa855f7))
+                                    .border_color(rgb(0x9a9aa2))
+                                    .text_color(rgb(0x9a9aa2))
                                     .text_xs()
                                     .font_medium()
                                     .flex()
@@ -11172,7 +11023,7 @@ fn render_applied_effects(
                             .into_any_element(),
                         None => div()
                             .text_xs()
-                            .text_color(rgb(0x22c55e))
+                            .text_color(rgb(0xe4e4e7))
                             .child(format!(
                                 "● Ready — {} param{} · GPU validated",
                                 params.len(),
@@ -11850,7 +11701,7 @@ fn render_applied_effects(
                                 .as_ref()
                                 .map(|(id, _)| id != &effect.id)
                                 .unwrap_or(false);
-                        if show { rgb(0x38bdf8) } else { cx.theme().secondary.into() }
+                        if show { rgb(0xb5b5bd) } else { cx.theme().secondary.into() }
                     })
                     .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
                         let start_y = event.position.y / px(1.0);
@@ -15040,7 +14891,7 @@ impl Render for PropertiesPanel {
                                         div()
                                             .px_2()
                                             .py_0p5()
-                                            .bg(if is_locked { rgb(0xf59e0b).into() } else { cx.theme().muted })
+                                            .bg(if is_locked { rgb(0xd4d4d8).into() } else { cx.theme().muted })
                                             .text_color(if is_locked { rgb(0x000000).into() } else { cx.theme().muted_foreground })
                                             .rounded_sm()
                                             .cursor_pointer()
@@ -15416,7 +15267,7 @@ impl Render for PropertiesPanel {
                         .py_1()
                         .rounded_sm()
                         .text_xs()
-                        .text_color(rgb(0xa855f7))
+                        .text_color(rgb(0x9a9aa2))
                         .hover(|s| s.bg(cx.theme().accent))
                         .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                             s_rm_mg.update(cx, |s, cx| {
@@ -15707,7 +15558,7 @@ fn effect_item_row(
                     .test_support()
                     .px_1()
                     .rounded_sm()
-                    .bg(rgb(0x1d4ed8))
+                    .bg(rgb(0x6e6e76))
                     .text_color(rgb(0xffffff))
                     .child("GPU")
             }))
@@ -16284,7 +16135,7 @@ fn timeline_stopwatch_nav(
         .rounded_sm()
         .hover(|s| s.bg(cx.theme().muted))
         .text_color(if is_animated {
-            rgb(0x38bdf8).into()
+            rgb(0xb5b5bd).into()
         } else {
             cx.theme().muted_foreground
         })
@@ -16328,7 +16179,7 @@ fn timeline_stopwatch_nav(
                 .px_0p5()
                 .text_xs()
                 .text_color(if has_kf_at_playhead {
-                    rgb(0xf59e0b).into()
+                    rgb(0xd4d4d8).into()
                 } else {
                     cx.theme().muted_foreground
                 })
@@ -16481,9 +16332,9 @@ fn timeline_keyframe_lane(
                 .text_color(if selected {
                     rgb(0xffffff)
                 } else if is_at_playhead {
-                    rgb(0xf59e0b)
+                    rgb(0xd4d4d8)
                 } else {
-                    rgb(0x38bdf8)
+                    rgb(0xb5b5bd)
                 })
                 .hover(|s| s.text_color(rgb(0xffffff)))
                 .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
@@ -16671,17 +16522,17 @@ fn timeline_scrub(
 
             if is_linked {
                 val_view = val_view
-                    .bg(rgb(0x2d1515))
+                    .bg(rgb(0x232326))
                     .border_color(rgb(0xef4444))
                     .text_color(rgb(0xef4444))
                     .cursor_not_allowed();
             } else if has_modifier {
                 val_view = val_view
-                    .bg(rgba(0xa855f718))
-                    .border_color(rgb(0xa855f7))
-                    .text_color(rgb(0xc084fc))
+                    .bg(rgba(0x9a9aa218))
+                    .border_color(rgb(0x9a9aa2))
+                    .text_color(rgb(0xb2b2ba))
                     .cursor_col_resize()
-                    .hover(|s| s.bg(rgba(0xa855f730)));
+                    .hover(|s| s.bg(rgba(0x9a9aa230)));
             } else {
                 val_view = val_view
                     .bg(cx.theme().secondary)
@@ -16778,7 +16629,7 @@ fn timeline_scrub(
                                     .h(px(12.))
                                     .items_center()
                                     .justify_center()
-                                    .text_color(rgb(0xa855f7))
+                                    .text_color(rgb(0x9a9aa2))
                                     .cursor_pointer()
                                     .hover(|s| s.opacity(0.8))
                                     .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
@@ -18361,9 +18212,9 @@ fn render_graph_view(
                     ("◆", rgb(0xffffff))
                 } else {
                     match k.interp {
-                        project::KeyframeInterpolation::Linear => ("◆", rgb(0x38bdf8)),
-                        project::KeyframeInterpolation::Bezier => ("●", rgb(0x4ade80)),
-                        project::KeyframeInterpolation::Hold => ("■", rgb(0xf59e0b)),
+                        project::KeyframeInterpolation::Linear => ("◆", rgb(0xb5b5bd)),
+                        project::KeyframeInterpolation::Bezier => ("●", rgb(0xc9c9cf)),
+                        project::KeyframeInterpolation::Hold => ("■", rgb(0xd4d4d8)),
                     }
                 };
                 let y = if speed_tab {
@@ -18602,7 +18453,7 @@ fn render_graph_view(
                 .px_2()
                 .py_1()
                 .rounded_sm()
-                .bg(rgb(0x0a0a0a))
+                .bg(rgb(0x09090b))
                 .border_1()
                 .border_color(ae::amber())
                 .text_xs()
@@ -19371,7 +19222,7 @@ impl Render for TimelinePanel {
                 if self.reorder_hover == Some(idx) && self.reorder_drag.as_ref().map(|(id, _)| id != &layer.id).unwrap_or(false) {
                     left_col = left_col
                         .border_t_2()
-                        .border_color(rgb(0x38bdf8));
+                        .border_color(rgb(0xb5b5bd));
                 }
                 let left_col = left_col
                     .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
@@ -19421,7 +19272,7 @@ impl Render for TimelinePanel {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .hover(|s| s.text_color(rgb(0x38bdf8)))
+                                    .hover(|s| s.text_color(rgb(0xb5b5bd)))
                                     .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                                         p_twirl.update(cx, |this, cx| {
                                             this.toggle_layer_expanded(&lid_twirl);
@@ -19447,7 +19298,7 @@ impl Render for TimelinePanel {
                             .child(
                                 div()
                                     .cursor_pointer()
-                                    .text_color(if layer.locked { rgb(0xf59e0b).into() } else { cx.theme().muted_foreground.opacity(0.5) })
+                                    .text_color(if layer.locked { rgb(0xd4d4d8).into() } else { cx.theme().muted_foreground.opacity(0.5) })
                                     .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                                         lock_state.update(cx, |s, cx| {
                                             s.toggle_layer_lock(&lid_lock);
@@ -19464,7 +19315,7 @@ impl Render for TimelinePanel {
                                     .rounded_sm()
                                     .font_bold()
                                     .text_xs()
-                                    .bg(if layer.is_solo() { rgb(0xf59e0b).into() } else { cx.theme().secondary })
+                                    .bg(if layer.is_solo() { rgb(0xd4d4d8).into() } else { cx.theme().secondary })
                                     .text_color(if layer.is_solo() { rgb(0x000000).into() } else { cx.theme().muted_foreground })
                                     .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                                         solo_state.update(cx, |s, cx| {
@@ -19744,7 +19595,7 @@ impl Render for TimelinePanel {
                             .top_0()
                             .bottom_0()
                             .w(px(1.))
-                            .bg(rgba(0x00d2ff88))
+                            .bg(rgba(0xffffff88))
                             .left(relative(playhead_percent / 100.0)),
                     );
 
@@ -20491,7 +20342,7 @@ impl Render for TimelinePanel {
                                                     .w(px(10.))
                                                     .h(px(10.))
                                                     .rounded_xs()
-                                                    .bg(rgb(0xa855f7))
+                                                    .bg(rgb(0x9a9aa2))
                                             )
                                             .child(
                                                 div()
@@ -20571,8 +20422,8 @@ impl Render for TimelinePanel {
                                                     .px_1()
                                                     .py_0p5()
                                                     .rounded_sm()
-                                                    .bg(if m_locked { rgb(0xf59e0b).opacity(0.3) } else { Rgba::from(cx.theme().muted) })
-                                                    .text_color(if m_locked { rgb(0xf59e0b) } else { Rgba::from(cx.theme().muted_foreground) })
+                                                    .bg(if m_locked { rgb(0xd4d4d8).opacity(0.3) } else { Rgba::from(cx.theme().muted) })
+                                                    .text_color(if m_locked { rgb(0xd4d4d8) } else { Rgba::from(cx.theme().muted_foreground) })
                                                     .text_xs()
                                                     .on_mouse_down(MouseButton::Left, {
                                                         let lid = layer.id.clone();
@@ -21352,20 +21203,20 @@ impl Render for TimelinePanel {
                                     .test_support()
                                     .px_2p5()
                                     .py_1()
-                                    .bg(rgb(0x0b0d11))
+                                    .bg(rgb(0x09090b))
                                     .rounded_md()
                                     .border_1()
-                                    .border_color(rgba(0x00d2ff55))
+                                    .border_color(rgba(0xffffff55))
                                     .font_bold()
                                     .text_sm()
-                                    .text_color(rgb(0x00d2ff))
+                                    .text_color(rgb(0xffffff))
                                     .child(format!("{current_tc}")),
                             )
                             .child(
                                 div()
                                     .text_xs()
                                     .font_medium()
-                                    .text_color(rgb(0x7e8494))
+                                    .text_color(rgb(0x71717a))
                                     .child(format!("Frame {current_frame} / {total_frames}")),
                             ),
                     )
@@ -21850,7 +21701,7 @@ impl Render for TimelinePanel {
                                         .top_0()
                                         .bottom_0()
                                         .w(px(2.))
-                                        .bg(rgb(0x00d2ff))
+                                        .bg(rgb(0xffffff))
                                         .left(relative(playhead_percent / 100.0))
                                         .child(
                                             div()
@@ -21860,7 +21711,7 @@ impl Render for TimelinePanel {
                                                 .w(px(10.))
                                                 .h(px(10.))
                                                 .rounded_xs()
-                                                .bg(rgb(0x00d2ff))
+                                                .bg(rgb(0xffffff))
                                         ),
                                 );
                         }
@@ -22693,7 +22544,7 @@ impl Render for TimelinePanel {
                                 .py_1()
                                 .rounded_sm()
                                 .text_xs()
-                                .text_color(rgb(0xa855f7))
+                                .text_color(rgb(0x9a9aa2))
                                 .hover(|s| s.bg(cx.theme().accent))
                                 .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                                     s_rm_mg.update(cx, |s, cx| {
