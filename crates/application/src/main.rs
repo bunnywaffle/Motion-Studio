@@ -7166,6 +7166,73 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
     }
 
     #[gpui_kit::test]
+    fn test_shape_stroke_ui_drives_model(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                let rid = s.add_rectangle_shape_layer(200.0, 100.0, None).expect("rect");
+                s.select_layer(Some(rid.clone()));
+                // Fill to none, exactly like the None tab.
+                s.set_layer_shape_fill(&rid, project::Color::TRANSPARENT).expect("fill none");
+                cx.notify();
+            });
+        });
+        // Click the Stroke Width +1 stepper twice (the UI commit path).
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("shape_stroke_w_plus", cx);
+            window.render_frame(cx);
+            window.click("shape_stroke_w_plus", cx);
+            window.render_frame(cx);
+        })
+        .expect("update_window failed");
+        // Model must hold width 2 now.
+        let width = app_view.read_with(cx, |view, cx| {
+            let state = view.state().read(cx);
+            let layer = state.active_composition().unwrap().get_layer(state.selected_layer_id.as_deref().unwrap()).unwrap().clone();
+            match layer.source {
+                project::LayerSource::Shape { shape_type: project::ShapeType::Rectangle { stroke_width, .. } } => stroke_width.value,
+                _ => panic!("expected rectangle"),
+            }
+        });
+        assert_eq!(width, 2.0, "two +1 clicks must set width 2");
+        // Stroke color via the same setter the picker commits through,
+        // then rasterize the app's evaluated frame: outline must ink.
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                let rid = s.selected_layer_id.clone().expect("selection");
+                s.set_layer_shape_stroke(&rid, project::Color::rgb(1.0, 0.0, 0.0)).expect("stroke color");
+                cx.notify();
+            });
+        });
+        let ink = app_view.read_with(cx, |view, cx| {
+            use std::collections::HashMap;
+            let state = view.state().read(cx);
+            let eval = state.evaluate_current_frame().expect("eval");
+            let lid = state.selected_layer_id.clone().expect("selection");
+            let layer = eval.get_layer(&lid).expect("evaluated layer").clone();
+            let assets: HashMap<String, std::sync::Arc<image::RgbaImage>> = HashMap::new();
+            let (base_w, base_h) = crate::raster::layer::layer_base_dims(&layer, 1920.0, 1080.0, &assets);
+            let (buf, _avg, _empty) = crate::raster::rasterize_layer(
+                &layer, base_w, base_h, 64, 64, 1920.0, 1080.0, project::Color::BLACK, None, 0.0, 0,
+                false, 5.0, &assets,
+            );
+            buf.px.iter().filter(|p| p.r > 0.5 && p.a > 0.1).count()
+        });
+        assert!(ink > 50, "red stroke must rasterize red pixels, got {ink}");
+    }
+
+    #[gpui_kit::test]
     fn test_kit_components_drive_commands(cx: &mut TestAppContext) {
         use gpui_kit::test::TestWindowExt;
 
