@@ -6957,6 +6957,18 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
     }
 
     #[test]
+    fn test_stroke_editor_seed_opaque() {
+        // Transparent current = "no color chosen yet": picking must yield
+        // a visible stroke, so alpha seeds to opaque. Explicit opacity and
+        // the legacy transparent look (via the A slider) are untouched.
+        let t = project::Color::rgba(1.0, 0.0, 0.0, 0.0);
+        let seeded = crate::panels::stroke_editor_seed(t);
+        assert_eq!((seeded.r, seeded.g, seeded.b, seeded.a), (1.0, 0.0, 0.0, 1.0));
+        let o = project::Color::rgba(0.0, 1.0, 0.0, 0.5);
+        assert_eq!(crate::panels::stroke_editor_seed(o), o);
+    }
+
+    #[test]
     fn test_dropdown_anchor_sits_above_button() {
         // Popup origins are computed from the button position (the old
         // code pinned both popups to a fixed window corner).
@@ -7187,15 +7199,19 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
                 cx.notify();
             });
         });
-        // Click the Stroke Width +1 stepper twice (the UI commit path).
+        // Stroke Width is a scrub field now (no +/- steppers): it renders
+        // with the model value, and the same key commits back through.
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            window.click("shape_stroke_w_plus", cx);
-            window.render_frame(cx);
-            window.click("shape_stroke_w_plus", cx);
-            window.render_frame(cx);
+            assert!(window.find("shape_stroke_w_field").visible());
         })
         .expect("update_window failed");
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                assert!(s.set_scrub_value("shape_stroke_width", 2.0));
+                cx.notify();
+            });
+        });
         // Model must hold width 2 now.
         let width = app_view.read_with(cx, |view, cx| {
             let state = view.state().read(cx);
@@ -7205,7 +7221,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
                 _ => panic!("expected rectangle"),
             }
         });
-        assert_eq!(width, 2.0, "two +1 clicks must set width 2");
+        assert_eq!(width, 2.0, "scrub commit must set width 2");
         // Stroke color via the same setter the picker commits through,
         // then rasterize the app's evaluated frame: outline must ink.
         app_view.update(cx, |view, cx| {

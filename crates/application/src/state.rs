@@ -4142,6 +4142,15 @@ impl EditorState {
                 } => Some(dash_offset.value),
                 _ => None,
             },
+            "shape_stroke_width" => match &layer.source {
+                LayerSource::Shape {
+                    shape_type:
+                        ShapeType::Rectangle { stroke_width, .. }
+                        | ShapeType::Ellipse { stroke_width, .. }
+                        | ShapeType::Path { stroke_width, .. },
+                } => Some(stroke_width.value),
+                _ => None,
+            },
             _ => {
                 // Shader Lab scalar (sl:) and component (slc:) keys.
                 let (rest, is_component) = match (key.strip_prefix("slc:"), key.strip_prefix("sl:")) {
@@ -4432,6 +4441,13 @@ impl EditorState {
                         _ => "dash_offset",
                     };
                     self.set_layer_shape_dash(&id, field, v.max(0.0)).is_ok()
+                } else {
+                    false
+                }
+            }
+            "shape_stroke_width" => {
+                if let Some(id) = self.selected_layer_id.clone() {
+                    self.set_layer_shape_stroke_width(&id, v.max(0.0)).is_ok()
                 } else {
                     false
                 }
@@ -6163,6 +6179,17 @@ impl EditorState {
                 if let LayerSource::Shape { shape_type: project::ShapeType::Ellipse { radius_y, .. } } = &mut layer.source {
                     if radius_y.is_animated() { radius_y.clear_keyframes(); }
                     else { let val = radius_y.value; radius_y.add_keyframe(Keyframe::new(current_tc, val)); }
+                }
+            }
+            "shape.stroke_width" => {
+                if let LayerSource::Shape { shape_type } = &mut layer.source {
+                    let prop = match shape_type {
+                        project::ShapeType::Rectangle { stroke_width, .. }
+                        | project::ShapeType::Ellipse { stroke_width, .. }
+                        | project::ShapeType::Path { stroke_width, .. } => stroke_width,
+                    };
+                    if prop.is_animated() { prop.clear_keyframes(); }
+                    else { let val = prop.value; prop.add_keyframe(Keyframe::new(current_tc, val)); }
                 }
             }
             "shape.dash" | "shape.dash_gap" | "shape.dash_offset" => {

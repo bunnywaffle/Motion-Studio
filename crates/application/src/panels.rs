@@ -8228,6 +8228,22 @@ fn property_keyframe_controls(
                             None => (false, false, false),
                         }
                     }
+                    "shape.stroke_width" => {
+                        let prop = match &layer.source {
+                            LayerSource::Shape { shape_type: project::ShapeType::Rectangle { stroke_width, .. } }
+                            | LayerSource::Shape { shape_type: project::ShapeType::Ellipse { stroke_width, .. } }
+                            | LayerSource::Shape { shape_type: project::ShapeType::Path { stroke_width, .. } } => Some(stroke_width),
+                            _ => None,
+                        };
+                        match prop {
+                            Some(p) => (
+                                p.has_keyframe_at(&current_tc),
+                                p.previous_keyframe_time(&current_tc).is_some(),
+                                p.next_keyframe_time(&current_tc).is_some(),
+                            ),
+                            None => (false, false, false),
+                        }
+                    }
                     "text.stroke_color" => {
                         if let LayerSource::Text { ref stroke_color, .. } = layer.source {
                             (
@@ -9064,38 +9080,13 @@ where
 /// Path shape inspectors (one copy; commits go through the selected layer
 /// so a single `shape_stroke` editor entity serves all three arms).
 /// Returns `[stroke_row, editor_if_open, width_row]` for `.children()`.
-/// Current stroke width of the selected Rectangle / Ellipse / Path shape
-/// (`fallback` when the selection is not a shape layer). Free function so
-/// the ±1 steppers in [`shape_stroke_rows`] can share it.
-fn selected_shape_stroke_width(
-    state: &Entity<EditorState>,
-    cx: &App,
-    fallback: f32,
-) -> f32 {
-    state
-        .read(cx)
-        .selected_layer()
-        .and_then(|l| match &l.source {
-            LayerSource::Shape {
-                shape_type:
-                    ShapeType::Rectangle { stroke_width, .. }
-                    | ShapeType::Ellipse { stroke_width, .. }
-                    | ShapeType::Path { stroke_width, .. },
-            } => Some(stroke_width.value),
-            _ => None,
-        })
-        .unwrap_or(fallback)
-}
-
-/// Shared Stroke color + Stroke Width rows for the Rectangle / Ellipse /
-/// Path shape inspectors (one copy; commits go through the selected layer
-/// so a single `shape_stroke` editor entity serves all three arms).
-/// Returns `[stroke_row, editor_if_open, width_row]` for `.children()`.
 fn shape_stroke_rows(
     stroke: &project::Property<project::Color>,
     stroke_width: &project::Property<f32>,
     stroke_editor: &Entity<InspectorColorPicker>,
     state: &Entity<EditorState>,
+    layer_id: &str,
+    panel_entity: &Entity<PropertiesPanel>,
     cx: &App,
 ) -> Vec<AnyElement> {
     let sc = stroke.value;
@@ -9109,8 +9100,6 @@ fn shape_stroke_rows(
     let open = stroke_editor.read(cx).expanded;
     let ed_toggle = stroke_editor.clone();
     let ed_render = stroke_editor.clone();
-    let s_sw_m = state.clone();
-    let s_sw_p = state.clone();
     let stroke_row = h_flex()
         .items_center()
         .justify_between()
@@ -9148,7 +9137,7 @@ fn shape_stroke_rows(
                         .child(if open { "Close" } else { "Edit" })
                         .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                             ed_toggle.update(cx, |this, cx| {
-                                this.set_expanded(!open, sc);
+                                this.set_expanded(!open, stroke_editor_seed(sc));
                                 cx.notify();
                             });
                             if !open {
@@ -9164,61 +9153,25 @@ fn shape_stroke_rows(
         .text_xs()
         .border_b_1()
         .border_color(cx.theme().border)
-        .child(div().text_color(cx.theme().muted_foreground).child("Stroke Width"))
         .child(
             h_flex()
                 .gap_1()
                 .items_center()
-                .child(
-                    div()
-                        .id("shape_stroke_w_minus")
-                        .test_support()
-                        .cursor_pointer()
-                        .px_2()
-                        .py_0p5()
-                        .rounded_sm()
-                        .bg(cx.theme().muted)
-                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-                        .child("−1")
-                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                            let cur = selected_shape_stroke_width(&s_sw_m, cx, sw);
-                            s_sw_m.update(cx, |s, cx| {
-                                if let Some(lid) = s.selected_layer_id.clone() {
-                                    let _ = s.set_layer_shape_stroke_width(&lid, cur - 1.0);
-                                    cx.notify();
-                                }
-                            });
-                        }),
-                )
-                .child(
-                    div()
-                        .id("shape_stroke_w_value")
-                        .test_support()
-                        .text_color(cx.theme().foreground)
-                        .child(format!("{sw:.0}px")),
-                )
-                .child(
-                    div()
-                        .id("shape_stroke_w_plus")
-                        .test_support()
-                        .cursor_pointer()
-                        .px_2()
-                        .py_0p5()
-                        .rounded_sm()
-                        .bg(cx.theme().muted)
-                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-                        .child("+1")
-                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                            let cur = selected_shape_stroke_width(&s_sw_p, cx, sw);
-                            s_sw_p.update(cx, |s, cx| {
-                                if let Some(lid) = s.selected_layer_id.clone() {
-                                    let _ = s.set_layer_shape_stroke_width(&lid, cur + 1.0);
-                                    cx.notify();
-                                }
-                            });
-                        }),
-                ),
+                .child(property_stopwatch(state, layer_id, "shape.stroke_width", stroke_width.is_animated(), cx))
+                .child(div().text_color(cx.theme().muted_foreground).child("Stroke Width")),
         )
+        .child(scrub_field(
+            SharedString::from("shape_stroke_w_field"),
+            "shape_stroke_width".to_string(),
+            format!("{sw:.1}px"),
+            None,
+            None,
+            state,
+            panel_entity,
+            cx,
+            move |_| {},
+            move |_| {},
+        ))
         .into_any_element();
     let mut rows = vec![stroke_row];
     if open {
@@ -9430,6 +9383,18 @@ where
         cx,
         Some(body.into_any_element()),
     )
+}
+
+/// Seed color for the shape stroke editor: a transparent current means
+/// "no color chosen yet" (transparent stroke renders as an outline in the
+/// fill color), so picking from the canvas must produce a visible stroke —
+/// seed alpha to opaque. Dragging A back to 0 keeps the legacy look.
+pub(crate) fn stroke_editor_seed(current: Color) -> Color {
+    if current.a <= 0.0 {
+        Color { a: 1.0, ..current }
+    } else {
+        current
+    }
 }
 
 /// Nested twirl-down group inside an open card (applied-effect parameter
@@ -14327,6 +14292,8 @@ impl Render for PropertiesPanel {
                                                 stroke_width,
                                                 &shape_stroke_editor,
                                                 &self.state,
+                                                &layer.id,
+                                                &panel_entity,
                                                 cx,
                                             ));
 
@@ -14517,6 +14484,8 @@ impl Render for PropertiesPanel {
                                                 stroke_width,
                                                 &shape_stroke_editor,
                                                 &self.state,
+                                                &layer.id,
+                                                &panel_entity,
                                                 cx,
                                             ));
 
@@ -14574,6 +14543,8 @@ impl Render for PropertiesPanel {
                                             stroke_width,
                                             &shape_stroke_editor,
                                             &self.state,
+                                            &layer.id,
+                                            &panel_entity,
                                             cx,
                                         ));
                                         // Trim lives in the STROKE section below
