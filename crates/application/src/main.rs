@@ -8095,6 +8095,11 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             // Card starts collapsed: expand first.
             window.click(SharedString::from(format!("effect_disclosure_{ramp}")), cx);
             window.render_frame(cx);
+            // Dual-ring diamonds: outer ring + color core render per stop.
+            for i in 0..2 {
+                assert!(window.find(SharedString::from(format!("gradient_stop{i}_{ramp}"))).visible());
+                assert!(window.find(SharedString::from(format!("gradient_stop{i}_{ramp}_core"))).visible(), "stop {i} must render its color core");
+            }
             window.drag_to(
                 SharedString::from(format!("gradient_stop0_{ramp}")),
                 SharedString::from(format!("gradient_bar_{ramp}")),

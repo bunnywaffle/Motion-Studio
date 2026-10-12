@@ -339,8 +339,8 @@ pub(crate) fn gradient_editor(
         .rounded_sm()
         .overflow_hidden()
         .cursor_pointer();
-    for i in 0..24 {
-        let c = probe.sample(i as f32 / 23.0);
+    for i in 0..64 {
+        let c = probe.sample(i as f32 / 63.0);
         bar = bar.child(div().flex_1().h_full().bg(to_rgba(c)));
     }
     {
@@ -429,22 +429,37 @@ pub(crate) fn gradient_editor(
         };
         wrap = wrap.child(
             div()
-                .id(SharedString::from(stop_id))
+                .id(SharedString::from(stop_id.clone()))
                 .test_support()
                 .absolute()
                 .left(relative(stop.offset.clamp(0.0, 1.0)))
                 .top(px(-4.))
-                .ml(px(-6.))
+                .ml(px(if i == sel { -8.0 } else { -7.0 }))
                 .cursor_grab()
-                .w(px(12.))
-                .h(px(12.))
+                .w(px(if i == sel { 16.0 } else { 14.0 }))
+                .h(px(if i == sel { 16.0 } else { 14.0 }))
                 .rounded_sm()
-                .bg(to_rgba(stop.color))
-                .border_1()
-                .border_color(if i == sel { rgb(0xffffff) } else { rgb(0x000000) })
+                .bg(rgb(0x000000))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .id(SharedString::from(format!("{stop_id}_core")))
+                        .test_support()
+                        .w(px(if i == sel { 12.0 } else { 10.0 }))
+                        .h(px(if i == sel { 12.0 } else { 10.0 }))
+                        .rounded_sm()
+                        .bg(to_rgba(stop.color))
+                        .border_1()
+                        .border_color(rgb(0xffffff)),
+                )
                 .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                     s_down.update(cx, |s, cx| {
                         s.checkpoint();
+                        // Degraded canvas while dragging (the release
+                        // handler restores full quality), same as scrubs.
+                        s.preview_fast = true;
                         cx.notify();
                     });
                     p_sel.update(cx, |this, cx| {

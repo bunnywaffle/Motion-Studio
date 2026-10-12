@@ -1,6 +1,18 @@
 # Current State
 
-## What Currently Works
+> Snapshot — October 2026 (`main` @ `442d6f5` and later). The sections below
+> preserve the original build-up history; this snapshot describes reality now.
+
+## Snapshot: What the App Is Today
+
+- Full AE-like compositor: project/composition/layer model (`crates/project`), scene-graph evaluation with nesting, mattes, keyframes, modifiers (`crates/compositor`), CPU raster viewport + wgpu/EGL effects (`crates/renderer`, `crates/application/src/raster`), GPUI Kit docks (Project / Viewer / Properties+Effects / Timeline) + top toolbar (single tool home: Move/Hand/Rotate/Pen/Text, 5-variant Shape group with flyout, quick-add, fill color, snapping, GPU dot).
+- Vector shapes (Rectangle/Ellipse/Pen Path + triangle/polygon/star tools) with spec panel: linked Size, Fill (None/Color/Gradient), Stroke + Width scrub, Corner Radius, STROKE group (Ends/Joints/Trim/Dash), true-kappa rounded corners, styled stroker (caps/joins/dashes), trim on all shapes.
+- First-class masks (modes, feather/expansion/opacity/invert, own transform with inspector rows).
+- Modifier graphs drive opacity, transform, effect params, and shape scalars (`shape.*` paths, scrub-alias canonicalized); f32-only engine (no color modifiers).
+- Monochrome zinc dark theme (error/delete red + node-graph type hues excepted).
+- **511 tests passing** (259 application, 133 project, 66 + 9 compositor, 37 renderer, incl. headless evaluation + UI suites), 0 failures, clippy clean modulo one pre-existing warning.
+
+## What Currently Works (original log, kept for history)
 - Cargo workspace initialized at repository root (`Cargo.toml`).
 - Binary crate created under `crates/application`.
 - `gpui-kit` dependency integrated in workspace dependencies and consumed by `crates/application`.
@@ -199,7 +211,7 @@
 - Phase 2: Hardware-Accelerated Rendering Architecture (layer composite rendering pass and GPU effect integration).
 
 ## Known Problems
-- None.
+- None open. Deferred by design: TAPER stroke group (contents unspecified), stroke dash islands keep round ends, color modifiers (f32-only graph engine), SinePath on rect/ellipse (bounds growth unsupported).
 
 ## Next Single Task
 

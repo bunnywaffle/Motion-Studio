@@ -463,6 +463,20 @@
     - Added `test_timeline_scrubbing_and_seek`: tests continuous time scrubbing.
   - All **148 workspace tests passing** (38 in application) with 0 errors and zero clippy warnings.
 
+---
+
+## Post-Phase 2 Development (chronological, from git history)
+
+- [x] **GPU effect waves (+ parity tests)**: color batch (tint, brightness/contrast, levels, hue/sat), 20 more effects (keys, color, distorts), glow/bloom/sharpen/stylize + cel shade + oil paint, Saber/OuterGlow/Checkerboard/GradientRamp, waves A/B (LongShadow multi-stage, Halo/Streaks/Rays/GodRays/Flare — 39 chain-safe). OFX stock suite (80 plugins, CPU+WGSL twins). GPU status dot in the top bar.
+- [x] **Effects library + modifiers**: library restyle (counts, GPU filter + badges, live footer), universal effect modifier graphs with indicator icons, modifier graphs drive effect params end to end, reference-styled color editor, effect drag-reorder, sub-100 timeline zoom.
+- [x] **Vector shapes**: transparent base, pen fill/stroke/trim, Trim/Sine/Instance path effects, Card 3D, signed scrub, smooth graph wires. Shape tools (Q): 5-variant flyout group (rectangle/ellipse/triangle/polygon/star) with right-click rows, Q cycling, variant memory shared between toolbars.
+- [x] **Shape stroke panel (spec parity)**: Size (linked), Fill, Stroke, Stroke Width, Corner Radius + STROKE group (Ends Butt/Round/Square, Joints Miter/Round/Bevel, Trim Start/End/Offset bound to the Trim Path effect, Dash/Gap/Offset). Styled CPU stroker (end-plane caps, joint planes, miter spikes with limit fallback, arclength dashes); trim routes through the path pipeline for rect/ellipse. Stroke params hashed in the layer cache key; stroke editor seeds opaque so picks are visible.
+- [x] **Masks**: first-class masks (Add/Subtract/Intersect/Difference/None, feather/expansion/opacity/invert, own Transform honored by raster+eval) with inspector Position/Rotation/Scale rows routed through the `mask:` scrub pipeline.
+- [x] **Shape fill parity + modifier graphs on shape scalars**: shared fill helper across Rectangle/Ellipse/Path (paths finally get the Fill picker); evaluation applies modifier graphs to shape scalars (rect w/h/corner, ellipse radii, stroke width, dash trio) under `shape.*` paths with scrub-alias canonicalization; stroke/dash resolve as DriverLink drivers; live-value reads cover the same paths. Colors stay f32-engine-excluded.
+- [x] **Toolbar + theme**: viewer side strip removed (single tool home: top toolbar, quick-add [+] relocated there); monochrome zinc dark theme across panels/main (error text + delete danger red deliberately kept; node-graph type hues and picker canvases untouched).
+- [x] **Gradient editor**: dual-ring (black + white) stop diamonds visible on any background, degraded preview during drags, denser preview bar.
+- Workspace state: **511 tests passing** (259 application + 133 project + 66 + 9 compositor unit/integration + 37 renderer + headless suites), 0 errors, clippy clean (one pre-existing float-precision warning in `raster/stock.rs`).
+
 
 
 
