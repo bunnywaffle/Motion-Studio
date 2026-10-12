@@ -7294,16 +7294,39 @@ impl EditorState {
             "transform.scale.x" => "scale_x",
             "transform.scale.y" => "scale_y",
             "transform.rotation" => "rotation",
+            "shape.rect_width" | "rect_w" => "shape.rect_width",
+            "shape.rect_height" | "rect_h" => "shape.rect_height",
+            "shape.corner_radius" | "rect_cr" => "shape.corner_radius",
+            "shape.ellipse_rx" | "ellipse_rx" | "ellipse_sw" => "shape.ellipse_rx",
+            "shape.ellipse_ry" | "ellipse_ry" | "ellipse_sh" => "shape.ellipse_ry",
+            "shape.stroke_width" => "shape.stroke_width",
+            "shape.dash" => "shape.dash",
+            "shape.dash_gap" => "shape.dash_gap",
+            "shape.dash_offset" => "shape.dash_offset",
             _ => return None,
         };
         layer.get_modifier_graph(alias).cloned()
+    }
+
+    /// Canonical modifier-graph path for shape scrub aliases. The
+    /// evaluator and stopwatches only speak the `shape.*` dialect, so
+    /// scrub-keyed bindings (`rect_w`, `ellipse_sw`, …) fold to it here.
+    fn canonical_shape_modifier_path(path: &str) -> &str {
+        match path {
+            "rect_w" => "shape.rect_width",
+            "rect_h" => "shape.rect_height",
+            "rect_cr" => "shape.corner_radius",
+            "ellipse_rx" | "ellipse_sw" => "shape.ellipse_rx",
+            "ellipse_ry" | "ellipse_sh" => "shape.ellipse_ry",
+            _ => path,
+        }
     }
 
     /// Set or update the modifier graph for a property path on a layer.
     pub fn set_layer_modifier_graph(&mut self, layer_id: &str, prop_path: &str, graph: project::ModifierGraph) {
         if let Some(comp) = self.active_composition_mut() {
             if let Some(layer) = comp.get_layer_mut(layer_id) {
-                layer.set_modifier_graph(prop_path, graph);
+                layer.set_modifier_graph(Self::canonical_shape_modifier_path(prop_path), graph);
             }
         }
     }
@@ -7312,7 +7335,7 @@ impl EditorState {
     pub fn remove_layer_modifier_graph(&mut self, layer_id: &str, prop_path: &str) {
         if let Some(comp) = self.active_composition_mut() {
             if let Some(layer) = comp.get_layer_mut(layer_id) {
-                layer.remove_modifier_graph(prop_path);
+                layer.remove_modifier_graph(Self::canonical_shape_modifier_path(prop_path));
             }
         }
     }
@@ -7348,6 +7371,54 @@ impl EditorState {
             "transform.scale.y" | "scale_y" => layer.transform.scale.evaluate_at(&tc).y,
             "transform.rotation" | "rotation" => layer.transform.rotation.evaluate_at(&tc),
             "opacity" => layer.opacity.evaluate_at(&tc),
+            "shape.rect_width" | "rect_w" => match &layer.source {
+                LayerSource::Shape { shape_type: ShapeType::Rectangle { width, .. } } => width.evaluate_at(&tc),
+                _ => 0.0,
+            },
+            "shape.rect_height" | "rect_h" => match &layer.source {
+                LayerSource::Shape { shape_type: ShapeType::Rectangle { height, .. } } => height.evaluate_at(&tc),
+                _ => 0.0,
+            },
+            "shape.corner_radius" | "rect_cr" => match &layer.source {
+                LayerSource::Shape { shape_type: ShapeType::Rectangle { corner_radius, .. } } => corner_radius.evaluate_at(&tc),
+                _ => 0.0,
+            },
+            "shape.ellipse_rx" | "ellipse_rx" | "ellipse_sw" => match &layer.source {
+                LayerSource::Shape { shape_type: ShapeType::Ellipse { radius_x, .. } } => {
+                    if prop_path == "ellipse_sw" { radius_x.evaluate_at(&tc) * 2.0 } else { radius_x.evaluate_at(&tc) }
+                }
+                _ => 0.0,
+            },
+            "shape.ellipse_ry" | "ellipse_ry" | "ellipse_sh" => match &layer.source {
+                LayerSource::Shape { shape_type: ShapeType::Ellipse { radius_y, .. } } => {
+                    if prop_path == "ellipse_sh" { radius_y.evaluate_at(&tc) * 2.0 } else { radius_y.evaluate_at(&tc) }
+                }
+                _ => 0.0,
+            },
+            "shape.stroke_width" => match &layer.source {
+                LayerSource::Shape { shape_type: ShapeType::Rectangle { stroke_width, .. }
+                    | ShapeType::Ellipse { stroke_width, .. }
+                    | ShapeType::Path { stroke_width, .. } } => stroke_width.evaluate_at(&tc),
+                _ => 0.0,
+            },
+            "shape.dash" => match &layer.source {
+                LayerSource::Shape { shape_type: ShapeType::Rectangle { dash, .. }
+                    | ShapeType::Ellipse { dash, .. }
+                    | ShapeType::Path { dash, .. } } => dash.evaluate_at(&tc),
+                _ => 0.0,
+            },
+            "shape.dash_gap" => match &layer.source {
+                LayerSource::Shape { shape_type: ShapeType::Rectangle { dash_gap, .. }
+                    | ShapeType::Ellipse { dash_gap, .. }
+                    | ShapeType::Path { dash_gap, .. } } => dash_gap.evaluate_at(&tc),
+                _ => 0.0,
+            },
+            "shape.dash_offset" => match &layer.source {
+                LayerSource::Shape { shape_type: ShapeType::Rectangle { dash_offset, .. }
+                    | ShapeType::Ellipse { dash_offset, .. }
+                    | ShapeType::Path { dash_offset, .. } } => dash_offset.evaluate_at(&tc),
+                _ => 0.0,
+            },
             _ => {
                 // Effect scalars share the canonical `effect:{id}:{param}`
                 // path everywhere (graph, links, compositor).
@@ -7397,8 +7468,9 @@ impl EditorState {
             None => return,
         };
 
-        // Remove any modifier graph on this property
-        layer.remove_modifier_graph(prop_path);
+        // Remove any modifier graph on this property (canonicalized so
+        // scrub-keyed bindings are caught too).
+        layer.remove_modifier_graph(Self::canonical_shape_modifier_path(prop_path));
         // Remove any property link on this property and its aliases
         let _ = layer.remove_property_link(prop_path);
         match prop_path {

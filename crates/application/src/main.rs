@@ -7024,6 +7024,26 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
     }
 
     #[test]
+    fn test_shape_modifier_paths_canonicalize() {
+        use crate::state::EditorState;
+
+        let mut state = EditorState::new();
+        let rid = state.add_rectangle_shape_layer(200.0, 100.0, None).expect("rect");
+        let graph = project::modifier::ModifierGraph::default();
+        // Scrub-keyed bindings fold to the shape.* dialect the evaluator
+        // and stopwatches speak.
+        state.set_layer_modifier_graph(&rid, "rect_w", graph.clone());
+        let comp = state.active_composition().unwrap().clone();
+        let layer = comp.get_layer(&rid).unwrap();
+        assert!(layer.get_modifier_graph("shape.rect_width").is_some());
+        assert!(state.get_layer_modifier_graph(&rid, "rect_w").is_some());
+        // Reset via either dialect clears the binding.
+        state.remove_layer_modifier_graph(&rid, "rect_w");
+        let comp = state.active_composition().unwrap().clone();
+        assert!(comp.get_layer(&rid).unwrap().get_modifier_graph("shape.rect_width").is_none());
+    }
+
+    #[test]
     fn test_stroke_editor_seed_opaque() {
         // Transparent current = "no color chosen yet": picking must yield
         // a visible stroke, so alpha seeds to opaque. Explicit opacity and
@@ -7375,6 +7395,77 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             buf.px.iter().filter(|p| p.r > 0.5 && p.a > 0.1).count()
         });
         assert!(path_ink > 50, "pen path stroke must rasterize red pixels, got {path_ink}");
+    }
+
+    #[gpui_kit::test]
+    fn test_path_fill_row_renders_and_rasterizes(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        // Pen paths share the same Fill row as rectangles now.
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                let comp = s.active_composition_mut().expect("comp");
+                let fps = comp.frame_rate;
+                let dur = comp.duration;
+                let layer = project::Layer::shape(
+                    "path_fill_e2e",
+                    "P",
+                    project::ShapeType::Path {
+                        path_data: "M 20 20 L 220 20 L 220 120 L 20 120 Z".to_string(),
+                        fill: project::Property::new("Fill", project::Color::TRANSPARENT),
+                        fill_gradient: None,
+                        stroke: project::Property::new("Stroke", project::Color::TRANSPARENT),
+                        stroke_width: project::Property::new("Stroke Width", 0.0),
+                        line_cap: "round".to_string(),
+                        line_join: "round".to_string(),
+                        dash: project::Property::new("Dash", 0.0),
+                        dash_gap: project::Property::new("Dash Gap", 0.0),
+                        dash_offset: project::Property::new("Dash Offset", 0.0),
+                    },
+                    project::TimeCode::zero(fps),
+                    dur,
+                );
+                comp.add_layer(layer).expect("add path");
+                s.select_layer(Some("path_fill_e2e".to_string()));
+                cx.notify();
+            });
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("path_fill_swatch").visible(), "path Fill row must render");
+        })
+        .expect("update_window failed");
+        // Fill red through the shared setter; the closed path must hold ink.
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.set_layer_shape_fill("path_fill_e2e", project::Color::rgb(1.0, 0.0, 0.0)).expect("fill");
+                cx.notify();
+            });
+        });
+        let ink = app_view.read_with(cx, |view, cx| {
+            use std::collections::HashMap;
+            let state = view.state().read(cx);
+            let eval = state.evaluate_current_frame().expect("eval");
+            let layer = eval.get_layer("path_fill_e2e").expect("evaluated path").clone();
+            let assets: HashMap<String, std::sync::Arc<image::RgbaImage>> = HashMap::new();
+            let (base_w, base_h) = crate::raster::layer::layer_base_dims(&layer, 1920.0, 1080.0, &assets);
+            let (buf, _avg, empty) = crate::raster::rasterize_layer(
+                &layer, base_w, base_h, 128, 128, 1920.0, 1080.0, project::Color::BLACK, None, 0.0, 0,
+                false, 5.0, &assets,
+            );
+            assert!(!empty, "filled path must hold ink");
+            buf.px.iter().filter(|p| p.r > 0.5 && p.a > 0.5).count()
+        });
+        assert!(ink > 500, "red path fill must rasterize, got {ink}");
     }
 
     #[gpui_kit::test]

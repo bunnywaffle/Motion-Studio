@@ -8927,6 +8927,96 @@ where
         .into_any_element()
 }
 
+/// Shared Fill row (three-mode None/Color/Gradient picker + stopwatch)
+/// for the Rectangle / Ellipse / Path shape inspectors. Returns
+/// `[fill_row, dialog?]` for `.children()`.
+#[allow(clippy::too_many_arguments)]
+fn shape_fill_row(
+    fill: &project::Property<project::Color>,
+    layer_id: &str,
+    swatch_id: &'static str,
+    state: &Entity<EditorState>,
+    panel_entity: &Entity<PropertiesPanel>,
+    panel: &PropertiesPanel,
+    fill_editor: Entity<InspectorColorPicker>,
+    grad_editor: &Entity<InspectorColorPicker>,
+    cx: &App,
+) -> Vec<AnyElement> {
+    let fill_col = fill.value;
+    let lid_fill = layer_id.to_string();
+    let shape_hex = format!(
+        "#{:02X}{:02X}{:02X}",
+        (fill_col.r * 255.0).round() as u8,
+        (fill_col.g * 255.0).round() as u8,
+        (fill_col.b * 255.0).round() as u8
+    );
+    let shape_model_grad = state.read(cx).layer_fill_gradient(&lid_fill, "shape_fill");
+    let shape_mode = panel.color_picker_mode.get("shape_fill").map(|s| s.as_str()).unwrap_or(if shape_model_grad.is_some() { "gradient" } else if fill_col.a <= 0.0 { "none" } else { "color" });
+
+    let is_shape_active = panel.active_color_picker.as_deref() == Some("shape_fill");
+    let p_shape_picker = panel_entity.clone();
+    let fill_editor_c = fill_editor.clone();
+
+    let row = h_flex()
+        .items_center()
+        .justify_between()
+        .text_xs()
+        .border_b_1()
+        .border_color(cx.theme().border)
+        .child(
+            h_flex()
+                .gap_1()
+                .items_center()
+                .child(property_stopwatch(state, layer_id, "shape.fill", fill.is_animated(), cx))
+                .child(div().text_color(cx.theme().muted_foreground).child("Fill"))
+        )
+        .child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(
+                    render_color_swatch(
+                        swatch_id,
+                        fill_col,
+                        shape_mode,
+                        shape_model_grad.clone(),
+                        is_shape_active,
+                        cx,
+                        move |_event, window, cx| {
+                            let opening = p_shape_picker.read(cx).active_color_picker.as_deref() != Some("shape_fill");
+                            p_shape_picker.update(cx, |this, cx| {
+                                this.active_color_picker = if opening {
+                                    Some("shape_fill".to_string())
+                                } else {
+                                    None
+                                };
+                                cx.notify();
+                            });
+                            if opening {
+                                fill_editor_c.update(cx, |ed, cx| {
+                                    ed.snapshot_orig(fill_col);
+                                    cx.notify();
+                                });
+                                InspectorColorPicker::sync_inputs(&fill_editor_c, None, window, cx);
+                            }
+                        },
+                    )
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(shape_hex),
+                ),
+        )
+        .into_any_element();
+    let mut rows = vec![row];
+    if is_shape_active {
+        rows.push(render_three_mode_color_picker("shape_fill", fill_col, panel, panel_entity, state, &fill_editor, grad_editor, cx).into_any_element());
+    }
+    rows
+}
+
 /// Shared Stroke color + Stroke Width rows for the Rectangle / Ellipse /
 /// Path shape inspectors (one copy; commits go through the selected layer
 /// so a single `shape_stroke` editor entity serves all three arms).
@@ -13995,25 +14085,6 @@ impl Render for PropertiesPanel {
                                         let cr = corner_radius.value;
                                         let linked = *size_linked;
                                         let s_link = self.state.clone();
-                                        let fill_col = fill.value;
-                                        let lid_fill = layer.id.clone();
-                                        let shape_hex = format!(
-                                            "#{:02X}{:02X}{:02X}",
-                                            (fill_col.r * 255.0).round() as u8,
-                                            (fill_col.g * 255.0).round() as u8,
-                                            (fill_col.b * 255.0).round() as u8
-                                        );
-                                        let shape_model_grad = self.state.read(cx).layer_fill_gradient(&lid_fill, "shape_fill");
-                                        let shape_mode = self.color_picker_mode.get("shape_fill").map(|s| s.as_str()).unwrap_or(if shape_model_grad.is_some() { "gradient" } else if fill_col.a <= 0.0 { "none" } else { "color" });
-                                        
-                                        let is_shape_active = self.active_color_picker.as_deref() == Some("shape_fill");
-                                        let p_shape_picker = panel_entity.clone();
-
-                                        let shape_dialog: Option<AnyElement> = if is_shape_active {
-                                            Some(render_three_mode_color_picker("shape_fill", fill_col, self, &panel_entity, &self.state, &shape_fill_editor, &grad_stop_editor, cx).into_any_element())
-                                        } else {
-                                            None
-                                        };
 
                                         let rect_body = v_flex()
                                             .id("shape_properties_section")
@@ -14079,61 +14150,17 @@ impl Render for PropertiesPanel {
                                                             )),
                                                     ),
                                             )
-                                            .child(
-                                                h_flex()
-                                                    .items_center()
-                                                    .justify_between()
-                                                    .text_xs()
-                                                    .border_b_1()
-                                                    .border_color(cx.theme().border)
-                                                    .child(
-                                                        h_flex()
-                                                            .gap_1()
-                                                            .items_center()
-                                                            .child(property_stopwatch(&self.state, &layer.id, "shape.fill", fill.is_animated(), cx))
-                                                            .child(div().text_color(cx.theme().muted_foreground).child("Fill"))
-                                                    )
-                                                    .child(
-                                                        h_flex()
-                                                            .gap_2()
-                                                            .items_center()
-                                                            .child(
-                                                                render_color_swatch(
-                                                                    "shape_fill_swatch",
-                                                                    fill_col,
-                                                                    shape_mode,
-                                                                    shape_model_grad.clone(),
-                                                                    is_shape_active,
-                                                                    cx,
-                                                                    move |_event, window, cx| {
-                                                                        let opening = p_shape_picker.read(cx).active_color_picker.as_deref() != Some("shape_fill");
-                                                                        p_shape_picker.update(cx, |this, cx| {
-                                                                            this.active_color_picker = if opening {
-                                                                                Some("shape_fill".to_string())
-                                                                            } else {
-                                                                                None
-                                                                            };
-                                                                            cx.notify();
-                                                                        });
-                                                                        if opening {
-                                                                            shape_fill_editor.update(cx, |ed, cx| {
-                                                                                ed.snapshot_orig(fill_col);
-                                                                                cx.notify();
-                                                                            });
-                                                                            InspectorColorPicker::sync_inputs(&shape_fill_editor, None, window, cx);
-                                                                        }
-                                                                    },
-                                                                )
-                                                            )
-                                                            .child(
-                                                                div()
-                                                                    .text_xs()
-                                                                    .text_color(cx.theme().muted_foreground)
-                                                                    .child(shape_hex),
-                                                            ),
-                                                    ),
-                                            )
-                                            .children(shape_dialog)
+                                            .children(shape_fill_row(
+                                                fill,
+                                                &layer.id,
+                                                "shape_fill_swatch",
+                                                &self.state,
+                                                &panel_entity,
+                                                self,
+                                                shape_fill_editor.clone(),
+                                                &grad_stop_editor,
+                                                cx,
+                                            ))
                                             .child(
                                                 h_flex()
                                                     .items_center()
@@ -14206,25 +14233,6 @@ impl Render for PropertiesPanel {
                                         let ry = radius_y.value;
                                         let linked = *size_linked;
                                         let s_link = self.state.clone();
-                                        let fill_col = fill.value;
-                                        let lid_fill = layer.id.clone();
-                                        let shape_hex = format!(
-                                            "#{:02X}{:02X}{:02X}",
-                                            (fill_col.r * 255.0).round() as u8,
-                                            (fill_col.g * 255.0).round() as u8,
-                                            (fill_col.b * 255.0).round() as u8
-                                        );
-                                        let shape_model_grad = self.state.read(cx).layer_fill_gradient(&lid_fill, "shape_fill");
-                                        let shape_mode = self.color_picker_mode.get("shape_fill").map(|s| s.as_str()).unwrap_or(if shape_model_grad.is_some() { "gradient" } else if fill_col.a <= 0.0 { "none" } else { "color" });
-                                        
-                                        let is_shape_active = self.active_color_picker.as_deref() == Some("shape_fill");
-                                        let p_shape_picker = panel_entity.clone();
-
-                                        let shape_dialog: Option<AnyElement> = if is_shape_active {
-                                            Some(render_three_mode_color_picker("shape_fill", fill_col, self, &panel_entity, &self.state, &shape_fill_editor, &grad_stop_editor, cx).into_any_element())
-                                        } else {
-                                            None
-                                        };
 
                                         let ellipse_body = v_flex()
                                             .id("shape_properties_section")
@@ -14290,61 +14298,17 @@ impl Render for PropertiesPanel {
                                                             )),
                                                     ),
                                             )
-                                            .child(
-                                                h_flex()
-                                                    .items_center()
-                                                    .justify_between()
-                                                    .text_xs()
-                                                    .border_b_1()
-                                                    .border_color(cx.theme().border)
-                                                    .child(
-                                                        h_flex()
-                                                            .gap_1()
-                                                            .items_center()
-                                                            .child(property_stopwatch(&self.state, &layer.id, "shape.fill", fill.is_animated(), cx))
-                                                            .child(div().text_color(cx.theme().muted_foreground).child("Fill"))
-                                                    )
-                                                    .child(
-                                                        h_flex()
-                                                            .gap_2()
-                                                            .items_center()
-                                                            .child(
-                                                                render_color_swatch(
-                                                                    "ellipse_fill_swatch",
-                                                                    fill_col,
-                                                                    shape_mode,
-                                                                    shape_model_grad.clone(),
-                                                                    is_shape_active,
-                                                                    cx,
-                                                                    move |_event, window, cx| {
-                                                                        let opening = p_shape_picker.read(cx).active_color_picker.as_deref() != Some("shape_fill");
-                                                                        p_shape_picker.update(cx, |this, cx| {
-                                                                            this.active_color_picker = if opening {
-                                                                                Some("shape_fill".to_string())
-                                                                            } else {
-                                                                                None
-                                                                            };
-                                                                            cx.notify();
-                                                                        });
-                                                                        if opening {
-                                                                            shape_fill_editor.update(cx, |ed, cx| {
-                                                                                ed.snapshot_orig(fill_col);
-                                                                                cx.notify();
-                                                                            });
-                                                                            InspectorColorPicker::sync_inputs(&shape_fill_editor, None, window, cx);
-                                                                        }
-                                                                    },
-                                                                )
-                                                            )
-                                                            .child(
-                                                                div()
-                                                                    .text_xs()
-                                                                    .text_color(cx.theme().muted_foreground)
-                                                                    .child(shape_hex),
-                                                            ),
-                                                    ),
-                                            )
-                                            .children(shape_dialog)
+                                            .children(shape_fill_row(
+                                                fill,
+                                                &layer.id,
+                                                "ellipse_fill_swatch",
+                                                &self.state,
+                                                &panel_entity,
+                                                self,
+                                                shape_fill_editor.clone(),
+                                                &grad_stop_editor,
+                                                cx,
+                                            ))
                                             .children(shape_stroke_rows(
                                                 stroke,
                                                 stroke_width,
@@ -14393,7 +14357,7 @@ impl Render for PropertiesPanel {
                                             ));
                                         }
                                     }
-                                    ShapeType::Path { path_data, stroke, stroke_width, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
+                                    ShapeType::Path { path_data, fill, stroke, stroke_width, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
                                         let path_body = v_flex()
                                             .id("shape_properties_section")
                                             .test_support()
@@ -14403,7 +14367,18 @@ impl Render for PropertiesPanel {
                                                     .text_xs()
                                                     .text_color(cx.theme().muted_foreground)
                                                     .child(format!("Path: {}", if path_data.len() > 40 { format!("{}...", &path_data[..40]) } else { path_data.clone() })),
-                                            );
+                                            )
+                                            .children(shape_fill_row(
+                                                fill,
+                                                &layer.id,
+                                                "path_fill_swatch",
+                                                &self.state,
+                                                &panel_entity,
+                                                self,
+                                                shape_fill_editor.clone(),
+                                                &grad_stop_editor,
+                                                cx,
+                                            ));
                                         let path_body = path_body.children(shape_stroke_rows(
                                             stroke,
                                             stroke_width,

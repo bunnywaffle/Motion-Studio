@@ -3,6 +3,7 @@ use project::{
     Color, Composition, Keyframe, KeyframeTangent, LoopMode, Project, Property, ShapeType,
     TimeCode, TrackMatteMode, Vec2,
 };
+use project::modifier::{ModifierGraph, ModifierNode, NodeConnection, NodeKind};
 use std::time::Instant;
 
 // 1. Multi-layer composite with mixed layer sources (Solids, Text, Shape, NestedCompositions)
@@ -1323,4 +1324,80 @@ fn test_performance_high_throughput_composition_evaluation() {
         "Evaluation throughput too low: {:.2} evals/sec (expected > 10,000 evals/sec)",
         evals_per_sec
     );
+}
+
+fn const_graph(val: f32) -> ModifierGraph {
+    ModifierGraph {
+        nodes: vec![
+            ModifierNode::new("c", 0.0, 0.0, NodeKind::Constant { value: val }),
+            ModifierNode::new("out", 200.0, 0.0, NodeKind::Output),
+        ],
+        connections: vec![NodeConnection::new("c", "value", "out", "result")],
+    }
+}
+
+// Modifier graphs bound to shape source scalars reshape the evaluated
+// snapshot (targets), and shape scalars resolve as drivers for other
+// graphs' DriverLink nodes.
+#[test]
+fn shape_modifier_graphs_apply_at_evaluation() {
+    let fps = 30.0;
+    let tc0 = TimeCode::from_frames(0, fps);
+    let tc300 = TimeCode::from_frames(300, fps);
+    let mut comp = Composition::new("comp_mod", "Mod", 1920, 1080, fps, tc300);
+    let mut rect = project::Layer::shape(
+        "rect_mod",
+        "Rect",
+        ShapeType::Rectangle {
+            width: Property::new("Width", 60.0),
+            height: Property::new("Height", 60.0),
+            corner_radius: Property::new("Corner Radius", 0.0),
+            size_linked: true,
+            fill: Property::new("Fill", Color::WHITE),
+            fill_gradient: None,
+            stroke: Property::new("Stroke", Color::TRANSPARENT),
+            stroke_width: Property::new("Stroke Width", 4.0),
+            line_cap: "round".to_string(),
+            line_join: "round".to_string(),
+            dash: Property::new("Dash", 7.0),
+            dash_gap: Property::new("Dash Gap", 0.0),
+            dash_offset: Property::new("Dash Offset", 0.0),
+        },
+        tc0,
+        tc300,
+    );
+    // Target: const graph forces stroke width to 25 regardless of base.
+    rect.set_modifier_graph("shape.stroke_width", const_graph(25.0));
+    // Driver: width follows the layer's own dash value (7.0) through a link.
+    rect.set_modifier_graph(
+        "shape.rect_width",
+        ModifierGraph {
+            nodes: vec![
+                ModifierNode::new(
+                    "drv",
+                    0.0,
+                    0.0,
+                    NodeKind::DriverLink {
+                        driver_layer_id: "rect_mod".to_string(),
+                        driver_prop_path: "shape.dash".to_string(),
+                    },
+                ),
+                ModifierNode::new("out", 200.0, 0.0, NodeKind::Output),
+            ],
+            connections: vec![NodeConnection::new("drv", "value", "out", "result")],
+        },
+    );
+    comp.add_layer(rect).unwrap();
+
+    let graph = SceneGraph::from_composition(&comp).unwrap();
+    let evaluator = LayerStackEvaluator::new();
+    let stack = evaluator.evaluate(&graph, &TimeCode::from_frames(10, fps));
+    let eval = stack.get_layer("rect_mod").expect("evaluated rect");
+    match &eval.source {
+        project::LayerSource::Shape { shape_type: ShapeType::Rectangle { width, stroke_width, .. } } => {
+            assert!((stroke_width.value - 25.0).abs() < 1e-4, "graph must reshape width, got {}", stroke_width.value);
+            assert!((width.value - 7.0).abs() < 1e-4, "width must follow dash driver, got {}", width.value);
+        }
+        _ => panic!("expected rectangle"),
+    }
 }

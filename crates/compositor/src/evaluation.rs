@@ -43,6 +43,22 @@ fn parsed_prog_cached(
 
 /// Resolve the live evaluated value of a driver layer's property link at a specific timecode.
 /// Recursively handles chains of links with cycle protection.
+/// Reshape one shape scalar through its modifier graph (if bound under
+/// `path`), evaluating the keyframed base at `time` first. Applied to the
+/// per-frame source snapshot, so keyframe tracks are never disturbed.
+fn eval_shape_mg(
+    graphs: &HashMap<String, project::ModifierGraph>,
+    path: &str,
+    prop: &mut project::Property<f32>,
+    time: &TimeCode,
+    factor: f32,
+    resolver: &dyn Fn(&str, &str) -> f32,
+) {
+    if let Some(mg) = graphs.get(path) {
+        prop.set_value(mg.evaluate_with_resolver(prop.evaluate_at(time), factor, resolver));
+    }
+}
+
 pub fn resolve_property_link_value(
     graph: &SceneGraph,
     driver_layer_id: &str,
@@ -125,6 +141,42 @@ pub fn resolve_property_link_value(
         "shape.ellipse_ry" | "radius_y" => {
             if let LayerSource::Shape { shape_type: project::ShapeType::Ellipse { ref radius_y, .. } } = node.source {
                 radius_y.evaluate_at(time)
+            } else {
+                0.0
+            }
+        }
+        "shape.stroke_width" | "stroke_width" => {
+            if let LayerSource::Shape { shape_type: project::ShapeType::Rectangle { ref stroke_width, .. }
+                | project::ShapeType::Ellipse { ref stroke_width, .. }
+                | project::ShapeType::Path { ref stroke_width, .. } } = node.source {
+                stroke_width.evaluate_at(time)
+            } else {
+                0.0
+            }
+        }
+        "shape.dash" | "dash" => {
+            if let LayerSource::Shape { shape_type: project::ShapeType::Rectangle { ref dash, .. }
+                | project::ShapeType::Ellipse { ref dash, .. }
+                | project::ShapeType::Path { ref dash, .. } } = node.source {
+                dash.evaluate_at(time)
+            } else {
+                0.0
+            }
+        }
+        "shape.dash_gap" | "dash_gap" => {
+            if let LayerSource::Shape { shape_type: project::ShapeType::Rectangle { ref dash_gap, .. }
+                | project::ShapeType::Ellipse { ref dash_gap, .. }
+                | project::ShapeType::Path { ref dash_gap, .. } } = node.source {
+                dash_gap.evaluate_at(time)
+            } else {
+                0.0
+            }
+        }
+        "shape.dash_offset" | "dash_offset" => {
+            if let LayerSource::Shape { shape_type: project::ShapeType::Rectangle { ref dash_offset, .. }
+                | project::ShapeType::Ellipse { ref dash_offset, .. }
+                | project::ShapeType::Path { ref dash_offset, .. } } = node.source {
+                dash_offset.evaluate_at(time)
             } else {
                 0.0
             }
@@ -2157,6 +2209,41 @@ impl LayerStackEvaluator {
             // rasterizer reads animated colors from plain `.value`s.
             let mut source = node.source.clone();
             source.resolve_at(time);
+            // Modifier graphs on shape source scalars (bound under shape.*
+            // paths, the stopwatch dialect). Colors can't be reshaped —
+            // the graph engine is f32-only.
+            if !node.modifier_graphs.is_empty() {
+                let factor = node.progression_factor(time);
+                let resolver = |d_lid: &str, d_prop: &str| {
+                    let mut visited = HashSet::new();
+                    resolve_property_link_value(graph, d_lid, d_prop, time, &mut visited).unwrap_or(0.0)
+                };
+                if let LayerSource::Shape { shape_type } = &mut source {
+                    match shape_type {
+                        project::ShapeType::Rectangle { width, height, corner_radius, .. } => {
+                            eval_shape_mg(&node.modifier_graphs, "shape.rect_width", width, time, factor, &resolver);
+                            eval_shape_mg(&node.modifier_graphs, "shape.rect_height", height, time, factor, &resolver);
+                            eval_shape_mg(&node.modifier_graphs, "shape.corner_radius", corner_radius, time, factor, &resolver);
+                        }
+                        project::ShapeType::Ellipse { radius_x, radius_y, .. } => {
+                            eval_shape_mg(&node.modifier_graphs, "shape.ellipse_rx", radius_x, time, factor, &resolver);
+                            eval_shape_mg(&node.modifier_graphs, "shape.ellipse_ry", radius_y, time, factor, &resolver);
+                        }
+                        project::ShapeType::Path { .. } => {}
+                    }
+                    let (stroke_width, dash, dash_gap, dash_offset) = match shape_type {
+                        project::ShapeType::Rectangle { stroke_width, dash, dash_gap, dash_offset, .. }
+                        | project::ShapeType::Ellipse { stroke_width, dash, dash_gap, dash_offset, .. }
+                        | project::ShapeType::Path { stroke_width, dash, dash_gap, dash_offset, .. } => {
+                            (stroke_width, dash, dash_gap, dash_offset)
+                        }
+                    };
+                    eval_shape_mg(&node.modifier_graphs, "shape.stroke_width", stroke_width, time, factor, &resolver);
+                    eval_shape_mg(&node.modifier_graphs, "shape.dash", dash, time, factor, &resolver);
+                    eval_shape_mg(&node.modifier_graphs, "shape.dash_gap", dash_gap, time, factor, &resolver);
+                    eval_shape_mg(&node.modifier_graphs, "shape.dash_offset", dash_offset, time, factor, &resolver);
+                }
+            }
             evaluated_layers.push(EvaluatedLayer {
                 id: node.id.clone(),
                 name: node.name.clone(),
