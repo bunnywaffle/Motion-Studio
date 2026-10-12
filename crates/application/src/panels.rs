@@ -6374,9 +6374,6 @@ pub struct PropertiesPanel {
     pub fx_hover: Option<usize>,
     /// Window-y where the effect reorder press started (threshold gate).
     pub fx_start_y: f32,
-    /// Effect ids already seeded into `fx_collapsed` once, so cards start
-    /// collapsed but explicit user expand/collapse choices stick.
-    fx_seen: HashSet<String>,
     /// Collapsed Shader Lab parameter groups (`effect_id:group`).
     pub fx_group_collapsed: HashSet<String>,
     /// Effect ID with the Shader Lab source editor open (`None` = closed).
@@ -6553,7 +6550,6 @@ impl PropertiesPanel {
             fx_drag: None,
             fx_hover: None,
             fx_start_y: 0.0,
-            fx_seen: HashSet::new(),
             fx_group_collapsed: HashSet::new(),
             shader_editor_open: None,
             shader_editor: None,
@@ -9301,6 +9297,7 @@ where
                     100.0,
                     anim,
                     crate::widgets::ScalarCommit::Effect,
+                    "stroke_",
                     cx,
                 ));
             }
@@ -10753,8 +10750,8 @@ fn render_applied_effects(
             let p_drag = panel_entity.clone();
             let p_hover = panel_entity.clone();
             let row_idx = fx_idx;
-            // Nested-collapsible state: collapsed by default (ids are
-            // seeded into `collapsed` on first sight); expanding is sticky.
+            // Nested-collapsible state: expanded by default; explicit
+            // user collapses stick in `collapsed`.
             let fx_open = !collapsed.contains(&eff_id);
 
             // Parameter body (nested inside the collapsible card below).
@@ -11178,6 +11175,7 @@ fn render_applied_effects(
                                     100.0,
                                     false,
                                     crate::widgets::ScalarCommit::ShaderLab,
+                                    "",
                                     cx,
                                 )
                             }
@@ -13147,14 +13145,8 @@ impl Render for PropertiesPanel {
                         let tint_black_picker_state = tint_black_color_picker.clone();
                         let tint_white_picker_state = tint_white_color_picker.clone();
                         let shadow_picker_state = shadow_color_picker.clone();
-                        // Applied-effect cards start collapsed: seed ids never
-                        // seen before into fx_collapsed (insert returns true
-                        // only for new ids, so user toggles stick).
-                        for eff in &layer.effects {
-                            if self.fx_seen.insert(eff.id.clone()) {
-                                self.fx_collapsed.insert(eff.id.clone());
-                            }
-                        }
+                        // Applied-effect cards start expanded; explicit user
+                        // collapse choices stick via fx_collapsed.
                         let effects_list = render_applied_effects(
                             &self.state,
                             layer,

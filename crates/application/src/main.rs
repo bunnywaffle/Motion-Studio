@@ -5393,8 +5393,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
 
             assert!(window.find(SharedString::from(format!("effect_toggle_{eff_id}"))).visible());
             assert!(window.find(SharedString::from(format!("effect_delete_{eff_id}"))).visible());
-            // Cards start collapsed: expand via disclosure first.
-            window.click(SharedString::from(format!("effect_disclosure_{eff_id}")), cx);
+            // Cards start expanded: params render without toggling.
             window.render_frame(cx);
             // Value field scrubs (drag/wheel) and types (click): no +/- buttons.
             assert!(window.find(SharedString::from(format!("param_radius_{eff_id}"))).visible());
@@ -6649,8 +6648,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
                 }
             }
             assert!(window.find(disc_id.clone()).visible());
-            window.click(disc_id.clone(), cx);
-            window.render_frame(cx);
+            // Cards start expanded: the placement hint renders without toggling.
             assert!(window.find(hint_id.clone()).visible());
         })
         .expect("update_window failed");
@@ -7294,7 +7292,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             // Adding trim swaps the button for bound Start/End/Offset rows.
             window.click("shape_trim_path_add", cx);
             window.render_frame(cx);
-            for id in ["param_start_fx_trim_path_1", "param_end_fx_trim_path_1", "param_offset_fx_trim_path_1"] {
+            for id in ["stroke_param_start_fx_trim_path_1", "stroke_param_end_fx_trim_path_1", "stroke_param_offset_fx_trim_path_1"] {
                 assert!(window.find(id).visible(), "{id} must appear after Add Trim Path");
             }
             // Position pill cycles center -> outer and commits to the model.
@@ -7567,8 +7565,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         });
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            // Card starts collapsed: scroll into view (the full-width
-            // timeline strip leaves a shorter inspector), then expand.
+            // Cards start expanded: scroll into view to reach rows.
             let disc = SharedString::from(format!("effect_disclosure_{noise}"));
             for _ in 0..8 {
                 window.scroll(
@@ -7581,8 +7578,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
                     break;
                 }
             }
-            window.click(disc, cx);
-            window.render_frame(cx);
+            // Cards start expanded: no toggle needed before clicking rows.
             let id = SharedString::from(format!("fx_bool_monochrome_{noise}"));
             assert!(window.find(id.clone()).visible());
             window.click(id, cx);
@@ -7711,8 +7707,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         });
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            // Card starts collapsed: expand first.
-            window.click(SharedString::from(format!("effect_disclosure_{eff}")), cx);
+            // Cards start expanded.
             window.render_frame(cx);
             // Vec widget: link pill + per-component rows.
             assert!(window.find(SharedString::from(format!("vec_link_{eff}_offset"))).visible());
@@ -7786,8 +7781,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         let hi_row = SharedString::from(format!("param_highlights_cyan_red_{bal}"));
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            // Card starts collapsed: expand first.
-            window.click(SharedString::from(format!("effect_disclosure_{bal}")), cx);
+            // Cards start expanded.
             window.render_frame(cx);
             assert!(window.find(cat.clone()).visible());
             // Default range: Shadows only.
@@ -7844,8 +7838,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         let mirror_toggle = SharedString::from(format!("fx_bool_mirror_{tiler}"));
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            // Card starts collapsed: expand first.
-            window.click(SharedString::from(format!("effect_disclosure_{tiler}")), cx);
+            // Cards start expanded.
             window.render_frame(cx);
             assert!(window.find(mode_trigger.clone()).visible());
             assert!(window.find(cell_trigger.clone()).visible());
@@ -7924,9 +7917,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         });
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            // Cards start collapsed: expand both first.
-            window.click(SharedString::from(format!("effect_disclosure_{ramp}")), cx);
-            window.click(SharedString::from(format!("effect_disclosure_{noise}")), cx);
+            // Cards start expanded.
             window.render_frame(cx);
             // Gradient editor: stops, reverse, selected-stop wheel.
             assert!(window.find(SharedString::from(format!("gradient_stop0_{ramp}"))).visible());
@@ -8145,9 +8136,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         // Drag stop 0 onto the bar center: offset lands near 0.5.
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            // Card starts collapsed: expand first.
-            window.click(SharedString::from(format!("effect_disclosure_{ramp}")), cx);
-            window.render_frame(cx);
+            // Cards start expanded.
             // Dual-ring diamonds: outer ring + color core render per stop.
             for i in 0..2 {
                 assert!(window.find(SharedString::from(format!("gradient_stop{i}_{ramp}"))).visible());
@@ -8421,10 +8410,9 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             out
         });
         cx.run_until_parked();
-        // Card starts collapsed: expand first.
+        // Cards start expanded: params render without toggling.
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            window.click(SharedString::from(format!("effect_disclosure_{eff_id}")), cx);
         })
         .expect("window update");
         for field in ["color_a", "color_b"] {
@@ -10514,19 +10502,19 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             }
             assert!(window.find(card_id.clone()).visible());
             assert!(window.find(disc_id.clone()).visible());
-            // Card starts collapsed: parameter not mounted until expanded.
-            assert!(window.try_find(SharedString::from(format!("param_radius_{blur_id}"))).is_none());
-            // Click disclosure to expand.
+            // Cards start expanded: parameter mounted without toggling.
+            assert!(window.find(SharedString::from(format!("param_radius_{blur_id}"))).visible());
+            // Click disclosure to collapse.
             window.click(disc_id.clone(), cx);
             window.render_frame(cx);
-            assert!(window.find(SharedString::from(format!("param_radius_{blur_id}"))).visible());
-            // Click disclosure again to collapse.
+            assert!(window.try_find(SharedString::from(format!("param_radius_{blur_id}"))).is_none());
+            // Click disclosure again to expand.
             window.click(disc_id, cx);
         })
         .expect("update_window failed");
 
         // Verify collapsed state in PropertiesPanel
-        assert!(app_view.read_with(cx, |view, cx| {
+        assert!(!app_view.read_with(cx, |view, cx| {
             view.panels().properties.read(cx).fx_collapsed.contains(&blur_id)
         }));
     }

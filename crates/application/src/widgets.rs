@@ -35,6 +35,9 @@ pub(crate) enum ScalarCommit {
 /// Scalar row (Slider / Number / Integer / Percentage / Angle): stopwatch +
 /// label on the left, drag-scrub + typed entry on the right. Renders exactly
 /// like the historic per-effect rows (same ids, keys, steps, formats).
+/// `id_prefix` disambiguates repeat renderings of one param (the shape
+/// STROKE section mirrors trim rows also shown in the applied-effects
+/// card); pass "" to keep historic ids.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn widget_scalar(
     state: &Entity<EditorState>,
@@ -48,6 +51,7 @@ pub(crate) fn widget_scalar(
     mult100: f32,
     animated: bool,
     commit: ScalarCommit,
+    id_prefix: &str,
     cx: &App,
 ) -> AnyElement {
     let s_m = state.clone();
@@ -59,7 +63,7 @@ pub(crate) fn widget_scalar(
     let mult = format!("{mult100:.0}");
     let (id, key): (SharedString, String) = match commit {
         ScalarCommit::Effect => (
-            SharedString::from(format!("param_{field}_{eff_id}")),
+            SharedString::from(format!("{id_prefix}param_{field}_{eff_id}")),
             format!("fx:{eff_id}:{field}:{mult}"),
         ),
         ScalarCommit::ShaderLab => (
@@ -757,6 +761,7 @@ pub(crate) fn widget_for_decl(
                 decl.meta.mult100,
                 animated,
                 ScalarCommit::Effect,
+                "",
                 cx,
             ),
             _ => div().into_any_element(),
