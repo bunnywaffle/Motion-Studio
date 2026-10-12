@@ -7222,6 +7222,24 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             }
         });
         assert_eq!(width, 2.0, "scrub commit must set width 2");
+        // Opening the stroke editor seeds opaque into the model when the
+        // stroke is still transparent (otherwise every pick keeps alpha 0
+        // and stays invisible).
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("shape_stroke_wheel", cx);
+            window.render_frame(cx);
+        })
+        .expect("update_window failed");
+        let seeded = app_view.read_with(cx, |view, cx| {
+            let state = view.state().read(cx);
+            let layer = state.active_composition().unwrap().get_layer(state.selected_layer_id.as_deref().unwrap()).unwrap().clone();
+            match layer.source {
+                project::LayerSource::Shape { shape_type: project::ShapeType::Rectangle { stroke, .. } } => stroke.value,
+                _ => panic!("expected rectangle"),
+            }
+        });
+        assert_eq!(seeded.a, 1.0, "opening the editor must seed opaque alpha");
         // Stroke color via the same setter the picker commits through,
         // then rasterize the app's evaluated frame: outline must ink.
         app_view.update(cx, |view, cx| {

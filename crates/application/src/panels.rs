@@ -9100,6 +9100,7 @@ fn shape_stroke_rows(
     let open = stroke_editor.read(cx).expanded;
     let ed_toggle = stroke_editor.clone();
     let ed_render = stroke_editor.clone();
+    let s_seed = state.clone();
     let stroke_row = h_flex()
         .items_center()
         .justify_between()
@@ -9136,8 +9137,22 @@ fn shape_stroke_rows(
                         .bg(if open { cx.theme().accent } else { cx.theme().muted })
                         .child(if open { "Close" } else { "Edit" })
                         .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                            // Opening the editor seeds opaque into the model
+                            // when the stroke is still transparent: picks
+                            // build on the model color, so without this every
+                            // pick would stay invisible (alpha 0 preserved).
+                            // (The A slider can still take it back to 0.)
+                            let seeded = stroke_editor_seed(sc);
+                            if !open && seeded != sc {
+                                s_seed.update(cx, |s, cx| {
+                                    if let Some(lid) = s.selected_layer_id.clone() {
+                                        let _ = s.set_layer_shape_stroke(&lid, seeded);
+                                        cx.notify();
+                                    }
+                                });
+                            }
                             ed_toggle.update(cx, |this, cx| {
-                                this.set_expanded(!open, stroke_editor_seed(sc));
+                                this.set_expanded(!open, seeded);
                                 cx.notify();
                             });
                             if !open {
