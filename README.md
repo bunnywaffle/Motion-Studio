@@ -66,6 +66,20 @@ Details:
 - MP4 and WebM muxing shells out to `ffmpeg`. It is found via `FFMPEG_PATH` or `PATH`; if it is missing, those formats transparently fall back to writing the PNG sequence and report it in the status bar.
 - PNG Still exports exactly the playhead frame; every other format exports the composition's full duration.
 
+## Modifier Graphs — Link Anything to Anything
+
+Every numeric property can carry its own node graph that reshapes its value every frame. Right-click any property row and pick **Modifier Graph…** (the workflow icon opens graphs already bound).
+
+- **Anything drives anything**: a `Driver Link` node reads any property on any layer — transform, opacity, effect params, shape scalars (size, stroke width, dash…), text scalars — and the graph's `Output` writes to the bound property. Driver chains are allowed and cycle-guarded.
+- **Bindable targets**: opacity, transform (position/scale/rotation/anchor), every effect scalar, and shape scalars. (Colors stay out: the graph engine is scalar/float.)
+- **Nodes**: sources (`Base Value In`, `Constant`, `Get Layer Factor`, `Driver Link`), math (`Math` + − × ÷ ^, `Lerp`, `Clamp`, `Remap`, `Smoothstep`, `Stepped`), generators (`Noise`, `Wave` sine/triangle/square), and `Output`.
+- **Starter combos**:
+  - *Progress wipe*: `Get Layer Factor` → `Smoothstep` → `Output` on Trim End or Opacity.
+  - *Pulse*: `Wave (Sine)` → `Output` on Scale or Opacity.
+  - *Jitter*: `Noise` → `Clamp` → `Output` on Position X.
+  - *Follower*: `Driver Link` (leader's Position X) → `Math (+offset)` → `Output` on the follower.
+  - *Quantized spin*: `Get Layer Factor` → `Stepped` → `Remap` 0→360 → `Output` on Rotation.
+
 ## Building and Running
 
 ### Prerequisites
