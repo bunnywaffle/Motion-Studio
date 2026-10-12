@@ -7230,6 +7230,50 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             buf.px.iter().filter(|p| p.r > 0.5 && p.a > 0.1).count()
         });
         assert!(ink > 50, "red stroke must rasterize red pixels, got {ink}");
+        // Same flow for a pen path (closed triangle, fill none): the
+        // outline must rasterize through app evaluation too.
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                let comp = s.active_composition_mut().expect("comp");
+                let fps = comp.frame_rate;
+                let dur = comp.duration;
+                let layer = project::Layer::shape(
+                    "path_stroke_e2e",
+                    "P",
+                    project::ShapeType::Path {
+                        path_data: "M 20 20 L 120 20 L 70 90 Z".to_string(),
+                        fill: project::Property::new("Fill", project::Color::TRANSPARENT),
+                        fill_gradient: None,
+                        stroke: project::Property::new("Stroke", project::Color::rgb(1.0, 0.0, 0.0)),
+                        stroke_width: project::Property::new("Stroke Width", 6.0),
+                        line_cap: "round".to_string(),
+                        line_join: "round".to_string(),
+                        dash: project::Property::new("Dash", 0.0),
+                        dash_gap: project::Property::new("Dash Gap", 0.0),
+                        dash_offset: project::Property::new("Dash Offset", 0.0),
+                    },
+                    project::TimeCode::zero(fps),
+                    dur,
+                );
+                comp.add_layer(layer).expect("add path");
+                s.select_layer(Some("path_stroke_e2e".to_string()));
+                cx.notify();
+            });
+        });
+        let path_ink = app_view.read_with(cx, |view, cx| {
+            use std::collections::HashMap;
+            let state = view.state().read(cx);
+            let eval = state.evaluate_current_frame().expect("eval");
+            let layer = eval.get_layer("path_stroke_e2e").expect("evaluated path").clone();
+            let assets: HashMap<String, std::sync::Arc<image::RgbaImage>> = HashMap::new();
+            let (base_w, base_h) = crate::raster::layer::layer_base_dims(&layer, 1920.0, 1080.0, &assets);
+            let (buf, _avg, _empty) = crate::raster::rasterize_layer(
+                &layer, base_w, base_h, 128, 128, 1920.0, 1080.0, project::Color::BLACK, None, 0.0, 0,
+                false, 5.0, &assets,
+            );
+            buf.px.iter().filter(|p| p.r > 0.5 && p.a > 0.1).count()
+        });
+        assert!(path_ink > 50, "pen path stroke must rasterize red pixels, got {path_ink}");
     }
 
     #[gpui_kit::test]

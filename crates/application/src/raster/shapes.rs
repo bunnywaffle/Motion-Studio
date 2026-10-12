@@ -506,7 +506,7 @@ fn stroke_polyline(
         }
     }
     let bevel_at = |vi: usize| bevels.iter().find(|(i, _)| *i == vi).map(|(_, c)| *c);
-    for si in 0..seg_count {
+    for (si, &seg_start) in starts.iter().enumerate() {
         let (a, b) = (at(si), at(si + 1));
         let len = seg_len(si);
         if len < 1e-6 {
@@ -526,7 +526,7 @@ fn stroke_polyline(
         for j in j0..=j1 {
             let d = j as f32;
             let p = a + dir * d;
-            let s = starts[si] + d;
+            let s = seg_start + d;
             if style.dashed()
                 && (s + style.offset).rem_euclid(period) >= style.dash
             {
