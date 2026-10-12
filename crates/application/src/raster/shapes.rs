@@ -389,6 +389,48 @@ fn joint_geometry(
     }
 }
 
+/// Stroke position against the shape edge (Text-compatible naming).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum StrokePosition {
+    Inner,
+    #[default]
+    Center,
+    Outer,
+}
+
+impl StrokePosition {
+    pub(crate) fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "inner" => Self::Inner,
+            "outer" => Self::Outer,
+            _ => Self::Center,
+        }
+    }
+
+    /// Content-box pad (each side) beyond the shape box: outer strokes
+    /// live entirely outside the edge. Inner/center need none (center
+    /// keeps its legacy in-box clip).
+    pub(crate) fn pad(self, nib: f32) -> f32 {
+        match self {
+            Self::Outer => nib.max(0.0),
+            _ => 0.0,
+        }
+    }
+}
+
+/// Geometric interior mask for inner/outer strokes: `None` draws the
+/// centered walk untouched; otherwise the shape interior is painted
+/// opaque white (SDF fills for primitives, path fill for shaped
+/// outlines) and only the inside (inner) or outside (outer) of the walk
+/// survives. Open paths must resolve to center beforehand.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum StrokeMask<'a> {
+    None,
+    Rect { w: f32, h: f32, cr: f32, inner: bool },
+    Ellipse { rx: f32, ry: f32, inner: bool },
+    Path { svg: &'a str, origin: project::Vec2, inner: bool },
+}
+
 /// Stroke a path through the shared path model (curves flatten to the
 /// polyline, then a styled nib walks it). Closed paths join up.
 /// `origin` is the content-buffer frame origin in path-local coords
@@ -401,6 +443,7 @@ pub(crate) fn stroke_path(
     col: Px,
     origin: project::Vec2,
     style: StrokeStyle,
+    mask: StrokeMask,
 ) {
     let path = project::Path::from_svg(path_data);
     let mut pts = path.flatten(0.5);
@@ -412,10 +455,12 @@ pub(crate) fn stroke_path(
     }
     let paint = Paint::Solid(col);
     stroke_polyline(buf, &pts, path.closed, nib, &paint, style);
+    apply_stroke_mask(buf, mask);
 }
 
 /// Gradient variant of [`stroke_path`]: each nib stamp samples the linear
 /// gradient over the content frame (`frame_size`).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn stroke_path_gradient(
     buf: &mut FloatBuf,
     path_data: &str,
@@ -424,6 +469,7 @@ pub(crate) fn stroke_path_gradient(
     origin: project::Vec2,
     frame_size: (f32, f32),
     style: StrokeStyle,
+    mask: StrokeMask,
 ) {
     let path = project::Path::from_svg(path_data);
     let mut pts = path.flatten(0.5);
@@ -436,6 +482,35 @@ pub(crate) fn stroke_path_gradient(
     let axis = gradient_axis(frame_size.0, frame_size.1, gradient.angle);
     let paint = Paint::Gradient(gradient, axis);
     stroke_polyline(buf, &pts, path.closed, nib, &paint, style);
+    apply_stroke_mask(buf, mask);
+}
+
+/// Constrain a walked stroke to the shape interior (inner) or exterior
+/// (outer) via a geometric white mask. Center passes through untouched.
+fn apply_stroke_mask(buf: &mut FloatBuf, mask: StrokeMask) {
+    let (kind, inner) = match mask {
+        StrokeMask::None => return,
+        StrokeMask::Rect { w, h, cr, inner } => {
+            let mut m = FloatBuf::clear(buf.w, buf.h);
+            fill_rect(&mut m, w, h, cr, Px { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
+            (m, inner)
+        }
+        StrokeMask::Ellipse { rx, ry, inner } => {
+            let mut m = FloatBuf::clear(buf.w, buf.h);
+            fill_ellipse(&mut m, rx, ry, Px { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
+            (m, inner)
+        }
+        StrokeMask::Path { svg, origin, inner } => {
+            let mut m = FloatBuf::clear(buf.w, buf.h);
+            fill_path(&mut m, svg, Px { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }, origin);
+            (m, inner)
+        }
+    };
+    for (d, m) in buf.px.iter_mut().zip(kind.px.iter()) {
+        if (m.a > 0.5) != inner {
+            *d = Px::clear();
+        }
+    }
 }
 
 /// Stroke a polyline with full style support. `pts` are buffer-space

@@ -346,6 +346,9 @@ pub enum ShapeType {
         /// they render exactly as before).
         #[serde(default = "default_shape_stroke_width_zero_prop", deserialize_with = "crate::property::de_property_or_value")]
         stroke_width: Property<f32>,
+        /// Stroke position: "inner" | "center" | "outer" (Text-compatible).
+        #[serde(default = "default_stroke_position")]
+        stroke_position: String,
         /// Line cap: "butt" | "round" | "square".
         #[serde(default = "default_line_cap")]
         line_cap: String,
@@ -381,6 +384,9 @@ pub enum ShapeType {
         /// they render exactly as before).
         #[serde(default = "default_shape_stroke_width_zero_prop", deserialize_with = "crate::property::de_property_or_value")]
         stroke_width: Property<f32>,
+        /// Stroke position: "inner" | "center" | "outer" (Text-compatible).
+        #[serde(default = "default_stroke_position")]
+        stroke_position: String,
         /// Line cap: "butt" | "round" | "square".
         #[serde(default = "default_line_cap")]
         line_cap: String,
@@ -411,6 +417,9 @@ pub enum ShapeType {
         /// Stroke width in px (0 = no stroke).
         #[serde(default = "default_shape_stroke_width_prop", deserialize_with = "crate::property::de_property_or_value")]
         stroke_width: Property<f32>,
+        /// Stroke position: "inner" | "center" | "outer" (Text-compatible).
+        #[serde(default = "default_stroke_position")]
+        stroke_position: String,
         /// Line cap: "butt" | "round" | "square".
         #[serde(default = "default_line_cap")]
         line_cap: String,

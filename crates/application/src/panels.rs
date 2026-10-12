@@ -3609,19 +3609,21 @@ impl Render for CompositionViewerPanel {
                             }
                         }
                         LayerSource::Shape { shape_type } => match shape_type {
-                            ShapeType::Rectangle { width, height, .. } => {
-                                (width.value, height.value)
+                            ShapeType::Rectangle { width, height, stroke_width, stroke_position, .. } => {
+                                // Mirrors layer_base_dims (outer strokes grow
+                                // the box so outlines are never clipped).
+                                let pad = crate::raster::shapes::StrokePosition::from_str(stroke_position).pad(stroke_width.value);
+                                (width.value + 2.0 * pad, height.value + 2.0 * pad)
                             }
-                            ShapeType::Ellipse { radius_x, radius_y, .. } => {
-                                (radius_x.value * 2.0, radius_y.value * 2.0)
+                            ShapeType::Ellipse { radius_x, radius_y, stroke_width, stroke_position, .. } => {
+                                let pad = crate::raster::shapes::StrokePosition::from_str(stroke_position).pad(stroke_width.value);
+                                (radius_x.value * 2.0 + 2.0 * pad, radius_y.value * 2.0 + 2.0 * pad)
                             }
                             ShapeType::Path { path_data, .. } => {
                                 // Frame-aware size (see `Path::frame`): pen
                                 // paths live in arbitrary local coords.
-                                match project::Path::from_svg(path_data).frame(8.0) {
-                                    Some((_, size)) => (size.x, size.y),
-                                    None => (400.0, 300.0),
-                                }
+                                let (_, w, h) = crate::raster::layer::path_frame_padded(path_data, crate::raster::layer::shape_outer_pad(&layer.source));
+                                (w, h)
                             }
                         },
                         LayerSource::Adjustment => (comp_w, comp_h),
@@ -9232,6 +9234,7 @@ fn shape_stroke_section<F>(
     layer: &project::Layer,
     line_cap: &str,
     line_join: &str,
+    stroke_position: &str,
     dash: &project::Property<f32>,
     dash_gap: &project::Property<f32>,
     dash_offset: &project::Property<f32>,
@@ -9245,6 +9248,16 @@ where
     let lid = layer.id.clone();
     let mut body = v_flex()
         .gap_2()
+        .child(shape_enum_pill(
+            state,
+            &lid,
+            SharedString::from("shape_stroke_position"),
+            "Stroke Position",
+            stroke_position,
+            &["inner", "center", "outer"],
+            EditorState::set_layer_shape_stroke_position,
+            cx,
+        ))
         .child(shape_enum_pill(
             state,
             &lid,
@@ -11903,7 +11916,7 @@ impl Render for PropertiesPanel {
             let k = key.to_string();
             window.use_keyed_state(format!("fill_color_editor_{key}"), cx, move |window, cx| {
                 let editor = editor.clone();
-                InspectorColorPicker::new(window, cx, move |color, cx| {
+                InspectorColorPicker::new(window, cx, Some(editor.clone()), move |color, cx| {
                     let k = k.clone();
                     editor.update(cx, |state, cx| {
                         let Some(layer_id) = state.selected_layer_id.clone() else { return; };
@@ -11932,7 +11945,7 @@ impl Render for PropertiesPanel {
         let grad_stop_editor = window.use_keyed_state("grad_stop_color_editor", cx, move |window, cx| {
             let editor = editor_for_grad.clone();
             let panel_ent = panel_for_grad.clone();
-            InspectorColorPicker::new(window, cx, move |color, cx| {
+            InspectorColorPicker::new(window, cx, Some(editor.clone()), move |color, cx| {
                 let grad_target: Option<(String, usize)> = (|| {
                     let p = panel_ent.read(cx);
                     let key = p.active_color_picker.clone()?;
@@ -11955,7 +11968,7 @@ impl Render for PropertiesPanel {
         let editor_for_chroma = self.state.clone();
         let chroma_color_picker = window.use_keyed_state("properties_chroma_color_picker", cx, move |window, cx| {
             let editor = editor_for_chroma.clone();
-            InspectorColorPicker::new(window, cx, move |color, cx| {
+            InspectorColorPicker::new(window, cx, Some(editor.clone()), move |color, cx| {
                 editor.update(cx, |state, cx| {
                     let eff_id = state.selected_layer().and_then(|layer| {
                         layer.effects.iter().find(|e| matches!(e.effect_type, EffectType::ChromaKey { .. })).map(|e| e.id.clone())
@@ -11971,7 +11984,7 @@ impl Render for PropertiesPanel {
         let editor_for_tb = self.state.clone();
         let tint_black_color_picker = window.use_keyed_state("properties_tint_black_color_picker", cx, move |window, cx| {
             let editor = editor_for_tb.clone();
-            InspectorColorPicker::new(window, cx, move |color, cx| {
+            InspectorColorPicker::new(window, cx, Some(editor.clone()), move |color, cx| {
                 editor.update(cx, |state, cx| {
                     let eff_id = state.selected_layer().and_then(|layer| {
                         layer.effects.iter().find(|e| matches!(e.effect_type, EffectType::Tint { .. })).map(|e| e.id.clone())
@@ -11987,7 +12000,7 @@ impl Render for PropertiesPanel {
         let editor_for_tw = self.state.clone();
         let tint_white_color_picker = window.use_keyed_state("properties_tint_white_color_picker", cx, move |window, cx| {
             let editor = editor_for_tw.clone();
-            InspectorColorPicker::new(window, cx, move |color, cx| {
+            InspectorColorPicker::new(window, cx, Some(editor.clone()), move |color, cx| {
                 editor.update(cx, |state, cx| {
                     let eff_id = state.selected_layer().and_then(|layer| {
                         layer.effects.iter().find(|e| matches!(e.effect_type, EffectType::Tint { .. })).map(|e| e.id.clone())
@@ -12003,7 +12016,7 @@ impl Render for PropertiesPanel {
         let editor_for_shadow = self.state.clone();
         let shadow_color_picker = window.use_keyed_state("properties_shadow_color_picker", cx, move |window, cx| {
             let editor = editor_for_shadow.clone();
-            InspectorColorPicker::new(window, cx, move |color, cx| {
+            InspectorColorPicker::new(window, cx, Some(editor.clone()), move |color, cx| {
                 editor.update(cx, |state, cx| {
                     let eff_id = state.selected_layer().and_then(|layer| {
                         layer.effects.iter().find(|e| matches!(e.effect_type, EffectType::DropShadow { .. })).map(|e| e.id.clone())
@@ -12113,7 +12126,7 @@ impl Render for PropertiesPanel {
                 cx,
                 move |window, cx| {
                     let editor = editor.clone();
-                    InspectorColorPicker::new(window, cx, move |color, cx| {
+                    InspectorColorPicker::new(window, cx, Some(editor.clone()), move |color, cx| {
                         let eid_c = eid_w.clone();
                         let field_c = field_w.clone();
                         editor.update(cx, |state, cx| {
@@ -14079,7 +14092,7 @@ impl Render for PropertiesPanel {
                             }
                             LayerSource::Shape { shape_type } => {
                                 match shape_type {
-                                    ShapeType::Rectangle { width, height, corner_radius, fill, stroke, stroke_width, size_linked, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
+                                    ShapeType::Rectangle { width, height, corner_radius, fill, stroke, stroke_width, size_linked, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
                                         let w = width.value;
                                         let h = height.value;
                                         let cr = corner_radius.value;
@@ -14214,6 +14227,7 @@ impl Render for PropertiesPanel {
                                                 layer,
                                                 line_cap,
                                                 line_join,
+                                                stroke_position,
                                                 dash,
                                                 dash_gap,
                                                 dash_offset,
@@ -14228,7 +14242,7 @@ impl Render for PropertiesPanel {
                                             ));
                                         }
                                     }
-                                    ShapeType::Ellipse { radius_x, radius_y, fill, stroke, stroke_width, size_linked, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
+                                    ShapeType::Ellipse { radius_x, radius_y, fill, stroke, stroke_width, size_linked, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
                                         let rx = radius_x.value;
                                         let ry = radius_y.value;
                                         let linked = *size_linked;
@@ -14343,6 +14357,7 @@ impl Render for PropertiesPanel {
                                                 layer,
                                                 line_cap,
                                                 line_join,
+                                                stroke_position,
                                                 dash,
                                                 dash_gap,
                                                 dash_offset,
@@ -14357,7 +14372,7 @@ impl Render for PropertiesPanel {
                                             ));
                                         }
                                     }
-                                    ShapeType::Path { path_data, fill, stroke, stroke_width, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
+                                    ShapeType::Path { path_data, fill, stroke, stroke_width, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
                                         let path_body = v_flex()
                                             .id("shape_properties_section")
                                             .test_support()
@@ -14415,6 +14430,7 @@ impl Render for PropertiesPanel {
                                                 layer,
                                                 line_cap,
                                                 line_join,
+                                                stroke_position,
                                                 dash,
                                                 dash_gap,
                                                 dash_offset,

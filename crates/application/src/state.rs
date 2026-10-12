@@ -257,6 +257,9 @@ pub struct EditorState {
     /// of the full per-pixel interpreter, so scrubbing stays fluid and
     /// full quality lands on release.
     pub preview_fast: bool,
+    /// While true, `checkpoint()` is a no-op: gesture owners (color drags)
+    /// take one undo step on press and suppress per-packet checkpoints.
+    pub suppress_checkpoint: bool,
     /// Sticky preview resolution (View menu). Combined with `preview_fast`
     /// (gestures/playback) to pick raster sizes.
     pub preview_quality: PreviewQuality,
@@ -919,6 +922,7 @@ impl EditorState {
             tool_path_width: 2.0,
             tool_rotate_step: 15.0,
             preview_fast: false,
+            suppress_checkpoint: false,
             preview_quality: PreviewQuality::Auto,
             project_path: None,
             recent_projects: Vec::new(),
@@ -1455,6 +1459,12 @@ impl EditorState {
     /// structural or value mutation (gesture starts, menu actions,
     /// button clicks). Coalesces rapid repeats from the same caller.
     pub fn checkpoint(&mut self) {
+        // Gesture-owned undo (color drags): the gesture takes one step on
+        // press; per-packet checkpoints would clone the whole project per
+        // mouse packet (the color-selector lag) and spam undo history.
+        if self.suppress_checkpoint {
+            return;
+        }
         let entry = HistoryEntry::capture(self);
         // Coalesce: skip when identical to the last checkpoint (bursty
         // wheel ticks and drag frames share one undo step).
@@ -4947,6 +4957,36 @@ impl EditorState {
                     | ShapeType::Path { line_join, .. },
             } => {
                 *line_join = clean;
+                Ok(())
+            }
+            _ => Err("Not a shape layer".to_string()),
+        }
+    }
+
+    /// Set a shape layer's stroke position ("inner" | "center" | "outer";
+    /// Rectangle, Ellipse, Path). Unknown values fall back to center.
+    pub fn set_layer_shape_stroke_position(&mut self, layer_id: &str, value: &str) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let clean = match value.to_lowercase().as_str() {
+            "inner" => "inner",
+            "outer" => "outer",
+            _ => "center",
+        }
+        .to_string();
+        match &mut layer.source {
+            LayerSource::Shape {
+                shape_type:
+                    ShapeType::Rectangle { stroke_position, .. }
+                    | ShapeType::Ellipse { stroke_position, .. }
+                    | ShapeType::Path { stroke_position, .. },
+            } => {
+                *stroke_position = clean;
                 Ok(())
             }
             _ => Err("Not a shape layer".to_string()),
@@ -8986,6 +9026,7 @@ impl EditorState {
                 stroke_width: Property::new("Stroke Width", 0.0),
                 line_cap: "round".to_string(),
                 line_join: "round".to_string(),
+                stroke_position: "center".to_string(),
                 dash: Property::new("Dash", 0.0),
                 dash_gap: Property::new("Dash Gap", 0.0),
                 dash_offset: Property::new("Dash Offset", 0.0),
@@ -9053,6 +9094,7 @@ impl EditorState {
                 stroke_width: Property::new("Stroke Width", 0.0),
                 line_cap: "round".to_string(),
                 line_join: "round".to_string(),
+                stroke_position: "center".to_string(),
                 dash: Property::new("Dash", 0.0),
                 dash_gap: Property::new("Dash Gap", 0.0),
                 dash_offset: Property::new("Dash Offset", 0.0),
@@ -9123,6 +9165,7 @@ impl EditorState {
                 stroke_width: Property::new("Stroke Width", 0.0),
                 line_cap: "round".to_string(),
                 line_join: "round".to_string(),
+                stroke_position: "center".to_string(),
                 dash: Property::new("Dash", 0.0),
                 dash_gap: Property::new("Dash Gap", 0.0),
                 dash_offset: Property::new("Dash Offset", 0.0),
@@ -9365,6 +9408,7 @@ impl EditorState {
                 stroke_width: Property::new("Stroke Width", stroke_width),
                 line_cap: "round".to_string(),
                 line_join: "round".to_string(),
+                stroke_position: "center".to_string(),
                 dash: Property::new("Dash", 0.0),
                 dash_gap: Property::new("Dash Gap", 0.0),
                 dash_offset: Property::new("Dash Offset", 0.0),

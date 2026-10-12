@@ -21,6 +21,7 @@ use gpui_kit::{
     Styled, Subscription, Window,
 };
 use project::Color;
+use crate::state::EditorState;
 
 /// Value-format tabs. ACEScg is deliberately absent: the pipeline has no
 /// ACES backend, so that tab would be decorative.
@@ -60,6 +61,9 @@ type CommitFn = Rc<dyn Fn(Color, &mut App)>;
 
 pub(crate) struct InspectorColorPicker {
     commit: CommitFn,
+    /// Owning editor state (optional): drag gestures checkpoint once here
+    /// and run the canvas degraded; discrete commits are unaffected.
+    state: Option<Entity<EditorState>>,
     tab: ColorEditorTab,
     /// Compact rows collapse the editor behind a toggle; inline sections
     /// (solid fill) render it unconditionally and ignore this.
@@ -78,10 +82,16 @@ pub(crate) struct InspectorColorPicker {
 
 impl InspectorColorPicker {
     /// Build the per-usage editor state. `commit` writes the picked color to
-    /// the model (live, like the previous picker); numeric fields parse and
-    /// commit on change. Call from a `use_keyed_state` init closure, which
-    /// supplies the entity context.
-    pub fn new<F>(window: &mut Window, cx: &mut Context<Self>, commit: F) -> Self
+    /// the model on every change (drag packets included); pass the editor
+    /// state so drag gestures can checkpoint once + degrade the canvas.
+    /// Call from a `use_keyed_state` init closure, which supplies the
+    /// entity context.
+    pub fn new<F>(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        state: Option<Entity<EditorState>>,
+        commit: F,
+    ) -> Self
     where
         F: Fn(Color, &mut App) + 'static,
     {
@@ -92,6 +102,7 @@ impl InspectorColorPicker {
         }
         let mut this = Self {
             commit,
+            state,
             tab: ColorEditorTab::Rgb,
             expanded: false,
             orig: None,
@@ -833,6 +844,16 @@ impl InspectorColorPicker {
             this.dragging = Some(ctl);
             cx.notify();
         });
+        // One undo step per gesture (taken here, not per packet) + degraded
+        // canvas while dragging, mirroring every other scrub gesture.
+        if let Some(state) = editor.read(cx).state.clone() {
+            state.update(cx, |s, cx| {
+                s.checkpoint();
+                s.preview_fast = true;
+                s.suppress_checkpoint = true;
+                cx.notify();
+            });
+        }
         Self::drag_to(editor, ctl, pos, window, cx);
     }
 
@@ -842,6 +863,13 @@ impl InspectorColorPicker {
                 cx.notify();
             }
         });
+        if let Some(state) = editor.read(cx).state.clone() {
+            state.update(cx, |s, cx| {
+                s.suppress_checkpoint = false;
+                s.preview_fast = false;
+                cx.notify();
+            });
+        }
     }
 }
 

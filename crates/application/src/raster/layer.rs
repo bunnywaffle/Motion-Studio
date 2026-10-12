@@ -18,7 +18,7 @@ use super::stock::apply_stock;
 use super::pixel::{gradient_axis, sample_fill_gradient, Px};
 use super::shapes::{
     fill_ellipse, fill_ellipse_gradient, fill_path, fill_path_gradient, fill_rect,
-    fill_rect_gradient, stroke_path, stroke_path_gradient, StrokeStyle,
+    fill_rect_gradient, stroke_path, stroke_path_gradient, StrokeMask, StrokePosition, StrokeStyle,
 };
 use super::text::{StrokePos, TextSpec, raster_text};
 
@@ -111,7 +111,7 @@ pub fn raster_content(
             let (w, h) = (base_w.max(2.0), base_h.max(2.0));
             let mut buf = FloatBuf::clear(w.ceil() as u32, h.ceil() as u32);
             match shape_type {
-                ShapeType::Rectangle { corner_radius, fill, fill_gradient, stroke, stroke_width, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
+                ShapeType::Rectangle { corner_radius, fill, fill_gradient, stroke, stroke_width, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
                     // Corner radius is stored unscaled; content is unscaled.
                     // Strokes run over a rounded-rectangle path so corners
                     // match the fill exactly. An enabled Trim Path effect
@@ -119,6 +119,7 @@ pub fn raster_content(
                     // never expand bounds, so the fixed box stays valid);
                     // without trim the fast SDF fills apply.
                     let style = StrokeStyle::from_shape(line_cap, line_join, dash.value, dash_gap.value, dash_offset.value);
+                    let pos = StrokePosition::from_str(stroke_position);
                     let nib = stroke_width.value.max(0.0);
                     let do_fill = fill.value.a > 0.0;
                     let do_stroke = nib > 0.0
@@ -128,52 +129,60 @@ pub fn raster_content(
                     } else {
                         fill.value
                     };
-                    let base = project::Path::rounded_rectangle(0.0, 0.0, w, h, corner_radius.value);
-                    if has_trim_path(&layer.effects) {
-                        let shaped_svg = apply_trim_only(&base, &layer.effects).to_svg();
-                        match fill_gradient {
-                            Some(gradient) => {
-                                if do_fill {
-                                    fill_path_gradient(&mut buf, &shaped_svg, gradient, Vec2::ZERO, (w, h));
-                                }
-                                if do_stroke {
-                                    stroke_path_gradient(&mut buf, &shaped_svg, nib, gradient, Vec2::ZERO, (w, h), style);
-                                }
-                            }
-                            None => {
-                                if do_fill {
-                                    fill_path(&mut buf, &shaped_svg, Px::from_color(fill.value), Vec2::ZERO);
-                                }
-                                if do_stroke {
-                                    stroke_path(&mut buf, &shaped_svg, nib, Px::from_color(sc), Vec2::ZERO, style);
-                                }
+                    // Outer strokes live outside the edge: the content box
+                    // grows by the nib on every side (see layer_base_dims)
+                    // and the shape draws shifted by the pad.
+                    let pad = pos.pad(nib);
+                    let (sw, sh) = ((w - 2.0 * pad).max(2.0), (h - 2.0 * pad).max(2.0));
+                    let base = project::Path::rounded_rectangle(pad, pad, sw, sh, corner_radius.value);
+                    let use_path = pad > 0.0 || has_trim_path(&layer.effects);
+                    let shaped_svg = if use_path {
+                        apply_trim_only(&base, &layer.effects).to_svg()
+                    } else {
+                        base.to_svg()
+                    };
+                    let mask = match pos {
+                        StrokePosition::Center => StrokeMask::None,
+                        StrokePosition::Inner => {
+                            if use_path {
+                                StrokeMask::Path { svg: &shaped_svg, origin: Vec2::ZERO, inner: true }
+                            } else {
+                                StrokeMask::Rect { w, h, cr: corner_radius.value, inner: true }
                             }
                         }
-                    } else {
-                        let rr_svg = base.to_svg();
-                        match fill_gradient {
-                            Some(gradient) => {
-                                if do_fill {
+                        StrokePosition::Outer => StrokeMask::Path { svg: &shaped_svg, origin: Vec2::ZERO, inner: false },
+                    };
+                    match fill_gradient {
+                        Some(gradient) => {
+                            if do_fill {
+                                if use_path {
+                                    fill_path_gradient(&mut buf, &shaped_svg, gradient, Vec2::ZERO, (sw, sh));
+                                } else {
                                     fill_rect_gradient(&mut buf, w, h, corner_radius.value, gradient);
                                 }
-                                if do_stroke {
-                                    stroke_path_gradient(&mut buf, &rr_svg, nib, gradient, Vec2::ZERO, (w, h), style);
-                                }
                             }
-                            None => {
-                                if do_fill {
+                            if do_stroke {
+                                stroke_path_gradient(&mut buf, &shaped_svg, nib, gradient, Vec2::ZERO, (sw, sh), style, mask);
+                            }
+                        }
+                        None => {
+                            if do_fill {
+                                if use_path {
+                                    fill_path(&mut buf, &shaped_svg, Px::from_color(fill.value), Vec2::ZERO);
+                                } else {
                                     fill_rect(&mut buf, w, h, corner_radius.value, Px::from_color(fill.value));
                                 }
-                                if do_stroke {
-                                    stroke_path(&mut buf, &rr_svg, nib, Px::from_color(sc), Vec2::ZERO, style);
-                                }
+                            }
+                            if do_stroke {
+                                stroke_path(&mut buf, &shaped_svg, nib, Px::from_color(sc), Vec2::ZERO, style, mask);
                             }
                         }
                     }
                 }
-                ShapeType::Ellipse { fill, fill_gradient, stroke, stroke_width, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
+                ShapeType::Ellipse { fill, fill_gradient, stroke, stroke_width, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
                     // Same trim routing as Rectangle (see above).
                     let style = StrokeStyle::from_shape(line_cap, line_join, dash.value, dash_gap.value, dash_offset.value);
+                    let pos = StrokePosition::from_str(stroke_position);
                     let nib = stroke_width.value.max(0.0);
                     let do_fill = fill.value.a > 0.0;
                     let do_stroke = nib > 0.0
@@ -183,50 +192,54 @@ pub fn raster_content(
                     } else {
                         fill.value
                     };
-                    let base = project::Path::ellipse(w / 2.0, h / 2.0, w / 2.0, h / 2.0);
-                    if has_trim_path(&layer.effects) {
-                        let shaped_svg = apply_trim_only(&base, &layer.effects).to_svg();
-                        match fill_gradient {
-                            Some(gradient) => {
-                                if do_fill {
-                                    fill_path_gradient(&mut buf, &shaped_svg, gradient, Vec2::ZERO, (w, h));
-                                }
-                                if do_stroke {
-                                    stroke_path_gradient(&mut buf, &shaped_svg, nib, gradient, Vec2::ZERO, (w, h), style);
-                                }
-                            }
-                            None => {
-                                if do_fill {
-                                    fill_path(&mut buf, &shaped_svg, Px::from_color(fill.value), Vec2::ZERO);
-                                }
-                                if do_stroke {
-                                    stroke_path(&mut buf, &shaped_svg, nib, Px::from_color(sc), Vec2::ZERO, style);
-                                }
+                    let pad = pos.pad(nib);
+                    let (sw, sh) = ((w - 2.0 * pad).max(2.0), (h - 2.0 * pad).max(2.0));
+                    let base = project::Path::ellipse(pad + sw / 2.0, pad + sh / 2.0, sw / 2.0, sh / 2.0);
+                    let use_path = pad > 0.0 || has_trim_path(&layer.effects);
+                    let shaped_svg = if use_path {
+                        apply_trim_only(&base, &layer.effects).to_svg()
+                    } else {
+                        base.to_svg()
+                    };
+                    let mask = match pos {
+                        StrokePosition::Center => StrokeMask::None,
+                        StrokePosition::Inner => {
+                            if use_path {
+                                StrokeMask::Path { svg: &shaped_svg, origin: Vec2::ZERO, inner: true }
+                            } else {
+                                StrokeMask::Ellipse { rx: w / 2.0, ry: h / 2.0, inner: true }
                             }
                         }
-                    } else {
-                        let el_svg = base.to_svg();
-                        match fill_gradient {
-                            Some(gradient) => {
-                                if do_fill {
+                        StrokePosition::Outer => StrokeMask::Path { svg: &shaped_svg, origin: Vec2::ZERO, inner: false },
+                    };
+                    match fill_gradient {
+                        Some(gradient) => {
+                            if do_fill {
+                                if use_path {
+                                    fill_path_gradient(&mut buf, &shaped_svg, gradient, Vec2::ZERO, (sw, sh));
+                                } else {
                                     fill_ellipse_gradient(&mut buf, w / 2.0, h / 2.0, gradient);
                                 }
-                                if do_stroke {
-                                    stroke_path_gradient(&mut buf, &el_svg, nib, gradient, Vec2::ZERO, (w, h), style);
-                                }
                             }
-                            None => {
-                                if do_fill {
+                            if do_stroke {
+                                stroke_path_gradient(&mut buf, &shaped_svg, nib, gradient, Vec2::ZERO, (sw, sh), style, mask);
+                            }
+                        }
+                        None => {
+                            if do_fill {
+                                if use_path {
+                                    fill_path(&mut buf, &shaped_svg, Px::from_color(fill.value), Vec2::ZERO);
+                                } else {
                                     fill_ellipse(&mut buf, w / 2.0, h / 2.0, Px::from_color(fill.value));
                                 }
-                                if do_stroke {
-                                    stroke_path(&mut buf, &el_svg, nib, Px::from_color(sc), Vec2::ZERO, style);
-                                }
+                            }
+                            if do_stroke {
+                                stroke_path(&mut buf, &shaped_svg, nib, Px::from_color(sc), Vec2::ZERO, style, mask);
                             }
                         }
                     }
                 }
-                ShapeType::Path { path_data, fill, fill_gradient, stroke, stroke_width, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
+                ShapeType::Path { path_data, fill, fill_gradient, stroke, stroke_width, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
                     // Vector path effects run pre-flatten on the parsed
                     // path; re-serialize for the SVG-string rasterizers.
                     let shaped = apply_path_fx(
@@ -234,24 +247,34 @@ pub fn raster_content(
                         &layer.effects,
                     );
                     let shaped_svg = shaped.to_svg();
-                    let (origin, fw, fh) = match shaped.frame(8.0) {
-                        Some((origin, size)) => (origin, size.x, size.y),
-                        None => (Vec2::ZERO, 400.0, 300.0),
-                    };
                     // Transparent stroke = legacy look (outline in the fill
                     // color); width 0 (or transparent fill+stroke) skips.
                     let style = StrokeStyle::from_shape(line_cap, line_join, dash.value, dash_gap.value, dash_offset.value);
+                    let pos = StrokePosition::from_str(stroke_position);
                     let nib = stroke_width.value.max(0.0);
                     let do_fill = fill.value.a > 0.0;
                     let do_stroke = nib > 0.0
                         && (stroke.value.a > 0.0 || fill.value.a > 0.0);
+                    // Outer strokes reach past the fixed 8px frame pad:
+                    // grow it by the nib (layer_base_dims/local_box use the
+                    // same pad via path_frame_padded, so boxes stay exact).
+                    let (origin, fw, fh) = match shaped.frame(8.0 + pos.pad(nib)) {
+                        Some((origin, size)) => (origin, size.x, size.y),
+                        None => (Vec2::ZERO, 400.0, 300.0),
+                    };
+                    // Inner/outer only make sense on closed paths.
+                    let mask = match (pos, shaped.closed) {
+                        (StrokePosition::Inner, true) => StrokeMask::Path { svg: &shaped_svg, origin, inner: true },
+                        (StrokePosition::Outer, true) => StrokeMask::Path { svg: &shaped_svg, origin, inner: false },
+                        _ => StrokeMask::None,
+                    };
                     match fill_gradient {
                         Some(gradient) => {
                             if do_fill {
                                 fill_path_gradient(&mut buf, &shaped_svg, gradient, origin, (fw, fh));
                             }
                             if do_stroke {
-                                stroke_path_gradient(&mut buf, &shaped_svg, nib, gradient, origin, (fw, fh), style);
+                                stroke_path_gradient(&mut buf, &shaped_svg, nib, gradient, origin, (fw, fh), style, mask);
                             }
                         }
                         None => {
@@ -276,6 +299,7 @@ pub fn raster_content(
                                     Px::from_color(sc),
                                     origin,
                                     style,
+                                    mask,
                                 );
                             }
                         }
@@ -582,29 +606,29 @@ pub fn layer_cache_key(
             }
         }
         LayerSource::Shape { shape_type } => match shape_type {
-            ShapeType::Rectangle { width, height, corner_radius, fill, fill_gradient, stroke, stroke_width, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
+            ShapeType::Rectangle { width, height, corner_radius, fill, fill_gradient, stroke, stroke_width, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
                 4u8.hash(&mut h);
                 width.value.to_bits().hash(&mut h);
                 height.value.to_bits().hash(&mut h);
                 corner_radius.value.to_bits().hash(&mut h);
                 color_hash(&fill.value, &mut h);
                 gradient_hash(fill_gradient, &mut h);
-                shape_stroke_hash(stroke, stroke_width, line_cap, line_join, dash, dash_gap, dash_offset, &mut h);
+                shape_stroke_hash(stroke, stroke_width, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, &mut h);
             }
-            ShapeType::Ellipse { radius_x, radius_y, fill, fill_gradient, stroke, stroke_width, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
+            ShapeType::Ellipse { radius_x, radius_y, fill, fill_gradient, stroke, stroke_width, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
                 5u8.hash(&mut h);
                 radius_x.value.to_bits().hash(&mut h);
                 radius_y.value.to_bits().hash(&mut h);
                 color_hash(&fill.value, &mut h);
                 gradient_hash(fill_gradient, &mut h);
-                shape_stroke_hash(stroke, stroke_width, line_cap, line_join, dash, dash_gap, dash_offset, &mut h);
+                shape_stroke_hash(stroke, stroke_width, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, &mut h);
             }
-            ShapeType::Path { path_data, fill, fill_gradient, stroke, stroke_width, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
+            ShapeType::Path { path_data, fill, fill_gradient, stroke, stroke_width, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
                 6u8.hash(&mut h);
                 path_data.hash(&mut h);
                 color_hash(&fill.value, &mut h);
                 gradient_hash(fill_gradient, &mut h);
-                shape_stroke_hash(stroke, stroke_width, line_cap, line_join, dash, dash_gap, dash_offset, &mut h);
+                shape_stroke_hash(stroke, stroke_width, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, &mut h);
             }
         },
         LayerSource::Adjustment => {
@@ -664,6 +688,7 @@ fn color_hash(c: &Color, h: &mut DefaultHasher) {
 fn shape_stroke_hash(
     stroke: &project::Property<Color>,
     stroke_width: &project::Property<f32>,
+    stroke_position: &str,
     line_cap: &str,
     line_join: &str,
     dash: &project::Property<f32>,
@@ -673,6 +698,7 @@ fn shape_stroke_hash(
 ) {
     color_hash(&stroke.value, h);
     stroke_width.value.to_bits().hash(h);
+    stroke_position.hash(h);
     line_cap.hash(h);
     line_join.hash(h);
     dash.value.to_bits().hash(h);
@@ -1561,7 +1587,15 @@ pub fn blit_affine(
 /// coords. The content buffer spans `origin .. origin + (w, h)` (tight path
 /// bounds plus pad); drawing subtracts `origin` and world boxes are built
 /// from this frame. Non-path layers use `(ZERO, base_w, base_h)`.
-pub(crate) fn path_frame(path_data: &str) -> (Vec2, f32, f32) {    match project::Path::from_svg(path_data).frame(8.0) {
+pub(crate) fn path_frame(path_data: &str) -> (Vec2, f32, f32) {
+    path_frame_padded(path_data, 0.0)
+}
+
+/// Pen-path content frame with extra pad (outer strokes reach past the
+/// fixed 8px pad). All box/dims/origin callers must use the same extra
+/// (see `shape_outer_pad`) so mapping stays exact.
+pub(crate) fn path_frame_padded(path_data: &str, extra: f32) -> (Vec2, f32, f32) {
+    match project::Path::from_svg(path_data).frame(8.0 + extra.max(0.0)) {
         Some((origin, size)) => (origin, size.x, size.y),
         None => (Vec2::ZERO, 400.0, 300.0),
     }
@@ -1575,6 +1609,19 @@ fn has_trim_path(effects: &[EvaluatedEffect]) -> bool {
     effects.iter().any(|eff| {
         eff.enabled && matches!(eff.effect_type, EvaluatedEffectType::TrimPath { .. })
     })
+}
+
+/// Extra frame pad for outer strokes (the fixed 8px path pad covers
+/// centered/inner nibs up to 8px; outer strokes live fully outside).
+pub(crate) fn shape_outer_pad(source: &LayerSource) -> f32 {
+    match source {
+        LayerSource::Shape { shape_type: ShapeType::Rectangle { stroke_width, stroke_position, .. }
+            | ShapeType::Ellipse { stroke_width, stroke_position, .. }
+            | ShapeType::Path { stroke_width, stroke_position, .. } } => {
+            StrokePosition::from_str(stroke_position).pad(stroke_width.value)
+        }
+        _ => 0.0,
+    }
 }
 
 /// Trim-only subset of [`apply_path_fx`] for Rectangle/Ellipse shapes:
@@ -1736,7 +1783,7 @@ fn raster_instanced(
 pub fn layer_local_box(layer: &EvaluatedLayer, base_w: f32, base_h: f32) -> BoundingBox2D {
     match &layer.source {
         LayerSource::Shape { shape_type: ShapeType::Path { path_data, .. } } => {
-            let (origin, w, h) = path_frame(path_data);
+            let (origin, w, h) = path_frame_padded(path_data, shape_outer_pad(&layer.source));
             BoundingBox2D::from_origin_size(origin, Vec2::new(w, h))
         }
         _ => BoundingBox2D::from_origin_size(Vec2::ZERO, Vec2::new(base_w, base_h)),
@@ -1749,7 +1796,7 @@ pub fn layer_local_box(layer: &EvaluatedLayer, base_w: f32, base_h: f32) -> Boun
 pub fn layer_content_origin(source: &LayerSource) -> Vec2 {
     match source {
         LayerSource::Shape { shape_type: ShapeType::Path { path_data, .. } } => {
-            path_frame(path_data).0
+            path_frame_padded(path_data, shape_outer_pad(source)).0
         }
         _ => Vec2::ZERO,
     }
@@ -1935,14 +1982,21 @@ pub(crate) fn layer_base_dims(
             ((len * fs * 0.6 + 40.0 + sw * 2.0).max(100.0), (fs * 1.4 + 20.0 + sw * 2.0).max(40.0))
         }
         LayerSource::Shape { shape_type } => match shape_type {
-            ShapeType::Rectangle { width, height, .. } => (width.value, height.value),
-            ShapeType::Ellipse { radius_x, radius_y, .. } => {
-                (radius_x.value * 2.0, radius_y.value * 2.0)
+            ShapeType::Rectangle { width, height, stroke_width, stroke_position, .. } => {
+                // Outer strokes live outside the edge: grow the box so the
+                // outline is never clipped (raster_content draws shifted).
+                let pad = StrokePosition::from_str(stroke_position).pad(stroke_width.value);
+                (width.value + 2.0 * pad, height.value + 2.0 * pad)
+            }
+            ShapeType::Ellipse { radius_x, radius_y, stroke_width, stroke_position, .. } => {
+                let pad = StrokePosition::from_str(stroke_position).pad(stroke_width.value);
+                (radius_x.value * 2.0 + 2.0 * pad, radius_y.value * 2.0 + 2.0 * pad)
             }
             ShapeType::Path { path_data, .. } => {
                 // Frame-aware bounds (see `path_frame`): pen paths live in
-                // arbitrary local coords, not inside (0, 0, size).
-                let (_, w, h) = path_frame(path_data);
+                // arbitrary local coords, not inside (0, 0, size). Outer
+                // strokes grow the frame (same pad as the rasterizer).
+                let (_, w, h) = path_frame_padded(path_data, shape_outer_pad(&layer.source));
                 (w, h)
             }
         },
@@ -2193,6 +2247,7 @@ mod tests {
                 stroke_width: project::Property::new("Stroke Width", 2.0),
                 line_cap: "round".to_string(),
                 line_join: "round".to_string(),
+                stroke_position: "center".to_string(),
                 dash: project::Property::new("Dash", 0.0),
                 dash_gap: project::Property::new("Dash Gap", 0.0),
                 dash_offset: project::Property::new("Dash Offset", 0.0),
@@ -2281,6 +2336,7 @@ mod tests {
                 size_linked: true,
                 line_cap: "round".to_string(),
                 line_join: "round".to_string(),
+                stroke_position: "center".to_string(),
                 dash: project::Property::new("Dash", 0.0),
                 dash_gap: project::Property::new("Dash Gap", 0.0),
                 dash_offset: project::Property::new("Dash Offset", 0.0),
@@ -2330,6 +2386,7 @@ mod tests {
                 stroke_width: project::Property::new("Stroke Width", 2.0),
                 line_cap: "round".to_string(),
                 line_join: "round".to_string(),
+                stroke_position: "center".to_string(),
                 dash: project::Property::new("Dash", 0.0),
                 dash_gap: project::Property::new("Dash Gap", 0.0),
                 dash_offset: project::Property::new("Dash Offset", 0.0),
@@ -2410,6 +2467,7 @@ mod tests {
                 stroke_width: project::Property::new("Stroke Width", 4.0),
                 line_cap: line_cap.to_string(),
                 line_join: line_join.to_string(),
+                stroke_position: "center".to_string(),
                 dash: project::Property::new("Dash", dash),
                 dash_gap: project::Property::new("Dash Gap", dash_gap),
                 dash_offset: project::Property::new("Dash Offset", dash_offset),
@@ -2485,6 +2543,7 @@ mod tests {
                     stroke_width: project::Property::new("Stroke Width", 4.0),
                     line_cap: "round".to_string(),
                     line_join: join.to_string(),
+                    stroke_position: "center".to_string(),
                     dash: project::Property::new("Dash", 0.0),
                     dash_gap: project::Property::new("Dash Gap", 0.0),
                     dash_offset: project::Property::new("Dash Offset", 0.0),
@@ -2509,6 +2568,102 @@ mod tests {
     }
 
     #[test]
+    fn stroke_position_inner_keeps_center_outer_drops() {
+        use std::collections::HashMap;
+        // Red fill + black inner stroke (width 8): edge band black,
+        // deep center red.
+        let mut project = Project::new("p", "P");
+        let mut comp = Composition::hd_1080p_30fps("c", "C", 5.0);
+        let tc = TimeCode::from_frames(0, 30.0);
+        let out = TimeCode::from_frames(150, 30.0);
+        comp.add_layer(project::Layer::shape(
+            "l1",
+            "L",
+            project::ShapeType::Rectangle {
+                width: project::Property::new("W", 60.0),
+                height: project::Property::new("H", 60.0),
+                corner_radius: project::Property::new("R", 0.0),
+                size_linked: true,
+                fill: project::Property::new("Fill", Color::rgb(1.0, 0.0, 0.0)),
+                fill_gradient: None,
+                stroke: project::Property::new("Stroke", Color::rgb(0.0, 0.0, 0.0)),
+                stroke_width: project::Property::new("Stroke Width", 8.0),
+                stroke_position: "inner".to_string(),
+                line_cap: "round".to_string(),
+                line_join: "round".to_string(),
+                dash: project::Property::new("Dash", 0.0),
+                dash_gap: project::Property::new("Dash Gap", 0.0),
+                dash_offset: project::Property::new("Dash Offset", 0.0),
+            },
+            tc,
+            out,
+        ))
+        .unwrap();
+        project.add_composition(comp).unwrap();
+        let layer = eval_first(&project, "c");
+        let assets: HashMap<String, std::sync::Arc<image::RgbaImage>> = HashMap::new();
+        let (base_w, base_h) = layer_base_dims(&layer, 1920.0, 1080.0, &assets);
+        let (buf, _avg, empty) = rasterize_layer(
+            &layer, base_w, base_h, 64, 64, 1920.0, 1080.0, Color::BLACK, None, 0.0, 0,
+            false, 5.0, &assets,
+        );
+        assert!(!empty);
+        let edge = buf.get(3, 32);
+        assert!(edge.a > 0.5 && edge.r < 0.5, "inner edge band must be black: {edge:?}");
+        let center = buf.get(32, 32);
+        assert!(center.r > 0.9 && center.g < 0.1, "center must stay red fill: {center:?}");
+    }
+
+    #[test]
+    fn stroke_position_outer_expands_box() {
+        use std::collections::HashMap;
+        // Transparent fill + red outer stroke (width 8) on a 60px rect:
+        // the box grows to 76, the interior stays empty, the outer band inks.
+        let mut project = Project::new("p", "P");
+        let mut comp = Composition::hd_1080p_30fps("c", "C", 5.0);
+        let tc = TimeCode::from_frames(0, 30.0);
+        let out = TimeCode::from_frames(150, 30.0);
+        comp.add_layer(project::Layer::shape(
+            "l1",
+            "L",
+            project::ShapeType::Rectangle {
+                width: project::Property::new("W", 60.0),
+                height: project::Property::new("H", 60.0),
+                corner_radius: project::Property::new("R", 0.0),
+                size_linked: true,
+                fill: project::Property::new("Fill", Color::TRANSPARENT),
+                fill_gradient: None,
+                stroke: project::Property::new("Stroke", Color::rgb(1.0, 0.0, 0.0)),
+                stroke_width: project::Property::new("Stroke Width", 8.0),
+                stroke_position: "outer".to_string(),
+                line_cap: "round".to_string(),
+                line_join: "round".to_string(),
+                dash: project::Property::new("Dash", 0.0),
+                dash_gap: project::Property::new("Dash Gap", 0.0),
+                dash_offset: project::Property::new("Dash Offset", 0.0),
+            },
+            tc,
+            out,
+        ))
+        .unwrap();
+        project.add_composition(comp).unwrap();
+        let layer = eval_first(&project, "c");
+        let assets: HashMap<String, std::sync::Arc<image::RgbaImage>> = HashMap::new();
+        let (base_w, base_h) = layer_base_dims(&layer, 1920.0, 1080.0, &assets);
+        assert!((base_w - 76.0).abs() < 1e-3 && (base_h - 76.0).abs() < 1e-3, "outer box must grow by 2*nib: {base_w}x{base_h}");
+        let (buf, _avg, empty) = rasterize_layer(
+            &layer, base_w, base_h, 76, 76, 1920.0, 1080.0, Color::BLACK, None, 0.0, 0,
+            false, 5.0, &assets,
+        );
+        assert!(!empty, "outer stroke must hold ink");
+        // Outer band (pad region, x < 8) inks; deep interior stays empty.
+        let band = buf.get(3, 38);
+        assert!(band.a > 0.1 && band.r > 0.5, "outer band must ink: {band:?}");
+        assert!(buf.get(38, 38).a < 0.05, "interior must stay transparent");
+        assert!(buf.get(14, 38).a < 0.05, "shape interior (no fill) must stay transparent");
+    }
+
+    #[test]
     fn trim_path_applies_to_rect_stroke() {
         use std::collections::HashMap;
         let mut project = Project::new("p", "P");
@@ -2529,6 +2684,7 @@ mod tests {
                 stroke_width: project::Property::new("Stroke Width", 4.0),
                 line_cap: "round".to_string(),
                 line_join: "round".to_string(),
+                stroke_position: "center".to_string(),
                 dash: project::Property::new("Dash", 0.0),
                 dash_gap: project::Property::new("Dash Gap", 0.0),
                 dash_offset: project::Property::new("Dash Offset", 0.0),
@@ -2588,7 +2744,7 @@ mod tests {
         // regression: the key used to hash fill only).
         let tc = TimeCode::from_frames(0, 30.0);
         let out = TimeCode::from_frames(150, 30.0);
-        let rect = |sw: f32, cap: &str| {
+        let rect = |sw: f32, cap: &str, pos: &str| {
             project::Layer::shape(
                 "l1",
                 "L",
@@ -2603,6 +2759,7 @@ mod tests {
                     stroke_width: project::Property::new("Stroke Width", sw),
                     line_cap: cap.to_string(),
                     line_join: "round".to_string(),
+                    stroke_position: pos.to_string(),
                     dash: project::Property::new("Dash", 0.0),
                     dash_gap: project::Property::new("Dash Gap", 0.0),
                     dash_offset: project::Property::new("Dash Offset", 0.0),
@@ -2619,10 +2776,11 @@ mod tests {
             let eval = eval_first(&p, "c");
             layer_cache_key(&eval, 0, 64, 64, false, 0)
         };
-        let base = key_of(&rect(4.0, "round"));
-        assert_eq!(base, key_of(&rect(4.0, "round")), "identical strokes share cache");
-        assert_ne!(base, key_of(&rect(8.0, "round")), "width must invalidate");
-        assert_ne!(base, key_of(&rect(4.0, "butt")), "cap must invalidate");
+        let base = key_of(&rect(4.0, "round", "center"));
+        assert_eq!(base, key_of(&rect(4.0, "round", "center")), "identical strokes share cache");
+        assert_ne!(base, key_of(&rect(8.0, "round", "center")), "width must invalidate");
+        assert_ne!(base, key_of(&rect(4.0, "butt", "center")), "cap must invalidate");
+        assert_ne!(base, key_of(&rect(4.0, "round", "outer")), "position must invalidate");
     }
 
     #[test]
@@ -2641,6 +2799,7 @@ mod tests {
                 size_linked: true,
                 line_cap: "round".to_string(),
                 line_join: "round".to_string(),
+                stroke_position: "center".to_string(),
                 dash: project::Property::new("Dash", 0.0),
                 dash_gap: project::Property::new("Dash Gap", 0.0),
                 dash_offset: project::Property::new("Dash Offset", 0.0),
@@ -2658,6 +2817,7 @@ mod tests {
                 size_linked: true,
                 line_cap: "round".to_string(),
                 line_join: "round".to_string(),
+                stroke_position: "center".to_string(),
                 dash: project::Property::new("Dash", 0.0),
                 dash_gap: project::Property::new("Dash Gap", 0.0),
                 dash_offset: project::Property::new("Dash Offset", 0.0),
@@ -2672,6 +2832,7 @@ mod tests {
                 size_linked: true,
                 line_cap: "round".to_string(),
                 line_join: "round".to_string(),
+                stroke_position: "center".to_string(),
                 dash: project::Property::new("Dash", 0.0),
                 dash_gap: project::Property::new("Dash Gap", 0.0),
                 dash_offset: project::Property::new("Dash Offset", 0.0),

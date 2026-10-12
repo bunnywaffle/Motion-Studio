@@ -6977,8 +6977,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
     }
 
     #[test]
-    fn test_shape_stroke_params_and_linked_size() {
-        use crate::state::EditorState;
+    fn test_shape_stroke_params_and_linked_size() {        use crate::state::EditorState;
         use project::LayerSource;
 
         let mut state = EditorState::new();
@@ -6990,14 +6989,25 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         assert!(state.set_layer_shape_line_cap(&rid, "butt").is_ok());
         assert!(state.set_layer_shape_line_join(&rid, "bevel").is_ok());
         assert!(state.set_layer_shape_line_cap(&rid, "weird").is_ok());
+        assert!(state.set_layer_shape_stroke_position(&rid, "outer").is_ok());
+        assert!(state.set_layer_shape_stroke_position(&rid, "weird").is_ok());
         let shape_of = |s: &EditorState| {
             s.active_composition().unwrap().get_layer(&rid).unwrap().source.clone()
         };
         match shape_of(&state) {
-            LayerSource::Shape { shape_type: project::ShapeType::Rectangle { dash, line_cap, line_join, .. } } => {
+            LayerSource::Shape { shape_type: project::ShapeType::Rectangle { dash, line_cap, line_join, stroke_position, .. } } => {
                 assert_eq!(dash.value, 6.0);
                 assert_eq!(line_cap, "round");
                 assert_eq!(line_join, "bevel");
+                assert_eq!(stroke_position, "center");
+            }
+            _ => panic!("expected rectangle"),
+        }
+        // Position cycles inner -> center -> outer through the pill order.
+        assert!(state.set_layer_shape_stroke_position(&rid, "inner").is_ok());
+        match shape_of(&state) {
+            LayerSource::Shape { shape_type: project::ShapeType::Rectangle { stroke_position, .. } } => {
+                assert_eq!(stroke_position, "inner");
             }
             _ => panic!("expected rectangle"),
         }
@@ -7041,6 +7051,33 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         state.remove_layer_modifier_graph(&rid, "rect_w");
         let comp = state.active_composition().unwrap().clone();
         assert!(comp.get_layer(&rid).unwrap().get_modifier_graph("shape.rect_width").is_none());
+    }
+
+    #[test]
+    fn test_checkpoint_suppression_during_gestures() {
+        use crate::state::EditorState;
+
+        let mut state = EditorState::new();
+        let rid = state.add_rectangle_shape_layer(200.0, 100.0, None).expect("rect");
+        // Suppressed (color drag packets): commits leave no undo steps, so
+        // one undo reverts the layer add itself.
+        state.suppress_checkpoint = true;
+        state.set_layer_shape_fill(&rid, project::Color::RED).expect("fill");
+        state.set_layer_shape_fill(&rid, project::Color::BLUE).expect("fill");
+        state.suppress_checkpoint = false;
+        assert!(state.undo());
+        assert!(state.active_composition().unwrap().get_layer(&rid).is_none());
+        // Released: normal checkpointing resumes with one step per commit.
+        let rid2 = state.add_rectangle_shape_layer(200.0, 100.0, None).expect("rect");
+        state.set_layer_shape_fill(&rid2, project::Color::WHITE).expect("fill");
+        assert!(state.undo());
+        let layer = state.active_composition().unwrap().get_layer(&rid2).unwrap().clone();
+        match layer.source {
+            project::LayerSource::Shape { shape_type: project::ShapeType::Rectangle { fill, .. } } => {
+                assert_ne!(fill.value, project::Color::WHITE, "undo must revert the fill");
+            }
+            _ => panic!("expected rectangle"),
+        }
     }
 
     #[test]
@@ -7260,8 +7297,22 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             for id in ["param_start_fx_trim_path_1", "param_end_fx_trim_path_1", "param_offset_fx_trim_path_1"] {
                 assert!(window.find(id).visible(), "{id} must appear after Add Trim Path");
             }
+            // Position pill cycles center -> outer and commits to the model.
+            assert!(window.find("shape_stroke_position").visible());
+            window.click("shape_stroke_position", cx);
+            window.render_frame(cx);
         })
         .expect("update_window failed");
+        app_view.read_with(cx, |view, cx| {
+            let state = view.state().read(cx);
+            let layer = state.active_composition().unwrap().get_layer(state.selected_layer_id.as_deref().unwrap()).unwrap().clone();
+            match layer.source {
+                project::LayerSource::Shape { shape_type: project::ShapeType::Rectangle { stroke_position, .. } } => {
+                    assert_eq!(stroke_position, "outer");
+                }
+                _ => panic!("expected rectangle"),
+            }
+        });
     }
 
     #[gpui_kit::test]
@@ -7369,6 +7420,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
                         stroke_width: project::Property::new("Stroke Width", 6.0),
                         line_cap: "round".to_string(),
                         line_join: "round".to_string(),
+                        stroke_position: "center".to_string(),
                         dash: project::Property::new("Dash", 0.0),
                         dash_gap: project::Property::new("Dash Gap", 0.0),
                         dash_offset: project::Property::new("Dash Offset", 0.0),
@@ -7427,6 +7479,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
                         stroke_width: project::Property::new("Stroke Width", 0.0),
                         line_cap: "round".to_string(),
                         line_join: "round".to_string(),
+                        stroke_position: "center".to_string(),
                         dash: project::Property::new("Dash", 0.0),
                         dash_gap: project::Property::new("Dash Gap", 0.0),
                         dash_offset: project::Property::new("Dash Offset", 0.0),
