@@ -6358,6 +6358,8 @@ pub struct PropertiesPanel {
     pub source_expanded: bool,
     /// Shape STROKE parameter group (ends/joins/trim/dash).
     pub stroke_section_expanded: bool,
+    /// Shape Width Profile (taper) group.
+    pub profile_section_expanded: bool,
     pub transform_expanded: bool,
     pub switches_expanded: bool,
     pub effects_expanded: bool,
@@ -6410,6 +6412,12 @@ pub struct PropertiesPanel {
     pub gradient_drag: Option<GradientDrag>,
     /// Gradient bar geometry (origin_x, width, window px) per editor prefix.
     pub gradient_bar_bounds: HashMap<String, (f32, f32)>,
+    /// Selected curve-editor point per editor key.
+    pub curve_selected: HashMap<String, usize>,
+    /// In-progress curve point drag (None = idle).
+    pub curve_drag: Option<CurveDrag>,
+    /// Curve plot geometry (origin_x, origin_y, width, height, window px).
+    pub curve_bounds: HashMap<String, (f32, f32, f32, f32)>,
     /// Active 3-mode color picker key: e.g. "text_fill", "text_stroke", "solid_color" (None = closed).
     pub active_color_picker: Option<String>,
     /// Color mode per key: "none" | "color" | "gradient"
@@ -6491,6 +6499,14 @@ pub enum GradientTarget {
     Fill { layer_id: String, key: String },
 }
 
+/// Commit target for the reusable curve editor. New parametric features
+/// add variants here (mirrors [`GradientTarget`]).
+#[derive(Clone, Debug, PartialEq)]
+pub enum CurveTarget {
+    /// Stroke width profile on a shape layer.
+    StrokeProfile { layer_id: String },
+}
+
 impl GradientTarget {
     /// Stable test-id / bar-bounds prefix. Effect targets reuse the raw
     /// effect id so historic ids (`gradient_stop0_{eff}`,
@@ -6514,6 +6530,16 @@ pub struct GradientDrag {
     /// Last committed offset: mousemove packets that don't move past this
     /// (high-polling mice emit hundreds per frame) skip the commit.
     pub last_t: f32,
+}
+
+/// In-progress curve-editor point drag (mirrors [`GradientDrag`]).
+#[derive(Clone, Debug)]
+pub struct CurveDrag {
+    pub target: CurveTarget,
+    /// Editor key (selection + bounds scope), e.g. `stroke_profile_{lid}`.
+    pub key: String,
+    pub index: usize,
+    pub moved: bool,
 }
 
 struct TextInspectorInputs {
@@ -6540,6 +6566,7 @@ impl PropertiesPanel {
             scrub_moved: false,
             source_expanded: true,
             stroke_section_expanded: true,
+            profile_section_expanded: false,
             transform_expanded: true,
             switches_expanded: false,
             effects_expanded: true,
@@ -6567,6 +6594,9 @@ impl PropertiesPanel {
             gradient_stop: HashMap::new(),
             gradient_drag: None,
             gradient_bar_bounds: HashMap::new(),
+            curve_selected: HashMap::new(),
+            curve_drag: None,
+            curve_bounds: HashMap::new(),
             active_color_picker: None,
             color_picker_mode: HashMap::new(),
             color_picker_gradient_angle: HashMap::new(),
@@ -9362,6 +9392,83 @@ pub(crate) fn stroke_editor_seed(current: Color) -> Color {
     } else {
         current
     }
+}
+
+/// Width Profile (taper) group for shape layers: the reusable curve
+/// editor over the layer's profile points, plus reset. Empty profile =
+/// uniform stroke (the editor still renders so points can be added).
+#[allow(clippy::too_many_arguments)]
+fn shape_profile_section<F>(
+    state: &Entity<EditorState>,
+    panel_entity: &Entity<PropertiesPanel>,
+    panel: &PropertiesPanel,
+    layer: &project::Layer,
+    profile: &[project::ProfilePoint],
+    expanded: bool,
+    on_toggle: F,
+    cx: &App,
+) -> AnyElement
+where
+    F: Fn(&mut App) + 'static,
+{
+    let lid = layer.id.clone();
+    let key = format!("stroke_profile_{lid}");
+    let s_reset = state.clone();
+    let lid_reset = lid.clone();
+    let body = v_flex()
+        .gap_2()
+        .child(crate::widgets::curve_editor(
+            state,
+            panel_entity,
+            panel,
+            &key,
+            CurveTarget::StrokeProfile { layer_id: lid.clone() },
+            profile,
+            cx,
+        ))
+        .child(
+            h_flex()
+                .items_center()
+                .justify_between()
+                .text_xs()
+                .child(
+                    div()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(if profile.is_empty() {
+                            "Uniform width — click the plot to add taper points"
+                        } else {
+                            "Drag points to shape • right-click deletes"
+                        }),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("curve_reset_{key}")))
+                        .test_support()
+                        .cursor_pointer()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(cx.theme().muted)
+                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                        .text_color(cx.theme().foreground)
+                        .child("Reset")
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            s_reset.update(cx, |s, cx| {
+                                let _ = s.reset_shape_profile(&lid_reset);
+                                cx.notify();
+                            });
+                        }),
+                ),
+        );
+    prop_section(
+        "shape_profile_section",
+        "Width Profile".to_string(),
+        IconName::SlidersHorizontal,
+        expanded,
+        on_toggle,
+        cx,
+        Some(body.into_any_element()),
+    )
 }
 
 /// Nested twirl-down group inside an open card (applied-effect parameter
@@ -13042,6 +13149,34 @@ impl Render for PropertiesPanel {
                         }
                     }
                 }
+                // Curve point drag: absolute position in plot space.
+                if let Some(drag) = this.curve_drag.clone() {
+                    if let Some((ox, oy, w, h)) =
+                        this.curve_bounds.get(&drag.key).copied()
+                    {
+                        let mx = event.position.x / px(1.0);
+                        let my = event.position.y / px(1.0);
+                        let t = ((mx - ox) / w.max(1.0)).clamp(0.0, 1.0);
+                        let v = (1.0 - (my - oy) / h.max(1.0)).clamp(0.0, 1.0) * 2.0;
+                        let target = drag.target.clone();
+                        let idx = drag.index;
+                        let at = this.state.update(cx, |s, _| match &target {
+                            CurveTarget::StrokeProfile { layer_id } => {
+                                s.set_shape_profile_point(layer_id, idx, t, v)
+                            }
+                        });
+                        if let Ok(at) = at {
+                            this.curve_selected.insert(drag.key.clone(), at);
+                            if let Some(d) = this.curve_drag.as_mut() {
+                                d.index = at;
+                                d.moved = true;
+                            }
+                            let s = this.state.clone();
+                            s.update(cx, |_, cx| cx.notify());
+                            cx.notify();
+                        }
+                    }
+                }
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _event, window, cx| {
                 // Click (no drag movement) on a value field opens keyboard
@@ -13055,8 +13190,14 @@ impl Render for PropertiesPanel {
                 }
                 // A gradient diamond press without movement is a click, not
                 // a drag: undo the mousedown checkpoint so clicks leave the
-                // undo stack untouched.
+                // undo stack untouched. Same for curve points.
                 if let Some(drag) = this.gradient_drag.take() {
+                    if !drag.moved {
+                        let s = this.state.clone();
+                        s.update(cx, |s, _| s.undo());
+                    }
+                }
+                if let Some(drag) = this.curve_drag.take() {
                     if !drag.moved {
                         let s = this.state.clone();
                         s.update(cx, |s, _| s.undo());
@@ -13073,6 +13214,7 @@ impl Render for PropertiesPanel {
                 this.scrub_last_x = None;
                 this.scrub_moved = false;
                 this.gradient_drag = None;
+                this.curve_drag = None;
                 let s = this.state.clone();
                 s.update(cx, |s, cx| {
                     s.preview_fast = false;
@@ -14085,7 +14227,7 @@ impl Render for PropertiesPanel {
                             }
                             LayerSource::Shape { shape_type } => {
                                 match shape_type {
-                                    ShapeType::Rectangle { width, height, corner_radius, fill, stroke, stroke_width, size_linked, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
+                                    ShapeType::Rectangle { width, height, corner_radius, fill, stroke, stroke_width, size_linked, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, width_profile, .. } => {
                                         let w = width.value;
                                         let h = height.value;
                                         let cr = corner_radius.value;
@@ -14234,8 +14376,26 @@ impl Render for PropertiesPanel {
                                                 cx,
                                             ));
                                         }
+                                        {
+                                            let p_prof = panel_entity.clone();
+                                            props_items.push(shape_profile_section(
+                                                &self.state,
+                                                &panel_entity,
+                                                self,
+                                                layer,
+                                                width_profile,
+                                                self.profile_section_expanded,
+                                                move |cx| {
+                                                    p_prof.update(cx, |this, cx| {
+                                                        this.profile_section_expanded = !this.profile_section_expanded;
+                                                        cx.notify();
+                                                    });
+                                                },
+                                                cx,
+                                            ));
+                                        }
                                     }
-                                    ShapeType::Ellipse { radius_x, radius_y, fill, stroke, stroke_width, size_linked, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
+                                    ShapeType::Ellipse { radius_x, radius_y, fill, stroke, stroke_width, size_linked, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, width_profile, .. } => {
                                         let rx = radius_x.value;
                                         let ry = radius_y.value;
                                         let linked = *size_linked;
@@ -14364,8 +14524,26 @@ impl Render for PropertiesPanel {
                                                 cx,
                                             ));
                                         }
+                                        {
+                                            let p_prof = panel_entity.clone();
+                                            props_items.push(shape_profile_section(
+                                                &self.state,
+                                                &panel_entity,
+                                                self,
+                                                layer,
+                                                width_profile,
+                                                self.profile_section_expanded,
+                                                move |cx| {
+                                                    p_prof.update(cx, |this, cx| {
+                                                        this.profile_section_expanded = !this.profile_section_expanded;
+                                                        cx.notify();
+                                                    });
+                                                },
+                                                cx,
+                                            ));
+                                        }
                                     }
-                                    ShapeType::Path { path_data, fill, stroke, stroke_width, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
+                                    ShapeType::Path { path_data, fill, stroke, stroke_width, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, width_profile, .. } => {
                                         let path_body = v_flex()
                                             .id("shape_properties_section")
                                             .test_support()
@@ -14431,6 +14609,24 @@ impl Render for PropertiesPanel {
                                                 move |cx| {
                                                     p_stroke.update(cx, |this, cx| {
                                                         this.stroke_section_expanded = !this.stroke_section_expanded;
+                                                        cx.notify();
+                                                    });
+                                                },
+                                                cx,
+                                            ));
+                                        }
+                                        {
+                                            let p_prof = panel_entity.clone();
+                                            props_items.push(shape_profile_section(
+                                                &self.state,
+                                                &panel_entity,
+                                                self,
+                                                layer,
+                                                width_profile,
+                                                self.profile_section_expanded,
+                                                move |cx| {
+                                                    p_prof.update(cx, |this, cx| {
+                                                        this.profile_section_expanded = !this.profile_section_expanded;
                                                         cx.notify();
                                                     });
                                                 },

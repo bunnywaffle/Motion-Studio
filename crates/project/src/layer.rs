@@ -5,6 +5,7 @@ use crate::effect::Effect;
 use crate::error::ValidationError;
 use crate::marker::Marker;
 use crate::matte::TrackMatteMode;
+use crate::path::ProfilePoint;
 use crate::property::Property;
 use crate::timecode::TimeCode;
 use crate::transform::Transform;
@@ -364,6 +365,10 @@ pub enum ShapeType {
         /// Dash pattern offset in px.
         #[serde(default)]
         dash_offset: Property<f32>,
+        /// Taper profile along the stroke (empty = uniform width).
+        /// Points stay sorted by `x`; see `curve_editor`.
+        #[serde(default)]
+        width_profile: Vec<ProfilePoint>,
     },
     Ellipse {
         radius_x: Property<f32>,
@@ -402,6 +407,10 @@ pub enum ShapeType {
         /// Dash pattern offset in px.
         #[serde(default)]
         dash_offset: Property<f32>,
+        /// Taper profile along the stroke (empty = uniform width).
+        /// Points stay sorted by `x`; see `curve_editor`.
+        #[serde(default)]
+        width_profile: Vec<ProfilePoint>,
     },
     Path {
         path_data: String,
@@ -435,6 +444,10 @@ pub enum ShapeType {
         /// Dash pattern offset in px.
         #[serde(default)]
         dash_offset: Property<f32>,
+        /// Taper profile along the stroke (empty = uniform width).
+        /// Points stay sorted by `x`; see `curve_editor`.
+        #[serde(default)]
+        width_profile: Vec<ProfilePoint>,
     },
 }
 

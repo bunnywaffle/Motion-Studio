@@ -20,7 +20,8 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::searchable_list::SearchableVec;
 use gpui_kit::component::combobox::{Combobox, ComboboxState};
 use gpui_kit::*;
-use project::{Color, FillGradient, GradientStop, GradientType, PropDecl};
+use project::{Color, FillGradient, GradientStop, GradientType, ProfilePoint, PropDecl};
+use project::sample_width_profile;
 use std::collections::HashMap;
 
 /// Which commit path a scalar row uses.
@@ -727,6 +728,243 @@ pub(crate) fn fill_gradient_editor(
         stop_color_editor,
         cx,
     )
+}
+
+/// Plot height in px (fixed; y maps 0..2 onto it).
+const CURVE_PLOT_H: f32 = 140.0;
+
+/// Reusable 2D curve editor (stroke width profiles today; any sorted
+/// x-in-0..1, y-in-0..2 parametric data tomorrow): grid + smooth
+/// Catmull-Rom curve + square handles + X/Y readout.
+///
+/// Points render from `points` (sorted copy); selection and plot geometry
+/// live on the panel keyed by `key` (mirrors the gradient editor);
+/// commits flow through `target` (new features add `CurveTarget`
+/// variants). Click empty plot space adds a point, left-drag moves it
+/// (one undo step per gesture), right-click deletes it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn curve_editor(
+    state: &Entity<EditorState>,
+    panel_entity: &Entity<PropertiesPanel>,
+    panel: &PropertiesPanel,
+    key: &str,
+    target: panels::CurveTarget,
+    points: &[ProfilePoint],
+    cx: &App,
+) -> AnyElement {
+    let mut pts: Vec<ProfilePoint> = points.to_vec();
+    pts.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
+    // Direct field read: this renders inside the panel's own update, so
+    // `panel_entity.read(cx)` here would panic (same reason the selected
+    // stop arrives as a param in `gradient_editor`).
+    let sel = panel
+        .curve_selected
+        .get(key)
+        .copied()
+        .unwrap_or(0)
+        .min(pts.len().saturating_sub(1));
+    let sel_pt = pts.get(sel).copied().unwrap_or(ProfilePoint::new(0.0, 1.0));
+    // Dense display samples share the raster sampler (single source of
+    // truth for the curve shape).
+    let samples: Vec<(f32, f32)> = (0..=64)
+        .map(|i| {
+            let u = i as f32 / 64.0;
+            (u, sample_width_profile(&pts, u))
+        })
+        .collect();
+
+    let key_owned = key.to_string();
+    let p_prep = panel_entity.clone();
+    let mut plot = div()
+        .id(SharedString::from(format!("curve_plot_{key}")))
+        .test_support()
+        .relative()
+        .h(px(CURVE_PLOT_H))
+        .w_full()
+        .rounded_sm()
+        .overflow_hidden()
+        .cursor_crosshair()
+        .bg(cx.theme().muted)
+        .on_prepaint({
+            let key_prep = key_owned.clone();
+            move |bounds, _window, cx| {
+                let (ox, oy, w, h) = (
+                    bounds.origin.x / px(1.0),
+                    bounds.origin.y / px(1.0),
+                    bounds.size.width / px(1.0),
+                    bounds.size.height / px(1.0),
+                );
+                p_prep.update(cx, |this, cx| {
+                    if this.curve_bounds.get(&key_prep) != Some(&(ox, oy, w, h)) {
+                        this.curve_bounds.insert(key_prep.clone(), (ox, oy, w, h));
+                        cx.notify();
+                    }
+                });
+            }
+        })
+        .on_mouse_down(MouseButton::Left, {
+            let s_add = state.clone();
+            let p_add = panel_entity.clone();
+            let p_read = panel_entity.clone();
+            let target_add = target.clone();
+            let key_add = key_owned.clone();
+            move |event, _window, cx| {
+                // Point grabs bubble here; an armed drag means "not a plot
+                // click" (same guard as the gradient bar).
+                let armed = p_read.read(cx).curve_drag.clone().map(|d| d.key) == Some(key_add.clone());
+                if armed {
+                    return;
+                }
+                let mx = event.position.x / px(1.0);
+                let my = event.position.y / px(1.0);
+                let Some((ox, oy, w, h)) = p_read.read(cx).curve_bounds.get(&key_add).copied() else {
+                    return;
+                };
+                let t = ((mx - ox) / w.max(1.0)).clamp(0.0, 1.0);
+                let v = (1.0 - (my - oy) / h.max(1.0)).clamp(0.0, 1.0) * 2.0;
+                let at = s_add.update(cx, |s, _| match &target_add {
+                    panels::CurveTarget::StrokeProfile { layer_id } => {
+                        s.add_shape_profile_point(layer_id, t, v)
+                    }
+                });
+                if let Ok(at) = at {
+                    p_add.update(cx, |this, cx| {
+                        this.curve_selected.insert(key_add.clone(), at);
+                        cx.notify();
+                    });
+                    s_add.update(cx, |_, cx| cx.notify());
+                }
+            }
+        });
+    // Grid hairlines.
+    for fx in [0.25, 0.5, 0.75] {
+        plot = plot.child(
+            div()
+                .absolute()
+                .left(relative(fx))
+                .top(px(0.))
+                .bottom(px(0.))
+                .w(px(1.))
+                .bg(cx.theme().border),
+        );
+    }
+    for fy in [0.5, 1.0, 1.5] {
+        plot = plot.child(
+            div()
+                .absolute()
+                .top(px(CURVE_PLOT_H - fy / 2.0 * CURVE_PLOT_H))
+                .left(px(0.))
+                .right(px(0.))
+                .h(px(1.))
+                .bg(cx.theme().border),
+        );
+    }
+    // Smooth curve through the samples.
+    {
+        let samples_draw = samples.clone();
+        plot = plot.child(
+            gpui::canvas(
+                move |bounds: gpui::Bounds<gpui::Pixels>, _window, _cx| bounds,
+                move |_bounds, plot_bounds: gpui::Bounds<gpui::Pixels>, window, _cx| {
+                    let w = (plot_bounds.size.width / gpui::px(1.0)).max(1.0);
+                    let h = (plot_bounds.size.height / gpui::px(1.0)).max(1.0);
+                    let ox = plot_bounds.origin.x / gpui::px(1.0);
+                    let oy = plot_bounds.origin.y / gpui::px(1.0);
+                    let to_px = |u: f32, v: f32| {
+                        gpui::point(
+                            gpui::px(ox + u * w),
+                            gpui::px(oy + (1.0 - v / 2.0) * h),
+                        )
+                    };
+                    let mut path = gpui::Path::new(to_px(samples_draw[0].0, samples_draw[0].1));
+                    for seg in samples_draw.windows(2) {
+                        panels::draw_line_segment(&mut path, to_px(seg[0].0, seg[0].1), to_px(seg[1].0, seg[1].1), 2.0);
+                    }
+                    window.paint_path(path, gpui::Rgba { r: 1.0, g: 1.0, b: 1.0, a: 0.9 });
+                },
+            )
+            .absolute()
+            .size_full(),
+        );
+    }
+    // Square handles (white + black ring: visible on any curve color).
+    for (i, p) in pts.iter().enumerate() {
+        let s_down = state.clone();
+        let p_sel = panel_entity.clone();
+        let p_del = panel_entity.clone();
+        let s_del = state.clone();
+        let target_sel = target.clone();
+        let target_del = target.clone();
+        let key_pt = key_owned.clone();
+        let py = CURVE_PLOT_H - (p.y / 2.0).clamp(0.0, 1.0) * CURVE_PLOT_H;
+        let half = if i == sel { 6.0 } else { 5.0 };
+        plot = plot.child(
+            div()
+                .id(SharedString::from(format!("curve_pt_{key}_{i}")))
+                .test_support()
+                .absolute()
+                .left(relative(p.x.clamp(0.0, 1.0)))
+                .top(px(py))
+                .ml(px(-half))
+                .mt(px(-half))
+                .cursor_grab()
+                .w(px(half * 2.0))
+                .h(px(half * 2.0))
+                .rounded_sm()
+                .bg(gpui::Rgba { r: 1.0, g: 1.0, b: 1.0, a: 1.0 })
+                .border_1()
+                .border_color(gpui::Rgba { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })
+                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    s_down.update(cx, |s, cx| {
+                        s.checkpoint();
+                        s.preview_fast = true;
+                        cx.notify();
+                    });
+                    p_sel.update(cx, |this, cx| {
+                        this.curve_selected.insert(key_pt.clone(), i);
+                        this.curve_drag = Some(panels::CurveDrag {
+                            target: target_sel.clone(),
+                            key: key_pt.clone(),
+                            index: i,
+                            moved: false,
+                        });
+                        cx.notify();
+                    });
+                })
+                .on_mouse_down(MouseButton::Right, move |_event, _window, cx| {
+                    let target_do = target_del.clone();
+                    let res = s_del.update(cx, |s, _| match &target_do {
+                        panels::CurveTarget::StrokeProfile { layer_id } => {
+                            s.remove_shape_profile_point(layer_id, i)
+                        }
+                    });
+                    if res.is_ok() {
+                        // Selection clamps on next render; just refresh.
+                        p_del.update(cx, |_, cx| cx.notify());
+                        s_del.update(cx, |_, cx| cx.notify());
+                    }
+                }),
+        );
+    }
+    v_flex()
+        .gap_1()
+        .child(plot)
+        .child(
+            h_flex()
+                .gap_1()
+                .items_center()
+                .child(
+                    div()
+                        .id(SharedString::from(format!("curve_readout_{key}")))
+                        .test_support()
+                        .flex_1()
+                        .text_center()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!("X {:.3}   Y {:.3}", sel_pt.x, sel_pt.y)),
+                ),
+        )
+        .into_any_element()
 }
 
 /// Dispatch one declaration to its widget (the automatic UI).

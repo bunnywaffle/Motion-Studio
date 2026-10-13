@@ -7052,6 +7052,34 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
     }
 
     #[test]
+    fn test_shape_profile_points_sorted_and_clamped() {
+        use crate::state::EditorState;
+
+        let mut state = EditorState::new();
+        let rid = state.add_rectangle_shape_layer(200.0, 100.0, None).expect("rect");
+        // Add out of order + out of range: stored sorted and clamped.
+        assert_eq!(state.add_shape_profile_point(&rid, 0.8, 0.2).expect("add"), 0);
+        assert_eq!(state.add_shape_profile_point(&rid, 0.2, 5.0).expect("add"), 0);
+        let pts = |s: &EditorState| {
+            match s.active_composition().unwrap().get_layer(&rid).unwrap().source.clone() {
+                project::LayerSource::Shape { shape_type: project::ShapeType::Rectangle { width_profile, .. } } => width_profile,
+                _ => panic!("expected rectangle"),
+            }
+        };
+        assert_eq!(pts(&state).len(), 2);
+        assert!(pts(&state)[0].x <= pts(&state)[1].x);
+        assert_eq!(pts(&state)[0].y, 2.0, "y clamps to range");
+        // Move keeps sort (returns new index); remove/reset work.
+        assert_eq!(state.set_shape_profile_point(&rid, 1, 0.1, 1.0).expect("move"), 0);
+        assert_eq!(pts(&state).len(), 2);
+        state.remove_shape_profile_point(&rid, 0).expect("remove");
+        assert_eq!(pts(&state).len(), 1);
+        assert!(state.remove_shape_profile_point(&rid, 9).is_err());
+        state.reset_shape_profile(&rid).expect("reset");
+        assert!(pts(&state).is_empty());
+    }
+
+    #[test]
     fn test_checkpoint_suppression_during_gestures() {
         use crate::state::EditorState;
 
@@ -7422,6 +7450,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
                         dash: project::Property::new("Dash", 0.0),
                         dash_gap: project::Property::new("Dash Gap", 0.0),
                         dash_offset: project::Property::new("Dash Offset", 0.0),
+                        width_profile: Vec::new(),
                     },
                     project::TimeCode::zero(fps),
                     dur,
@@ -7481,6 +7510,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
                         dash: project::Property::new("Dash", 0.0),
                         dash_gap: project::Property::new("Dash Gap", 0.0),
                         dash_offset: project::Property::new("Dash Offset", 0.0),
+                        width_profile: Vec::new(),
                     },
                     project::TimeCode::zero(fps),
                     dur,
@@ -7517,6 +7547,83 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             buf.px.iter().filter(|p| p.r > 0.5 && p.a > 0.5).count()
         });
         assert!(ink > 500, "red path fill must rasterize, got {ink}");
+    }
+
+    #[gpui_kit::test]
+    fn test_width_profile_section_adds_and_drags_points(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        let rid = app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                let rid = s.add_rectangle_shape_layer(200.0, 100.0, None).expect("rect");
+                s.select_layer(Some(rid.clone()));
+                cx.notify();
+                rid
+            })
+        });
+        let plot = SharedString::from(format!("curve_plot_stroke_profile_{rid}"));
+        let pt0 = SharedString::from(format!("curve_pt_stroke_profile_{rid}_0"));
+        let readout = SharedString::from(format!("curve_readout_stroke_profile_{rid}"));
+        // Section starts collapsed: expand it, plot renders empty.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            for _ in 0..12 {
+                window.scroll(
+                    "properties_inspector",
+                    gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(-400.))),
+                    cx,
+                );
+                window.render_frame(cx);
+                if window.try_find("props_section_shape_profile_section").map(|e| e.visible()).unwrap_or(false) {
+                    break;
+                }
+            }
+            window.click("props_section_shape_profile_section", cx);
+            window.render_frame(cx);
+            assert!(window.find(plot.clone()).visible(), "profile plot must render");
+            assert!(window.find(readout.clone()).visible(), "readout must render");
+        })
+        .expect("update_window failed");
+        // Click the plot middle: adds a point there and renders its handle.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let b = window.find(plot.clone()).bounds();
+            let w = b.size.width / px(1.0);
+            window.click_at(plot.clone(), gpui::point(px(w * 0.5), px(70.)), cx);
+            window.render_frame(cx);
+            assert!(window.find(pt0.clone()).visible(), "added point must render");
+        })
+        .expect("update_window failed");
+        let n = app_view.read_with(cx, |view, cx| {
+            match view.state().read(cx).active_composition().unwrap().get_layer(&rid).unwrap().source.clone() {
+                project::LayerSource::Shape { shape_type: project::ShapeType::Rectangle { width_profile, .. } } => width_profile.len(),
+                _ => panic!("expected rectangle"),
+            }
+        });
+        assert_eq!(n, 1);
+        // Reset clears back to uniform.
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.reset_shape_profile(&rid).expect("reset");
+                cx.notify();
+            });
+        });
+        let n = app_view.read_with(cx, |view, cx| {
+            match view.state().read(cx).active_composition().unwrap().get_layer(&rid).unwrap().source.clone() {
+                project::LayerSource::Shape { shape_type: project::ShapeType::Rectangle { width_profile, .. } } => width_profile.len(),
+                _ => panic!("expected rectangle"),
+            }
+        });
+        assert_eq!(n, 0);
     }
 
     #[gpui_kit::test]

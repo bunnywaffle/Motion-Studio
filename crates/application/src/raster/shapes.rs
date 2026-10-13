@@ -436,6 +436,7 @@ pub(crate) enum StrokeMask<'a> {
 /// `origin` is the content-buffer frame origin in path-local coords
 /// (see `Path::frame`): the path is drawn shifted by `-origin` so buffers
 /// spanning arbitrary local coords are never clipped.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn stroke_path(
     buf: &mut FloatBuf,
     path_data: &str,
@@ -444,6 +445,7 @@ pub(crate) fn stroke_path(
     origin: project::Vec2,
     style: StrokeStyle,
     mask: StrokeMask,
+    profile: &[project::ProfilePoint],
 ) {
     let path = project::Path::from_svg(path_data);
     let mut pts = path.flatten(0.5);
@@ -454,7 +456,7 @@ pub(crate) fn stroke_path(
         *p -= origin;
     }
     let paint = Paint::Solid(col);
-    stroke_polyline(buf, &pts, path.closed, nib, &paint, style);
+    stroke_polyline(buf, &pts, path.closed, nib, &paint, style, profile);
     apply_stroke_mask(buf, mask);
 }
 
@@ -470,6 +472,7 @@ pub(crate) fn stroke_path_gradient(
     frame_size: (f32, f32),
     style: StrokeStyle,
     mask: StrokeMask,
+    profile: &[project::ProfilePoint],
 ) {
     let path = project::Path::from_svg(path_data);
     let mut pts = path.flatten(0.5);
@@ -481,7 +484,7 @@ pub(crate) fn stroke_path_gradient(
     }
     let axis = gradient_axis(frame_size.0, frame_size.1, gradient.angle);
     let paint = Paint::Gradient(gradient, axis);
-    stroke_polyline(buf, &pts, path.closed, nib, &paint, style);
+    stroke_polyline(buf, &pts, path.closed, nib, &paint, style, profile);
     apply_stroke_mask(buf, mask);
 }
 
@@ -523,11 +526,17 @@ fn stroke_polyline(
     nib: f32,
     paint: &Paint,
     style: StrokeStyle,
+    profile: &[project::ProfilePoint],
 ) {
     let seg_count = if closed { pts.len() } else { pts.len().saturating_sub(1) };
+    // Width profile (taper): sorted once up front; the model keeps lists
+    // sorted on edit, this only guards hand-edited files.
+    let mut prof: Vec<project::ProfilePoint> = profile.to_vec();
+    prof.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
     if seg_count == 0 {
         if let Some(p) = pts.first() {
-            stamp(buf, p.x, p.y, nib, paint, &[]);
+            // Single dot: profile at the start.
+            stamp(buf, p.x, p.y, nib * project::sample_width_profile(&prof, 0.0), paint, &[]);
         }
         return;
     }
@@ -541,6 +550,9 @@ fn stroke_polyline(
         acc += seg_len(i);
     }
     let period = style.dash + style.gap;
+    // `total` accumulates above; each stamp scales its nib by the sampled
+    // profile multiplier (empty = uniform, one branch per stamp).
+    let total = acc;
     // Join vertex indices (closed: every vertex; open: interior only).
     let join_at: Vec<usize> = if closed {
         (0..pts.len()).collect()
@@ -658,7 +670,13 @@ fn stroke_polyline(
                     }
                 }
             }
-            stamp(buf, p.x, p.y, nib, paint, &clips[..nc]);
+            let nib_eff = if prof.is_empty() {
+                nib
+            } else {
+                let u = if total > 1e-6 { (s / total).clamp(0.0, 1.0) } else { 0.0 };
+                nib * project::sample_width_profile(&prof, u)
+            };
+            stamp(buf, p.x, p.y, nib_eff, paint, &clips[..nc]);
         }
     }
     for (a, m, b) in miters {

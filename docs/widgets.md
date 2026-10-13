@@ -133,6 +133,25 @@ Two layers: kit primitives + app-side retained state.
 - `widget_gradient(...)` (ramp adapter: endpoint wheels) and
   `fill_gradient_editor(...)` (fill-slot adapter) wrap it.
 
+## Curve editor
+
+- `curve_editor(state, panel_entity, panel, key, target, points, cx)`
+  (`widgets.rs`) — reusable 2D curve editor (stroke width profiles today;
+  any sorted x-in-0..1 data tomorrow): grid + smooth Catmull-Rom curve
+  (shares the raster sampler `project::sample_width_profile`, so display
+  == render) + square handles + X/Y readout. Click empty plot adds a
+  point, left-drag moves it (one undo step, degraded preview),
+  right-click deletes.
+- Selection + plot geometry live on the panel keyed by `key`
+  (`curve_selected`, `curve_bounds`, `curve_drag`); drags are serviced by
+  the panel-root mouse handlers (same pattern as gradient stops).
+- Commits flow through `CurveTarget` (add variants for new features,
+  mirroring `GradientTarget`); today: `StrokeProfile { layer_id }` →
+  `set/add/remove_shape_profile_point`, `reset_shape_profile` (moves skip
+  checkpoints, like gradient moves).
+- Curve math lives in `crates/project/src/path.rs` (`ProfilePoint`,
+  `sample_width_profile`): x sorted, y clamped 0..2, empty profile = 1.0.
+
 ## Sections & rows
 
 - `prop_section(id, title, icon, expanded, on_toggle, cx, body)` —

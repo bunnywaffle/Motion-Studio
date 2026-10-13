@@ -20,8 +20,7 @@ use serde::{Deserialize, Serialize};
 /// Handle coupling mode of a path node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PathPointKind {
-    /// Independent in/out handles (sharp corner possible).
+pub enum PathPointKind {    /// Independent in/out handles (sharp corner possible).
     #[default]
     Corner,
     /// Handles stay collinear (180° apart), lengths independent.
@@ -32,10 +31,56 @@ pub enum PathPointKind {
     Auto,
 }
 
+/// One width-profile node: position along a path (`x` in 0..1) and width
+/// multiplier (`y`, 0 = pinched shut, 1 = full nib). Drives tapered
+/// strokes; edited through the reusable curve widget. Point lists stay
+/// sorted by `x` (editors enforce it); the sampler assumes it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ProfilePoint {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl ProfilePoint {
+    pub const fn new(x: f32, y: f32) -> Self {
+        Self { x, y }
+    }
+}
+
+/// Width multiplier at arclength fraction `u` (clamped 0..1) over sorted
+/// profile points: uniform Catmull-Rom through the neighbours (ends
+/// duplicated), linear in `x` within the span. Empty profiles (uniform
+/// strokes) return 1.0; output clamps to 0..2.
+pub fn sample_width_profile(points: &[ProfilePoint], u: f32) -> f32 {
+    if points.is_empty() {
+        return 1.0;
+    }
+    if points.len() == 1 {
+        return points[0].y.clamp(0.0, 2.0);
+    }
+    let u = u.clamp(0.0, 1.0);
+    let mut i = 0;
+    while i + 1 < points.len() && points[i + 1].x < u {
+        i += 1;
+    }
+    let i = i.min(points.len() - 2);
+    let (p1, p2) = (&points[i], &points[i + 1]);
+    let span = (p2.x - p1.x).max(1e-6);
+    let t = ((u - p1.x) / span).clamp(0.0, 1.0);
+    let p0 = if i == 0 { p1 } else { &points[i - 1] };
+    let p3 = if i + 2 >= points.len() { p2 } else { &points[i + 2] };
+    let (t2, t3) = (t * t, t * t * t);
+    let y = 0.5
+        * (2.0 * p1.y
+            + (-p0.y + p2.y) * t
+            + (2.0 * p0.y - 5.0 * p1.y + 4.0 * p2.y - p3.y) * t2
+            + (-p0.y + 3.0 * p1.y - 3.0 * p2.y + p3.y) * t3);
+    y.clamp(0.0, 2.0)
+}
+
 /// One Bézier node: anchor plus relative tangent offsets.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct PathPoint {
-    pub pos: Vec2,
+pub struct PathPoint {    pub pos: Vec2,
     #[serde(default)]
     pub in_tan: Vec2,
     #[serde(default)]
@@ -1565,6 +1610,36 @@ mod tests {
                 .any(|(cx, cy)| ((p.x - cx).hypot(p.y - cy) - 10.0).abs() < 0.6);
             assert!(on_h_edge || on_v_edge || on_arc, "stray point {p:?}");
         }
+    }
+
+    #[test]
+    fn width_profile_samples_catmull_rom() {
+        // Empty/singleton degenerate cases.
+        assert_eq!(sample_width_profile(&[], 0.37), 1.0);
+        assert_eq!(sample_width_profile(&[ProfilePoint::new(0.2, 1.4)], 0.9), 1.4);
+        // Linear ramp hits its nodes exactly and midpoints halfway.
+        let ramp = [ProfilePoint::new(0.0, 0.0), ProfilePoint::new(1.0, 2.0)];
+        assert_eq!(sample_width_profile(&ramp, 0.0), 0.0);
+        assert_eq!(sample_width_profile(&ramp, 1.0), 2.0);
+        assert!((sample_width_profile(&ramp, 0.5) - 1.0).abs() < 1e-5);
+        // Clamping on both axes.
+        assert_eq!(sample_width_profile(&ramp, -3.0), 0.0);
+        assert_eq!(sample_width_profile(&ramp, 7.0), 2.0);
+        assert_eq!(
+            sample_width_profile(&[ProfilePoint::new(0.0, 9.0), ProfilePoint::new(1.0, -4.0)], 0.5),
+            2.0,
+            "midpoint clamps to range"
+        );
+        // Bump: peak holds near its node, eases on both sides.
+        let bump = [
+            ProfilePoint::new(0.0, 0.0),
+            ProfilePoint::new(0.5, 1.0),
+            ProfilePoint::new(1.0, 0.0),
+        ];
+        assert!((sample_width_profile(&bump, 0.5) - 1.0).abs() < 1e-5);
+        let (l, r) = (sample_width_profile(&bump, 0.25), sample_width_profile(&bump, 0.75));
+        assert!(l > 0.3 && l < 0.9 && r > 0.3 && r < 0.9, "soft shoulders: {l} {r}");
+        assert!((l - r).abs() < 1e-5, "symmetric bump: {l} {r}");
     }
 
     #[test]

@@ -111,7 +111,7 @@ pub fn raster_content(
             let (w, h) = (base_w.max(2.0), base_h.max(2.0));
             let mut buf = FloatBuf::clear(w.ceil() as u32, h.ceil() as u32);
             match shape_type {
-                ShapeType::Rectangle { corner_radius, fill, fill_gradient, stroke, stroke_width, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
+                ShapeType::Rectangle { corner_radius, fill, fill_gradient, stroke, stroke_width, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, width_profile, .. } => {
                     // Corner radius is stored unscaled; content is unscaled.
                     // Strokes run over a rounded-rectangle path so corners
                     // match the fill exactly. An enabled Trim Path effect
@@ -162,7 +162,7 @@ pub fn raster_content(
                                 }
                             }
                             if do_stroke {
-                                stroke_path_gradient(&mut buf, &shaped_svg, nib, gradient, Vec2::ZERO, (sw, sh), style, mask);
+                                stroke_path_gradient(&mut buf, &shaped_svg, nib, gradient, Vec2::ZERO, (sw, sh), style, mask, width_profile);
                             }
                         }
                         None => {
@@ -174,12 +174,12 @@ pub fn raster_content(
                                 }
                             }
                             if do_stroke {
-                                stroke_path(&mut buf, &shaped_svg, nib, Px::from_color(sc), Vec2::ZERO, style, mask);
+                                stroke_path(&mut buf, &shaped_svg, nib, Px::from_color(sc), Vec2::ZERO, style, mask, width_profile);
                             }
                         }
                     }
                 }
-                ShapeType::Ellipse { fill, fill_gradient, stroke, stroke_width, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
+                ShapeType::Ellipse { fill, fill_gradient, stroke, stroke_width, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, width_profile, .. } => {
                     // Same trim routing as Rectangle (see above).
                     let style = StrokeStyle::from_shape(line_cap, line_join, dash.value, dash_gap.value, dash_offset.value);
                     let pos = StrokePosition::from_str(stroke_position);
@@ -222,7 +222,7 @@ pub fn raster_content(
                                 }
                             }
                             if do_stroke {
-                                stroke_path_gradient(&mut buf, &shaped_svg, nib, gradient, Vec2::ZERO, (sw, sh), style, mask);
+                                stroke_path_gradient(&mut buf, &shaped_svg, nib, gradient, Vec2::ZERO, (sw, sh), style, mask, width_profile);
                             }
                         }
                         None => {
@@ -234,12 +234,12 @@ pub fn raster_content(
                                 }
                             }
                             if do_stroke {
-                                stroke_path(&mut buf, &shaped_svg, nib, Px::from_color(sc), Vec2::ZERO, style, mask);
+                                stroke_path(&mut buf, &shaped_svg, nib, Px::from_color(sc), Vec2::ZERO, style, mask, width_profile);
                             }
                         }
                     }
                 }
-                ShapeType::Path { path_data, fill, fill_gradient, stroke, stroke_width, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
+                ShapeType::Path { path_data, fill, fill_gradient, stroke, stroke_width, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, width_profile, .. } => {
                     // Vector path effects run pre-flatten on the parsed
                     // path; re-serialize for the SVG-string rasterizers.
                     let shaped = apply_path_fx(
@@ -274,7 +274,7 @@ pub fn raster_content(
                                 fill_path_gradient(&mut buf, &shaped_svg, gradient, origin, (fw, fh));
                             }
                             if do_stroke {
-                                stroke_path_gradient(&mut buf, &shaped_svg, nib, gradient, origin, (fw, fh), style, mask);
+                                stroke_path_gradient(&mut buf, &shaped_svg, nib, gradient, origin, (fw, fh), style, mask, width_profile);
                             }
                         }
                         None => {
@@ -300,6 +300,7 @@ pub fn raster_content(
                                     origin,
                                     style,
                                     mask,
+                                    width_profile,
                                 );
                             }
                         }
@@ -606,29 +607,29 @@ pub fn layer_cache_key(
             }
         }
         LayerSource::Shape { shape_type } => match shape_type {
-            ShapeType::Rectangle { width, height, corner_radius, fill, fill_gradient, stroke, stroke_width, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
+            ShapeType::Rectangle { width, height, corner_radius, fill, fill_gradient, stroke, stroke_width, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, width_profile, .. } => {
                 4u8.hash(&mut h);
                 width.value.to_bits().hash(&mut h);
                 height.value.to_bits().hash(&mut h);
                 corner_radius.value.to_bits().hash(&mut h);
                 color_hash(&fill.value, &mut h);
                 gradient_hash(fill_gradient, &mut h);
-                shape_stroke_hash(stroke, stroke_width, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, &mut h);
+                shape_stroke_hash(stroke, stroke_width, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, width_profile, &mut h);
             }
-            ShapeType::Ellipse { radius_x, radius_y, fill, fill_gradient, stroke, stroke_width, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
+            ShapeType::Ellipse { radius_x, radius_y, fill, fill_gradient, stroke, stroke_width, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, width_profile, .. } => {
                 5u8.hash(&mut h);
                 radius_x.value.to_bits().hash(&mut h);
                 radius_y.value.to_bits().hash(&mut h);
                 color_hash(&fill.value, &mut h);
                 gradient_hash(fill_gradient, &mut h);
-                shape_stroke_hash(stroke, stroke_width, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, &mut h);
+                shape_stroke_hash(stroke, stroke_width, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, width_profile, &mut h);
             }
-            ShapeType::Path { path_data, fill, fill_gradient, stroke, stroke_width, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, .. } => {
+            ShapeType::Path { path_data, fill, fill_gradient, stroke, stroke_width, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, width_profile, .. } => {
                 6u8.hash(&mut h);
                 path_data.hash(&mut h);
                 color_hash(&fill.value, &mut h);
                 gradient_hash(fill_gradient, &mut h);
-                shape_stroke_hash(stroke, stroke_width, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, &mut h);
+                shape_stroke_hash(stroke, stroke_width, stroke_position, line_cap, line_join, dash, dash_gap, dash_offset, width_profile, &mut h);
             }
         },
         LayerSource::Adjustment => {
@@ -694,6 +695,7 @@ fn shape_stroke_hash(
     dash: &project::Property<f32>,
     dash_gap: &project::Property<f32>,
     dash_offset: &project::Property<f32>,
+    profile: &[project::ProfilePoint],
     h: &mut DefaultHasher,
 ) {
     color_hash(&stroke.value, h);
@@ -704,6 +706,11 @@ fn shape_stroke_hash(
     dash.value.to_bits().hash(h);
     dash_gap.value.to_bits().hash(h);
     dash_offset.value.to_bits().hash(h);
+    profile.len().hash(h);
+    for p in profile {
+        p.x.to_bits().hash(h);
+        p.y.to_bits().hash(h);
+    }
 }
 
 fn gradient_hash(g: &Option<project::Property<project::FillGradient>>, h: &mut DefaultHasher) {
@@ -2257,6 +2264,7 @@ mod tests {
                 dash: project::Property::new("Dash", 0.0),
                 dash_gap: project::Property::new("Dash Gap", 0.0),
                 dash_offset: project::Property::new("Dash Offset", 0.0),
+                width_profile: Vec::new(),
             },
             tc,
             out,
@@ -2346,6 +2354,7 @@ mod tests {
                 dash: project::Property::new("Dash", 0.0),
                 dash_gap: project::Property::new("Dash Gap", 0.0),
                 dash_offset: project::Property::new("Dash Offset", 0.0),
+                width_profile: Vec::new(),
             },
             tc,
             out,
@@ -2396,6 +2405,7 @@ mod tests {
                 dash: project::Property::new("Dash", 0.0),
                 dash_gap: project::Property::new("Dash Gap", 0.0),
                 dash_offset: project::Property::new("Dash Offset", 0.0),
+                width_profile: Vec::new(),
             },
             tc,
             out,
@@ -2477,6 +2487,7 @@ mod tests {
                 dash: project::Property::new("Dash", dash),
                 dash_gap: project::Property::new("Dash Gap", dash_gap),
                 dash_offset: project::Property::new("Dash Offset", dash_offset),
+                width_profile: Vec::new(),
             },
             tc,
             out,
@@ -2553,6 +2564,7 @@ mod tests {
                     dash: project::Property::new("Dash", 0.0),
                     dash_gap: project::Property::new("Dash Gap", 0.0),
                     dash_offset: project::Property::new("Dash Offset", 0.0),
+                width_profile: Vec::new(),
                 },
                 tc,
                 out,
@@ -2571,6 +2583,52 @@ mod tests {
         for buf in [&miter, &bevel, &round] {
             assert!(buf.get(28, 25).a > 0.3, "arms must hold ink");
         }
+    }
+
+    #[test]
+    fn stroke_width_profile_tapers_along_path() {
+        use std::collections::HashMap;
+        // Horizontal open path, nib 4, ramp profile (pinched start, full
+        // end): the far end carries ink well off the centerline while the
+        // start stays thin. Frame pads x by 12 (path 20..80 -> buf 8..68).
+        let mut project = Project::new("p", "P");
+        let mut comp = Composition::hd_1080p_30fps("c", "C", 5.0);
+        let tc = TimeCode::from_frames(0, 30.0);
+        let out = TimeCode::from_frames(150, 30.0);
+        comp.add_layer(project::Layer::shape(
+            "l1",
+            "L",
+            project::ShapeType::Path {
+                path_data: "M 20 30 L 80 30".to_string(),
+                fill: project::Property::new("Fill", Color::TRANSPARENT),
+                fill_gradient: None,
+                stroke: project::Property::new("Stroke", Color::rgb(1.0, 0.0, 0.0)),
+                stroke_width: project::Property::new("Stroke Width", 4.0),
+                stroke_position: "center".to_string(),
+                line_cap: "round".to_string(),
+                line_join: "round".to_string(),
+                dash: project::Property::new("Dash", 0.0),
+                dash_gap: project::Property::new("Dash Gap", 0.0),
+                dash_offset: project::Property::new("Dash Offset", 0.0),
+                width_profile: vec![
+                    project::ProfilePoint::new(0.0, 0.0),
+                    project::ProfilePoint::new(1.0, 1.0),
+                ],
+            },
+            tc,
+            out,
+        ))
+        .unwrap();
+        project.add_composition(comp).unwrap();
+        let layer = eval_first(&project, "c");
+        let assets: HashMap<String, std::sync::Arc<image::RgbaImage>> = HashMap::new();
+        let (base_w, base_h) = layer_base_dims(&layer, 1920.0, 1080.0, &assets);
+        let buf = raster_content(&layer, base_w, base_h).expect("content");
+        // Path y=30 -> buf y=8. Far end (x=74 -> buf 62) inks 3px off the
+        // line (nib ~3.8); start (x=26 -> buf 14) does not (nib ~0.2).
+        assert!(buf.get(62, 5).a > 0.1, "wide end must ink off-center");
+        assert!(buf.get(14, 5).a < 0.05, "pinched start must stay thin");
+        assert!(buf.get(38, 8).a > 0.3, "middle must hold ink");
     }
 
     #[test]
@@ -2600,6 +2658,7 @@ mod tests {
                 dash: project::Property::new("Dash", 0.0),
                 dash_gap: project::Property::new("Dash Gap", 0.0),
                 dash_offset: project::Property::new("Dash Offset", 0.0),
+                width_profile: Vec::new(),
             },
             tc,
             out,
@@ -2647,6 +2706,7 @@ mod tests {
                 dash: project::Property::new("Dash", 0.0),
                 dash_gap: project::Property::new("Dash Gap", 0.0),
                 dash_offset: project::Property::new("Dash Offset", 0.0),
+                width_profile: Vec::new(),
             },
             tc,
             out,
@@ -2694,6 +2754,7 @@ mod tests {
                 dash: project::Property::new("Dash", 0.0),
                 dash_gap: project::Property::new("Dash Gap", 0.0),
                 dash_offset: project::Property::new("Dash Offset", 0.0),
+                width_profile: Vec::new(),
             },
             tc,
             out,
@@ -2769,6 +2830,7 @@ mod tests {
                     dash: project::Property::new("Dash", 0.0),
                     dash_gap: project::Property::new("Dash Gap", 0.0),
                     dash_offset: project::Property::new("Dash Offset", 0.0),
+                width_profile: Vec::new(),
                 },
                 tc,
                 out,
@@ -2809,6 +2871,7 @@ mod tests {
                 dash: project::Property::new("Dash", 0.0),
                 dash_gap: project::Property::new("Dash Gap", 0.0),
                 dash_offset: project::Property::new("Dash Offset", 0.0),
+                width_profile: Vec::new(),
             },
             // Sharp corners take the fill-only fast path in
             // `rasterize_layer` — the stroke must opt out of it.
@@ -2827,6 +2890,7 @@ mod tests {
                 dash: project::Property::new("Dash", 0.0),
                 dash_gap: project::Property::new("Dash Gap", 0.0),
                 dash_offset: project::Property::new("Dash Offset", 0.0),
+                width_profile: Vec::new(),
             },
             project::ShapeType::Ellipse {
                 radius_x: project::Property::new("RX", 30.0),
@@ -2842,6 +2906,7 @@ mod tests {
                 dash: project::Property::new("Dash", 0.0),
                 dash_gap: project::Property::new("Dash Gap", 0.0),
                 dash_offset: project::Property::new("Dash Offset", 0.0),
+                width_profile: Vec::new(),
             },
         ] {
             let mut project = Project::new("p", "P");

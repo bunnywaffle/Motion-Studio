@@ -48,7 +48,7 @@ pub use mask::{Mask, MaskMode, MaskShapeKind};
 pub use matte::TrackMatteMode;
 pub use modifier::{MathOp, ModifierGraph, ModifierNode, NodeConnection, NodeKind, WaveType};
 pub use ofx::{ofx_in_category, ofx_lookup, OfxCategory, OfxEffectDescriptor, OfxParamDescriptor, OFX_SUITE};
-pub use path::{Path, PathBooleanOp, PathPoint, PathPointKind};
+pub use path::{Path, PathBooleanOp, PathPoint, PathPointKind, ProfilePoint, sample_width_profile};
 pub use trace::{AutoTraceOptions, TraceChannel, TraceRange, TracedContour};
 pub use project::{Project, ProjectSettings, CURRENT_FORMAT_VERSION};
 pub use property::{
@@ -146,6 +146,7 @@ mod tests {
                 dash: Property::new("Dash", 0.0),
                 dash_gap: Property::new("Dash Gap", 0.0),
                 dash_offset: Property::new("Dash Offset", 0.0),
+                width_profile: Vec::new(),
             },
             TimeCode::from_frames(0, 30.0),
             TimeCode::from_frames(150, 30.0),
@@ -559,6 +560,7 @@ mod tests {
                 dash: Property::new("Dash", 0.0),
                 dash_gap: Property::new("Dash Gap", 0.0),
                 dash_offset: Property::new("Dash Offset", 0.0),
+                width_profile: Vec::new(),
             },
             tc0,
             tc100,
@@ -860,7 +862,7 @@ mod tests {
         let shape = Layer::shape(
             "shp",
             "Shape",
-            ShapeType::Path { path_data: "M 0 0 L 10 10".to_string(), fill: Property::new("Fill", Color::WHITE), fill_gradient: None, stroke: Property::new("Stroke", Color::TRANSPARENT), stroke_width: Property::new("Stroke Width", 2.0), line_cap: "round".to_string(), line_join: "round".to_string(), stroke_position: "center".to_string(), dash: Property::new("Dash", 0.0), dash_gap: Property::new("Dash Gap", 0.0), dash_offset: Property::new("Dash Offset", 0.0) },
+            ShapeType::Path { path_data: "M 0 0 L 10 10".to_string(), fill: Property::new("Fill", Color::WHITE), fill_gradient: None, stroke: Property::new("Stroke", Color::TRANSPARENT), stroke_width: Property::new("Stroke Width", 2.0), line_cap: "round".to_string(), line_join: "round".to_string(), stroke_position: "center".to_string(), dash: Property::new("Dash", 0.0), dash_gap: Property::new("Dash Gap", 0.0), dash_offset: Property::new("Dash Offset", 0.0), width_profile: Vec::new() },
             tc0,
             tc100,
         );
@@ -1017,6 +1019,7 @@ mod tests {
                 dash: Property::new("Dash", 0.0),
                 dash_gap: Property::new("Dash Gap", 0.0),
                 dash_offset: Property::new("Dash Offset", 0.0),
+                width_profile: Vec::new(),
             },
             tc0,
             tc300,
@@ -1040,6 +1043,7 @@ mod tests {
                 dash: Property::new("Dash", 0.0),
                 dash_gap: Property::new("Dash Gap", 0.0),
                 dash_offset: Property::new("Dash Offset", 0.0),
+                width_profile: Vec::new(),
             },
             tc0,
             tc300,
@@ -1061,6 +1065,7 @@ mod tests {
                 dash: Property::new("Dash", 0.0),
                 dash_gap: Property::new("Dash Gap", 0.0),
                 dash_offset: Property::new("Dash Offset", 0.0),
+                width_profile: Vec::new(),
             },
             tc0,
             tc300,

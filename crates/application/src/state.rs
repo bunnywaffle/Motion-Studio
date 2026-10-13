@@ -4993,6 +4993,107 @@ impl EditorState {
         }
     }
 
+    /// Mutable width-profile points of a shape layer (Rectangle, Ellipse,
+    /// Path). Returns false for other sources.
+    fn shape_profile_mut(
+        layer: &mut Layer,
+    ) -> Option<&mut Vec<project::ProfilePoint>> {
+        match &mut layer.source {
+            LayerSource::Shape {
+                shape_type:
+                    ShapeType::Rectangle { width_profile, .. }
+                    | ShapeType::Ellipse { width_profile, .. }
+                    | ShapeType::Path { width_profile, .. },
+            } => Some(width_profile),
+            _ => None,
+        }
+    }
+
+    /// Keep profile points sorted by `x` (the sampler assumes it).
+    fn sort_profile(points: &mut [project::ProfilePoint]) {
+        points.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
+    }
+
+    /// Move a width-profile point (drag path: no checkpoint, the gesture
+    /// owner checkpoints on press). Clamps x to 0..1, y to 0..2, re-sorts,
+    /// and returns the point's new index.
+    pub fn set_shape_profile_point(
+        &mut self,
+        layer_id: &str,
+        index: usize,
+        x: f32,
+        y: f32,
+    ) -> Result<usize, String> {
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let points = Self::shape_profile_mut(layer).ok_or_else(|| "Not a shape layer".to_string())?;
+        {
+            let slot = points.get_mut(index).ok_or_else(|| format!("Profile point {index} out of range"))?;
+            slot.x = x.clamp(0.0, 1.0);
+            slot.y = y.clamp(0.0, 2.0);
+        }
+        Self::sort_profile(points);
+        let (x, y) = (x.clamp(0.0, 1.0), y.clamp(0.0, 2.0));
+        Ok(points.iter().position(|p| (p.x - x).abs() < 1e-6 && (p.y - y).abs() < 1e-6).unwrap_or(index))
+    }
+
+    /// Add a width-profile point (one undo step), keeping sort order.
+    /// Returns the new point's index.
+    pub fn add_shape_profile_point(
+        &mut self,
+        layer_id: &str,
+        x: f32,
+        y: f32,
+    ) -> Result<usize, String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let points = Self::shape_profile_mut(layer).ok_or_else(|| "Not a shape layer".to_string())?;
+        points.push(project::ProfilePoint::new(x.clamp(0.0, 1.0), y.clamp(0.0, 2.0)));
+        Self::sort_profile(points);
+        let (x, y) = (x.clamp(0.0, 1.0), y.clamp(0.0, 2.0));
+        Ok(points.iter().position(|p| (p.x - x).abs() < 1e-6 && (p.y - y).abs() < 1e-6).unwrap_or(0))
+    }
+
+    /// Remove a width-profile point (one undo step).
+    pub fn remove_shape_profile_point(&mut self, layer_id: &str, index: usize) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let points = Self::shape_profile_mut(layer).ok_or_else(|| "Not a shape layer".to_string())?;
+        if index >= points.len() {
+            return Err(format!("Profile point {index} out of range"));
+        }
+        points.remove(index);
+        Ok(())
+    }
+
+    /// Clear the width profile back to uniform (one undo step).
+    pub fn reset_shape_profile(&mut self, layer_id: &str) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let points = Self::shape_profile_mut(layer).ok_or_else(|| "Not a shape layer".to_string())?;
+        points.clear();
+        Ok(())
+    }
+
     /// Toggle linked Size editing on a Rectangle/Ellipse shape layer.
     pub fn set_layer_shape_size_linked(&mut self, layer_id: &str, linked: bool) -> Result<(), String> {
         self.checkpoint();
@@ -9030,6 +9131,7 @@ impl EditorState {
                 dash: Property::new("Dash", 0.0),
                 dash_gap: Property::new("Dash Gap", 0.0),
                 dash_offset: Property::new("Dash Offset", 0.0),
+                width_profile: Vec::new(),
             },
             in_pt,
             out_pt,
@@ -9098,6 +9200,7 @@ impl EditorState {
                 dash: Property::new("Dash", 0.0),
                 dash_gap: Property::new("Dash Gap", 0.0),
                 dash_offset: Property::new("Dash Offset", 0.0),
+                width_profile: Vec::new(),
             },
             in_pt,
             out_pt,
@@ -9169,6 +9272,7 @@ impl EditorState {
                 dash: Property::new("Dash", 0.0),
                 dash_gap: Property::new("Dash Gap", 0.0),
                 dash_offset: Property::new("Dash Offset", 0.0),
+                width_profile: Vec::new(),
             },
             in_pt,
             out_pt,
@@ -9412,6 +9516,7 @@ impl EditorState {
                 dash: Property::new("Dash", 0.0),
                 dash_gap: Property::new("Dash Gap", 0.0),
                 dash_offset: Property::new("Dash Offset", 0.0),
+                width_profile: Vec::new(),
             },
             in_pt,
             out_pt,
