@@ -43,12 +43,51 @@ Conventions every widget follows:
 - `widget_dropdown(eff_id, field, label, combo, cx)` — kit `Combobox`
   (search, keyboard nav, a11y). The retained `ComboboxState` entity is
   provisioned by the Properties panel per `(eff_id, field)`; Confirm
-  commits through the shader setter.
+  commits through the shader setter. Full provisioning pattern below —
+  reuse it, don't rebuild it.
 - `shape_enum_pill(state, layer_id, id, label, current, options, set, cx)`
   (`panels.rs`) — lightweight cycle-on-click alternative (`Butt/Round/
   Square…`): shows the value, click advances. `set` is a plain
   `fn(&mut EditorState, &str, &str)` (e.g.
   `EditorState::set_layer_shape_line_cap`).
+
+### Combobox dropdowns (full pattern — reuse, don't rebuild)
+
+Two layers: kit primitives + app-side retained state.
+
+- **Primitives** (`gpui_kit::component::combobox`): `ComboboxState` (holds
+  selection + filter text), `SearchableVec<String>` (option list delegate),
+  `Combobox::new(state)` view (`.small()`, `.placeholder(...)`),
+  `ComboboxEvent::Confirm(v)` / `Change(v)` (both carry the picked values —
+  handle both, they fire in different interaction paths), `IndexPath`
+  (initial selection).
+- **Provisioning** (the part everyone reimplements wrong): state entities
+  are created once per key and retained in a panel-owned map, or selection
+  resets every render. Canonical shape, as done for timeline blend-mode /
+  matte combos (`tl_combos` + `tl_combo_subs`) and mask-mode combos
+  (`combos`):
+  ```rust
+  // key: format!("tl_blend_{lid}") / format!("mask_mode_{mid}") — one entry per control
+  if !self.tl_combos.contains_key(&key) {
+      let delegate = SearchableVec::new(OPTIONS.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+      let cb = cx.new(|cx| ComboboxState::new(delegate, vec![IndexPath::new(current_idx)], window, cx));
+      let sub = cx.subscribe(&cb, move |_, _, event: &ComboboxEvent<SearchableVec<String>>, cx| {
+          let vals = match event { ComboboxEvent::Confirm(v) | ComboboxEvent::Change(v) => v };
+          if let Some(name) = vals.first() { /* commit setter */ }
+      });
+      self.tl_combos.insert(key.clone(), cb);
+      self.tl_combo_subs.insert(key, sub); // keep the subscription alive
+  }
+  ```
+- **Rendering**: look the entity up by key and wrap it —
+  `Combobox::new(cb).small().into_any_element()` (mask-mode rows do exactly
+  this; `widget_dropdown` does it for effect enums). Missing entry →
+  render the em-dash fallback, never a fresh unprovisioned state.
+- **Checklist for a new dropdown**: unique key per control instance,
+  initial `IndexPath` from the model value, `Confirm`+`Change` both commit
+  through the model setter, subscription stored alongside the entity,
+  `.id(...)` + `.test_support()` on the wrapper, and a UI test that opens
+  the combo and picks an option.
 
 ## Vector rows
 
