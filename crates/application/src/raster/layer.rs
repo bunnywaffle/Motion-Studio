@@ -762,6 +762,7 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
         EvaluatedEffectType::Vignette { .. } => 25,
         EvaluatedEffectType::CelShading { .. } => 30,
         EvaluatedEffectType::OilPaint { .. } => 31,
+        EvaluatedEffectType::Curves { .. } => 35,
         EvaluatedEffectType::TrimPath { .. } => 32,
         EvaluatedEffectType::SinePath { .. } => 33,
         EvaluatedEffectType::InstancePath { .. } => 34,
@@ -949,6 +950,13 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
         EvaluatedEffectType::OilPaint { radius, amount } => {
             radius.to_bits().hash(h);
             amount.to_bits().hash(h);
+        }
+        EvaluatedEffectType::Curves { curve } => {
+            curve.len().hash(h);
+            for p in curve {
+                p.x.to_bits().hash(h);
+                p.y.to_bits().hash(h);
+            }
         }
         EvaluatedEffectType::TrimPath { start, end, offset } => {
             start.to_bits().hash(h);

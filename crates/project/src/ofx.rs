@@ -109,6 +109,13 @@ pub const OFX_SUITE: &[OfxEffectDescriptor] = &[
         spatial: true,
     },
     OfxEffectDescriptor {
+        id: "net.sf.openfx.custom.tone_curve",
+        label: "Tone Curve",
+        category: OfxCategory::Color,
+        params: &[],
+        spatial: false,
+    },
+    OfxEffectDescriptor {
         id: "net.sf.openfx.brightness_contrast",
         label: "Brightness & Contrast",
         category: OfxCategory::Color,
@@ -983,6 +990,7 @@ mod tests {
             EffectType::hue_saturation(0.0, 0.0, 0.0),
             EffectType::sharpen(50.0, 2.0),
             EffectType::vignette(50.0, 50.0),
+            EffectType::curves(),
         ]
     }
 

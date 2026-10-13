@@ -5094,6 +5094,102 @@ impl EditorState {
         Ok(())
     }
 
+    /// Mutable tone-curve points of a Curves effect.
+    fn effect_curve_mut<'a>(
+        comp: &'a mut project::Composition,
+        layer_id: &str,
+        eff_id: &str,
+    ) -> Result<&'a mut Vec<project::ProfilePoint>, String> {
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| format!("Layer {layer_id} not found"))?;
+        let effect = layer
+            .get_effect_mut(eff_id)
+            .ok_or_else(|| format!("Effect {eff_id} not found on layer"))?;
+        match &mut effect.effect_type {
+            project::EffectType::Curves { curve } => Ok(curve),
+            _ => Err(format!("Effect {eff_id} has no tone curve")),
+        }
+    }
+
+    /// Keep curve points sorted by `x`.
+    fn sort_curve(points: &mut [project::ProfilePoint]) {
+        points.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
+    }
+
+    /// Move a tone-curve point (drag path: no checkpoint). Clamps x/y to
+    /// 0..1, re-sorts, returns the new index.
+    pub fn set_effect_curve_point(
+        &mut self,
+        layer_id: &str,
+        eff_id: &str,
+        index: usize,
+        x: f32,
+        y: f32,
+    ) -> Result<usize, String> {
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let points = Self::effect_curve_mut(comp, layer_id, eff_id)?;
+        {
+            let slot = points.get_mut(index).ok_or_else(|| format!("Curve point {index} out of range"))?;
+            slot.x = x.clamp(0.0, 1.0);
+            slot.y = y.clamp(0.0, 1.0);
+        }
+        Self::sort_curve(points);
+        let (x, y) = (x.clamp(0.0, 1.0), y.clamp(0.0, 1.0));
+        Ok(points.iter().position(|p| (p.x - x).abs() < 1e-6 && (p.y - y).abs() < 1e-6).unwrap_or(index))
+    }
+
+    /// Add a tone-curve point (one undo step). Returns the new index.
+    pub fn add_effect_curve_point(
+        &mut self,
+        layer_id: &str,
+        eff_id: &str,
+        x: f32,
+        y: f32,
+    ) -> Result<usize, String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let points = Self::effect_curve_mut(comp, layer_id, eff_id)?;
+        points.push(project::ProfilePoint::new(x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)));
+        Self::sort_curve(points);
+        let (x, y) = (x.clamp(0.0, 1.0), y.clamp(0.0, 1.0));
+        Ok(points.iter().position(|p| (p.x - x).abs() < 1e-6 && (p.y - y).abs() < 1e-6).unwrap_or(0))
+    }
+
+    /// Remove a tone-curve point (one undo step).
+    pub fn remove_effect_curve_point(
+        &mut self,
+        layer_id: &str,
+        eff_id: &str,
+        index: usize,
+    ) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let points = Self::effect_curve_mut(comp, layer_id, eff_id)?;
+        if index >= points.len() {
+            return Err(format!("Curve point {index} out of range"));
+        }
+        points.remove(index);
+        Ok(())
+    }
+
+    /// Clear the tone curve back to linear (one undo step).
+    pub fn reset_effect_curve(&mut self, layer_id: &str, eff_id: &str) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let points = Self::effect_curve_mut(comp, layer_id, eff_id)?;
+        points.clear();
+        Ok(())
+    }
+
     /// Toggle linked Size editing on a Rectangle/Ellipse shape layer.
     pub fn set_layer_shape_size_linked(&mut self, layer_id: &str, linked: bool) -> Result<(), String> {
         self.checkpoint();

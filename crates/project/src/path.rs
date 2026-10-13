@@ -58,6 +58,26 @@ pub fn sample_width_profile(points: &[ProfilePoint], u: f32) -> f32 {
     if points.len() == 1 {
         return points[0].y.clamp(0.0, 2.0);
     }
+    sample_profile_core(points, u).clamp(0.0, 2.0)
+}
+
+/// Tone-curve output at input fraction `u` (clamped 0..1) over sorted
+/// points: same Catmull-Rom core, but an empty curve is the identity
+/// diagonal (no change) and output clamps to 0..1.
+pub fn sample_tone_curve(points: &[ProfilePoint], u: f32) -> f32 {
+    let u = u.clamp(0.0, 1.0);
+    if points.is_empty() {
+        return u;
+    }
+    if points.len() == 1 {
+        return points[0].y.clamp(0.0, 1.0);
+    }
+    sample_profile_core(points, u).clamp(0.0, 1.0)
+}
+
+/// Uniform Catmull-Rom interpolation over sorted points (ends duplicated),
+/// unclamped. Both samplers share this core so display == render.
+fn sample_profile_core(points: &[ProfilePoint], u: f32) -> f32 {
     let u = u.clamp(0.0, 1.0);
     let mut i = 0;
     while i + 1 < points.len() && points[i + 1].x < u {
@@ -70,17 +90,16 @@ pub fn sample_width_profile(points: &[ProfilePoint], u: f32) -> f32 {
     let p0 = if i == 0 { p1 } else { &points[i - 1] };
     let p3 = if i + 2 >= points.len() { p2 } else { &points[i + 2] };
     let (t2, t3) = (t * t, t * t * t);
-    let y = 0.5
-        * (2.0 * p1.y
-            + (-p0.y + p2.y) * t
-            + (2.0 * p0.y - 5.0 * p1.y + 4.0 * p2.y - p3.y) * t2
-            + (-p0.y + 3.0 * p1.y - 3.0 * p2.y + p3.y) * t3);
-    y.clamp(0.0, 2.0)
+    0.5 * (2.0 * p1.y
+        + (-p0.y + p2.y) * t
+        + (2.0 * p0.y - 5.0 * p1.y + 4.0 * p2.y - p3.y) * t2
+        + (-p0.y + 3.0 * p1.y - 3.0 * p2.y + p3.y) * t3)
 }
 
 /// One Bézier node: anchor plus relative tangent offsets.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct PathPoint {    pub pos: Vec2,
+pub struct PathPoint {
+    pub pos: Vec2,
     #[serde(default)]
     pub in_tan: Vec2,
     #[serde(default)]
@@ -1640,6 +1659,27 @@ mod tests {
         let (l, r) = (sample_width_profile(&bump, 0.25), sample_width_profile(&bump, 0.75));
         assert!(l > 0.3 && l < 0.9 && r > 0.3 && r < 0.9, "soft shoulders: {l} {r}");
         assert!((l - r).abs() < 1e-5, "symmetric bump: {l} {r}");
+    }
+
+    #[test]
+    fn tone_curve_identity_and_s_curve() {
+        // Empty = identity diagonal at several stops.
+        for u in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            assert_eq!(sample_tone_curve(&[], u), u);
+        }
+        // S-curve (lift shadows slightly, crush highlights): dark input
+        // rises, bright input falls, midpoint holds.
+        let s = [
+            ProfilePoint::new(0.0, 0.0),
+            ProfilePoint::new(0.25, 0.35),
+            ProfilePoint::new(0.75, 0.65),
+            ProfilePoint::new(1.0, 1.0),
+        ];
+        assert!(sample_tone_curve(&s, 0.1) > 0.1, "shadows lift");
+        assert!((sample_tone_curve(&s, 0.5) - 0.5).abs() < 0.05, "mid holds");
+        assert!(sample_tone_curve(&s, 0.9) < 0.9, "highlights crush");
+        assert_eq!(sample_tone_curve(&s, 0.0), 0.0);
+        assert_eq!(sample_tone_curve(&s, 1.0), 1.0);
     }
 
     #[test]

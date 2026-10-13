@@ -607,6 +607,11 @@ pub enum EvaluatedEffectType {
         shadow_tint: Color,
         shadow_tint_amount: f32,
     },
+    /// Master tone curve: luminance remap through control points
+    /// (empty = linear identity).
+    Curves {
+        curve: Vec<project::ProfilePoint>,
+    },
     OilPaint {
         radius: f32,
         amount: f32,
@@ -656,6 +661,7 @@ impl EvaluatedEffectType {
             Self::Vignette { .. } => "Vignette",
             Self::CelShading { .. } => "Cel Shading",
             Self::OilPaint { .. } => "Oil Painting",
+            Self::Curves { .. } => "Tone Curve",
             Self::OuterGlow { .. } => "Outer Glow",
             Self::Stock { plugin, .. } => plugin.descriptor().label,
         }
@@ -697,6 +703,7 @@ impl EvaluatedEffectType {
             Self::Vignette { .. } => "net.sf.openfx.vignette",
             Self::CelShading { .. } => "net.sf.openfx.cel_shading",
             Self::OilPaint { .. } => "net.sf.openfx.oil_paint",
+            Self::Curves { .. } => "net.sf.openfx.custom.tone_curve",
             Self::OuterGlow { .. } => "net.sf.openfx.outer_glow",
             Self::Stock { plugin, .. } => plugin.plugin_id(),
         }
@@ -977,8 +984,9 @@ impl EvaluatedEffectType {
                 Color::rgba(r, g, b, c.a)
             }
             // Sharpen (unsharp mask) and Vignette need neighbours / pixel
-            // position: identity here, resolved by the rasterizer.
-            Self::Sharpen { .. } | Self::Vignette { .. } | Self::CelShading { .. } | Self::OilPaint { .. } | Self::OuterGlow { .. } => c,
+            // position: identity here, resolved by the rasterizer. Curves
+            // needs its LUT: identity here, resolved by the rasterizer.
+            Self::Sharpen { .. } | Self::Vignette { .. } | Self::CelShading { .. } | Self::OilPaint { .. } | Self::Curves { .. } | Self::OuterGlow { .. } => c,
             // Stock per-pixel kernels; spatial stock is identity here.
             Self::Stock { plugin, params, .. } => process_color_stock(*plugin, params, c),
         }
@@ -2186,6 +2194,9 @@ impl LayerStackEvaluator {
                                 radius: eval_eff_prop("radius", radius.evaluate_at(time)),
                                 amount: eval_eff_prop("amount", amount.evaluate_at(time)),
                             }
+                        }
+                        EffectType::Curves { curve } => {
+                            EvaluatedEffectType::Curves { curve: curve.clone() }
                         }
                         EffectType::Stock { plugin, params, colors } => {
                             let desc = plugin.descriptor();

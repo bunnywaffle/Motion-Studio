@@ -172,6 +172,7 @@ pub enum PropValue {
     Color { value: Color, animated: bool },
     Text(String),
     EnumSel { index: usize },
+    Curve { points: Vec<crate::path::ProfilePoint> },
 }
 
 impl PropDecl {
@@ -228,6 +229,17 @@ impl PropDecl {
             widget: WidgetKind::Dropdown,
             meta,
             value: PropValue::EnumSel { index: selected },
+        }
+    }
+
+    /// Curve editor carrying control points (tone curves, width profiles).
+    pub fn curve(field: &str, label: &str, points: Vec<crate::path::ProfilePoint>) -> Self {
+        Self {
+            field: field.to_string(),
+            label: label.to_string(),
+            widget: WidgetKind::Curve,
+            meta: ParamMeta::slider(0.0, 1.0, 0.01, 2, "", 100.0),
+            value: PropValue::Curve { points },
         }
     }
 }

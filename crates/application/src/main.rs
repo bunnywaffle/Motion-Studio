@@ -7627,6 +7627,52 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
     }
 
     #[gpui_kit::test]
+    fn test_tone_curve_effect_renders_curve_editor(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        let eff_id = app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                let rid = s.add_rectangle_shape_layer(200.0, 100.0, None).expect("rect");
+                s.select_layer(Some(rid));
+                let eid = s
+                    .add_effect_to_selected_layer(project::EffectType::curves())
+                    .expect("tone curve");
+                cx.notify();
+                eid
+            })
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            // Scroll the curve plot itself into view, then verify.
+            let plot = SharedString::from(format!("curve_plot_effect_curve_{eff_id}"));
+            for _ in 0..16 {
+                window.scroll(
+                    "properties_inspector",
+                    gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(-400.))),
+                    cx,
+                );
+                window.render_frame(cx);
+                if window.try_find(plot.clone()).map(|e| e.visible()).unwrap_or(false) {
+                    break;
+                }
+            }
+            // Linear by default: empty plot + readout render, no points yet.
+            assert!(window.find(plot.clone()).visible());
+            assert!(window.find(SharedString::from(format!("curve_readout_effect_curve_{eff_id}"))).visible());
+        })
+        .expect("update_window failed");
+    }
+
+    #[gpui_kit::test]
     fn test_kit_components_drive_commands(cx: &mut TestAppContext) {
         use gpui_kit::test::TestWindowExt;
 

@@ -356,6 +356,9 @@ pub fn apply_effect_pixels(
         EvaluatedEffectType::OilPaint { radius, amount } => {
             apply_oil_paint(buf, *radius, *amount);
         }
+        EvaluatedEffectType::Curves { curve } => {
+            apply_tone_curve(buf, curve);
+        }
         EvaluatedEffectType::TrimPath { .. }
         | EvaluatedEffectType::SinePath { .. }
         | EvaluatedEffectType::InstancePath { .. } => {
@@ -755,6 +758,31 @@ pub fn apply_cel_shade(
     }
 }
 
+/// Master tone curve in place: 256-entry LUT from the control points
+/// (empty = identity, no-op). Straight-space RGB remap, alpha untouched.
+pub fn apply_tone_curve(buf: &mut FloatBuf, curve: &[project::ProfilePoint]) {
+    if buf.w == 0 || buf.h == 0 {
+        return;
+    }
+    let mut lut = [0.0f32; 256];
+    for (i, slot) in lut.iter_mut().enumerate() {
+        *slot = project::sample_tone_curve(curve, i as f32 / 255.0);
+    }
+    // Identity fast path (avoids touching pixels at all).
+    if lut.iter().enumerate().all(|(i, v)| (*v - i as f32 / 255.0).abs() < 1e-6) {
+        return;
+    }
+    for p in buf.px.iter_mut() {
+        if p.a <= 0.0 {
+            continue;
+        }
+        let c = p.to_color();
+        let at = |x: f32| lut[(x.clamp(0.0, 1.0) * 255.0).round() as usize];
+        let out = Color::rgba(at(c.r), at(c.g), at(c.b), c.a);
+        *p = Px::from_color(out);
+    }
+}
+
 /// Oil painting in place: classic Kuwahara smoothing — each pixel takes
 /// the mean of the lowest-variance quadrant in a `(radius+1)^2` window.
 /// `radius` 1..4 bounds the cost (81 taps max); `amount` 0..100 blends
@@ -890,6 +918,49 @@ mod tests {
         let s = buf.px[1].to_color();
         // band = round(0.5*3)/3 = 2/3, shade = 0 + 1*2/3 -> 0.5*2/3.
         assert!((s.r - 1.0 / 3.0).abs() < 1e-4, "floor 0 must lift to band, got {s:?}");
+    }
+
+    #[test]
+    fn tone_curve_empty_is_identity() {
+        let mut buf = FloatBuf {
+            w: 8,
+            h: 2,
+            px: (0..16).map(|i| Px { r: i as f32 / 15.0, g: 0.5, b: 0.25, a: 1.0 }).collect(),
+        };
+        let before = buf.px.clone();
+        apply_tone_curve(&mut buf, &[]);
+        for (a, b) in before.iter().zip(buf.px.iter()) {
+            assert!((a.r - b.r).abs() < 1e-6 && (a.g - b.g).abs() < 1e-6 && (a.b - b.b).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn tone_curve_s_shape_lifts_shadows_crushes_highlights() {
+        use project::ProfilePoint;
+        // Gentle S: (0,0) (0.25,0.35) (0.75,0.65) (1,1).
+        let curve = vec![
+            ProfilePoint::new(0.0, 0.0),
+            ProfilePoint::new(0.25, 0.35),
+            ProfilePoint::new(0.75, 0.65),
+            ProfilePoint::new(1.0, 1.0),
+        ];
+        let mut buf = FloatBuf {
+            w: 4,
+            h: 1,
+            px: vec![
+                Px { r: 0.1, g: 0.1, b: 0.1, a: 1.0 },
+                Px { r: 0.5, g: 0.5, b: 0.5, a: 1.0 },
+                Px { r: 0.9, g: 0.9, b: 0.9, a: 1.0 },
+                Px { r: 1.0, g: 1.0, b: 1.0, a: 0.0 },
+            ],
+        };
+        apply_tone_curve(&mut buf, &curve);
+        let (dark, mid, bright, empty) =
+            (buf.px[0].to_color(), buf.px[1].to_color(), buf.px[2].to_color(), buf.px[3]);
+        assert!(dark.r > 0.1, "shadows lift, got {dark:?}");
+        assert!((mid.r - 0.5).abs() < 0.05, "mid holds, got {mid:?}");
+        assert!(bright.r < 0.9, "highlights crush, got {bright:?}");
+        assert_eq!(empty.a, 0.0, "transparent pixels untouched");
     }
 
     #[test]

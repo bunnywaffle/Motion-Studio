@@ -1,5 +1,6 @@
 use crate::color::Color;
 use crate::layer::{FillGradient, GradientStop, GradientType};
+use crate::path::ProfilePoint;
 use crate::property::Property;
 use crate::puppet::PuppetPin;
 use crate::shader::{parse_shader_params, ShaderParam, ShaderParamValue};
@@ -665,6 +666,14 @@ pub enum EffectType {
         radius: Property<f32>,
         amount: Property<f32>,
     },
+    /// Tone curve: master luminance remap through an editable curve
+    /// (empty = linear identity). OFX plug-in
+    /// `net.sf.openfx.custom.tone_curve`.
+    Curves {
+        /// Sorted control points (x = input, y = output, 0..1).
+        #[serde(default)]
+        curve: Vec<ProfilePoint>,
+    },
     /// Modular stock plug-in (see `crate::stock::StockPlugin`): scalar
     /// params are built from the plug-in descriptor, so every stock effect
     /// is keyframable with zero per-effect plumbing. `colors` holds the
@@ -716,6 +725,7 @@ impl EffectType {
             Self::Vignette { .. } => "Vignette",
             Self::CelShading { .. } => "Cel Shading",
             Self::OilPaint { .. } => "Oil Painting",
+            Self::Curves { .. } => "Tone Curve",
             Self::Stock { plugin, .. } => plugin.descriptor().label,
         }
     }
@@ -1179,6 +1189,11 @@ impl EffectType {
         }
     }
 
+    /// Construct a Tone Curve effect type (linear identity by default).
+    pub fn curves() -> Self {
+        Self::Curves { curve: Vec::new() }
+    }
+
     /// Construct a Vignette effect type.
     pub fn vignette(amount: f32, softness: f32) -> Self {
         Self::Vignette {
@@ -1225,6 +1240,7 @@ impl EffectType {
             Self::Vignette { .. } => "net.sf.openfx.vignette",
             Self::CelShading { .. } => "net.sf.openfx.cel_shading",
             Self::OilPaint { .. } => "net.sf.openfx.oil_paint",
+            Self::Curves { .. } => "net.sf.openfx.custom.tone_curve",
             Self::Stock { plugin, .. } => plugin.plugin_id(),
         }
     }
@@ -1464,6 +1480,11 @@ impl Effect {
     /// Factory for creating an Oil Painting effect.
     pub fn oil_paint(id: impl Into<String>, radius: f32, amount: f32) -> Self {
         Self::new(id, "Oil Painting", EffectType::oil_paint(radius, amount))
+    }
+
+    /// Factory for creating a Tone Curve effect (linear by default).
+    pub fn curves(id: impl Into<String>) -> Self {
+        Self::new(id, "Tone Curve", EffectType::curves())
     }
 
     /// Factory for creating a Vignette effect.
@@ -2522,7 +2543,8 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 }
             }
             // Shader Lab values are dynamic (see nudge_shader_value).
-            EffectType::ShaderLab { .. } => {}
+            // Curves carry control points, not scalar params.
+            EffectType::ShaderLab { .. } | EffectType::Curves { .. } => {}
         }
         false
     }
@@ -2969,7 +2991,8 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
             // Puppet pin components are dynamic (`pin_{i}_{x|y}`) tracks.
             EffectType::Puppet { pins, .. } => Self::pin_component(pins, param_name),
             // Shader Lab values are dynamic, not `Property<f32>` tracks.
-            EffectType::ShaderLab { .. } => None,
+            // Curves carry control points, not scalar params.
+            EffectType::ShaderLab { .. } | EffectType::Curves { .. } => None,
         }
     }
 
@@ -3387,7 +3410,8 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
             // Puppet pin components are dynamic (`pin_{i}_{x|y}`) tracks.
             EffectType::Puppet { pins, .. } => Self::pin_component_mut(pins, param_name),
             // Shader Lab values are dynamic, not `Property<f32>` tracks.
-            EffectType::ShaderLab { .. } => None,
+            // Curves carry control points, not scalar params.
+            EffectType::ShaderLab { .. } | EffectType::Curves { .. } => None,
         }
     }
 
@@ -3815,6 +3839,9 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 scalar("radius", "Radius", WidgetKind::Slider, px1(1.0, 4.0, 1.0, 2.0), radius),
                 scalar("amount", "Amount", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), amount),
             ],
+            // Curves renders through its bespoke card arm (curve editor);
+            // no scalar/color declarations.
+            EffectType::Curves { .. } => vec![],
             EffectType::Stock { .. } => {
                 let mut out = Vec::new();
                 for (name, label, value, step) in self.stock_scalar_params() {
@@ -3961,8 +3988,7 @@ mod tests {
     }
 
     #[test]
-    fn cel_shading_legacy_files_load_with_defaults() {
-        // Pre-option files store only levels/edge; everything else defaults
+    fn cel_shading_legacy_files_load_with_defaults() {        // Pre-option files store only levels/edge; everything else defaults
         // to the legacy look (intensities 100, amounts 0).
         let fx: Effect = serde_json::from_str(
             r#"{"id": "c", "name": "Cel", "effect_type": {"type": "cel_shading", "levels": {"name": "Levels", "value": 4.0, "default_value": 4.0}, "edge": {"name": "Edge", "value": 60.0, "default_value": 60.0}}}"#,
@@ -3983,5 +4009,26 @@ mod tests {
             names,
             ["levels", "edge", "highlight_intensity", "highlight_tint", "highlight_tint_amount", "shadow_intensity", "shadow_tint", "shadow_tint_amount"],
         );
+    }
+
+    #[test]
+    fn curves_effect_defaults_to_linear() {
+        // Factory + registry agree; empty curve renders nothing to tweak.
+        let fx = Effect::curves("tc");
+        assert_eq!(fx.effect_type.type_name(), "Tone Curve");
+        assert_eq!(fx.effect_type.ofx_plugin_id(), "net.sf.openfx.custom.tone_curve");
+        match &fx.effect_type {
+            EffectType::Curves { curve } => assert!(curve.is_empty()),
+            _ => panic!("expected curves"),
+        }
+        // Legacy files predate the field entirely.
+        let fx: Effect = serde_json::from_str(
+            r#"{"id": "tc", "name": "Tone Curve", "effect_type": {"type": "curves"}}"#,
+        )
+        .unwrap();
+        match &fx.effect_type {
+            EffectType::Curves { curve } => assert!(curve.is_empty()),
+            _ => panic!("expected curves"),
+        }
     }
 }

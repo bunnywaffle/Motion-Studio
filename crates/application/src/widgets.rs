@@ -21,7 +21,7 @@ use gpui_kit::component::searchable_list::SearchableVec;
 use gpui_kit::component::combobox::{Combobox, ComboboxState};
 use gpui_kit::*;
 use project::{Color, FillGradient, GradientStop, GradientType, ProfilePoint, PropDecl};
-use project::sample_width_profile;
+use project::{sample_tone_curve, sample_width_profile};
 use std::collections::HashMap;
 
 /// Which commit path a scalar row uses.
@@ -730,48 +730,61 @@ pub(crate) fn fill_gradient_editor(
     )
 }
 
-/// Plot height in px (fixed; y maps 0..2 onto it).
+/// Plot height in px (fixed; y maps 0..`y_max` onto it).
 const CURVE_PLOT_H: f32 = 140.0;
 
+/// Curve editor configuration: y range + sampler shared with the
+/// consumer, so display == render for every feature.
+#[derive(Clone, Copy)]
+pub(crate) struct CurveSpec {
+    /// Y range top (x always spans 0..1).
+    pub y_max: f32,
+    /// Sampler shared with the rasterizer/evaluator.
+    pub sample: fn(&[ProfilePoint], f32) -> f32,
+}
+
+impl CurveSpec {
+    /// Stroke taper profiles (multiplier 0..2).
+    pub const WIDTH_PROFILE: Self = Self { y_max: 2.0, sample: sample_width_profile };
+    /// Color tone curves (output 0..1, empty = identity).
+    pub const TONE: Self = Self { y_max: 1.0, sample: sample_tone_curve };
+}
+
 /// Reusable 2D curve editor (stroke width profiles today; any sorted
-/// x-in-0..1, y-in-0..2 parametric data tomorrow): grid + smooth
-/// Catmull-Rom curve + square handles + X/Y readout.
+/// x-in-0..1 data tomorrow): grid + smooth curve + square handles + X/Y
+/// readout + reset.
 ///
-/// Points render from `points` (sorted copy); selection and plot geometry
-/// live on the panel keyed by `key` (mirrors the gradient editor);
-/// commits flow through `target` (new features add `CurveTarget`
-/// variants). Click empty plot space adds a point, left-drag moves it
-/// (one undo step per gesture), right-click deletes it.
+/// Points render from `points` (sorted copy); `selected` arrives as a
+/// param because this renders inside the panel's own update (reading the
+/// panel entity here would panic — same reason the selected stop arrives
+/// as a param in `gradient_editor`). Selection + plot geometry live on the
+/// panel keyed by `key`; commits flow through `target` (new features add
+/// `CurveTarget` variants). Click empty plot space adds a point,
+/// left-drag moves it (one undo step per gesture), right-click deletes it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn curve_editor(
     state: &Entity<EditorState>,
     panel_entity: &Entity<PropertiesPanel>,
-    panel: &PropertiesPanel,
     key: &str,
     target: panels::CurveTarget,
     points: &[ProfilePoint],
+    selected: usize,
+    spec: CurveSpec,
     cx: &App,
 ) -> AnyElement {
     let mut pts: Vec<ProfilePoint> = points.to_vec();
     pts.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
-    // Direct field read: this renders inside the panel's own update, so
-    // `panel_entity.read(cx)` here would panic (same reason the selected
-    // stop arrives as a param in `gradient_editor`).
-    let sel = panel
-        .curve_selected
-        .get(key)
-        .copied()
-        .unwrap_or(0)
-        .min(pts.len().saturating_sub(1));
+    let sel = selected.min(pts.len().saturating_sub(1));
     let sel_pt = pts.get(sel).copied().unwrap_or(ProfilePoint::new(0.0, 1.0));
-    // Dense display samples share the raster sampler (single source of
+    // Dense display samples share the consumer's sampler (single source of
     // truth for the curve shape).
     let samples: Vec<(f32, f32)> = (0..=64)
         .map(|i| {
             let u = i as f32 / 64.0;
-            (u, sample_width_profile(&pts, u))
+            (u, (spec.sample)(&pts, u))
         })
         .collect();
+    let y_max = spec.y_max.max(0.01);
 
     let key_owned = key.to_string();
     let p_prep = panel_entity.clone();
@@ -821,10 +834,13 @@ pub(crate) fn curve_editor(
                     return;
                 };
                 let t = ((mx - ox) / w.max(1.0)).clamp(0.0, 1.0);
-                let v = (1.0 - (my - oy) / h.max(1.0)).clamp(0.0, 1.0) * 2.0;
+                let v = (1.0 - (my - oy) / h.max(1.0)).clamp(0.0, 1.0) * y_max;
                 let at = s_add.update(cx, |s, _| match &target_add {
                     panels::CurveTarget::StrokeProfile { layer_id } => {
                         s.add_shape_profile_point(layer_id, t, v)
+                    }
+                    panels::CurveTarget::EffectCurve { layer_id, eff_id } => {
+                        s.add_effect_curve_point(layer_id, eff_id, t, v)
                     }
                 });
                 if let Ok(at) = at {
@@ -848,11 +864,11 @@ pub(crate) fn curve_editor(
                 .bg(cx.theme().border),
         );
     }
-    for fy in [0.5, 1.0, 1.5] {
+    for fy in [0.25 * y_max, 0.5 * y_max, 0.75 * y_max] {
         plot = plot.child(
             div()
                 .absolute()
-                .top(px(CURVE_PLOT_H - fy / 2.0 * CURVE_PLOT_H))
+                .top(px(CURVE_PLOT_H - fy / y_max * CURVE_PLOT_H))
                 .left(px(0.))
                 .right(px(0.))
                 .h(px(1.))
@@ -873,7 +889,7 @@ pub(crate) fn curve_editor(
                     let to_px = |u: f32, v: f32| {
                         gpui::point(
                             gpui::px(ox + u * w),
-                            gpui::px(oy + (1.0 - v / 2.0) * h),
+                            gpui::px(oy + (1.0 - v / y_max) * h),
                         )
                     };
                     let mut path = gpui::Path::new(to_px(samples_draw[0].0, samples_draw[0].1));
@@ -896,7 +912,7 @@ pub(crate) fn curve_editor(
         let target_sel = target.clone();
         let target_del = target.clone();
         let key_pt = key_owned.clone();
-        let py = CURVE_PLOT_H - (p.y / 2.0).clamp(0.0, 1.0) * CURVE_PLOT_H;
+        let py = CURVE_PLOT_H - (p.y / y_max).clamp(0.0, 1.0) * CURVE_PLOT_H;
         let half = if i == sel { 6.0 } else { 5.0 };
         plot = plot.child(
             div()
@@ -927,6 +943,7 @@ pub(crate) fn curve_editor(
                             key: key_pt.clone(),
                             index: i,
                             moved: false,
+                            y_max: spec.y_max,
                         });
                         cx.notify();
                     });
@@ -937,6 +954,9 @@ pub(crate) fn curve_editor(
                         panels::CurveTarget::StrokeProfile { layer_id } => {
                             s.remove_shape_profile_point(layer_id, i)
                         }
+                        panels::CurveTarget::EffectCurve { layer_id, eff_id } => {
+                            s.remove_effect_curve_point(layer_id, eff_id, i)
+                        }
                     });
                     if res.is_ok() {
                         // Selection clamps on next render; just refresh.
@@ -946,6 +966,8 @@ pub(crate) fn curve_editor(
                 }),
         );
     }
+    let s_reset = state.clone();
+    let target_reset = target.clone();
     v_flex()
         .gap_1()
         .child(plot)
@@ -962,6 +984,34 @@ pub(crate) fn curve_editor(
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
                         .child(format!("X {:.3}   Y {:.3}", sel_pt.x, sel_pt.y)),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("curve_reset_{key}")))
+                        .test_support()
+                        .cursor_pointer()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(cx.theme().muted)
+                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                        .text_xs()
+                        .text_color(cx.theme().foreground)
+                        .child("Reset")
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            let target_do = target_reset.clone();
+                            s_reset.update(cx, |s, cx| {
+                                match &target_do {
+                                    panels::CurveTarget::StrokeProfile { layer_id } => {
+                                        let _ = s.reset_shape_profile(layer_id);
+                                    }
+                                    panels::CurveTarget::EffectCurve { layer_id, eff_id } => {
+                                        let _ = s.reset_effect_curve(layer_id, eff_id);
+                                    }
+                                }
+                                cx.notify();
+                            });
+                        }),
                 ),
         )
         .into_any_element()

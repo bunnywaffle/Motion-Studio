@@ -6487,6 +6487,8 @@ pub struct PropUi {
     pub vec_link: HashSet<String>,
     /// Selected gradient-editor stop per effect id.
     pub gradient_stop: HashMap<String, usize>,
+    /// Selected curve-editor point per editor key.
+    pub curve_selected: HashMap<String, usize>,
 }
 
 /// Target of the shared N-stop gradient editor (see
@@ -6505,6 +6507,8 @@ pub enum GradientTarget {
 pub enum CurveTarget {
     /// Stroke width profile on a shape layer.
     StrokeProfile { layer_id: String },
+    /// Master tone curve on a Curves effect.
+    EffectCurve { layer_id: String, eff_id: String },
 }
 
 impl GradientTarget {
@@ -6540,6 +6544,8 @@ pub struct CurveDrag {
     pub key: String,
     pub index: usize,
     pub moved: bool,
+    /// Y range top of the owning editor (width profiles 2.0, tone 1.0).
+    pub y_max: f32,
 }
 
 struct TextInspectorInputs {
@@ -9413,52 +9419,33 @@ where
 {
     let lid = layer.id.clone();
     let key = format!("stroke_profile_{lid}");
-    let s_reset = state.clone();
-    let lid_reset = lid.clone();
+    let sel = panel
+        .curve_selected
+        .get(&key)
+        .copied()
+        .unwrap_or(0)
+        .min(profile.len().saturating_sub(1));
     let body = v_flex()
         .gap_2()
         .child(crate::widgets::curve_editor(
             state,
             panel_entity,
-            panel,
             &key,
             CurveTarget::StrokeProfile { layer_id: lid.clone() },
             profile,
+            sel,
+            crate::widgets::CurveSpec::WIDTH_PROFILE,
             cx,
         ))
         .child(
-            h_flex()
-                .items_center()
-                .justify_between()
+            div()
                 .text_xs()
-                .child(
-                    div()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(if profile.is_empty() {
-                            "Uniform width — click the plot to add taper points"
-                        } else {
-                            "Drag points to shape • right-click deletes"
-                        }),
-                )
-                .child(
-                    div()
-                        .id(SharedString::from(format!("curve_reset_{key}")))
-                        .test_support()
-                        .cursor_pointer()
-                        .px_2()
-                        .py_0p5()
-                        .rounded_sm()
-                        .bg(cx.theme().muted)
-                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-                        .text_color(cx.theme().foreground)
-                        .child("Reset")
-                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                            s_reset.update(cx, |s, cx| {
-                                let _ = s.reset_shape_profile(&lid_reset);
-                                cx.notify();
-                            });
-                        }),
-                ),
+                .text_color(cx.theme().muted_foreground)
+                .child(if profile.is_empty() {
+                    "Uniform width — click the plot to add taper points"
+                } else {
+                    "Drag points to shape • right-click deletes"
+                }),
         );
     prop_section(
         "shape_profile_section",
@@ -11706,6 +11693,21 @@ fn render_applied_effects(
                         effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, enums, cx));
                     }
                 }
+                EffectType::Curves { curve } => {
+                    // Master tone curve editor (linear identity when empty).
+                    let key = format!("effect_curve_{eff_id}");
+                    let sel = ui.curve_selected.get(&key).copied().unwrap_or(0);
+                    effect_box = effect_box.child(crate::widgets::curve_editor(
+                        state,
+                        panel_entity,
+                        &key,
+                        CurveTarget::EffectCurve { layer_id: layer.id.clone(), eff_id: eff_id.clone() },
+                        curve,
+                        sel,
+                        crate::widgets::CurveSpec::TONE,
+                        cx,
+                    ));
+                }
                 EffectType::GradientRamp { .. } => {
                     // N-stop gradient editor over the ramp stops (bar,
                     // draggable diamonds, wheel, reverse, presets) + angle row.
@@ -13157,12 +13159,15 @@ impl Render for PropertiesPanel {
                         let mx = event.position.x / px(1.0);
                         let my = event.position.y / px(1.0);
                         let t = ((mx - ox) / w.max(1.0)).clamp(0.0, 1.0);
-                        let v = (1.0 - (my - oy) / h.max(1.0)).clamp(0.0, 1.0) * 2.0;
+                        let v = (1.0 - (my - oy) / h.max(1.0)).clamp(0.0, 1.0) * drag.y_max;
                         let target = drag.target.clone();
                         let idx = drag.index;
                         let at = this.state.update(cx, |s, _| match &target {
                             CurveTarget::StrokeProfile { layer_id } => {
                                 s.set_shape_profile_point(layer_id, idx, t, v)
+                            }
+                            CurveTarget::EffectCurve { layer_id, eff_id } => {
+                                s.set_effect_curve_point(layer_id, eff_id, idx, t, v)
                             }
                         });
                         if let Ok(at) = at {
@@ -13304,6 +13309,7 @@ impl Render for PropertiesPanel {
                             &PropUi {
                                 vec_link: self.vec_link.clone(),
                                 gradient_stop: self.gradient_stop.clone(),
+                                curve_selected: self.curve_selected.clone(),
                             },
                             &fx_selects,
                             &fx_enums,
@@ -15887,6 +15893,7 @@ pub(crate) fn effect_template_for(plugin_id: &str) -> Option<EffectType> {
         "net.sf.openfx.bloom" => EffectType::bloom(40.0, 10.0),
         "net.sf.openfx.vignette" => EffectType::vignette(50.0, 50.0),
         "net.sf.openfx.cel_shading" => EffectType::cel_shading(4.0, 60.0),
+        "net.sf.openfx.custom.tone_curve" => EffectType::curves(),
         "net.sf.openfx.oil_paint" => EffectType::oil_paint(2.0, 100.0),
         "net.sf.openfx.trim_path" => EffectType::trim_path(0.0, 100.0, 0.0),
         "net.sf.openfx.sine_path" => EffectType::sine_path(20.0, 1.0, 0.0),
