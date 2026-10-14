@@ -6410,7 +6410,10 @@ pub struct PropertiesPanel {
     pub gradient_stop: HashMap<String, usize>,
     /// In-progress gradient stop drag (None = idle).
     pub gradient_drag: Option<GradientDrag>,
-    /// Gradient bar geometry (origin_x, width, window px) per editor prefix.
+    /// Color picker with an in-progress drag: panel-root mouse handlers
+    /// service its moves (per-element handlers drop fast drags that leave
+    /// the small SV/slider hit areas).
+    pub(crate) color_drag: Option<Entity<InspectorColorPicker>>,    /// Gradient bar geometry (origin_x, width, window px) per editor prefix.
     pub gradient_bar_bounds: HashMap<String, (f32, f32)>,
     /// Selected curve-editor point per editor key.
     pub curve_selected: HashMap<String, usize>,
@@ -6599,6 +6602,7 @@ impl PropertiesPanel {
             vec_link: HashSet::new(),
             gradient_stop: HashMap::new(),
             gradient_drag: None,
+            color_drag: None,
             gradient_bar_bounds: HashMap::new(),
             curve_selected: HashMap::new(),
             curve_drag: None,
@@ -7894,6 +7898,7 @@ pub(crate) fn render_three_mode_color_picker(
                             grad_editor,
                             &format!("{key}_grad_stop"),
                             stop_color,
+                            panel_entity,
                             cx,
                         ));
                     v_flex()
@@ -7932,6 +7937,7 @@ pub(crate) fn render_three_mode_color_picker(
                 fill_editor,
                 key,
                 current_color,
+                panel_entity,
                 cx,
             )
         }
@@ -8562,6 +8568,7 @@ pub(crate) fn fx_swatch_row(
     label: &str,
     current: Color,
     wheel: Option<&Entity<InspectorColorPicker>>,
+    panel: &Entity<PropertiesPanel>,
     cx: &App,
 ) -> AnyElement {
     let cur_hex = format!(
@@ -8631,6 +8638,7 @@ pub(crate) fn fx_swatch_row(
                 picker,
                 &format!("fx_{field}_{eff_id}"),
                 current,
+                panel,
                 cx,
             ));
         }
@@ -9170,6 +9178,7 @@ fn shape_stroke_rows(
             &ed_render,
             "shape_stroke",
             sc,
+            panel_entity,
             cx,
         ));
     }
@@ -11038,6 +11047,7 @@ fn render_applied_effects(
                                 &ed_render,
                                 eid,
                                 color,
+                                panel_entity,
                                 cx,
                             ));
                         }
@@ -11118,6 +11128,7 @@ fn render_applied_effects(
                             &ed_render,
                             "shadow_color",
                             sc,
+                            panel_entity,
                             cx,
                         ));
                     }
@@ -11663,6 +11674,7 @@ fn render_applied_effects(
                             &ed_render,
                             "chroma_color",
                             kc,
+                            panel_entity,
                             cx,
                         ));
                     }
@@ -13089,7 +13101,7 @@ impl Render for PropertiesPanel {
             .flex_col()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 if !event.dragging() {
                     if this.scrub_prop.is_some() {
                         this.scrub_prop = None;
@@ -13182,6 +13194,18 @@ impl Render for PropertiesPanel {
                         }
                     }
                 }
+                // Color picker drag: serviced here so fast drags that leave
+                // the small SV/slider hit areas keep tracking (the
+                // per-element handlers drop those packets, which reads as
+                // sticking then jumping). Coalescing lives in `drag_to`.
+                if let Some(ed) = this.color_drag.clone() {
+                    crate::color_editor::InspectorColorPicker::service_move(
+                        &ed,
+                        event.position,
+                        window,
+                        cx,
+                    );
+                }
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _event, window, cx| {
                 // Click (no drag movement) on a value field opens keyboard
@@ -13208,6 +13232,12 @@ impl Render for PropertiesPanel {
                         s.update(cx, |s, _| s.undo());
                     }
                 }
+                // Dropping a color drag ends the gesture (the editor's own
+                // up handlers cover releases over its controls; this covers
+                // releases anywhere else in the panel).
+                if let Some(ed) = this.color_drag.take() {
+                    crate::color_editor::InspectorColorPicker::end_drag(&ed, cx);
+                }
                 let s = this.state.clone();
                 s.update(cx, |s, cx| {
                     s.preview_fast = false;
@@ -13220,6 +13250,9 @@ impl Render for PropertiesPanel {
                 this.scrub_moved = false;
                 this.gradient_drag = None;
                 this.curve_drag = None;
+                if let Some(ed) = this.color_drag.take() {
+                    crate::color_editor::InspectorColorPicker::end_drag(&ed, cx);
+                }
                 let s = this.state.clone();
                 s.update(cx, |s, cx| {
                     s.preview_fast = false;

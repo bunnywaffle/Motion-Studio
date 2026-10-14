@@ -21,6 +21,7 @@ use gpui_kit::{
     Styled, Subscription, Window,
 };
 use project::Color;
+use crate::panels::PropertiesPanel;
 use crate::state::EditorState;
 
 /// Value-format tabs. ACEScg is deliberately absent: the pipeline has no
@@ -74,6 +75,9 @@ pub(crate) struct InspectorColorPicker {
     /// no `cx` borrowing is possible here).
     current: Rc<RefCell<Color>>,
     dragging: Option<DragCtl>,
+    /// Last serviced drag position (window px): sub-pixel packets skip the
+    /// commit (high-polling mice emit hundreds per frame).
+    drag_last_px: Option<(f32, f32)>,
     sv_bounds: Option<Bounds<Pixels>>,
     bar_bounds: HashMap<DragCtl, Bounds<Pixels>>,
     inputs: HashMap<Field, Entity<InputState>>,
@@ -108,6 +112,7 @@ impl InspectorColorPicker {
             orig: None,
             current: Rc::new(RefCell::new(Color::WHITE)),
             dragging: None,
+            drag_last_px: None,
             sv_bounds: None,
             bar_bounds: HashMap::new(),
             inputs,
@@ -299,6 +304,7 @@ pub(crate) fn render_color_editor(
     editor: &Entity<InspectorColorPicker>,
     id: &str,
     current: Color,
+    panel: &Entity<PropertiesPanel>,
     cx: &App,
 ) -> AnyElement {
     // Silent model mirror for field edits (interior mutability: no `cx`
@@ -419,6 +425,7 @@ pub(crate) fn render_color_editor(
     let ed_sv_move = editor.clone();
     let ed_sv_up = editor.clone();
     let ed_sv_out = editor.clone();
+    let p_sv = panel.clone();
     let mut sv = div()
         .relative()
         .w_full()
@@ -451,6 +458,11 @@ pub(crate) fn render_color_editor(
         })
         .on_mouse_down(MouseButton::Left, move |event, window, cx| {
             InspectorColorPicker::begin_drag(&ed_sv, DragCtl::Sv, event.position, window, cx);
+            let ed = ed_sv.clone();
+            p_sv.update(cx, |this, cx| {
+                this.color_drag = Some(ed);
+                cx.notify();
+            });
         })
         .on_mouse_move(move |event, window, cx| {
             if ed_sv_move.read(cx).dragging == Some(DragCtl::Sv) {
@@ -483,7 +495,7 @@ pub(crate) fn render_color_editor(
     }
 
     // --- sliders: H + A always visible; RGB bars live in the RGB tab ---
-    let hue_bar = slider_row(editor, id, DragCtl::Hue, "H", hue_track(), h / 360.0, &format!("{h:.0}°"), cx);
+    let hue_bar = slider_row(editor, id, DragCtl::Hue, "H", hue_track(), h / 360.0, &format!("{h:.0}°"), panel, cx);
     let alpha_bar = slider_row(
         editor,
         id,
@@ -501,6 +513,7 @@ pub(crate) fn render_color_editor(
             .into_any_element(),
         current.a,
         &format!("{:.0}%", current.a * 100.0),
+        panel,
         cx,
     );
 
@@ -520,7 +533,7 @@ pub(crate) fn render_color_editor(
                         .gap_2()
                         .items_center()
                         .child(div().w(px(10.)).text_xs().text_color(cx.theme().muted_foreground).child(label))
-                        .child(div().flex_1().child(slider_bar(editor, id, ctl, gradient_track(from, to, 90.0), val as f32 / 255.0, cx)))
+                        .child(div().flex_1().child(slider_bar(editor, id, ctl, gradient_track(from, to, 90.0), val as f32 / 255.0, panel, cx)))
                         .child(
                             div()
                                 .w(px(52.))
@@ -612,13 +625,14 @@ fn slider_row(
     track: AnyElement,
     t: f32,
     readout: &str,
+    panel: &Entity<PropertiesPanel>,
     cx: &App,
 ) -> AnyElement {
     h_flex()
         .gap_2()
         .items_center()
         .child(div().w(px(10.)).text_xs().text_color(cx.theme().muted_foreground).child(label.to_string()))
-        .child(div().flex_1().child(slider_bar(editor, id, ctl, track, t, cx)))
+        .child(div().flex_1().child(slider_bar(editor, id, ctl, track, t, panel, cx)))
         .child(
             div()
                 .w(px(44.))
@@ -638,6 +652,7 @@ fn slider_bar(
     ctl: DragCtl,
     track: AnyElement,
     t: f32,
+    panel: &Entity<PropertiesPanel>,
     cx: &App,
 ) -> AnyElement {
     let ed_down = editor.clone();
@@ -645,6 +660,7 @@ fn slider_bar(
     let ed_up = editor.clone();
     let ed_out = editor.clone();
     let ed_pre = editor.clone();
+    let p_down = panel.clone();
     let ctl_name = match ctl {
         DragCtl::Hue => "hue",
         DragCtl::Alpha => "alpha",
@@ -676,6 +692,11 @@ fn slider_bar(
         })
         .on_mouse_down(MouseButton::Left, move |event, window, cx| {
             InspectorColorPicker::begin_drag(&ed_down, ctl, event.position, window, cx);
+            let ed = ed_down.clone();
+            p_down.update(cx, |this, cx| {
+                this.color_drag = Some(ed);
+                cx.notify();
+            });
         })
         .on_mouse_move(move |event, window, cx| {
             if ed_move.read(cx).dragging == Some(ctl) {
@@ -795,7 +816,8 @@ impl InspectorColorPicker {
     }
 
     /// Map a pointer position to a color through a control's recorded
-    /// bounds, then commit when it differs.
+    /// bounds, then commit when it differs. Sub-pixel packets skip the
+    /// commit entirely (no model write, no re-render).
     fn drag_to(
         editor: &Entity<Self>,
         ctl: DragCtl,
@@ -803,6 +825,20 @@ impl InspectorColorPicker {
         window: &mut Window,
         cx: &mut App,
     ) {
+        let px = (f32::from(pos.x), f32::from(pos.y));
+        let fresh = editor.update(cx, |this, _| {
+            let fresh = match this.drag_last_px {
+                Some((lx, ly)) => (px.0 - lx).hypot(px.1 - ly) >= 1.0,
+                None => true,
+            };
+            if fresh {
+                this.drag_last_px = Some(px);
+            }
+            fresh
+        });
+        if !fresh {
+            return;
+        }
         let (bounds, current) = {
             let this = editor.read(cx);
             (this.bounds_for(ctl), *this.current.borrow())
@@ -833,6 +869,21 @@ impl InspectorColorPicker {
         Self::commit_synced(editor, next, None, window, cx);
     }
 
+    /// Service one drag packet from the panel-root mouse handler (the
+    /// per-element handlers drop fast drags that leave the small hit
+    /// areas; the root sees every move in the panel).
+    pub(crate) fn service_move(
+        editor: &Entity<Self>,
+        pos: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let ctl = editor.read(cx).dragging;
+        if let Some(ctl) = ctl {
+            Self::drag_to(editor, ctl, pos, window, cx);
+        }
+    }
+
     fn begin_drag(
         editor: &Entity<Self>,
         ctl: DragCtl,
@@ -857,8 +908,7 @@ impl InspectorColorPicker {
         Self::drag_to(editor, ctl, pos, window, cx);
     }
 
-    fn end_drag(editor: &Entity<Self>, cx: &mut App) {
-        editor.update(cx, |this, cx| {
+    pub(crate) fn end_drag(editor: &Entity<Self>, cx: &mut App) {        editor.update(cx, |this, cx| {
             if this.dragging.take().is_some() {
                 cx.notify();
             }

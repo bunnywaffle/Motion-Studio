@@ -106,14 +106,17 @@ Two layers: kit primitives + app-side retained state.
   | Gradient tabs. Tab switches **commit** (Color tab commits opaque
   white, None commits transparent + clears gradient) — this is what keeps
   picks visible.
-- `InspectorColorPicker` + `render_color_editor(editor, id, current, cx)`
-  (`color_editor.rs`) — RGB/HEX/HSV tabs, SV canvas, hue/alpha/RGB sliders,
-  numeric fields. Created once per usage via `use_keyed_state` with a
-  `commit` closure (e.g. `shape_stroke` → `set_layer_shape_stroke`).
+- `InspectorColorPicker` + `render_color_editor(editor, id, current, panel,
+  cx)` (`color_editor.rs`) — RGB/HEX/HSV tabs, SV canvas, hue/alpha/RGB
+  sliders, numeric fields. Created once per usage via `use_keyed_state`
+  with a `commit` closure (e.g. `shape_stroke` → `set_layer_shape_stroke`).
   Drag gestures checkpoint once in `begin_drag`, suppress per-packet
   checkpoints (`EditorState::suppress_checkpoint`), run the canvas
-  degraded (`preview_fast`), and restore both in `end_drag`. Helpers:
-  `rgb_to_hsv`, `hsv_to_rgb`, `sync_inputs`.
+  degraded (`preview_fast`), and restore both in `end_drag`. Sub-pixel
+  packets skip the commit (`drag_last_px`); unchanged colors skip via the
+  current-mirror check. Fast drags keep tracking because the panel-root
+  mouse handlers service the registered `color_drag` editor
+  (`service_move`); per-element handlers stay as fallback.
 - `fx_swatch_row(state, layer_id, eff_id, field, label, color, wheel, cx)`
   (`panels.rs`) — effect color row bound to a wheel editor from the
   per-`(eff_id, field)` registry (`fx_color_fields` lists an effect's

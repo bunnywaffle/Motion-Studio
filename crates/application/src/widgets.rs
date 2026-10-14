@@ -686,6 +686,7 @@ pub(crate) fn widget_gradient(
             "Stop",
             stop_color,
             wheels.get(&(eff_id.to_string(), f.to_string())),
+            panel,
             cx,
         ),
         None => div().into_any_element(),
@@ -1069,6 +1070,7 @@ pub(crate) fn widget_for_decl(
                     &decl.label,
                     c,
                     wheels.get(&(eff_id.to_string(), decl.field.clone())),
+                    panel,
                     cx,
                 ))
                 .into_any_element(),

@@ -7673,6 +7673,67 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
     }
 
     #[gpui_kit::test]
+    fn test_color_hue_click_commits_single_undo_step(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                let rid = s.add_rectangle_shape_layer(200.0, 100.0, None).expect("rect");
+                s.select_layer(Some(rid.clone()));
+                // Opaque red stroke so the hue drag has something to change.
+                s.set_layer_shape_stroke(&rid, project::Color::rgb(1.0, 0.0, 0.0)).expect("stroke");
+                s.set_layer_shape_stroke_width(&rid, 4.0).expect("width");
+                cx.notify();
+            });
+        });
+        // Open the stroke editor, then click the hue bar midpoint (cyan).
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("shape_stroke_wheel", cx);
+            window.render_frame(cx);
+            let bar = SharedString::from("shape_stroke_hue_bar");
+            let b = window.find(bar.clone()).bounds();
+            let w = b.size.width / px(1.0);
+            window.click_at(bar, gpui::point(px(w * 0.5), px(10.)), cx);
+            window.render_frame(cx);
+        })
+        .expect("update_window failed");
+        let hue_of = |app_view: &Entity<AppView>, cx: &mut TestAppContext| {
+            app_view.read_with(cx, |view, cx| {
+                let state = view.state().read(cx);
+                let layer = state.active_composition().unwrap().get_layer(state.selected_layer_id.as_deref().unwrap()).unwrap().clone();
+                match layer.source {
+                    project::LayerSource::Shape { shape_type: project::ShapeType::Rectangle { stroke, .. } } => {
+                        let (h, _, _) = crate::color_editor::rgb_to_hsv(stroke.value.r, stroke.value.g, stroke.value.b);
+                        h
+                    }
+                    _ => panic!("expected rectangle"),
+                }
+            })
+        };
+        let hue = hue_of(&app_view, cx);
+        assert!((hue - 180.0).abs() < 30.0, "hue bar midpoint must shift red toward cyan, got {hue}");
+        // One undo step reverts the whole gesture (press checkpoint only).
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                assert!(s.undo());
+                cx.notify();
+            });
+        });
+        let hue = hue_of(&app_view, cx);
+        assert!(hue < 30.0 || hue > 330.0, "undo must restore red, got {hue}");
+    }
+
+    #[gpui_kit::test]
     fn test_kit_components_drive_commands(cx: &mut TestAppContext) {
         use gpui_kit::test::TestWindowExt;
 
