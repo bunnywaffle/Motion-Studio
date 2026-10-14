@@ -71,7 +71,7 @@ Details:
 Every numeric property can carry its own node graph that reshapes its value every frame. Right-click any property row and pick **Modifier Graph…** (the workflow icon opens graphs already bound).
 
 - **Anything drives anything**: a `Driver Link` node reads any property on any layer — transform, opacity, effect params, shape scalars (size, stroke width, dash…), text scalars — and the graph's `Output` writes to the bound property. Driver chains are allowed and cycle-guarded.
-- **Bindable targets**: opacity, transform (position/scale/rotation/anchor), every effect scalar, and shape scalars. (Colors stay out: the graph engine is scalar/float.)
+- **Bindable targets**: opacity, transform (position/scale/rotation/anchor), every effect scalar, shape scalars, text scalars (size, tracking, leading, …), and mask opacity/feather/expansion. (Colors stay out: the graph engine is scalar/float.)
 - **Nodes**: sources (`Base Value In`, `Constant`, `Get Layer Factor`, `Driver Link`), math (`Math` + − × ÷ ^, `Lerp`, `Clamp`, `Remap`, `Smoothstep`, `Stepped`), generators (`Noise`, `Wave` sine/triangle/square), and `Output`.
 - **Starter combos**:
   - *Progress wipe*: `Get Layer Factor` → `Smoothstep` → `Output` on Trim End or Opacity.

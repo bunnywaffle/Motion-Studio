@@ -7052,6 +7052,99 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
     }
 
     #[test]
+    fn test_canonical_modifier_path_folds_aliases() {
+        use crate::state::EditorState;
+        // Text scrub keys (with and without the :mult suffix).
+        assert_eq!(EditorState::canonical_modifier_path("text_tracking:50"), "text.tracking");
+        assert_eq!(EditorState::canonical_modifier_path("text_leading"), "text.leading");
+        assert_eq!(EditorState::canonical_modifier_path("font_size"), "text.font_size");
+        assert_eq!(EditorState::canonical_modifier_path("text.tracking"), "text.tracking");
+        // Mask keys: the inspector's layer-qualified form folds to the
+        // timeline's `mask:{mask}:{param}` dialect.
+        assert_eq!(EditorState::canonical_modifier_path("mask:L1:M1:feather:50"), "mask:M1:feather");
+        assert_eq!(EditorState::canonical_modifier_path("mask:M1:opacity"), "mask:M1:opacity");
+        // Effect scrub keys fold to `effect:`.
+        assert_eq!(EditorState::canonical_modifier_path("fx:e1:radius"), "effect:e1:radius");
+        assert_eq!(EditorState::canonical_modifier_path("effect:e1:radius"), "effect:e1:radius");
+        // Shape + transform aliases still fold.
+        assert_eq!(EditorState::canonical_modifier_path("rect_w"), "shape.rect_width");
+        assert_eq!(EditorState::canonical_modifier_path("pos_x"), "transform.position.x");
+        // Graph roundtrip through an alias lands on canonical storage.
+        let mut state = EditorState::new();
+        let rid = state.add_rectangle_shape_layer(200.0, 100.0, None).expect("rect");
+        let graph = project::modifier::ModifierGraph::default();
+        state.set_layer_modifier_graph(&rid, "ellipse_sw", graph.clone());
+        assert!(state.get_layer_modifier_graph(&rid, "shape.ellipse_rx").is_some());
+    }
+
+    /// Constant-output graph: proves a bound graph EXECUTED on a path
+    /// (base value is replaced, not merely read).
+    fn const_graph(v: f32) -> project::modifier::ModifierGraph {
+        use project::modifier::{ModifierGraph, ModifierNode, NodeConnection, NodeKind};
+        ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("c", 0.0, 0.0, NodeKind::Constant { value: v }),
+                ModifierNode::new("out", 420.0, 140.0, NodeKind::Output),
+            ],
+            connections: vec![NodeConnection::new("c", "value", "out", "result")],
+        }
+    }
+
+    #[test]
+    fn test_modifier_graph_applies_to_text_and_mask() {
+        use compositor::{LayerStackEvaluator, SceneGraph};
+        use project::{LayerSource, TimeCode};
+
+        // Full chain: scrub-alias binding through EditorState, then eval.
+        let mut state = crate::state::EditorState::new();
+        let tid = state.add_text_layer("hi", None).expect("text");
+        state.set_layer_text_scalar(&tid, "tracking", 10.0).expect("tracking");
+        state.set_layer_modifier_graph(&tid, "text_tracking", const_graph(5.0));
+        let mid = state.add_mask_to_layer(&tid).expect("mask");
+        state.set_layer_modifier_graph(&tid, &format!("mask:{tid}:{mid}:feather:50"), const_graph(7.0));
+
+        let cid = state.active_composition().unwrap().id.clone();
+        let tc = TimeCode::from_frames(0, 30.0);
+        let graph = SceneGraph::from_project(&state.project, &cid).unwrap();
+        let stack = LayerStackEvaluator::new().evaluate(&graph, &tc);
+        let evaluated = stack.get_layer(&tid).unwrap();
+        if let LayerSource::Text { ref tracking, .. } = evaluated.source {
+            assert!((tracking.value - 5.0).abs() < 1e-4, "graph must reshape tracking, got {}", tracking.value);
+        } else {
+            panic!("expected text");
+        }
+        assert!((evaluated.masks[0].feather - 7.0).abs() < 1e-4, "graph must reshape mask feather");
+    }
+
+    #[test]
+    fn test_modifier_driver_resolves_modern_effect_param() {
+        use compositor::{SceneGraph, resolve_property_link_value};
+        use project::{Composition, Effect, EffectType, Layer, Project, Property, TimeCode};
+        use std::collections::HashSet;
+
+        let mut project = Project::new("p", "Proj");
+        let tc = TimeCode::from_frames(0, 30.0);
+        let tc_end = TimeCode::from_frames(150, 30.0);
+        let mut comp = Composition::new("c", "Comp", 100, 100, 30.0, tc_end);
+        let mut layer = Layer::adjustment("a1", "Adj", tc, tc_end);
+        layer.effects.push(Effect {
+            id: "e1".to_string(),
+            name: "Exposure".to_string(),
+            enabled: true,
+            effect_type: EffectType::Exposure {
+                exposure: Property::new("Exposure", 2.0),
+            },
+        });
+        comp.add_layer(layer).unwrap();
+        project.add_composition(comp).unwrap();
+        let graph = SceneGraph::from_project(&project, "c").unwrap();
+
+        let mut visited = HashSet::new();
+        let val = resolve_property_link_value(&graph, "a1", "effect:e1:exposure", &tc, &mut visited);
+        assert_eq!(val, Some(2.0), "modern effect params must resolve as driver sources");
+    }
+
+    #[test]
     fn test_shape_profile_points_sorted_and_clamped() {
         use crate::state::EditorState;
 
@@ -13084,9 +13177,9 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             assert_eq!(span, 10.0);
         });
 
-        // 2. Zoom in centered on playhead at 5.0s
+        // 2. Zoom in anchored on the view center (full 10s view: center 5.0s).
         timeline_panel.update(cx, |p, _| {
-            p.zoom_in(5.0, 10.0);
+            p.zoom_in(10.0);
             assert!(p.timeline_zoom > 1.0);
             let (start, span) = p.visible_time_span(10.0);
             assert!(span < 10.0);
@@ -13119,7 +13212,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         // 5. Zoom out below 100%: visible exceeds total, start centers
         // negative (padding on both sides), pan locks.
         timeline_panel.update(cx, |p, _| {
-            p.set_zoom(0.5, 5.0, 10.0);
+            p.set_zoom(0.5, 10.0);
             assert!((p.timeline_zoom - 0.5).abs() < 1e-4);
             let (start, span) = p.visible_time_span(10.0);
             assert!((span - 20.0).abs() < 1e-6);
@@ -13133,15 +13226,31 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         // 6. Zoom-out button floors at 25%, zoom-in caps at 1600%.
         timeline_panel.update(cx, |p, _| {
             for _ in 0..10 {
-                p.zoom_out(5.0, 10.0);
+                p.zoom_out(10.0);
             }
             assert!((p.timeline_zoom - 0.25).abs() < 1e-4);
             for _ in 0..20 {
-                p.zoom_in(5.0, 10.0);
+                p.zoom_in(10.0);
             }
             assert!((p.timeline_zoom - 16.0).abs() < 1e-4);
             p.zoom_reset();
             assert_eq!(p.timeline_zoom, 1.0);
+        });
+
+        // 7. Zoom anchors on the view center, not the playhead: pan right,
+        // zoom in twice, and the viewport middle must not move.
+        timeline_panel.update(cx, |p, _| {
+            p.zoom_reset();
+            p.zoom_in(10.0);
+            p.pan_right(10.0);
+            p.pan_right(10.0);
+            let (s0, v0) = p.visible_time_span(10.0);
+            let c0 = s0 + v0 * 0.5;
+            p.zoom_in(10.0);
+            let (s1, v1) = p.visible_time_span(10.0);
+            let c1 = s1 + v1 * 0.5;
+            assert!((c1 - c0).abs() < 0.05, "zoom must keep view center {c0} vs {c1}");
+            assert!(v1 < v0);
         });
     }
 

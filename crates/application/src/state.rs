@@ -7509,61 +7509,82 @@ impl EditorState {
     }
 
     /// Retrieve the modifier graph attached to a property path on a layer.
+    /// Any scrub-keyed alias folds through the canonical funnel first, so
+    /// storage (always canonical) is found in one lookup.
     pub fn get_layer_modifier_graph(&self, layer_id: &str, prop_path: &str) -> Option<project::ModifierGraph> {
         let comp = self.active_composition()?;
         let layer = comp.get_layer(layer_id)?;
-        if let Some(mg) = layer.get_modifier_graph(prop_path) {
-            return Some(mg.clone());
-        }
-        let alias = match prop_path {
-            "anchor_x" => "transform.anchor_point.x",
-            "anchor_y" => "transform.anchor_point.y",
-            "pos_x" => "transform.position.x",
-            "pos_y" => "transform.position.y",
-            "scale_x" => "transform.scale.x",
-            "scale_y" => "transform.scale.y",
-            "scale_u" => "transform.scale.x",
-            "rotation" => "transform.rotation",
-            "transform.anchor_point.x" => "anchor_x",
-            "transform.anchor_point.y" => "anchor_y",
-            "transform.position.x" => "pos_x",
-            "transform.position.y" => "pos_y",
-            "transform.scale.x" => "scale_x",
-            "transform.scale.y" => "scale_y",
-            "transform.rotation" => "rotation",
-            "shape.rect_width" | "rect_w" => "shape.rect_width",
-            "shape.rect_height" | "rect_h" => "shape.rect_height",
-            "shape.corner_radius" | "rect_cr" => "shape.corner_radius",
-            "shape.ellipse_rx" | "ellipse_rx" | "ellipse_sw" => "shape.ellipse_rx",
-            "shape.ellipse_ry" | "ellipse_ry" | "ellipse_sh" => "shape.ellipse_ry",
-            "shape.stroke_width" => "shape.stroke_width",
-            "shape.dash" => "shape.dash",
-            "shape.dash_gap" => "shape.dash_gap",
-            "shape.dash_offset" => "shape.dash_offset",
-            _ => return None,
-        };
-        layer.get_modifier_graph(alias).cloned()
+        layer
+            .get_modifier_graph(&Self::canonical_modifier_path(prop_path))
+            .cloned()
     }
 
-    /// Canonical modifier-graph path for shape scrub aliases. The
-    /// evaluator and stopwatches only speak the `shape.*` dialect, so
-    /// scrub-keyed bindings (`rect_w`, `ellipse_sw`, …) fold to it here.
-    fn canonical_shape_modifier_path(path: &str) -> &str {
+    /// Canonical modifier-graph / property-link path. The evaluator,
+    /// stopwatches and base-value readers only speak the canonical
+    /// dialects (`transform.*`, `opacity`, `shape.*`, `text.*`,
+    /// `mask:{mask}:{param}`, `effect:{id}:{param}`), so scrub-keyed
+    /// bindings (`rect_w`, `text_tracking:50`,
+    /// `mask:{layer}:{mask}:{param}:{mult}`, `fx:{id}:{field}`, ???)
+    /// fold to them here — one funnel for every reader and writer.
+    pub(crate) fn canonical_modifier_path(path: &str) -> String {
         match path {
-            "rect_w" => "shape.rect_width",
-            "rect_h" => "shape.rect_height",
-            "rect_cr" => "shape.corner_radius",
-            "ellipse_rx" | "ellipse_sw" => "shape.ellipse_rx",
-            "ellipse_ry" | "ellipse_sh" => "shape.ellipse_ry",
-            _ => path,
+            "rect_w" => return "shape.rect_width".to_string(),
+            "rect_h" => return "shape.rect_height".to_string(),
+            "rect_cr" => return "shape.corner_radius".to_string(),
+            "ellipse_rx" | "ellipse_sw" => return "shape.ellipse_rx".to_string(),
+            "ellipse_ry" | "ellipse_sh" => return "shape.ellipse_ry".to_string(),
+            "anchor_x" => return "transform.anchor_point.x".to_string(),
+            "anchor_y" => return "transform.anchor_point.y".to_string(),
+            "pos_x" => return "transform.position.x".to_string(),
+            "pos_y" => return "transform.position.y".to_string(),
+            "scale_u" | "scale_x" => return "transform.scale.x".to_string(),
+            "scale_y" => return "transform.scale.y".to_string(),
+            "rotation" => return "transform.rotation".to_string(),
+            "font_size" => return "text.font_size".to_string(),
+            _ => {}
         }
+        // Text scrub keys (`text_tracking`, `text_leading`, `text_stroke_w`,
+        // `text_baseline`, `text_box_w/h`, each with an optional `:<mult>`)
+        // fold to the dotted dialect the evaluator speaks; already-dotted
+        // paths pass through.
+        if path.starts_with("text.") {
+            return path.to_string();
+        }
+        let head = path.split(':').next().unwrap_or(path);
+        match head {
+            "text_tracking" => return "text.tracking".to_string(),
+            "text_leading" => return "text.leading".to_string(),
+            "text_stroke_w" => return "text.stroke_width".to_string(),
+            "text_baseline" => return "text.baseline_shift".to_string(),
+            "text_box_w" => return "text.box_width".to_string(),
+            "text_box_h" => return "text.box_height".to_string(),
+            _ => {}
+        }
+        // Mask keys: `mask:{mask}:{param}` already canonical; the legacy
+        // inspector form carries the layer id and scrub mult
+        // (`mask:{layer}:{mask}:{param}[:{mult}]`) — drop both.
+        if let Some(rest) = path.strip_prefix("mask:") {
+            let parts: Vec<&str> = rest.split(':').collect();
+            if parts.len() >= 3 {
+                return format!("mask:{}:{}", parts[1], parts[2]);
+            }
+            return path.to_string();
+        }
+        // Effect scrub keys fold to the canonical `effect:` dialect.
+        if let Some(rest) = path.strip_prefix("fx:") {
+            let parts: Vec<&str> = rest.splitn(2, ':').collect();
+            if parts.len() == 2 {
+                return format!("effect:{}:{}", parts[0], parts[1]);
+            }
+        }
+        path.to_string()
     }
 
     /// Set or update the modifier graph for a property path on a layer.
     pub fn set_layer_modifier_graph(&mut self, layer_id: &str, prop_path: &str, graph: project::ModifierGraph) {
         if let Some(comp) = self.active_composition_mut() {
             if let Some(layer) = comp.get_layer_mut(layer_id) {
-                layer.set_modifier_graph(Self::canonical_shape_modifier_path(prop_path), graph);
+                layer.set_modifier_graph(Self::canonical_modifier_path(prop_path), graph);
             }
         }
     }
@@ -7572,7 +7593,7 @@ impl EditorState {
     pub fn remove_layer_modifier_graph(&mut self, layer_id: &str, prop_path: &str) {
         if let Some(comp) = self.active_composition_mut() {
             if let Some(layer) = comp.get_layer_mut(layer_id) {
-                layer.remove_modifier_graph(Self::canonical_shape_modifier_path(prop_path));
+                layer.remove_modifier_graph(&Self::canonical_modifier_path(prop_path));
             }
         }
     }
@@ -7656,7 +7677,48 @@ impl EditorState {
                     | ShapeType::Path { dash_offset, .. } } => dash_offset.evaluate_at(&tc),
                 _ => 0.0,
             },
+            "text.font_size" => match &layer.source {
+                LayerSource::Text { font_size, .. } => font_size.evaluate_at(&tc),
+                _ => 0.0,
+            },
+            "text.tracking" => match &layer.source {
+                LayerSource::Text { tracking, .. } => tracking.evaluate_at(&tc),
+                _ => 0.0,
+            },
+            "text.leading" => match &layer.source {
+                LayerSource::Text { leading, .. } => leading.evaluate_at(&tc),
+                _ => 0.0,
+            },
+            "text.stroke_width" => match &layer.source {
+                LayerSource::Text { stroke_width, .. } => stroke_width.evaluate_at(&tc),
+                _ => 0.0,
+            },
+            "text.baseline_shift" => match &layer.source {
+                LayerSource::Text { baseline_shift, .. } => baseline_shift.evaluate_at(&tc),
+                _ => 0.0,
+            },
+            "text.box_width" => match &layer.source {
+                LayerSource::Text { box_width, .. } => box_width.evaluate_at(&tc),
+                _ => 0.0,
+            },
+            "text.box_height" => match &layer.source {
+                LayerSource::Text { box_height, .. } => box_height.evaluate_at(&tc),
+                _ => 0.0,
+            },
             _ => {
+                // Mask scalars share the canonical `mask:{mask}:{param}`
+                // path everywhere (graph, links, compositor).
+                if let Some(rest) = prop_path.strip_prefix("mask:") {
+                    let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                    if parts.len() == 2 {
+                        if let Some(mask) = layer.get_mask(parts[0]) {
+                            if let Some(prop) = mask.get_param_property(parts[1]) {
+                                return prop.evaluate_at(&tc);
+                            }
+                        }
+                    }
+                    return 0.0;
+                }
                 // Effect scalars share the canonical `effect:{id}:{param}`
                 // path everywhere (graph, links, compositor).
                 if let Some(rest) = prop_path.strip_prefix("effect:") {
@@ -7707,7 +7769,7 @@ impl EditorState {
 
         // Remove any modifier graph on this property (canonicalized so
         // scrub-keyed bindings are caught too).
-        layer.remove_modifier_graph(Self::canonical_shape_modifier_path(prop_path));
+        layer.remove_modifier_graph(&Self::canonical_modifier_path(prop_path));
         // Remove any property link on this property and its aliases
         let _ = layer.remove_property_link(prop_path);
         match prop_path {
@@ -7972,8 +8034,9 @@ impl EditorState {
             None => return false,
         };
 
-        // Bind the property link on the target layer
-        layer.set_property_link(target_prop_path, project::PropertyLink::new(&src_lid, &src_prop));
+        // Bind the property link on the target layer (canonicalized so
+        // scrub-keyed aliases resolve to the same binding everwhere).
+        layer.set_property_link(Self::canonical_modifier_path(target_prop_path), project::PropertyLink::new(&src_lid, &src_prop));
 
         match target_prop_path {
             "transform.anchor_point.x" | "anchor_x" => {
@@ -8074,6 +8137,7 @@ impl EditorState {
         if let Some(comp) = self.active_composition_mut() {
             if let Some(layer) = comp.get_layer_mut(layer_id) {
                 let _ = layer.remove_property_link(prop_path);
+                let _ = layer.remove_property_link(&Self::canonical_modifier_path(prop_path));
                 match prop_path {
                     "anchor_x" => { let _ = layer.remove_property_link("transform.anchor_point.x"); }
                     "anchor_y" => { let _ = layer.remove_property_link("transform.anchor_point.y"); }
@@ -8108,6 +8172,9 @@ impl EditorState {
         if layer.is_property_linked(prop_path) {
             return true;
         }
+        if layer.is_property_linked(&Self::canonical_modifier_path(prop_path)) {
+            return true;
+        }
         match prop_path {
             "anchor_x" => layer.is_property_linked("transform.anchor_point.x"),
             "anchor_y" => layer.is_property_linked("transform.anchor_point.y"),
@@ -8133,6 +8200,9 @@ impl EditorState {
         let comp = self.active_composition()?;
         let layer = comp.get_layer(layer_id)?;
         if let Some(link) = layer.get_property_link(prop_path) {
+            return Some(link.clone());
+        }
+        if let Some(link) = layer.get_property_link(&Self::canonical_modifier_path(prop_path)) {
             return Some(link.clone());
         }
         let alias = match prop_path {

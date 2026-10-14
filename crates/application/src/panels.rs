@@ -7041,19 +7041,9 @@ where
     // target, render the live single-line editor instead of the value label.
     // (Drag-scrub and mouse-wheel still work on the label.)
     let edit_id = id.into();
-    let raw_path = match prop_key.as_str() {
-        "anchor_x" => "transform.anchor_point.x",
-        "anchor_y" => "transform.anchor_point.y",
-        "pos_x" => "transform.position.x",
-        "pos_y" => "transform.position.y",
-        "scale_x" => "transform.scale.x",
-        "scale_y" => "transform.scale.y",
-        "scale_u" => "transform.scale.x",
-        "rotation" => "transform.rotation",
-        "opacity" => "opacity",
-        other => other,
-    };
-    let canonical_path = effect_path_for_value_key(raw_path);
+    // Every scrub-keyed alias folds to the canonical dialect the graph,
+    // link and base-value stores speak (one funnel, no per-site match).
+    let canonical_path = crate::state::EditorState::canonical_modifier_path(prop_key.as_str());
     let sel_lid_opt = state.read(cx).selected_layer_id.clone();
     let is_linked = if let Some(ref lid) = sel_lid_opt {
         state.read(cx).is_layer_property_linked(lid, &canonical_path)
@@ -7318,11 +7308,7 @@ where
     let prop_for_rclick = prop_key.clone();
 
     let edit_id = id.into();
-    let raw_path = match prop_for_rclick.as_str() {
-        "font_size" => "text.font_size",
-        other => other,
-    };
-    let canonical_path = effect_path_for_value_key(raw_path);
+    let canonical_path = crate::state::EditorState::canonical_modifier_path(prop_for_rclick.as_str());
     let sel_lid_opt = state.read(cx).selected_layer_id.clone();
     let is_linked = if let Some(ref lid) = sel_lid_opt {
         state.read(cx).is_layer_property_linked(lid, &canonical_path)
@@ -16667,18 +16653,7 @@ fn timeline_scrub(
         "opacity" => "opacity",
         _ => "transform.position",
     };
-    let raw_path = match value_key.as_str() {
-        "anchor_x" => "transform.anchor_point.x",
-        "anchor_y" => "transform.anchor_point.y",
-        "pos_x" => "transform.position.x",
-        "pos_y" => "transform.position.y",
-        "scale_x" => "transform.scale.x",
-        "scale_y" => "transform.scale.y",
-        "rotation" => "transform.rotation",
-        "opacity" => "opacity",
-        other => other,
-    };
-    let canonical_path = effect_path_for_value_key(raw_path);
+    let canonical_path = crate::state::EditorState::canonical_modifier_path(value_key.as_str());
     let is_linked = state.read(cx).is_layer_property_linked(&layer_id, &canonical_path);
     let has_modifier = state.read(cx).get_layer_modifier_graph(&layer_id, &canonical_path).is_some();
     let display_str = if is_linked || has_modifier {
@@ -18915,16 +18890,17 @@ impl TimelinePanel {
         (start, visible_duration)
     }
 
-    /// Zoom in on the timeline centered on the current playhead.
-    pub fn zoom_in(&mut self, current_time: f64, total_duration: f64) {
+    /// Zoom in on the timeline, anchored on the current view center
+    /// (the frame under the viewport middle stays put).
+    pub fn zoom_in(&mut self, total_duration: f64) {
         let new_zoom = (self.timeline_zoom * 1.5).min(16.0);
-        self.set_zoom(new_zoom, current_time, total_duration);
+        self.set_zoom(new_zoom, total_duration);
     }
 
-    /// Zoom out on the timeline centered on the current playhead.
-    pub fn zoom_out(&mut self, current_time: f64, total_duration: f64) {
+    /// Zoom out on the timeline, anchored on the current view center.
+    pub fn zoom_out(&mut self, total_duration: f64) {
         let new_zoom = (self.timeline_zoom / 1.5).max(0.25);
-        self.set_zoom(new_zoom, current_time, total_duration);
+        self.set_zoom(new_zoom, total_duration);
     }
 
     /// Reset zoom back to 100% (fit full composition duration).
@@ -18933,22 +18909,27 @@ impl TimelinePanel {
         self.timeline_view_t0 = 0.0;
     }
 
-    /// Set explicit zoom factor centered on current_time.
-    pub fn set_zoom(&mut self, new_zoom: f32, current_time: f64, total_duration: f64) {
+    /// Set explicit zoom factor anchored on the current view center, so
+    /// zooming never jumps the viewport toward the playhead.
+    pub fn set_zoom(&mut self, new_zoom: f32, total_duration: f64) {
+        // Anchor on the pre-zoom view center: capture it before touching
+        // `timeline_zoom` (the span reader uses the stored zoom).
+        let (cur_t0, cur_vis) = self.visible_time_span(total_duration);
+        let center = cur_t0 + cur_vis / 2.0;
         self.timeline_zoom = new_zoom.clamp(0.25, 16.0);
         if (self.timeline_zoom - 1.0).abs() < 0.001 {
             self.timeline_zoom = 1.0;
             self.timeline_view_t0 = 0.0;
             return;
         }
-        let visible_duration = total_duration / self.timeline_zoom as f64;
-        if visible_duration >= total_duration {
+        let new_visible = total_duration / self.timeline_zoom as f64;
+        if new_visible >= total_duration {
             // Below 100%: centered padding, no pan window.
-            self.timeline_view_t0 = (total_duration - visible_duration) / 2.0;
+            self.timeline_view_t0 = (total_duration - new_visible) / 2.0;
             return;
         }
-        let max_start = (total_duration - visible_duration).max(0.0);
-        self.timeline_view_t0 = (current_time - visible_duration * 0.5).clamp(0.0, max_start);
+        let max_start = (total_duration - new_visible).max(0.0);
+        self.timeline_view_t0 = (center - new_visible * 0.5).clamp(0.0, max_start);
     }
 
     /// Pan timeline view window to the left.
@@ -20897,7 +20878,7 @@ impl Render for TimelinePanel {
                             if dx.abs() > 3.0 {
                                 this.zoom_scrub_moved = true;
                                 // ~1% zoom per px, anchored at press.
-                                this.set_zoom(z0 * (1.0 + dx / 100.0), current_time_secs, total_duration_secs);
+                                this.set_zoom(z0 * (1.0 + dx / 100.0), total_duration_secs);
                                 cx.notify();
                             }
                         }
@@ -21686,7 +21667,6 @@ impl Render for TimelinePanel {
                                 let p_pan_l = panel_entity.clone();
                                 let p_pan_r = panel_entity.clone();
                                 let cur_z = self.timeline_zoom;
-                                let cur_t = current_time_secs;
                                 let dur = total_duration_secs;
                                 let mut z_row = h_flex()
                                     .gap_1()
@@ -21707,7 +21687,7 @@ impl Render for TimelinePanel {
                                             .child("-")
                                             .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
                                                 p_zout.update(cx, |this, cx| {
-                                                    this.zoom_out(cur_t, dur);
+                                                    this.zoom_out(dur);
                                                     cx.notify();
                                                 });
                                             }),
@@ -21770,7 +21750,7 @@ impl Render for TimelinePanel {
                                             .child("+")
                                             .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
                                                 p_zin.update(cx, |this, cx| {
-                                                    this.zoom_in(cur_t, dur);
+                                                    this.zoom_in(dur);
                                                     cx.notify();
                                                 });
                                             }),

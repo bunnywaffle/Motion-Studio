@@ -43,10 +43,11 @@ fn parsed_prog_cached(
 
 /// Resolve the live evaluated value of a driver layer's property link at a specific timecode.
 /// Recursively handles chains of links with cycle protection.
-/// Reshape one shape scalar through its modifier graph (if bound under
+/// Reshape one scalar through its modifier graph (if bound under
 /// `path`), evaluating the keyframed base at `time` first. Applied to the
 /// per-frame source snapshot, so keyframe tracks are never disturbed.
-fn eval_shape_mg(
+/// Shared by shape, text and mask scalars — the graph engine is f32-only.
+fn eval_scalar_mg(
     graphs: &HashMap<String, project::ModifierGraph>,
     path: &str,
     prop: &mut project::Property<f32>,
@@ -106,6 +107,41 @@ pub fn resolve_property_link_value(
         "text.tracking" | "tracking" => {
             if let LayerSource::Text { ref tracking, .. } = node.source {
                 tracking.evaluate_at(time)
+            } else {
+                0.0
+            }
+        }
+        "text.leading" => {
+            if let LayerSource::Text { ref leading, .. } = node.source {
+                leading.evaluate_at(time)
+            } else {
+                0.0
+            }
+        }
+        "text.stroke_width" => {
+            if let LayerSource::Text { ref stroke_width, .. } = node.source {
+                stroke_width.evaluate_at(time)
+            } else {
+                0.0
+            }
+        }
+        "text.baseline_shift" => {
+            if let LayerSource::Text { ref baseline_shift, .. } = node.source {
+                baseline_shift.evaluate_at(time)
+            } else {
+                0.0
+            }
+        }
+        "text.box_width" => {
+            if let LayerSource::Text { ref box_width, .. } = node.source {
+                box_width.evaluate_at(time)
+            } else {
+                0.0
+            }
+        }
+        "text.box_height" => {
+            if let LayerSource::Text { ref box_height, .. } = node.source {
+                box_height.evaluate_at(time)
             } else {
                 0.0
             }
@@ -182,35 +218,40 @@ pub fn resolve_property_link_value(
             }
         }
         _ => {
+            // Mask scalars (`mask:{mask}:{param}`) resolve as driver
+            // sources through the mask's scalar accessors.
+            if let Some(rest) = driver_prop_path.strip_prefix("mask:") {
+                let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                if parts.len() == 2 {
+                    if let Some(mask) = node.masks.iter().find(|m| m.id == parts[0]) {
+                        if let Some(prop) = mask.get_param_property(parts[1]) {
+                            return Some(prop.evaluate_at(time));
+                        }
+                    }
+                }
+                return Some(0.0);
+            }
             if let Some(rest) = driver_prop_path.strip_prefix("effect:") {
                 let parts: Vec<&str> = rest.splitn(2, ':').collect();
                 if parts.len() == 2 {
                     let (eff_id, param) = (parts[0], parts[1]);
                     if let Some(eff) = node.effects.iter().find(|e| e.id == eff_id) {
-                        match (&eff.effect_type, param) {
-                            (project::EffectType::GaussianBlur { radius }, "radius") => radius.evaluate_at(time),
-                            (project::EffectType::BrightnessContrast { brightness, .. }, "brightness") => brightness.evaluate_at(time),
-                            (project::EffectType::BrightnessContrast { contrast, .. }, "contrast") => contrast.evaluate_at(time),
-                            (project::EffectType::Tint { amount, .. }, "amount") => amount.evaluate_at(time),
-                            (project::EffectType::Invert { amount }, "amount") => amount.evaluate_at(time),
-                            (project::EffectType::DropShadow { distance, .. }, "distance") => distance.evaluate_at(time),
-                            (project::EffectType::DropShadow { angle, .. }, "angle") => angle.evaluate_at(time),
-                            (project::EffectType::DropShadow { softness, .. }, "softness") => softness.evaluate_at(time),
-                            (project::EffectType::DropShadow { opacity, .. }, "opacity") => opacity.evaluate_at(time),
-                            (project::EffectType::GlslShader { param1, .. }, "param1") => param1.evaluate_at(time),
-                            (project::EffectType::GlslShader { param2, .. }, "param2") => param2.evaluate_at(time),
-                            (project::EffectType::GlslShader { param3, .. }, "param3") => param3.evaluate_at(time),
-                            (project::EffectType::GlslShader { param4, .. }, "param4") => param4.evaluate_at(time),
-                            _ => 0.0,
+                        // Generic: every scalar param of every effect
+                        // (Stock by declaration name, Puppet pins,
+                        // GlslShader param1..4, ...) resolves through the
+                        // same accessor the panel and keyframe code use.
+                        // ShaderLab values and Curves carry no scalar
+                        // tracks and stay 0.0, as before.
+                        if let Some(prop) = eff.get_param_property(param) {
+                            return Some(prop.evaluate_at(time));
                         }
-                    } else {
-                        0.0
                     }
+                    return Some(0.0);
                 } else {
-                    0.0
+                    return Some(0.0);
                 }
             } else {
-                0.0
+                return Some(0.0);
             }
         }
     };
@@ -2232,25 +2273,45 @@ impl LayerStackEvaluator {
             // rasterizer reads animated colors from plain `.value`s.
             let mut source = node.source.clone();
             source.resolve_at(time);
-            // Modifier graphs on shape source scalars (bound under shape.*
-            // paths, the stopwatch dialect). Colors can't be reshaped —
-            // the graph engine is f32-only.
+            // Modifier graphs on shape/text source scalars (bound under
+            // shape.*/text.* paths). Colors can't be reshaped — the
+            // graph engine is f32-only.
+            // Hoisted: the mask block below reuses the same pair.
+            let factor = node.progression_factor(time);
+            let resolver = |d_lid: &str, d_prop: &str| {
+                let mut visited = HashSet::new();
+                resolve_property_link_value(graph, d_lid, d_prop, time, &mut visited).unwrap_or(0.0)
+            };
             if !node.modifier_graphs.is_empty() {
-                let factor = node.progression_factor(time);
-                let resolver = |d_lid: &str, d_prop: &str| {
-                    let mut visited = HashSet::new();
-                    resolve_property_link_value(graph, d_lid, d_prop, time, &mut visited).unwrap_or(0.0)
-                };
+                if let LayerSource::Text {
+                    font_size,
+                    tracking,
+                    leading,
+                    stroke_width,
+                    baseline_shift,
+                    box_width,
+                    box_height,
+                    ..
+                } = &mut source
+                {
+                    eval_scalar_mg(&node.modifier_graphs, "text.font_size", font_size, time, factor, &resolver);
+                    eval_scalar_mg(&node.modifier_graphs, "text.tracking", tracking, time, factor, &resolver);
+                    eval_scalar_mg(&node.modifier_graphs, "text.leading", leading, time, factor, &resolver);
+                    eval_scalar_mg(&node.modifier_graphs, "text.stroke_width", stroke_width, time, factor, &resolver);
+                    eval_scalar_mg(&node.modifier_graphs, "text.baseline_shift", baseline_shift, time, factor, &resolver);
+                    eval_scalar_mg(&node.modifier_graphs, "text.box_width", box_width, time, factor, &resolver);
+                    eval_scalar_mg(&node.modifier_graphs, "text.box_height", box_height, time, factor, &resolver);
+                }
                 if let LayerSource::Shape { shape_type } = &mut source {
                     match shape_type {
                         project::ShapeType::Rectangle { width, height, corner_radius, .. } => {
-                            eval_shape_mg(&node.modifier_graphs, "shape.rect_width", width, time, factor, &resolver);
-                            eval_shape_mg(&node.modifier_graphs, "shape.rect_height", height, time, factor, &resolver);
-                            eval_shape_mg(&node.modifier_graphs, "shape.corner_radius", corner_radius, time, factor, &resolver);
+                            eval_scalar_mg(&node.modifier_graphs, "shape.rect_width", width, time, factor, &resolver);
+                            eval_scalar_mg(&node.modifier_graphs, "shape.rect_height", height, time, factor, &resolver);
+                            eval_scalar_mg(&node.modifier_graphs, "shape.corner_radius", corner_radius, time, factor, &resolver);
                         }
                         project::ShapeType::Ellipse { radius_x, radius_y, .. } => {
-                            eval_shape_mg(&node.modifier_graphs, "shape.ellipse_rx", radius_x, time, factor, &resolver);
-                            eval_shape_mg(&node.modifier_graphs, "shape.ellipse_ry", radius_y, time, factor, &resolver);
+                            eval_scalar_mg(&node.modifier_graphs, "shape.ellipse_rx", radius_x, time, factor, &resolver);
+                            eval_scalar_mg(&node.modifier_graphs, "shape.ellipse_ry", radius_y, time, factor, &resolver);
                         }
                         project::ShapeType::Path { .. } => {}
                     }
@@ -2261,10 +2322,10 @@ impl LayerStackEvaluator {
                             (stroke_width, dash, dash_gap, dash_offset)
                         }
                     };
-                    eval_shape_mg(&node.modifier_graphs, "shape.stroke_width", stroke_width, time, factor, &resolver);
-                    eval_shape_mg(&node.modifier_graphs, "shape.dash", dash, time, factor, &resolver);
-                    eval_shape_mg(&node.modifier_graphs, "shape.dash_gap", dash_gap, time, factor, &resolver);
-                    eval_shape_mg(&node.modifier_graphs, "shape.dash_offset", dash_offset, time, factor, &resolver);
+                    eval_scalar_mg(&node.modifier_graphs, "shape.stroke_width", stroke_width, time, factor, &resolver);
+                    eval_scalar_mg(&node.modifier_graphs, "shape.dash", dash, time, factor, &resolver);
+                    eval_scalar_mg(&node.modifier_graphs, "shape.dash_gap", dash_gap, time, factor, &resolver);
+                    eval_scalar_mg(&node.modifier_graphs, "shape.dash_offset", dash_offset, time, factor, &resolver);
                 }
             }
             evaluated_layers.push(EvaluatedLayer {
@@ -2292,15 +2353,25 @@ impl LayerStackEvaluator {
                     for mask in &node.masks {
                         let (m_anchor, m_pos, m_scale, m_rot) =
                             mask.transform.evaluate_at(time);
+                        // Mask scalars reshape through graphs bound under
+                        // `mask:{mask_id}:{param}` (same hoisted pair).
+                        let mg_mask = |param: &str, base: f32| -> f32 {
+                            let path = format!("mask:{}:{param}", mask.id);
+                            if let Some(mg) = node.modifier_graphs.get(&path) {
+                                mg.evaluate_with_resolver(base, factor, &resolver)
+                            } else {
+                                base
+                            }
+                        };
                         evaluated_masks.push(EvaluatedMask {
                             id: mask.id.clone(),
                             name: mask.name.clone(),
                             enabled: mask.enabled,
                             path: mask.path.evaluate_at(time),
                             mode: mask.mode,
-                            opacity: mask.opacity.evaluate_at(time),
-                            feather: mask.feather.evaluate_at(time),
-                            expansion: mask.expansion.evaluate_at(time),
+                            opacity: mg_mask("opacity", mask.opacity.evaluate_at(time)),
+                            feather: mg_mask("feather", mask.feather.evaluate_at(time)),
+                            expansion: mg_mask("expansion", mask.expansion.evaluate_at(time)),
                             invert: mask.invert,
                             transform: EvaluatedTransform::from_components(
                                 m_pos, m_scale, m_rot, m_anchor, None,
