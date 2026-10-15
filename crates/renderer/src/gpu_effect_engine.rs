@@ -737,6 +737,19 @@ impl GpuEffectEngine {
                         EvaluatedEffectType::MatchLight { amount, src_mid, src_high, .. } => {
                             ("match_light", [*amount, src_mid.r, src_mid.g, src_mid.b, src_high.r, src_high.g, src_high.b, 0.0, 0.0, 0.0])
                         }
+                        EvaluatedEffectType::InnerGlow { size, intensity, .. } => {
+                            ("inner_glow", [*size, *intensity, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+                        }
+                        EvaluatedEffectType::Dither { amount, levels } => {
+                            ("dither", [*amount, *levels, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+                        }
+                        EvaluatedEffectType::RimLight { mode, direction, width, intensity, .. } => {
+                            let m = match mode {
+                                project::RimMode::Directional => 0.0,
+                                project::RimMode::Full => 1.0,
+                            };
+                            ("rim_light", [m, *direction, *width, 0.0, *intensity, 0.0, 0.0, 0.0, 0.0, 0.0])
+                        }
                         // NOTE: no OuterGlow branch on purpose (blit-stage
                         // effect; a chain pass would double-apply, see the
                         // for_builtin note). It falls to `_ => continue`
@@ -771,6 +784,18 @@ impl GpuEffectEngine {
                             [ref_mid.r, ref_mid.g, ref_mid.b, 1.0],
                             [ref_high.r, ref_high.g, ref_high.b, 1.0],
                             [src_shadow.r, src_shadow.g, src_shadow.b, 1.0],
+                        ],
+                        EvaluatedEffectType::InnerGlow { color, .. } => [
+                            [color.r, color.g, color.b, 1.0],
+                            [0.0; 4],
+                            [0.0; 4],
+                            [0.0; 4],
+                        ],
+                        EvaluatedEffectType::RimLight { color, .. } => [
+                            [color.r, color.g, color.b, 1.0],
+                            [0.0; 4],
+                            [0.0; 4],
+                            [0.0; 4],
                         ],
                         _ => [[0.0; 4]; 4],
                     };

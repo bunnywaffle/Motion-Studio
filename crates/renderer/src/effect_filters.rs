@@ -1666,6 +1666,128 @@ fn fx_match_grade(uv: vec2<f32>, color: vec4<f32>, amount: f32, ref_s: vec3<f32>
     )
 }
 
+/// Inner glow: inward tent-blur of the alpha holes (mirrors
+/// `apply_inner_glow`). Fixed 5x5 taps with size-scaled offsets, so the
+/// twin agrees with the CPU kernel exactly.
+pub fn inner_glow_resample() -> ColorFilter {
+    color_filter!(
+        "inner_glow_resample",
+        r#"fn fx_inner_hole(px: vec2<i32>, res: vec2<i32>) -> f32 {
+    let cx = clamp(px.x, 0, res.x - 1);
+    let cy = clamp(px.y, 0, res.y - 1);
+    return 1.0 - textureLoad(src_tex, vec2<i32>(cx, cy), 0).a;
+}
+fn fx_inner_glow(uv: vec2<f32>, color: vec4<f32>, size: f32, intensity: f32, glow: vec3<f32>, res: vec2<f32>) -> vec4<f32> {
+    let k = clamp(intensity / 100.0, 0.0, 1.0);
+    if (k <= 0.0 || color.a <= 0.0) {
+        return color;
+    }
+    let r = clamp(size, 0.0, 100.0) / 100.0 * 24.0;
+    let X = uv * res - vec2<f32>(0.5);
+    let ri = vec2<i32>(i32(res.x), i32(res.y));
+    // Tent 1-2-4-2-1 by index arithmetic (no arrays: dynamic indexing
+    // crashes some D3D drivers at pipeline creation).
+    var acc = 0.0;
+    for (var i = -2; i <= 2; i++) {
+        var wi = 1.0;
+        if (abs(i) == 1) { wi = 2.0; }
+        if (i == 0) { wi = 4.0; }
+        for (var j = -2; j <= 2; j++) {
+            var wj = 1.0;
+            if (abs(j) == 1) { wj = 2.0; }
+            if (j == 0) { wj = 4.0; }
+            let sx = i32(floor(X.x + f32(j) * r * 0.5 + 0.5));
+            let sy = i32(floor(X.y + f32(i) * r * 0.5 + 0.5));
+            acc = acc + wi * wj * fx_inner_hole(vec2<i32>(sx, sy), ri);
+        }
+    }
+    let g = clamp(acc / 144.0 * k, 0.0, 1.0);
+    return vec4<f32>(mix(color.rgb, glow, g), color.a);
+}"#
+    )
+}
+
+/// Ordered dither: posterize + Bayer threshold (mirrors `apply_dither`).
+/// Deterministic point filter; pixel grid comes from RES.
+pub fn dither_filter() -> ColorFilter {
+    color_filter!(
+        "dither_filter",
+        r#"fn fx_dither_q(c: f32, n: f32, t: f32) -> f32 {
+    let v = c * (n - 1.0);
+    let i = floor(v);
+    let step = select(0.0, 1.0, v - i > t);
+    return clamp((i + step) / (n - 1.0), 0.0, 1.0);
+}
+fn fx_dither(uv: vec2<f32>, color: vec4<f32>, amount: f32, levels: f32, res: vec2<f32>) -> vec4<f32> {
+    let k = clamp(amount / 100.0, 0.0, 1.0);
+    if (k <= 0.0 || color.a <= 0.0) {
+        return color;
+    }
+    let n = clamp(floor(levels + 0.5), 2.0, 32.0);
+    let X = uv * res - vec2<f32>(0.5);
+    let xi = i32(floor(X.x + 0.5));
+    let yi = i32(floor(X.y + 0.5));
+    let bx = xi - (xi / 4) * 4;
+    let by = yi - (yi / 4) * 4;
+    // Bayer rows by branch (no arrays: dynamic indexing crashes some
+    // D3D drivers at pipeline creation).
+    var row = vec4<f32>(0.0, 8.0, 2.0, 10.0);
+    if (by == 1) { row = vec4<f32>(12.0, 4.0, 14.0, 6.0); }
+    if (by == 2) { row = vec4<f32>(3.0, 11.0, 1.0, 9.0); }
+    if (by == 3) { row = vec4<f32>(15.0, 7.0, 13.0, 5.0); }
+    var bayer = row.x;
+    if (bx == 1) { bayer = row.y; }
+    if (bx == 2) { bayer = row.z; }
+    if (bx == 3) { bayer = row.w; }
+    let t = (bayer + 0.5) / 16.0;
+    let qr = fx_dither_q(color.r, n, t);
+    let qg = fx_dither_q(color.g, n, t);
+    let qb = fx_dither_q(color.b, n, t);
+    let out = color.rgb + (vec3<f32>(qr, qg, qb) - color.rgb) * k;
+    return vec4<f32>(out, color.a);
+}"#
+    )
+}
+
+/// Stylized rim light on the alpha contour (mirrors `apply_rim_light`).
+/// `mode` 0 = directional (screen-space `direction` degrees), 1 = full.
+pub fn rim_light_resample() -> ColorFilter {
+    color_filter!(
+        "rim_light_resample",
+        r#"fn fx_rim_alpha(px: vec2<i32>, res: vec2<i32>) -> f32 {
+    let cx = clamp(px.x, 0, res.x - 1);
+    let cy = clamp(px.y, 0, res.y - 1);
+    return textureLoad(src_tex, vec2<i32>(cx, cy), 0).a;
+}
+fn fx_rim_light(uv: vec2<f32>, color: vec4<f32>, mode: f32, direction: f32, width: f32, rim: vec3<f32>, intensity: f32, res: vec2<f32>) -> vec4<f32> {
+    let k = clamp(intensity / 100.0, 0.0, 1.0);
+    if (k <= 0.0 || color.a <= 0.0) {
+        return color;
+    }
+    let wg = clamp(width, 0.0, 100.0) / 100.0 * 4.0;
+    let rad = radians(direction);
+    let L = vec2<f32>(cos(rad), sin(rad));
+    let X = uv * res - vec2<f32>(0.5);
+    let xi = i32(floor(X.x + 0.5));
+    let yi = i32(floor(X.y + 0.5));
+    let ri = vec2<i32>(i32(res.x), i32(res.y));
+    let gx = -fx_rim_alpha(vec2<i32>(xi - 1, yi - 1), ri) - 2.0 * fx_rim_alpha(vec2<i32>(xi - 1, yi), ri) - fx_rim_alpha(vec2<i32>(xi - 1, yi + 1), ri) + fx_rim_alpha(vec2<i32>(xi + 1, yi - 1), ri) + 2.0 * fx_rim_alpha(vec2<i32>(xi + 1, yi), ri) + fx_rim_alpha(vec2<i32>(xi + 1, yi + 1), ri);
+    let gy = -fx_rim_alpha(vec2<i32>(xi - 1, yi - 1), ri) - 2.0 * fx_rim_alpha(vec2<i32>(xi, yi - 1), ri) - fx_rim_alpha(vec2<i32>(xi + 1, yi - 1), ri) + fx_rim_alpha(vec2<i32>(xi - 1, yi + 1), ri) + 2.0 * fx_rim_alpha(vec2<i32>(xi, yi + 1), ri) + fx_rim_alpha(vec2<i32>(xi + 1, yi + 1), ri);
+    let mag = length(vec2<f32>(gx, gy));
+    if (mag <= 0.00001) {
+        return color;
+    }
+    let edge = clamp(mag * wg * 0.25, 0.0, 1.0);
+    var side = 1.0;
+    if (mode < 0.5) {
+        side = clamp(dot(vec2<f32>(gx, gy) / mag, vec2<f32>(-L.x, -L.y)), 0.0, 1.0);
+    }
+    let g = clamp(edge * side * k, 0.0, 1.0);
+    return vec4<f32>(mix(color.rgb, rim, g), color.a);
+}"#
+    )
+}
+
 /// Oil painting: classic Kuwahara smoothing (mirrors `apply_oil_paint`).
 /// Quadrant layout, mean/variance order, and straight-space sampling all
 /// match the CPU kernel exactly.
@@ -2489,6 +2611,9 @@ pub fn resample_filters() -> Vec<ColorFilter> {
         stock_lens_flare(),
         cel_shade_resample(),
         match_grade_resample(),
+        inner_glow_resample(),
+        dither_filter(),
+        rim_light_resample(),
         oil_paint_resample(),
     ]
 }
@@ -2672,6 +2797,9 @@ mod tests {
             ("stock_lens_flare", "fx_stock_lens_flare(uv, color, u.params[0], u.params[1], u.params[2], u.colors[0].rgb, RES)"),
             ("cel_shade_resample", "fx_cel_shade(uv, color, u.params[0].x, u.params[0].y, u.params[0].z, u.params[0].w, u.colors[0].rgb, u.params[1].x, u.colors[1].rgb, u.params[1].y, RES)"),
             ("match_grade_resample", "fx_match_grade(uv, color, u.params[0].x, u.colors[0].rgb, u.colors[1].rgb, u.colors[2].rgb, u.colors[3].rgb, vec3<f32>(u.params[0].y, u.params[0].z, u.params[0].w), vec3<f32>(u.params[1].x, u.params[1].y, u.params[1].z), 0.0)"),
+            ("inner_glow_resample", "fx_inner_glow(uv, color, u.params[0].x, u.params[0].y, u.colors[0].rgb, RES)"),
+            ("dither_filter", "fx_dither(uv, color, u.params[0].x, u.params[0].y, RES)"),
+            ("rim_light_resample", "fx_rim_light(uv, color, u.params[0].x, u.params[0].y, u.params[0].z, u.colors[0].rgb, u.params[1].x, RES)"),
             ("oil_paint_resample", "fx_oil_paint(uv, color, u.params[0].x, u.params[0].y, RES)"),
         ];
         let twins = resample_filters();

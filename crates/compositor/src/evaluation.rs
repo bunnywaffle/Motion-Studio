@@ -681,6 +681,25 @@ pub enum EvaluatedEffectType {
         src_mid: Color,
         src_high: Color,
     },
+    /// Inner glow: light spilling inward from the alpha contour.
+    InnerGlow {
+        size: f32,
+        intensity: f32,
+        color: Color,
+    },
+    /// Ordered dither: posterize + Bayer threshold.
+    Dither {
+        amount: f32,
+        levels: f32,
+    },
+    /// Stylized rim light on the alpha contour (screen-space).
+    RimLight {
+        mode: project::RimMode,
+        direction: f32,
+        width: f32,
+        color: Color,
+        intensity: f32,
+    },
     /// Modular stock plug-in: evaluated scalar params in descriptor order
     /// plus resolved color slots.
     Stock {
@@ -728,6 +747,9 @@ impl EvaluatedEffectType {
             Self::OilPaint { .. } => "Oil Painting",
             Self::MatchColor { .. } => "Match Color",
             Self::MatchLight { .. } => "Match Light",
+            Self::InnerGlow { .. } => "Inner Glow",
+            Self::Dither { .. } => "Dither",
+            Self::RimLight { .. } => "Rim Light",
             Self::Curves { .. } => "Tone Curve",
             Self::OuterGlow { .. } => "Outer Glow",
             Self::Stock { plugin, .. } => plugin.descriptor().label,
@@ -772,6 +794,9 @@ impl EvaluatedEffectType {
             Self::OilPaint { .. } => "net.sf.openfx.oil_paint",
             Self::MatchColor { .. } => "net.sf.openfx.match_color",
             Self::MatchLight { .. } => "net.sf.openfx.match_light",
+            Self::InnerGlow { .. } => "net.sf.openfx.inner_glow",
+            Self::Dither { .. } => "net.sf.openfx.dither",
+            Self::RimLight { .. } => "net.sf.openfx.rim_light",
             Self::Curves { .. } => "net.sf.openfx.custom.tone_curve",
             Self::OuterGlow { .. } => "net.sf.openfx.outer_glow",
             Self::Stock { plugin, .. } => plugin.plugin_id(),
@@ -810,7 +835,10 @@ impl EvaluatedEffectType {
                     | Self::CelShading { .. }
                     | Self::OilPaint { .. }
                     | Self::MatchColor { .. }
-                    | Self::MatchLight { .. }            ),
+                    | Self::MatchLight { .. }
+                    | Self::InnerGlow { .. }
+                    | Self::Dither { .. }
+                    | Self::RimLight { .. }            ),
         }
     }
 
@@ -1057,7 +1085,7 @@ impl EvaluatedEffectType {
             // Sharpen (unsharp mask) and Vignette need neighbours / pixel
             // position: identity here, resolved by the rasterizer. Curves
             // needs its LUT: identity here, resolved by the rasterizer.
-            Self::Sharpen { .. } | Self::Vignette { .. } | Self::CelShading { .. } | Self::OilPaint { .. } | Self::MatchColor { .. } | Self::MatchLight { .. } | Self::Curves { .. } | Self::OuterGlow { .. } => c,
+            Self::Sharpen { .. } | Self::Vignette { .. } | Self::CelShading { .. } | Self::OilPaint { .. } | Self::MatchColor { .. } | Self::MatchLight { .. } | Self::InnerGlow { .. } | Self::Dither { .. } | Self::RimLight { .. } | Self::Curves { .. } | Self::OuterGlow { .. } => c,
             // Stock per-pixel kernels; spatial stock is identity here.
             Self::Stock { plugin, params, .. } => process_color_stock(*plugin, params, c),
         }
@@ -2290,6 +2318,28 @@ impl LayerStackEvaluator {
                                 src_shadow: z,
                                 src_mid: z,
                                 src_high: z,
+                            }
+                        }
+                        EffectType::InnerGlow { size, intensity, color } => {
+                            EvaluatedEffectType::InnerGlow {
+                                size: eval_eff_prop("size", size.evaluate_at(time)),
+                                intensity: eval_eff_prop("intensity", intensity.evaluate_at(time)),
+                                color: color.evaluate_at(time),
+                            }
+                        }
+                        EffectType::Dither { amount, levels } => {
+                            EvaluatedEffectType::Dither {
+                                amount: eval_eff_prop("amount", amount.evaluate_at(time)),
+                                levels: eval_eff_prop("levels", levels.evaluate_at(time)),
+                            }
+                        }
+                        EffectType::RimLight { mode, direction, width, color, intensity } => {
+                            EvaluatedEffectType::RimLight {
+                                mode: *mode,
+                                direction: eval_eff_prop("direction", direction.evaluate_at(time)),
+                                width: eval_eff_prop("width", width.evaluate_at(time)),
+                                color: color.evaluate_at(time),
+                                intensity: eval_eff_prop("intensity", intensity.evaluate_at(time)),
                             }
                         }
                         EffectType::Curves { curve } => {

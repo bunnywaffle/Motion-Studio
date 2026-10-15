@@ -394,6 +394,37 @@ pub const OFX_SUITE: &[OfxEffectDescriptor] = &[
         spatial: false,
     },
     OfxEffectDescriptor {
+        id: "net.sf.openfx.inner_glow",
+        label: "Inner Glow",
+        category: OfxCategory::Light,
+        params: &[
+            OfxParamDescriptor { name: "size", label: "Size", min: 0.0, max: 100.0, default: 40.0 },
+            OfxParamDescriptor { name: "intensity", label: "Intensity", min: 0.0, max: 100.0, default: 75.0 },
+        ],
+        spatial: true,
+    },
+    OfxEffectDescriptor {
+        id: "net.sf.openfx.dither",
+        label: "Dither",
+        category: OfxCategory::Stylize,
+        params: &[
+            OfxParamDescriptor { name: "amount", label: "Amount", min: 0.0, max: 100.0, default: 100.0 },
+            OfxParamDescriptor { name: "levels", label: "Levels", min: 2.0, max: 32.0, default: 8.0 },
+        ],
+        spatial: false,
+    },
+    OfxEffectDescriptor {
+        id: "net.sf.openfx.rim_light",
+        label: "Rim Light",
+        category: OfxCategory::Light,
+        params: &[
+            OfxParamDescriptor { name: "direction", label: "Direction", min: 0.0, max: 360.0, default: 135.0 },
+            OfxParamDescriptor { name: "width", label: "Width", min: 0.0, max: 100.0, default: 30.0 },
+            OfxParamDescriptor { name: "intensity", label: "Intensity", min: 0.0, max: 100.0, default: 80.0 },
+        ],
+        spatial: true,
+    },
+    OfxEffectDescriptor {
         id: "net.sf.openfx.checkerboard",
         label: "Checkerboard",
         category: OfxCategory::Generate,

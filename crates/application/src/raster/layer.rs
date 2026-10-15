@@ -764,6 +764,9 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
         EvaluatedEffectType::OilPaint { .. } => 31,
         EvaluatedEffectType::MatchColor { .. } => 36,
         EvaluatedEffectType::MatchLight { .. } => 37,
+        EvaluatedEffectType::InnerGlow { .. } => 38,
+        EvaluatedEffectType::Dither { .. } => 39,
+        EvaluatedEffectType::RimLight { .. } => 40,
         EvaluatedEffectType::Curves { .. } => 35,
         EvaluatedEffectType::TrimPath { .. } => 32,
         EvaluatedEffectType::SinePath { .. } => 33,
@@ -783,6 +786,22 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
             amount.to_bits().hash(h);
         }
         EvaluatedEffectType::Invert { amount } => amount.to_bits().hash(h),
+        EvaluatedEffectType::InnerGlow { size, intensity, color } => {
+            size.to_bits().hash(h);
+            intensity.to_bits().hash(h);
+            color_hash(color, h);
+        }
+        EvaluatedEffectType::Dither { amount, levels } => {
+            amount.to_bits().hash(h);
+            levels.to_bits().hash(h);
+        }
+        EvaluatedEffectType::RimLight { mode, direction, width, color, intensity } => {
+            (*mode as u8).hash(h);
+            direction.to_bits().hash(h);
+            width.to_bits().hash(h);
+            color_hash(color, h);
+            intensity.to_bits().hash(h);
+        }
         EvaluatedEffectType::MatchColor { reference_layer, amount, ref_shadow, ref_mid, ref_high, src_shadow, src_mid, src_high }
         | EvaluatedEffectType::MatchLight { reference_layer, amount, ref_shadow, ref_mid, ref_high, src_shadow, src_mid, src_high } => {
             reference_layer.hash(h);
@@ -3481,6 +3500,63 @@ mod tests {
         // The grade must actually move pixels (not a silent identity).
         let moved = cpu.px.iter().zip(base.px.iter()).filter(|(a, b)| (a.r - b.r).abs() > 0.01).count();
         assert!(moved > 1000, "match grade must shift the image, moved {moved}");
+    }
+
+    #[test]
+    fn gpu_contour_effects_match_cpu_within_tolerance() {
+        use compositor::{EvaluatedEffect, EvaluatedEffectType};
+        if !crate::raster::buffer::gpu_accelerated() {
+            return;
+        }
+        // Opaque gradient with a transparent corner: contour for
+        // inner-glow/rim, content for dither.
+        let mut base = FloatBuf::clear(64, 64);
+        for y in 0..64 {
+            for x in 0..64 {
+                let (r, g, b) = (x as f32 / 63.0, y as f32 / 63.0, 0.4);
+                let a = if x > 48 && y > 48 { 0.0 } else { 1.0 };
+                base.put(x, y, Px { r: r * a, g: g * a, b: b * a, a });
+            }
+        }
+        let fx = |id: &str, name: &str, effect_type: EvaluatedEffectType| EvaluatedEffect {
+            id: id.to_string(),
+            name: name.to_string(),
+            enabled: true,
+            effect_type,
+        };
+        let effects = vec![
+            fx("ig", "Inner Glow", EvaluatedEffectType::InnerGlow {
+                size: 40.0,
+                intensity: 80.0,
+                color: Color::rgba(1.0, 1.0, 1.0, 1.0),
+            }),
+            // No dither here: ordered thresholds flip on u8-quantized
+            // gradients, so it correctly declines the GPU chain (CPU
+            // kernel covered by the raster unit test).
+            fx("rim", "Rim Light", EvaluatedEffectType::RimLight {
+                mode: project::RimMode::Directional,
+                direction: 135.0,
+                width: 40.0,
+                color: Color::rgba(1.0, 1.0, 1.0, 1.0),
+                intensity: 80.0,
+            }),
+        ];
+        let ctx = RasterFx { time_s: 0.0, frame: 0, res_w: 64.0, res_h: 64.0, duration_s: 0.0, playing: false };
+        let mut cpu = base.clone();
+        apply_layer_fx(&mut cpu, 64.0, 64.0, &effects, &ctx, false);
+        let mut gpu = base.clone();
+        apply_layer_fx(&mut gpu, 64.0, 64.0, &effects, &ctx, true);
+        let mut worst = 0.0f32;
+        for (c, g) in cpu.px.iter().zip(gpu.px.iter()) {
+            for (cc, gg) in [c.r, c.g, c.b, c.a].into_iter().zip([g.r, g.g, g.b, g.a]) {
+                worst = worst.max((cc - gg).abs());
+            }
+        }
+        assert!(worst < 0.02, "GPU contour effects must match CPU within u8 rounding: {worst}");
+        let moved = cpu.px.iter().zip(base.px.iter()).filter(|(a, b)| {
+            (a.r - b.r).abs() + (a.g - b.g).abs() + (a.b - b.b).abs() > 0.01
+        }).count();
+        assert!(moved > 200, "contour effects must move pixels, moved {moved}");
     }
 
     fn gpu_parity_base() -> FloatBuf {

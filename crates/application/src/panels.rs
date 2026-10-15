@@ -11968,6 +11968,9 @@ fn render_applied_effects(
                 | EffectType::OilPaint { .. }
                 | EffectType::MatchColor { .. }
                 | EffectType::MatchLight { .. }
+                | EffectType::InnerGlow { .. }
+                | EffectType::Dither { .. }
+                | EffectType::RimLight { .. }
                 | EffectType::TrimPath { .. }
                 | EffectType::SinePath { .. }
                 | EffectType::InstancePath { .. } => {
@@ -16223,6 +16226,9 @@ pub(crate) fn effect_template_for(plugin_id: &str) -> Option<EffectType> {
         "net.sf.openfx.oil_paint" => EffectType::oil_paint(2.0, 100.0),
         "net.sf.openfx.match_color" => EffectType::match_color(100.0),
         "net.sf.openfx.match_light" => EffectType::match_light(100.0),
+        "net.sf.openfx.inner_glow" => EffectType::inner_glow(40.0, 75.0, Color::WHITE),
+        "net.sf.openfx.dither" => EffectType::dither(100.0, 8.0),
+        "net.sf.openfx.rim_light" => EffectType::rim_light(135.0, 30.0, Color::WHITE, 80.0),
         "net.sf.openfx.trim_path" => EffectType::trim_path(0.0, 100.0, 0.0),
         "net.sf.openfx.sine_path" => EffectType::sine_path(20.0, 1.0, 0.0),
         "net.sf.openfx.instance_path" => EffectType::instance_path(5.0, 100.0, 0.0, 100.0, 100.0),

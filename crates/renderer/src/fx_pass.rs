@@ -526,6 +526,21 @@ impl FxPass {
                 "fx_match_grade(uv, color, u.params[0].x, u.colors[0].rgb, u.colors[1].rgb, u.colors[2].rgb, u.colors[3].rgb, vec3<f32>(u.params[0].y, u.params[0].z, u.params[0].w), vec3<f32>(u.params[1].x, u.params[1].y, u.params[1].z), 1.0)",
                 false,
             ),
+            "inner_glow" => (
+                ef::inner_glow_resample().wgsl,
+                "fx_inner_glow(uv, color, u.params[0].x, u.params[0].y, u.colors[0].rgb, vec2<f32>(u.misc.y, u.misc.z))",
+                true,
+            ),
+            "dither" => (
+                ef::dither_filter().wgsl,
+                "fx_dither(uv, color, u.params[0].x, u.params[0].y, vec2<f32>(u.misc.y, u.misc.z))",
+                true,
+            ),
+            "rim_light" => (
+                ef::rim_light_resample().wgsl,
+                "fx_rim_light(uv, color, u.params[0].x, u.params[0].y, u.params[0].z, u.colors[0].rgb, u.params[1].x, vec2<f32>(u.misc.y, u.misc.z))",
+                true,
+            ),
             // NOTE: no "outer_glow" arm on purpose. Outer glow is a
             // blit-stage effect (blurred silhouette under content); a
             // chain twin would double-apply against the blit pass, and the
@@ -1019,7 +1034,7 @@ pub const CHAIN_SAFE_STOCK: [StockPlugin; 39] = [
 /// CPU kernel within u8 rounding (gentle point math, no time seeds, no
 /// spatial resampling): the set the live GPU chain may take without
 /// visual change. Same audit bar as [`CHAIN_SAFE_STOCK`].
-pub const CHAIN_SAFE_BUILTIN: [&str; 18] = [
+pub const CHAIN_SAFE_BUILTIN: [&str; 20] = [
     "brightness_contrast",
     "tint",
     "levels",
@@ -1038,6 +1053,8 @@ pub const CHAIN_SAFE_BUILTIN: [&str; 18] = [
     "gradient_ramp",
     "match_color",
     "match_light",
+    "inner_glow",
+    "rim_light",
 ];
 
 /// Stable built-in id for a GPU-ported evaluated effect, if any.
@@ -1060,6 +1077,12 @@ pub fn builtin_gpu_id(effect: &compositor::EvaluatedEffectType) -> Option<&'stat
         E::OilPaint { .. } => Some("oil_paint"),
         E::MatchColor { .. } => Some("match_color"),
         E::MatchLight { .. } => Some("match_light"),
+        E::InnerGlow { .. } => Some("inner_glow"),
+        E::RimLight { .. } => Some("rim_light"),
+        // NOTE: no "dither" arm on purpose. Ordered thresholds flip on
+        // u8-quantized gradients (1/(levels-1) per flipped bit), the same
+        // reason halftone/cel stay CPU. Its twin still compiles (honest
+        // badge: no GPU claim).
         E::Checkerboard { .. } => Some("checkerboard"),
         E::GradientRamp { .. } => Some("gradient_ramp"),
         _ => None,

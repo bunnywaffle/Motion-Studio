@@ -161,6 +161,43 @@ impl TileMode {
     }
 }
 
+/// Rim-light coverage mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RimMode {
+    /// Keyed to one side by `direction`.
+    #[default]
+    Directional,
+    /// Uniform contour glow all around.
+    Full,
+}
+
+impl RimMode {
+    /// All modes in Combobox order.
+    pub const ALL: [Self; 2] = [Self::Directional, Self::Full];
+
+    /// Human label.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Directional => "Directional",
+            Self::Full => "Full",
+        }
+    }
+
+    /// Parse a [`Self::label`] back into a mode (Combobox commit path).
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.label() == label)
+    }
+
+    /// Combobox index of this mode.
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Directional => 0,
+            Self::Full => 1,
+        }
+    }
+}
+
 /// Tiler cell aperture shape (grid + radial lattices; hexagon mode always
 /// uses hex cells). Non-square cells punch transparency outside the shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -683,6 +720,31 @@ pub enum EffectType {
         reference_layer: String,
         amount: Property<f32>,
     },
+    /// Inner glow: light spilling inward from the alpha contour.
+    /// OFX plug-in `net.sf.openfx.inner_glow`.
+    InnerGlow {
+        size: Property<f32>,
+        intensity: Property<f32>,
+        #[serde(deserialize_with = "crate::property::de_property_or_value", default)]
+        color: Property<Color>,
+    },
+    /// Ordered dither: posterize to `levels` + Bayer threshold.
+    /// OFX plug-in `net.sf.openfx.dither`.
+    Dither {
+        amount: Property<f32>,
+        levels: Property<f32>,
+    },
+    /// Stylized rim light on the alpha contour (screen-space Sobel;
+    /// 2D layers carry no normals). OFX plug-in `net.sf.openfx.rim_light`.
+    RimLight {
+        #[serde(default)]
+        mode: RimMode,
+        direction: Property<f32>,
+        width: Property<f32>,
+        #[serde(deserialize_with = "crate::property::de_property_or_value", default)]
+        color: Property<Color>,
+        intensity: Property<f32>,
+    },
     /// Tone curve: master luminance remap through an editable curve
     /// (empty = linear identity). OFX plug-in
     /// `net.sf.openfx.custom.tone_curve`.
@@ -744,6 +806,9 @@ impl EffectType {
             Self::OilPaint { .. } => "Oil Painting",
             Self::MatchColor { .. } => "Match Color",
             Self::MatchLight { .. } => "Match Light",
+            Self::InnerGlow { .. } => "Inner Glow",
+            Self::Dither { .. } => "Dither",
+            Self::RimLight { .. } => "Rim Light",
             Self::Curves { .. } => "Tone Curve",
             Self::Stock { plugin, .. } => plugin.descriptor().label,
         }
@@ -1230,6 +1295,34 @@ impl EffectType {
         }
     }
 
+    /// Construct an Inner Glow effect type.
+    pub fn inner_glow(size: f32, intensity: f32, color: Color) -> Self {
+        Self::InnerGlow {
+            size: Property::new("Size", size.clamp(0.0, 100.0)),
+            intensity: Property::new("Intensity", intensity.clamp(0.0, 100.0)),
+            color: Property::new("Color", color),
+        }
+    }
+
+    /// Construct a Dither effect type.
+    pub fn dither(amount: f32, levels: f32) -> Self {
+        Self::Dither {
+            amount: Property::new("Amount", amount.clamp(0.0, 100.0)),
+            levels: Property::new("Levels", levels.clamp(2.0, 32.0).round()),
+        }
+    }
+
+    /// Construct a Rim Light effect type.
+    pub fn rim_light(direction: f32, width: f32, color: Color, intensity: f32) -> Self {
+        Self::RimLight {
+            mode: RimMode::Directional,
+            direction: Property::new("Direction", direction),
+            width: Property::new("Width", width.clamp(0.0, 100.0)),
+            color: Property::new("Color", color),
+            intensity: Property::new("Intensity", intensity.clamp(0.0, 100.0)),
+        }
+    }
+
     /// Construct a Vignette effect type.
     pub fn vignette(amount: f32, softness: f32) -> Self {
         Self::Vignette {
@@ -1278,6 +1371,9 @@ impl EffectType {
             Self::OilPaint { .. } => "net.sf.openfx.oil_paint",
             Self::MatchColor { .. } => "net.sf.openfx.match_color",
             Self::MatchLight { .. } => "net.sf.openfx.match_light",
+            Self::InnerGlow { .. } => "net.sf.openfx.inner_glow",
+            Self::Dither { .. } => "net.sf.openfx.dither",
+            Self::RimLight { .. } => "net.sf.openfx.rim_light",
             Self::Curves { .. } => "net.sf.openfx.custom.tone_curve",
             Self::Stock { plugin, .. } => plugin.plugin_id(),
         }
@@ -1998,6 +2094,15 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 }
                 false
             }
+            EffectType::RimLight { mode, .. } => {
+                if field.eq_ignore_ascii_case("mode") {
+                    if let Some(m) = RimMode::ALL.get(index).copied() {
+                        *mode = m;
+                        return true;
+                    }
+                }
+                false
+            }
             _ => false,
         }
     }
@@ -2021,6 +2126,13 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     Some(order.index())
                 } else if field.eq_ignore_ascii_case("easing") {
                     Some(easing.index())
+                } else {
+                    None
+                }
+            }
+            EffectType::RimLight { mode, .. } => {
+                if field.eq_ignore_ascii_case("mode") {
+                    Some(mode.index())
                 } else {
                     None
                 }
@@ -2575,6 +2687,36 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     return true;
                 }
             }
+            EffectType::InnerGlow { size, intensity, .. } => {
+                if param_name.eq_ignore_ascii_case("size") {
+                    size.set_value((size.value + delta).clamp(0.0, 100.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("intensity") {
+                    intensity.set_value((intensity.value + delta).clamp(0.0, 100.0));
+                    return true;
+                }
+            }
+            EffectType::Dither { amount, levels } => {
+                if param_name.eq_ignore_ascii_case("amount") {
+                    amount.set_value((amount.value + delta).clamp(0.0, 100.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("levels") {
+                    levels.set_value((levels.value + delta).clamp(2.0, 32.0).round());
+                    return true;
+                }
+            }
+            EffectType::RimLight { direction, width, intensity, .. } => {
+                if param_name.eq_ignore_ascii_case("direction") {
+                    direction.set_value((direction.value + delta).clamp(0.0, 360.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("width") {
+                    width.set_value((width.value + delta).clamp(0.0, 100.0));
+                    return true;
+                } else if param_name.eq_ignore_ascii_case("intensity") {
+                    intensity.set_value((intensity.value + delta).clamp(0.0, 100.0));
+                    return true;
+                }
+            }
             EffectType::Stock { plugin, params, .. } => {
                 let desc = plugin.descriptor();
                 for (i, p) in desc.params.iter().enumerate() {
@@ -3039,6 +3181,35 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     None
                 }
             }
+            EffectType::InnerGlow { size, intensity, .. } => {
+                if param_name.eq_ignore_ascii_case("size") {
+                    Some(size)
+                } else if param_name.eq_ignore_ascii_case("intensity") {
+                    Some(intensity)
+                } else {
+                    None
+                }
+            }
+            EffectType::Dither { amount, levels } => {
+                if param_name.eq_ignore_ascii_case("amount") {
+                    Some(amount)
+                } else if param_name.eq_ignore_ascii_case("levels") {
+                    Some(levels)
+                } else {
+                    None
+                }
+            }
+            EffectType::RimLight { direction, width, intensity, .. } => {
+                if param_name.eq_ignore_ascii_case("direction") {
+                    Some(direction)
+                } else if param_name.eq_ignore_ascii_case("width") {
+                    Some(width)
+                } else if param_name.eq_ignore_ascii_case("intensity") {
+                    Some(intensity)
+                } else {
+                    None
+                }
+            }
             // Puppet pin components are dynamic (`pin_{i}_{x|y}`) tracks.
             EffectType::Puppet { pins, .. } => Self::pin_component(pins, param_name),
             // Shader Lab values are dynamic, not `Property<f32>` tracks.
@@ -3461,6 +3632,35 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
             EffectType::MatchColor { amount, .. } | EffectType::MatchLight { amount, .. } => {
                 if param_name.eq_ignore_ascii_case("amount") {
                     Some(amount)
+                } else {
+                    None
+                }
+            }
+            EffectType::InnerGlow { size, intensity, .. } => {
+                if param_name.eq_ignore_ascii_case("size") {
+                    Some(size)
+                } else if param_name.eq_ignore_ascii_case("intensity") {
+                    Some(intensity)
+                } else {
+                    None
+                }
+            }
+            EffectType::Dither { amount, levels } => {
+                if param_name.eq_ignore_ascii_case("amount") {
+                    Some(amount)
+                } else if param_name.eq_ignore_ascii_case("levels") {
+                    Some(levels)
+                } else {
+                    None
+                }
+            }
+            EffectType::RimLight { direction, width, intensity, .. } => {
+                if param_name.eq_ignore_ascii_case("direction") {
+                    Some(direction)
+                } else if param_name.eq_ignore_ascii_case("width") {
+                    Some(width)
+                } else if param_name.eq_ignore_ascii_case("intensity") {
+                    Some(intensity)
                 } else {
                     None
                 }
@@ -3902,6 +4102,27 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
             // dynamic, declarations are static).
             EffectType::MatchColor { amount, .. } | EffectType::MatchLight { amount, .. } => vec![
                 scalar("amount", "Amount", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), amount)
+            ],
+            EffectType::InnerGlow { size, intensity, color } => vec![
+                scalar("size", "Size", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 1.0, 0, "%", 40.0), size),
+                scalar("intensity", "Intensity", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 75.0), intensity),
+                PropDecl::color("color", "Color", color.value, color.is_animated()),
+            ],
+            EffectType::Dither { amount, levels } => vec![
+                scalar("amount", "Amount", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), amount),
+                scalar("levels", "Levels", WidgetKind::Slider, px1(2.0, 32.0, 1.0, 8.0), levels),
+            ],
+            EffectType::RimLight { mode, direction, width, color, intensity } => vec![
+                PropDecl::enumeration(
+                    "mode",
+                    "Mode",
+                    RimMode::ALL.iter().map(|m| m.label().to_string()).collect(),
+                    mode.index(),
+                ),
+                scalar("direction", "Direction", WidgetKind::Slider, ParamMeta::slider(0.0, 360.0, 5.0, 0, "°", 135.0), direction),
+                scalar("width", "Width", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 1.0, 0, "%", 30.0), width),
+                PropDecl::color("color", "Color", color.value, color.is_animated()),
+                scalar("intensity", "Intensity", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 80.0), intensity),
             ],
             // Curves renders through its bespoke card arm (curve editor);
             // no scalar/color declarations.

@@ -359,6 +359,16 @@ pub fn apply_effect_pixels(
         EvaluatedEffectType::OilPaint { radius, amount } => {
             apply_oil_paint(buf, *radius, *amount);
         }
+        EvaluatedEffectType::InnerGlow { size, intensity, color } => {
+            apply_inner_glow(buf, *size, *intensity, *color);
+        }
+        EvaluatedEffectType::Dither { amount, levels } => {
+            apply_dither(buf, *amount, *levels);
+        }
+        EvaluatedEffectType::RimLight { mode, direction, width, color, intensity } => {
+            let directional = matches!(mode, project::RimMode::Directional);
+            apply_rim_light(buf, directional, *direction, *width, *color, *intensity);
+        }
         EvaluatedEffectType::MatchColor { amount, ref_shadow, ref_mid, ref_high, src_shadow, src_mid, src_high, .. } => {
             let refz = ZoneAvgs {
                 shadow: [ref_shadow.r, ref_shadow.g, ref_shadow.b],
@@ -1078,10 +1088,239 @@ pub fn resolve_match_stats(
     Some(out)
 }
 
+/// Inner glow in place: light spilling inward from the alpha contour.
+/// `size` 0..100 maps to a tent-blur radius up to 24px (fixed 5x5 taps,
+/// so CPU and GPU twins agree exactly); `intensity` blends the glow
+/// color over content, strongest at the edge, alpha untouched.
+pub fn apply_inner_glow(buf: &mut FloatBuf, size: f32, intensity: f32, color: Color) {
+    let k = (intensity / 100.0).clamp(0.0, 1.0);
+    let r = (size.clamp(0.0, 100.0) / 100.0 * 24.0).max(0.0);
+    if k <= 0.0 || buf.w == 0 || buf.h == 0 {
+        return;
+    }
+    // Tent offsets: -r, -r/2, 0, r/2, r with weights 1-2-4-2-1 (sum 144).
+    let offs = [-r, -r * 0.5, 0.0, r * 0.5, r];
+    let wts = [1.0f32, 2.0, 4.0, 2.0, 1.0];
+    let at = |px: &[Px], w: u32, h: u32, x: i32, y: i32| -> f32 {
+        let cx = x.clamp(0, w as i32 - 1);
+        let cy = y.clamp(0, h as i32 - 1);
+        1.0 - px[(cy as u32 * w + cx as u32) as usize].a
+    };
+    let src = buf.px.clone();
+    for y in 0..buf.h {
+        for x in 0..buf.w {
+            let idx = (y * buf.w + x) as usize;
+            let p = src[idx];
+            if p.a <= 0.0 {
+                continue;
+            }
+            let mut acc = 0.0f32;
+            for (i, oy) in offs.iter().enumerate() {
+                for (j, ox) in offs.iter().enumerate() {
+                    // floor(v + 0.5): matches the WGSL twin's texel
+                    // rounding exactly (Rust round() differs on halves).
+                    let sx = (x as f32 + ox + 0.5).floor() as i32;
+                    let sy = (y as f32 + oy + 0.5).floor() as i32;
+                    acc += wts[i] * wts[j] * at(&src, buf.w, buf.h, sx, sy);
+                }
+            }
+            let g = (acc / 144.0 * k).clamp(0.0, 1.0);
+            let c = p.to_color();
+            let out = Color::rgba(
+                c.r + (color.r - c.r) * g,
+                c.g + (color.g - c.g) * g,
+                c.b + (color.b - c.b) * g,
+                c.a,
+            );
+            buf.px[idx] = Px::from_color(out);
+        }
+    }
+}
+
+/// 4x4 Bayer matrix (0..15) shared by the CPU kernel and the WGSL twin.
+const BAYER_4X4: [[f32; 4]; 4] = [
+    [0.0, 8.0, 2.0, 10.0],
+    [12.0, 4.0, 14.0, 6.0],
+    [3.0, 11.0, 1.0, 9.0],
+    [15.0, 7.0, 13.0, 5.0],
+];
+
+/// Ordered dither in place: posterize each channel to `levels`
+/// (2..32) with a Bayer threshold, blended by `amount`. Deterministic
+/// (no time seed) so CPU/GPU/export agree exactly.
+pub fn apply_dither(buf: &mut FloatBuf, amount: f32, levels: f32) {
+    let k = (amount / 100.0).clamp(0.0, 1.0);
+    let n = levels.round().clamp(2.0, 32.0);
+    if k <= 0.0 || buf.w == 0 || buf.h == 0 {
+        return;
+    }
+    for y in 0..buf.h {
+        for x in 0..buf.w {
+            let idx = (y * buf.w + x) as usize;
+            let p = buf.px[idx];
+            if p.a <= 0.0 {
+                continue;
+            }
+            let t = (BAYER_4X4[(y & 3) as usize][(x & 3) as usize] + 0.5) / 16.0;
+            let q = |c: f32| {
+                let v = c * (n - 1.0);
+                let i = v.floor();
+                let step = if v - i > t { 1.0 } else { 0.0 };
+                ((i + step) / (n - 1.0)).clamp(0.0, 1.0)
+            };
+            let c = p.to_color();
+            let out = Color::rgba(
+                c.r + (q(c.r) - c.r) * k,
+                c.g + (q(c.g) - c.g) * k,
+                c.b + (q(c.b) - c.b) * k,
+                c.a,
+            );
+            buf.px[idx] = Px::from_color(out);
+        }
+    }
+}
+
+/// Sobel gradient of the alpha channel (clamp addressing, same taps
+/// the WGSL twin samples).
+fn sobel_alpha_grad(snap: &[Px], w: u32, h: u32, x: u32, y: u32) -> (f32, f32) {
+    let a = |dx: i32, dy: i32| -> f32 {
+        let cx = (x as i32 + dx).clamp(0, w as i32 - 1);
+        let cy = (y as i32 + dy).clamp(0, h as i32 - 1);
+        snap[(cy as u32 * w + cx as u32) as usize].a
+    };
+    let gx = -a(-1, -1) - 2.0 * a(-1, 0) - a(-1, 1) + a(1, -1) + 2.0 * a(1, 0) + a(1, 1);
+    let gy = -a(-1, -1) - 2.0 * a(0, -1) - a(1, -1) + a(-1, 1) + 2.0 * a(0, 1) + a(1, 1);
+    (gx, gy)
+}
+
+/// Stylized rim light in place: Sobel alpha-contour glow. `direction`
+/// (degrees, screen space) keys `Directional` mode to one side; `Full`
+/// glows all around. `width` scales edge reach, `intensity` blends.
+pub fn apply_rim_light(
+    buf: &mut FloatBuf,
+    directional: bool,
+    direction: f32,
+    width: f32,
+    color: Color,
+    intensity: f32,
+) {
+    let k = (intensity / 100.0).clamp(0.0, 1.0);
+    let wg = (width.clamp(0.0, 100.0) / 100.0 * 4.0).max(0.0);
+    if k <= 0.0 || buf.w == 0 || buf.h == 0 {
+        return;
+    }
+    let rad = direction.to_radians();
+    let (lx, ly) = (rad.cos(), rad.sin());
+    let src = buf.px.clone();
+    for y in 0..buf.h {
+        for x in 0..buf.w {
+            let idx = (y * buf.w + x) as usize;
+            let p = src[idx];
+            if p.a <= 0.0 {
+                continue;
+            }
+            let (gx, gy) = sobel_alpha_grad(&src, buf.w, buf.h, x, y);
+            let mag = (gx * gx + gy * gy).sqrt();
+            if mag <= 1e-5 {
+                continue;
+            }
+            let edge = (mag * wg * 0.25).clamp(0.0, 1.0);
+            // Contour normal vs light direction (both screen-space,
+            // y-down — no flips needed). The alpha gradient points INTO
+            // the content, so the outward normal is its negation.
+            let side = if directional {
+                ((gx / mag) * -lx + (gy / mag) * -ly).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            let g = (edge * side * k).clamp(0.0, 1.0);
+            let c = p.to_color();
+            let out = Color::rgba(
+                c.r + (color.r - c.r) * g,
+                c.g + (color.g - c.g) * g,
+                c.b + (color.b - c.b) * g,
+                c.a,
+            );
+            buf.px[idx] = Px::from_color(out);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use compositor::evaluation::EvaluatedEffectType;
+
+    /// Opaque box with a transparent right half: shared fixture for the
+    /// contour effects (inner glow + rim need a hard alpha edge).
+    fn alpha_edge_buf() -> FloatBuf {
+        let mut buf = FloatBuf { w: 32, h: 32, px: vec![Px { r: 0.4, g: 0.4, b: 0.4, a: 1.0 }; 1024] };
+        for y in 0..32 {
+            for x in 16..32 {
+                buf.px[(y * 32 + x) as usize] = Px { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+            }
+        }
+        buf
+    }
+
+    #[test]
+    fn inner_glow_lights_the_contour_not_the_fill() {
+        use project::Color;
+        let mut buf = alpha_edge_buf();
+        apply_inner_glow(&mut buf, 60.0, 100.0, Color::WHITE);
+        // Just inside the edge (x=15): holes blur in → visible glow.
+        let edge = buf.px[16 * 32 + 15];
+        // Deep interior (x=4): holes blur out → near-original.
+        let inner = buf.px[16 * 32 + 4];
+        // Transparent side untouched.
+        let out = buf.px[16 * 32 + 20];
+        assert!(edge.r > 0.5, "edge must glow toward white, got {}", edge.r);
+        assert!(inner.r < 0.45, "deep fill must stay near 0.4, got {}", inner.r);
+        assert_eq!(out.a, 0.0);
+    }
+
+    #[test]
+    fn dither_posterizes_to_levels_at_full_amount() {
+        let mut buf = FloatBuf { w: 16, h: 16, px: vec![Px { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }; 256] };
+        for y in 0..16 {
+            for x in 0..16 {
+                let v = (x as f32 + y as f32) / 30.0;
+                buf.px[(y * 16 + x) as usize] = Px { r: v, g: v, b: v, a: 1.0 };
+            }
+        }
+        apply_dither(&mut buf, 100.0, 2.0);
+        // 2 levels: every channel snaps to exactly 0 or 1.
+        for p in &buf.px {
+            for v in [p.r, p.g, p.b] {
+                assert!(v == 0.0 || v == 1.0, "must posterize, got {v}");
+            }
+        }
+        // Zero amount is a no-op.
+        let mut buf2 = alpha_edge_buf();
+        let before = buf2.px.clone();
+        apply_dither(&mut buf2, 0.0, 2.0);
+        assert!(buf2.px.iter().zip(before.iter()).all(|(a, b)| a.r == b.r));
+    }
+
+    #[test]
+    fn rim_light_directional_and_full_differ() {
+        use project::Color;
+        let mut dir = alpha_edge_buf();
+        apply_rim_light(&mut dir, true, 0.0, 60.0, Color::WHITE, 100.0);
+        let mut full = alpha_edge_buf();
+        apply_rim_light(&mut full, false, 0.0, 60.0, Color::WHITE, 100.0);
+        let d = dir.px[16 * 32 + 15].r;
+        let f = full.px[16 * 32 + 15].r;
+        assert!(f > 0.6, "full rim must light the contour, got {f}");
+        // Direction 0° (light from +x = the transparent side): the
+        // contour normal points +x there, so directional ≈ full here…
+        assert!(d > 0.6, "facing contour must light, got {d}");
+        // …but flipping the light to 180° must kill it.
+        let mut back = alpha_edge_buf();
+        apply_rim_light(&mut back, true, 180.0, 60.0, Color::WHITE, 100.0);
+        let b = back.px[16 * 32 + 15].r;
+        assert!(b < d - 0.2, "backlit contour must stay dark: {b} vs {d}");
+    }
     #[test]
     fn cel_shade_bands_luminance_and_inks_edges() {
         use project::Color;
