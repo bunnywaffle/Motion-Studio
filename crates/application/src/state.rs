@@ -1882,6 +1882,64 @@ impl EditorState {
         Ok(id)
     }
 
+    /// Add a Null control layer (no pixels — parenting + linkable values).
+    pub fn add_null_layer(&mut self, name: Option<&str>) -> Result<String, String> {
+        self.checkpoint();
+        let (id, in_pt, out_pt, comp_w, comp_h) = {
+            let comp = self
+                .active_composition()
+                .ok_or_else(|| "No active composition".to_string())?;
+            let mut counter = comp.layers.len() + 1;
+            let mut id = format!("layer_null_{counter}");
+            while comp.get_layer(&id).is_some() {
+                counter += 1;
+                id = format!("layer_null_{counter}");
+            }
+            (
+                id,
+                TimeCode::zero(comp.frame_rate),
+                comp.duration,
+                comp.width,
+                comp.height,
+            )
+        };
+
+        let layer_name = name.unwrap_or("Null 1");
+        let mut layer = Layer::null(&id, layer_name, in_pt, out_pt);
+        layer.transform.position.set_value(Vec2::ZERO);
+        layer.transform.anchor_point.set_value(Vec2::new(
+            (comp_w / 2) as f32,
+            (comp_h / 2) as f32,
+        ));
+
+        let comp_mut = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        comp_mut
+            .insert_layer(0, layer)
+            .map_err(|e| format!("Failed to add null layer: {e:?}"))?;
+
+        self.selected_layer_id = Some(id.clone());
+        Ok(id)
+    }
+
+    /// Switch a null layer's viewport gizmo shape.
+    pub fn set_null_gizmo(&mut self, layer_id: &str, gizmo: project::NullGizmo) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| "No such layer".to_string())?;
+        if let LayerSource::Null { gizmo: g } = &mut layer.source {
+            *g = gizmo;
+            Ok(())
+        } else {
+            Err("Not a null layer".to_string())
+        }
+    }
+
     /// Import a media file from disk (image or video), register it in project assets,
     /// and add a new centered layer to the active composition.
     pub fn import_media_file(&mut self, path: PathBuf) -> Result<String, String> {

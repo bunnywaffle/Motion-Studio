@@ -59,6 +59,10 @@ pub fn rasterize_comp(
         if !layer.is_rendered() {
             continue;
         }
+        if matches!(&layer.source, LayerSource::Null { .. }) {
+            // Null control layers carry no pixels — transform only.
+            continue;
+        }
         if matches!(&layer.source, LayerSource::Adjustment) {
             // True AE semantics: adjustment layers post-process everything
             // composited beneath them, respecting masks, opacity, and blend mode.

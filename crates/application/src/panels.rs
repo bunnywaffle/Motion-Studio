@@ -3643,6 +3643,162 @@ impl Render for CompositionViewerPanel {
                     let l_h = ((render_bbox.max.y - render_bbox.min.y) * scale_y).max(2.0);
                     let is_selected = state.selected_layer_id.as_deref() == Some(&layer.id);
 
+                    // Null control layers: no pixmap — draw the chosen
+                    // Resolve-style gizmo (arrow / target crosshair /
+                    // bounding diamond) in canvas space for EVERY null so
+                    // it stays clickable, dimmed when unselected. Shape
+                    // points run through the world matrix (rotation follows
+                    // parenting) at a fixed screen size; the center dot
+                    // grabs a canvas move-drag.
+                    if let LayerSource::Null { gizmo } = &layer.source {
+                        let null_panel = cx.entity().clone();
+                        let null_state = self.state.clone();
+                        let null_lid = layer.id.clone();
+                        let null_sel = is_selected;
+                        let n_fit = scale_x;
+                        let n_cw = comp_w;
+                        let n_ch = comp_h;
+                        let origin = layer.local_to_world_point(project::Vec2::ZERO);
+                        let x_axis = layer.local_to_world_point(project::Vec2::new(1.0, 0.0));
+                        let mut dx = x_axis.x - origin.x;
+                        let mut dy = x_axis.y - origin.y;
+                        let len = (dx * dx + dy * dy).sqrt().max(1e-6);
+                        dx /= len;
+                        dy /= len;
+                        // Fixed screen size back in comp units.
+                        let s = 16.0 / n_fit.max(1e-6);
+                        // World-space offsets mapped straight to canvas px.
+                        let c2s = |ox: f32, oy: f32| {
+                            let wx = origin.x + dx * ox - dy * oy;
+                            let wy = origin.y + dy * ox + dx * oy;
+                            ((wx + n_cw / 2.0) * n_fit, (wy + n_ch / 2.0) * n_fit)
+                        };
+                        let (ccx, ccy) = c2s(0.0, 0.0);
+                        let gcol = if null_sel {
+                            rgb(0xffffff)
+                        } else {
+                            Rgba { r: 0.65, g: 0.65, b: 0.7, a: 0.85 }
+                        };
+                        let pt = |ox: f32, oy: f32| {
+                            let (x, y) = c2s(ox, oy);
+                            gpui::point(gpui::px(x), gpui::px(y))
+                        };
+                        let mut curves: Vec<OverlayCurve> = Vec::new();
+                        match gizmo {
+                            project::NullGizmo::Arrow => {
+                                curves.push(OverlayCurve {
+                                    points: vec![pt(-s, 0.0), pt(s * 0.55, 0.0)],
+                                    color: gcol,
+                                    thickness: 2.0,
+                                });
+                                curves.push(OverlayCurve {
+                                    points: vec![
+                                        pt(s * 0.55, -s * 0.35),
+                                        pt(s, 0.0),
+                                        pt(s * 0.55, s * 0.35),
+                                    ],
+                                    color: gcol,
+                                    thickness: 2.0,
+                                });
+                            }
+                            project::NullGizmo::Target => {
+                                curves.push(OverlayCurve {
+                                    points: vec![pt(-s, 0.0), pt(-s * 0.25, 0.0)],
+                                    color: gcol,
+                                    thickness: 2.0,
+                                });
+                                curves.push(OverlayCurve {
+                                    points: vec![pt(s * 0.25, 0.0), pt(s, 0.0)],
+                                    color: gcol,
+                                    thickness: 2.0,
+                                });
+                                curves.push(OverlayCurve {
+                                    points: vec![pt(0.0, -s), pt(0.0, -s * 0.25)],
+                                    color: gcol,
+                                    thickness: 2.0,
+                                });
+                                curves.push(OverlayCurve {
+                                    points: vec![pt(0.0, s * 0.25), pt(0.0, s)],
+                                    color: gcol,
+                                    thickness: 2.0,
+                                });
+                            }
+                            project::NullGizmo::Diamond => {
+                                curves.push(OverlayCurve {
+                                    points: vec![
+                                        pt(s, 0.0),
+                                        pt(0.0, s),
+                                        pt(-s, 0.0),
+                                        pt(0.0, -s),
+                                        pt(s, 0.0),
+                                    ],
+                                    color: gcol,
+                                    thickness: 2.0,
+                                });
+                            }
+                        }
+                        gizmo_els.push(
+                            div()
+                                .id(SharedString::from(format!("null_gizmo_{}", null_lid)))
+                                .test_support()
+                                .absolute()
+                                .size_full()
+                                .child(
+                                    gpui::canvas(
+                                        move |_bounds, _window, _cx| {},
+                                        move |bounds, _, window, _cx| {
+                                            let ox = bounds.origin.x;
+                                            let oy = bounds.origin.y;
+                                            for curve in &curves {
+                                                if curve.points.len() >= 2 {
+                                                    let shifted: Vec<gpui::Point<gpui::Pixels>> =
+                                                        curve.points.iter()
+                                                            .map(|p| gpui::point(p.x + ox, p.y + oy))
+                                                            .collect();
+                                                    let mut path = gpui::Path::new(shifted[0]);
+                                                    for seg in shifted.windows(2) {
+                                                        draw_line_segment(&mut path, seg[0], seg[1], curve.thickness)
+                                                    }
+                                                    window.paint_path(path, curve.color);
+                                                }
+                                            }
+                                        },
+                                    )
+                                    .absolute()
+                                    .size_full(),
+                                )
+                                .child(
+                                    gizmo_dot(
+                                        format!("null_grab_{null_lid}"),
+                                        ccx,
+                                        ccy,
+                                        22.0,
+                                        Rgba { r: 1.0, g: 1.0, b: 1.0, a: if null_sel { 0.25 } else { 0.08 } },
+                                        gcol,
+                                        true,
+                                    )
+                                    .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+                                        let (mx, my) = (event.position.x / px(1.0), event.position.y / px(1.0));
+                                        null_state.update(cx, |s, cx| {
+                                            s.checkpoint();
+                                            s.select_layer(Some(null_lid.clone()));
+                                            s.preview_fast = true;
+                                            cx.notify();
+                                        });
+                                        null_panel.update(cx, |this, cx| {
+                                            this.is_dragging_canvas = true;
+                                            this.last_canvas_mouse = Some((mx, my));
+                                            this.empty_down = None;
+                                            cx.notify();
+                                        });
+                                    })
+                                    .into_any_element(),
+                                )
+                                .into_any_element(),
+                        );
+                        continue;
+                    }
+
                     // Sample backdrop for this layer from the composition background
                     // and all intersecting underlying layers rendered so far.
                     let mut sampled_backdrop = full_frame_backdrop;
@@ -13002,6 +13158,7 @@ impl Render for PropertiesPanel {
                     LayerSource::Shape { .. } => "Shape Layer",
                     LayerSource::NestedComposition { .. } => "Pre-comp Layer",
                     LayerSource::Adjustment => "Adjustment Layer",
+                    LayerSource::Null { .. } => "Null Layer",
                     _ => "2D Layer",
                 };
                 let idx = state
@@ -14743,6 +14900,67 @@ impl Render for PropertiesPanel {
                                     Some(adj_body.into_any_element()),
                                 );
                                 props_items.push(adj_section);
+                            }
+                            LayerSource::Null { gizmo } => {
+                                let current = *gizmo;
+                                let mut picker = h_flex().gap_1().items_center();
+                                for (label, g) in [
+                                    ("Arrow", project::NullGizmo::Arrow),
+                                    ("Target", project::NullGizmo::Target),
+                                    ("Diamond", project::NullGizmo::Diamond),
+                                ] {
+                                    let s_g = self.state.clone();
+                                    let lid_g = layer.id.clone();
+                                    picker = picker.child(
+                                        div()
+                                            .id(SharedString::from(format!("null_gizmo_{label}")))
+                                            .cursor_pointer()
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_sm()
+                                            .text_xs()
+                                            .bg(if current == g { cx.theme().accent } else { cx.theme().muted })
+                                            .text_color(if current == g {
+                                                cx.theme().accent_foreground
+                                            } else {
+                                                cx.theme().muted_foreground
+                                            })
+                                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                s_g.update(cx, |s, cx| {
+                                                    let _ = s.set_null_gizmo(&lid_g, g);
+                                                    cx.notify();
+                                                });
+                                            })
+                                            .child(label),
+                                    );
+                                }
+                                let null_body = v_flex()
+                                    .id("null_properties_section")
+                                    .test_support()
+                                    .gap_1p5()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child("Control layer: no pixels. Parent layers to it and link its transform from graphs."),
+                                    )
+                                    .child(picker);
+                                let p_src = panel_entity.clone();
+                                let null_section = prop_section(
+                                    "null_source",
+                                    "Null Layer".to_string(),
+                                    IconName::Move,
+                                    self.source_expanded,
+                                    move |cx| {
+                                        p_src.update(cx, |this, cx| {
+                                            this.source_expanded = !this.source_expanded;
+                                            cx.notify();
+                                        });
+                                    },
+                                    cx,
+                                    Some(null_body.into_any_element()),
+                                );
+                                props_items.push(null_section);
                             }
                             _ => {}
                         }
@@ -22442,6 +22660,30 @@ impl Render for TimelinePanel {
                                 });
                             })
                             .child("New Text Layer"),
+                    );
+                    let s_null = s_menu.clone();
+                    let p_null = p_close.clone();
+                    menu_items = menu_items.child(
+                        div()
+                            .id("timeline_ctx_new_null")
+                            .test_support()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                s_null.update(cx, |s, cx| {
+                                    let _ = s.add_null_layer(None);
+                                    cx.notify();
+                                });
+                                p_null.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    cx.notify();
+                                });
+                            })
+                            .child("New Null Layer"),
                     );
                 }
                 ContextMenuTarget::Effect { layer_id, effect_id } => {

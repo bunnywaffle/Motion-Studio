@@ -543,6 +543,28 @@ pub enum LayerSource {
         generator_type: String,
     },
     Adjustment,
+    /// Null control layer: no pixels, only a transform + viewport gizmo.
+    /// Exists to parent other layers and to expose linkable values to
+    /// modifier graphs and driver links.
+    Null {
+        #[serde(default)]
+        gizmo: NullGizmo,
+    },
+}
+
+/// Viewport gizmo shape for a null layer (DaVinci Resolve-style
+/// control gizmos). Purely visual: the null's transform values are what
+/// graphs and links read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum NullGizmo {
+    /// Position arrow.
+    #[default]
+    Arrow,
+    /// Crosshair target.
+    Target,
+    /// Bounding diamond outline.
+    Diamond,
 }
 
 impl LayerSource {
@@ -601,6 +623,7 @@ impl LayerSource {
             Self::NestedComposition { .. } => "NestedComposition",
             Self::Procedural { .. } => "Procedural",
             Self::Adjustment => "Adjustment",
+            Self::Null { .. } => "Null",
         }
     }
 }
@@ -948,6 +971,21 @@ impl Layer {
         matches!(self.source, LayerSource::Adjustment)
     }
 
+    /// Factory for creating a Null control layer.
+    pub fn null(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        in_point: TimeCode,
+        out_point: TimeCode,
+    ) -> Self {
+        Self::new(id, name, LayerSource::Null { gizmo: NullGizmo::Arrow }, in_point, out_point)
+    }
+
+    /// Check if this layer is a null control layer.
+    pub fn is_null(&self) -> bool {
+        matches!(self.source, LayerSource::Null { .. })
+    }
+
     /// Check if this layer is active at the specified timecode (in_point <= time < out_point).
     pub fn is_active_at(&self, time: &TimeCode) -> bool {
         if (self.in_point.frame_rate() - time.frame_rate()).abs() < 1e-4
@@ -1155,6 +1193,7 @@ impl Layer {
                 PALETTE[index % PALETTE.len()]
             }
             LayerSource::Adjustment => Color::rgb(0.95, 0.45, 0.25), // AE Coral / Peach
+            LayerSource::Null { .. } => Color::rgb(0.55, 0.55, 0.60), // neutral gray
         }
     }
 

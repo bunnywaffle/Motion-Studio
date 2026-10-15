@@ -7077,6 +7077,37 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         assert!(state.get_layer_modifier_graph(&rid, "shape.ellipse_rx").is_some());
     }
 
+    #[test]
+    fn test_null_layer_gizmo_and_transform_links() {
+        use crate::state::EditorState;
+        use compositor::{LayerStackEvaluator, SceneGraph};
+        use project::{LayerSource, NullGizmo, TimeCode};
+
+        let mut state = EditorState::new();
+        let nid = state.add_null_layer(None).expect("null");
+        let layer = state.active_composition().unwrap().get_layer(&nid).unwrap().clone();
+        assert!(matches!(layer.source, LayerSource::Null { .. }));
+        assert!(layer.is_null());
+        // Gizmo picker roundtrips every style.
+        for g in [NullGizmo::Arrow, NullGizmo::Target, NullGizmo::Diamond] {
+            state.set_null_gizmo(&nid, g).expect("gizmo");
+            let l = state.active_composition().unwrap().get_layer(&nid).unwrap().clone();
+            assert!(matches!(l.source, LayerSource::Null { gizmo } if gizmo == g));
+        }
+        assert!(state.set_null_gizmo("nope", NullGizmo::Arrow).is_err());
+        // Null evaluates (transform intact) but carries no source pixels.
+        let cid = state.active_composition().unwrap().id.clone();
+        let tc = TimeCode::from_frames(0, 30.0);
+        let graph = SceneGraph::from_project(&state.project, &cid).unwrap();
+        let stack = LayerStackEvaluator::new().evaluate(&graph, &tc);
+        let evaluated = stack.get_layer(&nid).unwrap();
+        assert!(matches!(evaluated.source, LayerSource::Null { .. }));
+        // Its position resolves as a driver source for graphs/links.
+        let mut visited = std::collections::HashSet::new();
+        let px = compositor::resolve_property_link_value(&graph, &nid, "transform.position.x", &tc, &mut visited);
+        assert!(px.is_some());
+    }
+
     /// Constant-output graph: proves a bound graph EXECUTED on a path
     /// (base value is replaced, not merely read).
     fn const_graph(v: f32) -> project::modifier::ModifierGraph {
@@ -7117,8 +7148,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
     }
 
     #[test]
-    fn test_modifier_driver_resolves_modern_effect_param() {
-        use compositor::{SceneGraph, resolve_property_link_value};
+    fn test_modifier_driver_resolves_modern_effect_param() {        use compositor::{SceneGraph, resolve_property_link_value};
         use project::{Composition, Effect, EffectType, Layer, Project, Property, TimeCode};
         use std::collections::HashSet;
 
