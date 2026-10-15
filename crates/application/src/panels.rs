@@ -1401,7 +1401,7 @@ impl ProjectPanel {
                                     .py_1p5()
                                     .rounded_md()
                                     .bg(rgb(0x9a9aa2))
-                                    .text_color(rgb(0xffffff))
+                                    .text_color(rgb(0x09090b))
                                     .text_xs()
                                     .font_semibold()
                                     .hover(|s| s.opacity(0.9))
@@ -16074,7 +16074,7 @@ fn effect_item_row(
                     .px_1()
                     .rounded_sm()
                     .bg(rgb(0x6e6e76))
-                    .text_color(rgb(0xffffff))
+                    .text_color(rgb(0x09090b))
                     .child("GPU")
             }))
             .child(
@@ -16377,7 +16377,7 @@ impl Render for EffectsPanel {
                 .text_xs()
                 .cursor_pointer();
             if active {
-                pill = pill.bg(cx.theme().primary).text_color(rgb(0xffffff));
+                pill = pill.bg(cx.theme().primary).text_color(cx.theme().primary_foreground);
             } else {
                 pill = pill
                     .bg(cx.theme().muted)
@@ -17807,7 +17807,7 @@ fn render_graph_view(
             .py_0p5()
             .rounded_sm()
             .bg(if on { ae::accent() } else { ae::control() })
-            .text_color(if on { rgb(0xffffff) } else { ae::text() })
+            .text_color(if on { rgb(0x09090b) } else { ae::text() })
             .hover(|s| s.bg(ae::hover()))
             .text_xs()
             .child(label.to_string())
@@ -17833,7 +17833,7 @@ fn render_graph_view(
                 .py_0p5()
                 .rounded_sm()
                 .bg(if isolate { ae::accent() } else { ae::control() })
-                .text_color(if isolate { rgb(0xffffff) } else { ae::text() })
+                .text_color(if isolate { rgb(0x09090b) } else { ae::text() })
                 .hover(|s| s.bg(ae::hover()))
                 .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
                     p_iso.update(cx, |this, cx| {
@@ -17949,7 +17949,7 @@ fn render_graph_view(
                 .py_0p5()
                 .rounded_sm()
                 .bg(if show_grid { ae::accent() } else { ae::control() })
-                .text_color(if show_grid { rgb(0xffffff) } else { ae::text() })
+                .text_color(if show_grid { rgb(0x09090b) } else { ae::text() })
                 .hover(|s| s.bg(ae::hover()))
                 .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
                     p_grid.update(cx, |this, cx| {
@@ -17968,7 +17968,7 @@ fn render_graph_view(
                 .py_0p5()
                 .rounded_sm()
                 .bg(if show_keys { ae::accent() } else { ae::control() })
-                .text_color(if show_keys { rgb(0xffffff) } else { ae::text() })
+                .text_color(if show_keys { rgb(0x09090b) } else { ae::text() })
                 .hover(|s| s.bg(ae::hover()))
                 .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
                     p_keys.update(cx, |this, cx| {
@@ -18129,7 +18129,7 @@ fn render_graph_view(
                             .py_1()
                             .rounded_sm()
                             .bg(ae::accent())
-                            .text_color(rgb(0xffffff))
+                            .text_color(rgb(0x09090b))
                             .text_xs()
                             .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
                                 let lid = lid_add.clone();
@@ -18381,7 +18381,7 @@ fn render_graph_view(
                             .py_0p5()
                             .rounded_sm()
                             .bg(if on { ae::accent() } else { ae::control() })
-                            .text_color(if on { rgb(0xffffff) } else { ae::text() })
+                            .text_color(if on { rgb(0x09090b) } else { ae::text() })
                             .hover(|s| s.bg(ae::hover()))
                             .text_xs()
                             .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
