@@ -292,6 +292,118 @@ pub struct EditorState {
     pub layer_clipboard: Option<Layer>,
     /// Copied asset id for Copy / Paste Asset (project panel menus).
     pub asset_clipboard: Option<String>,
+    /// User-saved animation presets (captured from a layer's keyframes and
+    /// persisted to disk so they survive restarts).
+    pub user_animation_presets: Vec<UserAnimationPreset>,
+}
+
+/// One animatable track captured inside a [`UserAnimationPreset`]. The
+/// `path` mirrors the canonical property paths used elsewhere
+/// (`transform.position`, `transform.scale`, `transform.rotation`,
+/// `transform.anchor_point`, `opacity`) so a preset can be applied to any
+/// layer by matching paths.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum PresetTrack {
+    Vec2 {
+        path: String,
+        keyframes: Vec<Keyframe<Vec2>>,
+    },
+    F32 {
+        path: String,
+        keyframes: Vec<Keyframe<f32>>,
+    },
+}
+
+/// A named set of keyframed properties captured from a layer, re-appliable
+/// to any other layer. Serialized to JSON on disk.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UserAnimationPreset {
+    pub name: String,
+    pub tracks: Vec<PresetTrack>,
+}
+
+impl UserAnimationPreset {
+    /// Capture every animated transform/opacity track on `layer`. Tracks are
+    /// omitted when the property carries no keyframes, so an unanimated layer
+    /// yields an empty preset (the caller reports that as an error).
+    pub fn capture(layer: &Layer, name: impl Into<String>) -> Self {
+        let mut tracks = Vec::new();
+        let t = &layer.transform;
+        if t.anchor_point.is_animated() {
+            tracks.push(PresetTrack::Vec2 {
+                path: "transform.anchor_point".to_string(),
+                keyframes: t.anchor_point.keyframes.clone(),
+            });
+        }
+        if t.position.is_animated() {
+            tracks.push(PresetTrack::Vec2 {
+                path: "transform.position".to_string(),
+                keyframes: t.position.keyframes.clone(),
+            });
+        }
+        if t.scale.is_animated() {
+            tracks.push(PresetTrack::Vec2 {
+                path: "transform.scale".to_string(),
+                keyframes: t.scale.keyframes.clone(),
+            });
+        }
+        if t.rotation.is_animated() {
+            tracks.push(PresetTrack::F32 {
+                path: "transform.rotation".to_string(),
+                keyframes: t.rotation.keyframes.clone(),
+            });
+        }
+        if layer.opacity.is_animated() {
+            tracks.push(PresetTrack::F32 {
+                path: "opacity".to_string(),
+                keyframes: layer.opacity.keyframes.clone(),
+            });
+        }
+        Self {
+            name: name.into(),
+            tracks,
+        }
+    }
+}
+
+/// On-disk location for the persisted user-preset list
+/// (`<config>/MotionStudio/animation_presets.json`).
+fn user_presets_file() -> Option<PathBuf> {
+    let base = std::env::var_os("APPDATA").map(PathBuf::from)
+        .or_else(|| std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from))
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    Some(base.join("MotionStudio").join("animation_presets.json"))
+}
+
+/// Read persisted user presets, tolerating a missing or corrupt file.
+fn load_user_animation_presets() -> Vec<UserAnimationPreset> {
+    match user_presets_file() {
+        Some(path) => load_presets_from(&path),
+        None => Vec::new(),
+    }
+}
+
+/// Parse a preset list from an explicit path (missing/corrupt → empty).
+pub(crate) fn load_presets_from(path: &StdPath) -> Vec<UserAnimationPreset> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Write the user-preset list to the config dir.
+fn save_user_animation_presets(list: &[UserAnimationPreset]) -> Result<(), String> {
+    let path = user_presets_file().ok_or_else(|| "no config directory available".to_string())?;
+    save_presets_to(&path, list)
+}
+
+/// Serialize a preset list to an explicit path, creating the directory.
+pub(crate) fn save_presets_to(path: &StdPath, list: &[UserAnimationPreset]) -> Result<(), String> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("create dir failed: {e}"))?;
+    }
+    let text = serde_json::to_string_pretty(list).map_err(|e| format!("serialize failed: {e}"))?;
+    std::fs::write(path, text).map_err(|e| format!("write failed: {e}"))
 }
 
 /// One undo/redo snapshot: the whole project plus UI context.
@@ -938,6 +1050,7 @@ impl EditorState {
             property_link_toast: None,
             layer_clipboard: None,
             asset_clipboard: None,
+            user_animation_presets: load_user_animation_presets(),
         }
     }
 
@@ -7284,6 +7397,89 @@ impl EditorState {
                     layer.opacity.add_keyframe(hold_f32(t0 + (i as f64) * dt, val));
                 }
             }
+        }
+    }
+
+    /// Save every animated transform/opacity track on `layer` as a named
+    /// user preset, then persist the preset list to disk. Re-saving under an
+    /// existing name overwrites it. Returns the number of captured tracks.
+    pub fn save_layer_animation_as_preset(
+        &mut self,
+        layer_id: &str,
+        name: impl Into<String>,
+    ) -> Result<usize, String> {
+        let name = name.into().trim().to_string();
+        let name = if name.is_empty() { "Untitled Animation".to_string() } else { name };
+        let comp = self
+            .active_composition()
+            .ok_or_else(|| "no active composition".to_string())?;
+        let layer = comp
+            .get_layer(layer_id)
+            .ok_or_else(|| "layer not found".to_string())?;
+        let preset = UserAnimationPreset::capture(layer, name.clone());
+        if preset.tracks.is_empty() {
+            return Err("Layer has no animated properties to save".to_string());
+        }
+        let count = preset.tracks.len();
+        match self.user_animation_presets.iter().position(|p| p.name == name) {
+            Some(i) => self.user_animation_presets[i] = preset,
+            None => self.user_animation_presets.push(preset),
+        }
+        save_user_animation_presets(&self.user_animation_presets)?;
+        Ok(count)
+    }
+
+    /// Apply a stored user preset to `layer_id`, replacing those properties'
+    /// keyframes. Returns true when at least one track matched.
+    pub fn apply_user_preset(&mut self, layer_id: &str, index: usize) -> bool {
+        let Some(preset) = self.user_animation_presets.get(index).cloned() else {
+            return false;
+        };
+        self.checkpoint();
+        let Some(comp) = self.active_composition_mut() else {
+            return false;
+        };
+        let Some(layer) = comp.get_layer_mut(layer_id) else {
+            return false;
+        };
+        let mut applied = false;
+        for track in &preset.tracks {
+            match track {
+                PresetTrack::Vec2 { path, keyframes } => {
+                    let prop = match path.as_str() {
+                        "transform.anchor_point" => Some(&mut layer.transform.anchor_point),
+                        "transform.position" => Some(&mut layer.transform.position),
+                        "transform.scale" => Some(&mut layer.transform.scale),
+                        _ => None,
+                    };
+                    if let Some(p) = prop {
+                        p.keyframes = keyframes.clone();
+                        p.animated = !keyframes.is_empty();
+                        applied = true;
+                    }
+                }
+                PresetTrack::F32 { path, keyframes } => {
+                    let prop = match path.as_str() {
+                        "transform.rotation" => Some(&mut layer.transform.rotation),
+                        "opacity" => Some(&mut layer.opacity),
+                        _ => None,
+                    };
+                    if let Some(p) = prop {
+                        p.keyframes = keyframes.clone();
+                        p.animated = !keyframes.is_empty();
+                        applied = true;
+                    }
+                }
+            }
+        }
+        applied
+    }
+
+    /// Remove a stored user preset and persist the trimmed list.
+    pub fn delete_user_preset(&mut self, index: usize) {
+        if index < self.user_animation_presets.len() {
+            self.user_animation_presets.remove(index);
+            let _ = save_user_animation_presets(&self.user_animation_presets);
         }
     }
 

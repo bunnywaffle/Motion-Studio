@@ -11,7 +11,7 @@
 //! - **Single Command Buffer Submission**: Encodes all effect stages into a single
 //!   `wgpu::CommandEncoder` and submits once per frame, preventing CPU-GPU synchronization stalls.
 
-use crate::compute_blur::ComputeBlurPipeline;
+use crate::compute_blur::{ComputeBlurPipeline, ComputeBoxPipeline};
 use crate::device::{DoubleBufferedTarget, GpuContext, GpuError, RenderTarget};
 use crate::fx_pass::{FxMergePass, FxPass, FxUniforms};
 use compositor::{EvaluatedEffect, EvaluatedEffectType};
@@ -21,6 +21,7 @@ use project::StockPlugin;
 pub struct GpuEffectEngine {
     gpu: GpuContext,
     blur_pipeline: ComputeBlurPipeline,
+    box_pipeline: ComputeBoxPipeline,
     targets: Option<DoubleBufferedTarget>,
     intermediate_target: Option<RenderTarget>,
     fx_pass_cache: std::collections::HashMap<StockPlugin, FxPass>,
@@ -73,9 +74,11 @@ impl GpuEffectEngine {
     /// Create a new GPU effect engine with a headless or native device context.
     pub fn new(gpu: GpuContext) -> Result<Self, GpuError> {
         let blur_pipeline = ComputeBlurPipeline::new(&gpu)?;
+        let box_pipeline = ComputeBoxPipeline::new(&gpu)?;
         Ok(Self {
             gpu,
             blur_pipeline,
+            box_pipeline,
             targets: None,
             intermediate_target: None,
             fx_pass_cache: std::collections::HashMap::new(),
@@ -334,6 +337,20 @@ impl GpuEffectEngine {
                         any = true;
                         continue;
                     }
+                    if *plugin == StockPlugin::BoxBlur || *plugin == StockPlugin::Defocus {
+                        use compositor::fx::stock_p;
+                        let noop = if *plugin == StockPlugin::Defocus { 0.5 } else { 1.0 };
+                        let r = if *plugin == StockPlugin::Defocus {
+                            stock_p(*plugin, params, 0).clamp(0.0, 40.0)
+                        } else {
+                            stock_p(*plugin, params, 0).clamp(0.0, 64.0)
+                        };
+                        if r < noop {
+                            continue;
+                        }
+                        any = true;
+                        continue;
+                    }
                     if !crate::fx_pass::CHAIN_SAFE_STOCK.contains(plugin) {
                         return false;
                     }
@@ -477,6 +494,49 @@ impl GpuEffectEngine {
                     }
                 }
                 EvaluatedEffectType::Stock { plugin, params, colors } => {
+                    // Box blur / defocus: separable box compute passes
+                    // (`box_blur` exact, defocus = box(r) then box(r*0.7)).
+                    if *plugin == StockPlugin::BoxBlur || *plugin == StockPlugin::Defocus {
+                        use compositor::fx::stock_p;
+                        let scratch = self.intermediate_target.as_ref().expect("intermediate allocated");
+                        if *plugin == StockPlugin::BoxBlur {
+                            if self.box_pipeline.record_box(
+                                &self.gpu,
+                                &mut encoder,
+                                targets.read_target(),
+                                scratch,
+                                targets.write_target(),
+                                stock_p(*plugin, params, 0),
+                            ) {
+                                targets.swap();
+                            }
+                        } else {
+                            let r = stock_p(*plugin, params, 0).clamp(0.0, 40.0);
+                            if r >= 0.5
+                                && self.box_pipeline.record_box(
+                                    &self.gpu,
+                                    &mut encoder,
+                                    targets.read_target(),
+                                    scratch,
+                                    targets.write_target(),
+                                    r,
+                                )
+                            {
+                                targets.swap();
+                                if self.box_pipeline.record_box(
+                                    &self.gpu,
+                                    &mut encoder,
+                                    targets.read_target(),
+                                    scratch,
+                                    targets.write_target(),
+                                    r * 0.7,
+                                ) {
+                                    targets.swap();
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     // Card 3D packs the shared-plan inverse homography
                     // (same matrix the CPU kernel solves): identity skips,
                     // culled/degenerate bail to the exact CPU path via Err.

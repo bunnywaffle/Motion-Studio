@@ -200,6 +200,7 @@ dependencies = [
  "project",
  "renderer",
  "rfd",
+ "serde",
  "serde_json",
 ]
 

@@ -338,3 +338,258 @@ impl ComputeBlurPipeline {
         }
     }
 }
+
+/// Uniforms for the separable box-blur compute pass.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug)]
+pub struct ComputeBoxUniforms {
+    pub width: u32,
+    pub height: u32,
+    pub radius: u32,
+    pub axis: u32,
+    pub read_pm: u32,
+    pub write_pm: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+}
+
+/// Box blur (`box_blur`) reproduced exactly: a per-pixel box average over
+/// the in-bounds window, normalized by the in-bounds count. Separable in
+/// two passes (H then V) as long as the horizontal pass stores its
+/// result **premultiplied** (`write_pm=1`) and the vertical pass reads it
+/// raw (`read_pm=0`) and stores straight — the ratio of sums must survive
+/// the intermediate, unlike the fragment resample twins.
+pub const COMPUTE_BOX_WGSL: &str = r#"
+struct BoxParams {
+    width: u32,
+    height: u32,
+    radius: u32,
+    axis: u32,
+    read_pm: u32,
+    write_pm: u32,
+    _pad0: u32,
+    _pad1: u32,
+};
+
+@group(0) @binding(0) var src_tex: texture_2d<f32>;
+@group(0) @binding(1) var dst_tex: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(2) var<uniform> params: BoxParams;
+
+fn box_texel(px: vec2<i32>, res: vec2<i32>) -> vec4<f32> {
+    if (px.x < 0 || px.y < 0 || px.x >= res.x || px.y >= res.y) {
+        return vec4<f32>(0.0);
+    }
+    let t = textureLoad(src_tex, px, 0);
+    if (params.read_pm == 1u) {
+        return vec4<f32>(t.rgb * t.a, t.a);
+    }
+    return t;
+}
+
+@compute @workgroup_size(16, 16)
+fn cs_box(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let w = i32(params.width);
+    let h = i32(params.height);
+    let x = i32(gid.x);
+    let y = i32(gid.y);
+    if (x >= w || y >= h) {
+        return;
+    }
+    let r = i32(params.radius);
+    let res = vec2<i32>(w, h);
+    var acc = vec4<f32>(0.0);
+    var n = 0.0;
+    if (params.axis == 0u) {
+        for (var i: i32 = -r; i <= r; i++) {
+            let sx = x + i;
+            if (sx >= 0 && sx < w) {
+                acc += box_texel(vec2<i32>(sx, y), res);
+                n += 1.0;
+            }
+        }
+    } else {
+        for (var i: i32 = -r; i <= r; i++) {
+            let sy = y + i;
+            if (sy >= 0 && sy < h) {
+                acc += box_texel(vec2<i32>(x, sy), res);
+                n += 1.0;
+            }
+        }
+    }
+    let inv = 1.0 / max(n, 1.0);
+    var out = vec4<f32>(acc.rgb * inv, acc.a * inv);
+    if (params.write_pm == 0u) {
+        let rgb = select(acc.rgb * inv, acc.rgb / acc.a, acc.a > 0.0);
+        out = vec4<f32>(rgb, acc.a * inv);
+    }
+    textureStore(dst_tex, vec2<i32>(x, y), out);
+}
+"#;
+
+/// Separable box-blur pipeline (two dispatches: horizontal, vertical).
+pub struct ComputeBoxPipeline {
+    pipeline: wgpu::ComputePipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+}
+
+impl ComputeBoxPipeline {
+    pub fn new(gpu: &GpuContext) -> Result<Self, GpuError> {
+        let shader = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Compute Box Shader"),
+            source: wgpu::ShaderSource::Wgsl(COMPUTE_BOX_WGSL.into()),
+        });
+        let bind_group_layout = gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Compute Box Bind Group Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Compute Box Pipeline Layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+        let pipeline = gpu.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Compute Box Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("cs_box"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
+        });
+        Ok(Self {
+            pipeline,
+            bind_group_layout,
+        })
+    }
+
+    fn uniform_buffer(gpu: &GpuContext) -> wgpu::Buffer {
+        gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Compute Box Uniform Buffer"),
+            size: std::mem::size_of::<ComputeBoxUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    /// Record a two-pass box blur `src → intermediate → dst`.
+    ///
+    /// `radius_px` is floored and clamped to `0..=64` exactly like the CPU
+    /// kernel; radii below 1 are a no-op and nothing is recorded (returns
+    /// `false`, so the caller must not swap its ping-pong targets).
+    pub fn record_box(
+        &self,
+        gpu: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        src: &RenderTarget,
+        intermediate: &RenderTarget,
+        dst: &RenderTarget,
+        radius_px: f32,
+    ) -> bool {
+        let r = radius_px.clamp(0.0, 64.0).floor() as u32;
+        if r < 1 {
+            return false;
+        }
+        let width = src.width();
+        let height = src.height();
+        let workgroups_x = width.div_ceil(16);
+        let workgroups_y = height.div_ceil(16);
+
+        // ponytail: fresh uniform buffers per call — `queue.write_buffer`
+        // lands ahead of the command buffer, so a pooled buffer would be
+        // clobbered by the next call (or by pass 2 within this call).
+        let mk = |axis: u32, read_pm: u32, write_pm: u32| ComputeBoxUniforms {
+            width,
+            height,
+            radius: r,
+            axis,
+            read_pm,
+            write_pm,
+            _pad0: 0,
+            _pad1: 0,
+        };
+        let h_uniform = Self::uniform_buffer(gpu);
+        let v_uniform = Self::uniform_buffer(gpu);
+        gpu.queue.write_buffer(&h_uniform, 0, bytemuck::bytes_of(&mk(0, 1, 1)));
+        gpu.queue.write_buffer(&v_uniform, 0, bytemuck::bytes_of(&mk(1, 0, 0)));
+
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Compute Box Horizontal Pass"),
+                timestamp_writes: None,
+            });
+            self.dispatch(gpu, &mut cpass, &h_uniform, src, intermediate, workgroups_x, workgroups_y);
+        }
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Compute Box Vertical Pass"),
+                timestamp_writes: None,
+            });
+            self.dispatch(gpu, &mut cpass, &v_uniform, intermediate, dst, workgroups_x, workgroups_y);
+        }
+        true
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch(
+        &self,
+        gpu: &GpuContext,
+        cpass: &mut wgpu::ComputePass<'_>,
+        uniform_buffer: &wgpu::Buffer,
+        from: &RenderTarget,
+        to: &RenderTarget,
+        workgroups_x: u32,
+        workgroups_y: u32,
+    ) {
+        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Compute Box Bind Group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(from.view()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(to.view()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        cpass.set_pipeline(&self.pipeline);
+        cpass.set_bind_group(0, &bind_group, &[]);
+        cpass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+    }
+}

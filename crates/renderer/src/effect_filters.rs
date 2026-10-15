@@ -1897,6 +1897,141 @@ fn fx_oil_paint(uv: vec2<f32>, color: vec4<f32>, radius: f32, amount: f32, res: 
     )
 }
 
+/// Stock directional blur (mirrors `dir_blur`): 1D line gather along
+/// `angle` (deg) spanning `length` px. Taps = clamp(len as int, 2, 48).
+/// `len < 0.5` leaves the buffer untouched (CPU early-out).
+pub fn stock_directional_blur_resample() -> ColorFilter {
+    color_filter!(
+        "stock_directional_blur_resample",
+        r#"fn fx_stock_directional_blur_c(uv: vec2<f32>, color: vec4<f32>, angle: f32, length: f32, res: vec2<f32>) -> vec4<f32> {
+    let len = clamp(length, 0.0, 200.0);
+    if (len < 0.5) {
+        return color;
+    }
+    let X = uv * res - vec2<f32>(0.5);
+    let rad = radians(angle);
+    let d = vec2<f32>(cos(rad), sin(rad));
+    let taps = clamp(i32(len), 2, 48);
+    var acc = vec4<f32>(0.0);
+    for (var i: i32 = 0; i < taps; i++) {
+        let t = (f32(i) / f32(taps - 1) - 0.5) * len;
+        acc += fx_sample_cpu_pm(X + d * t, res);
+    }
+    let a = acc.a / f32(taps);
+    return vec4<f32>(select(acc.rgb / f32(taps), acc.rgb / acc.a, acc.a > 0.0), a);
+}"#
+    )
+}
+
+/// Stock motion blur (identical kernel to directional blur).
+pub fn stock_motion_blur_resample() -> ColorFilter {
+    color_filter!(
+        "stock_motion_blur_resample",
+        r#"fn fx_stock_motion_blur_c(uv: vec2<f32>, color: vec4<f32>, angle: f32, length: f32, res: vec2<f32>) -> vec4<f32> {
+    let len = clamp(length, 0.0, 200.0);
+    if (len < 0.5) {
+        return color;
+    }
+    let X = uv * res - vec2<f32>(0.5);
+    let rad = radians(angle);
+    let d = vec2<f32>(cos(rad), sin(rad));
+    let taps = clamp(i32(len), 2, 48);
+    var acc = vec4<f32>(0.0);
+    for (var i: i32 = 0; i < taps; i++) {
+        let t = (f32(i) / f32(taps - 1) - 0.5) * len;
+        acc += fx_sample_cpu_pm(X + d * t, res);
+    }
+    let a = acc.a / f32(taps);
+    return vec4<f32>(select(acc.rgb / f32(taps), acc.rgb / acc.a, acc.a > 0.0), a);
+}"#
+    )
+}
+
+/// Stock radial blur (mirrors `k_radial`, zoom=false): 16 taps swept
+/// around the frame center. `strength < 0.25` leaves the pixel unchanged.
+pub fn stock_radial_blur_resample() -> ColorFilter {
+    color_filter!(
+        "stock_radial_blur_resample",
+        r#"fn fx_stock_radial_blur_c(uv: vec2<f32>, color: vec4<f32>, amount_p: f32, falloff_p: f32, zoom: f32, res: vec2<f32>) -> vec4<f32> {
+    let amount = clamp(amount_p / 100.0, 0.0, 1.0);
+    let fall = clamp(falloff_p / 100.0, 0.0, 1.0);
+    if (amount <= 0.001) {
+        return color;
+    }
+    let X = uv * res - vec2<f32>(0.5);
+    let c = res * 0.5;
+    let max_r = min(res.x, res.y) * 0.5;
+    let dx = X.x - c.x;
+    let dy = X.y - c.y;
+    let r = sqrt(dx * dx + dy * dy) / max(max_r, 1.0);
+    let edge = clamp(r * (1.0 - fall * 0.7), 0.0, 1.0);
+    let strength = amount * edge * max_r * 0.12;
+    if (strength < 0.25) {
+        return color;
+    }
+    var ux = 0.0;
+    var uy = 0.0;
+    if (r >= 0.00001) {
+        ux = dx / (r * max(max_r, 1.0));
+        uy = dy / (r * max(max_r, 1.0));
+    }
+    var acc = vec4<f32>(0.0);
+    for (var i: i32 = 0; i < 16; i++) {
+        let t = (f32(i) / 15.0 - 0.5) * strength;
+        var off = vec2<f32>(-uy * t, ux * t);
+        if (zoom > 0.5) {
+            off = vec2<f32>(ux * t, uy * t);
+        }
+        acc += fx_sample_cpu_pm(X + off, res);
+    }
+    let a = acc.a / 16.0;
+    return vec4<f32>(select(acc.rgb / 16.0, acc.rgb / acc.a, acc.a > 0.0), a);
+}"#
+    )
+}
+
+/// Stock zoom blur (mirrors `k_radial`, zoom=true): taps recede along the ray.
+pub fn stock_zoom_blur_resample() -> ColorFilter {
+    color_filter!(
+        "stock_zoom_blur_resample",
+        r#"fn fx_stock_zoom_blur_c(uv: vec2<f32>, color: vec4<f32>, amount_p: f32, falloff_p: f32, zoom: f32, res: vec2<f32>) -> vec4<f32> {
+    let amount = clamp(amount_p / 100.0, 0.0, 1.0);
+    let fall = clamp(falloff_p / 100.0, 0.0, 1.0);
+    if (amount <= 0.001) {
+        return color;
+    }
+    let X = uv * res - vec2<f32>(0.5);
+    let c = res * 0.5;
+    let max_r = min(res.x, res.y) * 0.5;
+    let dx = X.x - c.x;
+    let dy = X.y - c.y;
+    let r = sqrt(dx * dx + dy * dy) / max(max_r, 1.0);
+    let edge = clamp(r * (1.0 - fall * 0.7), 0.0, 1.0);
+    let strength = amount * edge * max_r * 0.12;
+    if (strength < 0.25) {
+        return color;
+    }
+    var ux = 0.0;
+    var uy = 0.0;
+    if (r >= 0.00001) {
+        ux = dx / (r * max(max_r, 1.0));
+        uy = dy / (r * max(max_r, 1.0));
+    }
+    var acc = vec4<f32>(0.0);
+    for (var i: i32 = 0; i < 16; i++) {
+        let t = (f32(i) / 15.0 - 0.5) * strength;
+        var off = vec2<f32>(-uy * t, ux * t);
+        if (zoom > 0.5) {
+            off = vec2<f32>(ux * t, uy * t);
+        }
+        acc += fx_sample_cpu_pm(X + off, res);
+    }
+    let a = acc.a / 16.0;
+    return vec4<f32>(select(acc.rgb / 16.0, acc.rgb / acc.a, acc.a > 0.0), a);
+}"#
+    )
+}
+
 /// Stock Card 3D (mirrors `k_card_3d` via the shared plan): inverse
 /// homography in uniforms (row-major, baked by `card_3d_plan`) with a
 /// TRUE projective divide — not the bilinear approximation the corner
@@ -2667,6 +2802,10 @@ pub fn resample_filters() -> Vec<ColorFilter> {
         dither_filter(),
         rim_light_resample(),
         oil_paint_resample(),
+        stock_directional_blur_resample(),
+        stock_motion_blur_resample(),
+        stock_radial_blur_resample(),
+        stock_zoom_blur_resample(),
     ]
 }
 

@@ -23654,6 +23654,139 @@ impl Render for TimelinePanel {
                 }
             }
 
+            // --- Custom (user-saved) animation presets ---
+            {
+                let preset_input = window.use_keyed_state(
+                    "timeline_preset_name_input",
+                    cx,
+                    move |window, cx| {
+                        cx.new(|cx| {
+                            InputState::new(window, cx).placeholder("Name this animation...")
+                        })
+                    },
+                );
+                let input_entity = preset_input.read(cx).clone();
+
+                list = list.child(
+                    div()
+                        .text_xs()
+                        .text_color(ae::dim())
+                        .font_semibold()
+                        .py_0p5()
+                        .px_2()
+                        .child("Custom"),
+                );
+                list = list.child(
+                    div()
+                        .px_1()
+                        .py_0p5()
+                        .child(Input::new(&input_entity).id("timeline_preset_name_input")),
+                );
+                let s_save = s_e.clone();
+                let i_save = input_entity.clone();
+                let l_save = lid_opt.clone();
+                let p_save = cx.entity().clone();
+                list = list.child(
+                    div()
+                        .cursor_pointer()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_sm()
+                        .text_xs()
+                        .text_color(cx.theme().accent_foreground)
+                        .bg(cx.theme().accent)
+                        .hover(|s| s.opacity(0.9))
+                        .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                            let name = i_save.read(cx).value().trim().to_string();
+                            if name.is_empty() {
+                                return;
+                            }
+                            if let Some(ref lid) = l_save {
+                                s_save.update(cx, |s, cx| {
+                                    let note =
+                                        match s.save_layer_animation_as_preset(lid, name.clone()) {
+                                            Ok(n) => format!("Saved preset '{name}' ({n} tracks)"),
+                                            Err(e) => format!("Preset error: {e}"),
+                                        };
+                                    // ponytail: reuse the app's single toast channel.
+                                    s.property_link_toast = Some(note);
+                                    cx.notify();
+                                });
+                            }
+                            p_save.update(cx, |_, cx| cx.notify());
+                        })
+                        .child("Save Current Animation"),
+                );
+
+                let user_presets: Vec<String> = self
+                    .state
+                    .read(cx)
+                    .user_animation_presets
+                    .iter()
+                    .map(|p| p.name.clone())
+                    .collect();
+                if user_presets.is_empty() {
+                    list = list.child(
+                        div()
+                            .px_2()
+                            .py_0p5()
+                            .text_xs()
+                            .text_color(ae::dim())
+                            .child("Animate a layer, then save it here."),
+                    );
+                }
+                for (idx, pname) in user_presets.into_iter().enumerate() {
+                    let s_apply = s_e.clone();
+                    let l_apply = lid_opt.clone();
+                    let p_apply = cx.entity().clone();
+                    let s_del = s_e.clone();
+                    let p_del = cx.entity().clone();
+                    list = list.child(
+                        h_flex()
+                            .justify_between()
+                            .items_center()
+                            .px_2()
+                            .py_0p5()
+                            .rounded_sm()
+                            .text_xs()
+                            .hover(|s| {
+                                s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground)
+                            })
+                            .child(
+                                div()
+                                    .cursor_pointer()
+                                    .flex_1()
+                                    .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                                        if let Some(ref lid) = l_apply {
+                                            s_apply.update(cx, |s, cx| {
+                                                s.apply_user_preset(lid, idx);
+                                                cx.notify();
+                                            });
+                                        }
+                                        p_apply.update(cx, |p, cx| {
+                                            p.animation_dropdown_open = false;
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child(pname.clone()),
+                            )
+                            .child(
+                                div()
+                                    .cursor_pointer()
+                                    .text_color(ae::dim())
+                                    .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                                        s_del.update(cx, |s, cx| {
+                                            s.delete_user_preset(idx);
+                                            cx.notify();
+                                        });
+                                        p_del.update(cx, |_, cx| cx.notify());
+                                    })
+                                    .child("×"),
+                            ),
+                    );
+                }
+            }
+
             let dropdown = deferred(
                 Positioner::corner(Anchor::TopLeft, popup_spot(self.anim_btn_pos))
                     .margin(px(8.))

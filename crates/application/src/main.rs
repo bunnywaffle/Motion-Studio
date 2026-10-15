@@ -3356,6 +3356,30 @@ impl Render for AppView {
             .flex_col()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
+            // OS drag-and-drop: files dropped anywhere land in the Project
+            // bin and import into the active composition.
+            .on_drop({
+                let state = self.state.clone();
+                let app = cx.entity().clone();
+                move |paths: &ExternalPaths, _window, cx| {
+                    let files: Vec<std::path::PathBuf> = paths.paths().to_vec();
+                    if files.is_empty() {
+                        return;
+                    }
+                    let note = state.update(cx, |s, cx| {
+                        let note = match s.import_multiple_media_files(&files) {
+                            Ok(count) => format!("Imported {count} files"),
+                            Err(e) => format!("Import error: {e}"),
+                        };
+                        cx.notify();
+                        note
+                    });
+                    app.update(cx, |a, cx| {
+                        a.menu_note = Some(note);
+                        cx.notify();
+                    });
+                }
+            })
             .on_action({
                 let state = self.state.clone();
                 move |_: &TogglePlayback, window, cx| {
@@ -4390,9 +4414,17 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             window.render_frame(cx);
             assert!(window.find("effect_item_blur").visible());
             assert!(window.find("effect_gpu_blur").visible());
+            // The CPU-only row is filtered out entirely.
+            assert!(window.try_find("effect_item_puppet").is_none());
+            // Narrow for the color row: the blur family now badges too, so
+            // the GPU-filtered list scrolls tint past the fold.
+            panels.effects.update(cx, |this, cx| {
+                this.search_query = "tint".to_string();
+                cx.notify();
+            });
+            window.render_frame(cx);
             assert!(window.find("effect_item_tint").visible());
             assert!(window.find("effect_gpu_tint").visible());
-            assert!(window.try_find("effect_item_puppet").is_none());
             // Resampling ports badge too (stock wave): narrow with a query
             // since the full GPU-filtered list scrolls past the fold.
             panels.effects.update(cx, |this, cx| {
@@ -4922,6 +4954,101 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             assert!(window.find("add_solid_button").visible());
         })
         .expect("update_window failed");
+    }
+
+    #[test]
+    fn test_user_animation_preset_capture_and_apply() {
+        use crate::state::UserAnimationPreset;
+        use project::{Keyframe, TimeCode};
+
+        let mut s = EditorState::blank();
+        let src = s
+            .add_solid_layer("Src", project::Color::WHITE, 0, 0)
+            .expect("src layer");
+        let dst = s
+            .add_solid_layer("Dst", project::Color::WHITE, 0, 0)
+            .expect("dst layer");
+        let fps = s.active_composition().expect("comp").frame_rate;
+        {
+            let comp = s.active_composition_mut().expect("comp");
+            let l = comp.get_layer_mut(&src).expect("src");
+            l.transform.position.add_keyframe(Keyframe::new(
+                TimeCode::from_seconds(0.0, fps),
+                Vec2::new(10.0, 20.0),
+            ));
+            l.transform.position.add_keyframe(Keyframe::new(
+                TimeCode::from_seconds(1.0, fps),
+                Vec2::new(110.0, 220.0),
+            ));
+            l.opacity.add_keyframe(Keyframe::new(TimeCode::from_seconds(0.0, fps), 0.0));
+            l.opacity.add_keyframe(Keyframe::new(TimeCode::from_seconds(1.0, fps), 100.0));
+        }
+
+        let preset = {
+            let comp = s.active_composition().expect("comp");
+            UserAnimationPreset::capture(comp.get_layer(&src).expect("src"), "Move & Fade")
+        };
+        assert_eq!(preset.tracks.len(), 2, "position + opacity captured");
+
+        // An unanimated layer captures nothing.
+        let empty = {
+            let comp = s.active_composition().expect("comp");
+            UserAnimationPreset::capture(comp.get_layer(&dst).expect("dst"), "Empty")
+        };
+        assert!(empty.tracks.is_empty());
+
+        s.user_animation_presets = vec![preset];
+        assert!(s.apply_user_preset(&dst, 0));
+
+        let dstl = s
+            .active_composition()
+            .expect("comp")
+            .get_layer(&dst)
+            .expect("dst");
+        assert_eq!(dstl.transform.position.keyframes().len(), 2);
+        assert_eq!(dstl.opacity.keyframes().len(), 2);
+        assert_eq!(dstl.transform.position.keyframes()[1].value.x, 110.0);
+        // Properties absent from the preset are left untouched.
+        assert!(!dstl.transform.scale.is_animated());
+
+        // Out-of-range index is a no-op.
+        assert!(!s.apply_user_preset(&dst, 99));
+    }
+
+    #[test]
+    fn test_user_animation_preset_disk_roundtrip() {
+        use crate::state::{load_presets_from, save_presets_to, PresetTrack, UserAnimationPreset};
+        use project::{Keyframe, TimeCode};
+
+        let dir = std::env::temp_dir().join("motion_studio_preset_test");
+        let path = dir.join("animation_presets.json");
+        let _ = std::fs::remove_file(&path);
+
+        let preset = UserAnimationPreset {
+            name: "Spin Fade".to_string(),
+            tracks: vec![PresetTrack::F32 {
+                path: "opacity".to_string(),
+                keyframes: vec![
+                    Keyframe::new(TimeCode::from_seconds(0.0, 30.0), 0.0f32),
+                    Keyframe::new(TimeCode::from_seconds(0.5, 30.0), 100.0f32),
+                ],
+            }],
+        };
+
+        save_presets_to(&path, std::slice::from_ref(&preset)).expect("save presets");
+        let loaded = load_presets_from(&path);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "Spin Fade");
+        match &loaded[0].tracks[0] {
+            PresetTrack::F32 { path, keyframes } => {
+                assert_eq!(path, "opacity");
+                assert_eq!(keyframes.len(), 2);
+                assert_eq!(keyframes[1].value, 100.0);
+            }
+            other => panic!("expected F32 track, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

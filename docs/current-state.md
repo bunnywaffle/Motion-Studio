@@ -10,7 +10,9 @@
 - First-class masks (modes, feather/expansion/opacity/invert, own transform with inspector rows).
 - Modifier graphs drive opacity, transform, effect params, and shape scalars (`shape.*` paths, scrub-alias canonicalized); f32-only engine (no color modifiers).
 - Monochrome zinc dark theme (error/delete red + node-graph type hues excepted).
-- **511 tests passing** (259 application, 133 project, 66 + 9 compositor, 37 renderer, incl. headless evaluation + UI suites), 0 failures, clippy clean modulo one pre-existing warning.
+- OS file drag-and-drop onto the window imports image/video/audio files into the Project bin.
+- Animation presets: 20 built-ins plus user-authored presets captured from a layer's animated transform and persisted to `<config>/MotionStudio/animation_presets.json` (timeline animation dropdown).
+- **545 tests passing** (289 application, 137 project, 66 + 9 compositor, 37 renderer, incl. headless evaluation + UI suites), 0 failures, clippy clean modulo one pre-existing warning.
 
 ## What Currently Works (original log, kept for history)
 - Cargo workspace initialized at repository root (`Cargo.toml`).

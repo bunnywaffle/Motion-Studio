@@ -421,6 +421,26 @@ impl FxPass {
                 "fx_stock_saber(uv, color, u.params[0].x, u.params[0].y, u.params[1].x, u.params[1].y, u.params[1].z, u.params[1].w, u.params[2].x, u.params[2].y, u.params[2].z, u.params[2].w, u.colors[0].rgb, u.colors[1].rgb, u.colors[2].rgb, u.misc.x, RES)",
                 false,
             ),
+            StockPlugin::DirectionalBlur => (
+                ef::stock_directional_blur_resample().wgsl,
+                "fx_stock_directional_blur_c(uv, color, u.params[0].x, u.params[0].y, RES)",
+                true,
+            ),
+            StockPlugin::MotionBlur => (
+                ef::stock_motion_blur_resample().wgsl,
+                "fx_stock_motion_blur_c(uv, color, u.params[0].x, u.params[0].y, RES)",
+                true,
+            ),
+            StockPlugin::RadialBlur => (
+                ef::stock_radial_blur_resample().wgsl,
+                "fx_stock_radial_blur_c(uv, color, u.params[0].x, u.params[0].y, 0.0, RES)",
+                true,
+            ),
+            StockPlugin::ZoomBlur => (
+                ef::stock_zoom_blur_resample().wgsl,
+                "fx_stock_zoom_blur_c(uv, color, u.params[0].x, u.params[0].y, 1.0, RES)",
+                true,
+            ),
             _ => {
                 return Err(format!("No native WGSL pass implemented for stock plugin {:?}", plugin));
             }
@@ -988,7 +1008,14 @@ struct FxUniforms {
 /// threshold presence flips across the u8 boundary while the white
 /// screen amplifies any nonzero mask to full strength — unboundable in
 /// a u8 chain for the same reason as Threshold.
-pub const CHAIN_SAFE_STOCK: [StockPlugin; 39] = [
+///
+/// Blur family: Directional/Motion/Radial/Zoom have exact fragment twins
+/// (premultiplied gather, unpremultiplied output); Box and Defocus run the
+/// separable box compute path (`ComputeBoxPipeline`) — no fragment twin, so
+/// they are members here but stay out of [`stock_wgsl_plugins`]. Bokeh and
+/// Bilateral stay on the exact CPU path (multi-stage highlight/screen and
+/// range-weighted passes do not fit a single u8 pass).
+pub const CHAIN_SAFE_STOCK: [StockPlugin; 45] = [
     StockPlugin::Posterize,
     StockPlugin::TemperatureTint,
     StockPlugin::SpillSuppress,
@@ -1028,6 +1055,12 @@ pub const CHAIN_SAFE_STOCK: [StockPlugin; 39] = [
     StockPlugin::LightRays,
     StockPlugin::GodRays,
     StockPlugin::LensFlare,
+    StockPlugin::DirectionalBlur,
+    StockPlugin::MotionBlur,
+    StockPlugin::RadialBlur,
+    StockPlugin::ZoomBlur,
+    StockPlugin::BoxBlur,
+    StockPlugin::Defocus,
 ];
 
 /// Built-in (non-stock) evaluated effects whose WGSL twin reproduces the
@@ -1134,6 +1167,10 @@ pub fn stock_wgsl_plugins() -> Vec<StockPlugin> {
         S::Liquify,
         S::Card3d,
         S::Saber,
+        S::DirectionalBlur,
+        S::MotionBlur,
+        S::RadialBlur,
+        S::ZoomBlur,
     ]
 }
 

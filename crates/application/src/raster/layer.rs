@@ -3369,6 +3369,86 @@ mod tests {
     }
 
     #[test]
+    fn gpu_blur_chain_matches_cpu_within_tolerance() {
+        use compositor::{EvaluatedEffect, EvaluatedEffectType};
+        if !crate::raster::buffer::gpu_accelerated() {
+            return;
+        }
+        // Soft gradient + a transparent corner.
+        let mut base = FloatBuf::clear(64, 64);
+        for y in 0..64 {
+            for x in 0..64 {
+                let (r, g, b) = (x as f32 / 63.0, y as f32 / 63.0, 0.4);
+                let a = if x > 48 && y > 48 { 0.0 } else { 1.0 };
+                base.put(x, y, Px { r: r * a, g: g * a, b: b * a, a });
+            }
+        }
+        let stock = |plugin: StockPlugin, params: Vec<f32>| EvaluatedEffect {
+            id: format!("fx_{plugin:?}"),
+            name: format!("{plugin:?}"),
+            enabled: true,
+            effect_type: EvaluatedEffectType::Stock { plugin, params, colors: Vec::new() },
+        };
+        let effects = vec![
+            stock(StockPlugin::DirectionalBlur, vec![30.0, 12.0]),
+            stock(StockPlugin::MotionBlur, vec![0.0, 9.0]),
+            stock(StockPlugin::RadialBlur, vec![60.0, 30.0]),
+            stock(StockPlugin::ZoomBlur, vec![60.0, 40.0]),
+        ];
+        let ctx = RasterFx { time_s: 0.0, frame: 0, res_w: 64.0, res_h: 64.0, duration_s: 0.0, playing: false };
+        let mut cpu = base.clone();
+        apply_layer_fx(&mut cpu, 64.0, 64.0, &effects, &ctx, false);
+        let mut gpu = base.clone();
+        apply_layer_fx(&mut gpu, 64.0, 64.0, &effects, &ctx, true);
+        let mut worst = 0.0f32;
+        for (c, g) in cpu.px.iter().zip(gpu.px.iter()) {
+            for (cc, gg) in [c.r, c.g, c.b, c.a].into_iter().zip([g.r, g.g, g.b, g.a]) {
+                worst = worst.max((cc - gg).abs());
+            }
+        }
+        assert!(worst < 0.03, "GPU blur chain must match CPU within tolerance: {worst}");
+    }
+
+    #[test]
+    fn gpu_box_defocus_chain_matches_cpu_within_tolerance() {
+        use compositor::{EvaluatedEffect, EvaluatedEffectType};
+        if !crate::raster::buffer::gpu_accelerated() {
+            return;
+        }
+        let mut base = FloatBuf::clear(64, 64);
+        for y in 0..64 {
+            for x in 0..64 {
+                let (r, g, b) = (x as f32 / 63.0, y as f32 / 63.0, 0.4);
+                let a = if x > 48 && y > 48 { 0.0 } else { 1.0 };
+                base.put(x, y, Px { r: r * a, g: g * a, b: b * a, a });
+            }
+        }
+        let stock = |plugin: StockPlugin, params: Vec<f32>| EvaluatedEffect {
+            id: format!("fx_{plugin:?}"),
+            name: format!("{plugin:?}"),
+            enabled: true,
+            effect_type: EvaluatedEffectType::Stock { plugin, params, colors: Vec::new() },
+        };
+        let effects = vec![
+            stock(StockPlugin::BoxBlur, vec![7.0]),
+            stock(StockPlugin::Defocus, vec![12.0]),
+            stock(StockPlugin::BoxBlur, vec![40.0]),
+        ];
+        let ctx = RasterFx { time_s: 0.0, frame: 0, res_w: 64.0, res_h: 64.0, duration_s: 0.0, playing: false };
+        let mut cpu = base.clone();
+        apply_layer_fx(&mut cpu, 64.0, 64.0, &effects, &ctx, false);
+        let mut gpu = base.clone();
+        apply_layer_fx(&mut gpu, 64.0, 64.0, &effects, &ctx, true);
+        let mut worst = 0.0f32;
+        for (c, g) in cpu.px.iter().zip(gpu.px.iter()) {
+            for (cc, gg) in [c.r, c.g, c.b, c.a].into_iter().zip([g.r, g.g, g.b, g.a]) {
+                worst = worst.max((cc - gg).abs());
+            }
+        }
+        assert!(worst < 0.03, "GPU box/defocus chain must match CPU within tolerance: {worst}");
+    }
+
+    #[test]
     fn gpu_color_chain_matches_cpu_within_tolerance() {
         use compositor::{EvaluatedEffect, EvaluatedEffectType};
         // Same hardware gate as the stock parity test above.
