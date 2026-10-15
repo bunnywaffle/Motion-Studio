@@ -8698,6 +8698,7 @@ fn fx_color_fields(effect: &project::Effect) -> Vec<&'static str> {
         EffectType::GradientRamp { .. } => vec!["color_a", "color_b"],
         EffectType::TextOutline { .. } => vec!["color"],
         EffectType::CelShading { .. } => vec!["highlight_tint", "shadow_tint"],
+        EffectType::InnerGlow { .. } | EffectType::RimLight { .. } => vec!["color"],
         _ => effect.color_slots(),
     }
 }
@@ -19192,13 +19193,14 @@ impl TimelinePanel {
 
     /// Visible time span (start_time_s, visible_duration_s) for the timeline lanes and ruler.
     /// Zoom 1.0 fits the whole comp; below 1.0 (min 0.25) the comp is
-    /// centered with padding on both sides.
+    /// right-aligned with padding on the left (zoom works from the right
+    /// edge at every level).
     pub fn visible_time_span(&self, total_duration: f64) -> (f64, f64) {
         let zoom = (self.timeline_zoom as f64).clamp(0.25, 16.0);
         let visible_duration = (total_duration / zoom).max(0.05);
         if visible_duration >= total_duration {
-            // Zoomed out past fit: lock centered with padding.
-            return ((total_duration - visible_duration) / 2.0, visible_duration);
+            // Zoomed out past fit: lock right-aligned with padding left.
+            return (total_duration - visible_duration, visible_duration);
         }
         let max_start = (total_duration - visible_duration).max(0.0);
         let start = self.timeline_view_t0.clamp(0.0, max_start);
@@ -19239,8 +19241,8 @@ impl TimelinePanel {
         }
         let new_visible = total_duration / self.timeline_zoom as f64;
         if new_visible >= total_duration {
-            // Below 100%: centered padding, no pan window.
-            self.timeline_view_t0 = (total_duration - new_visible) / 2.0;
+            // Below 100%: right-aligned padding, no pan window.
+            self.timeline_view_t0 = total_duration - new_visible;
             return;
         }
         let max_start = (total_duration - new_visible).max(0.0);
@@ -22439,6 +22441,31 @@ impl Render for TimelinePanel {
                                 });
                             })
                             .child("Add Mask"),
+                    );
+
+                    let s_null_l = s_menu.clone();
+                    let p_null_l = p_close.clone();
+                    menu_items = menu_items.child(
+                        div()
+                            .id("timeline_ctx_new_null_layer")
+                            .test_support()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                s_null_l.update(cx, |s, cx| {
+                                    let _ = s.add_null_layer(None);
+                                    cx.notify();
+                                });
+                                p_null_l.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    cx.notify();
+                                });
+                            })
+                            .child("New Null Layer"),
                     );
 
                     let s2 = s_menu.clone();

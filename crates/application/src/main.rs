@@ -1471,6 +1471,19 @@ fn render_menu_dropdown(
                     }
                     {
                         let (a, s) = (app.clone(), state.clone());
+                        items = items.child(menu_item("menu_new_null".to_string(), "New Null Layer".to_string(), None, true, cx, move |cx| {
+                            s.update(cx, |s, cx| {
+                                let _ = s.add_null_layer(None);
+                                cx.notify();
+                            });
+                            a.update(cx, |this, cx| {
+                                this.open_menu = None;
+                                cx.notify();
+                            });
+                        }));
+                    }
+                    {
+                        let (a, s) = (app.clone(), state.clone());
                         items = items.child(menu_item("menu_new_rect".to_string(), "New Rectangle".to_string(), None, true, cx, move |cx| {
                             s.update(cx, |s, cx| {
                                 let _ = s.add_rectangle_shape_layer(300.0, 200.0, None);
@@ -7106,6 +7119,70 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         let mut visited = std::collections::HashSet::new();
         let px = compositor::resolve_property_link_value(&graph, &nid, "transform.position.x", &tc, &mut visited);
         assert!(px.is_some());
+    }
+
+    #[gpui_kit::test]
+    fn test_layer_menu_creates_null(cx: &mut TestAppContext) {
+        use crate::TopMenu;
+        use gpui_kit::test::TestWindowExt;
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1440.), px(1200.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        // Open the Layer menu and click New Null Layer.
+        app_view.update(cx, |view, cx| {
+            view.open_menu = Some(TopMenu::Layer);
+            cx.notify();
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("menu_new_null").visible());
+            window.click("menu_new_null", cx);
+        })
+        .expect("update_window failed");
+        app_view.read_with(cx, |view, cx| {
+            let nulls = view
+                .state
+                .read(cx)
+                .active_composition()
+                .map(|c| c.layers.iter().filter(|l| l.is_null()).count())
+                .unwrap_or(0);
+            assert_eq!(nulls, 1, "menu must create exactly one null layer");
+        });
+    }
+
+    #[test]
+    fn test_inner_rim_color_roundtrip() {
+        use crate::state::EditorState;
+        let mut state = EditorState::new();
+        let rid = state.add_rectangle_shape_layer(200.0, 100.0, None).expect("rect");
+        for (ctor, field) in [
+            (project::EffectType::inner_glow(40.0, 75.0, project::Color::WHITE), "inner"),
+            (
+                project::EffectType::rim_light(135.0, 30.0, project::Color::WHITE, 80.0),
+                "rim",
+            ),
+        ] {
+            let eid = state.add_effect_to_selected_layer(ctor).expect("add fx");
+            state
+                .set_effect_color(&rid, &eid, "color", project::Color::rgb(1.0, 0.2, 0.1))
+                .expect("set color");
+            let back = state
+                .active_composition()
+                .unwrap()
+                .get_layer(&rid)
+                .unwrap()
+                .get_effect(&eid)
+                .unwrap()
+                .get_color_property("color")
+                .expect(field);
+            assert!((back.r - 1.0).abs() < 1e-5 && (back.g - 0.2).abs() < 1e-5, "{field} color must roundtrip");
+        }
     }
 
     /// Constant-output graph: proves a bound graph EXECUTED on a path
@@ -13305,14 +13382,15 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             assert_eq!(span, 10.0);
         });
 
-        // 5. Zoom out below 100%: visible exceeds total, start centers
-        // negative (padding on both sides), pan locks.
+        // 5. Zoom out below 100%: visible exceeds total, start goes
+        // negative so the comp hugs the right edge (padding left),
+        // pan locks.
         timeline_panel.update(cx, |p, _| {
             p.set_zoom(0.5, 10.0);
             assert!((p.timeline_zoom - 0.5).abs() < 1e-4);
             let (start, span) = p.visible_time_span(10.0);
             assert!((span - 20.0).abs() < 1e-6);
-            assert!((start + 5.0).abs() < 1e-6);
+            assert!((start + 10.0).abs() < 1e-6);
             p.pan_left(10.0);
             p.pan_right(10.0);
             let (start2, _) = p.visible_time_span(10.0);

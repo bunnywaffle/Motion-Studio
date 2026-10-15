@@ -1846,6 +1846,11 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     color.set_value(next);
                     true
                 }
+            EffectType::InnerGlow { color, .. } | EffectType::RimLight { color, .. }
+                if field.eq_ignore_ascii_case("color") => {
+                    color.set_value(next);
+                    true
+                }
             EffectType::CelShading { highlight_tint, shadow_tint, .. } => {
                 if field.eq_ignore_ascii_case("highlight_tint") {
                     highlight_tint.set_value(next);
@@ -1928,6 +1933,13 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     None
                 }
             }
+            EffectType::InnerGlow { color, .. } | EffectType::RimLight { color, .. } => {
+                if field.eq_ignore_ascii_case("color") {
+                    Some(color)
+                } else {
+                    None
+                }
+            }
             EffectType::Stock { plugin, colors, .. } => {
                 let idx = crate::stock::stock_color_slots(*plugin)
                     .iter()
@@ -2001,6 +2013,13 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     Some(highlight_tint)
                 } else if field.eq_ignore_ascii_case("shadow_tint") {
                     Some(shadow_tint)
+                } else {
+                    None
+                }
+            }
+            EffectType::InnerGlow { color, .. } | EffectType::RimLight { color, .. } => {
+                if field.eq_ignore_ascii_case("color") {
+                    Some(color)
                 } else {
                     None
                 }

@@ -1673,9 +1673,12 @@ pub fn inner_glow_resample() -> ColorFilter {
     color_filter!(
         "inner_glow_resample",
         r#"fn fx_inner_hole(px: vec2<i32>, res: vec2<i32>) -> f32 {
-    let cx = clamp(px.x, 0, res.x - 1);
-    let cy = clamp(px.y, 0, res.y - 1);
-    return 1.0 - textureLoad(src_tex, vec2<i32>(cx, cy), 0).a;
+    // Outside the pixmap is transparent (hole = 1): full-bleed layers
+    // get a contour instead of a clamped-away edge.
+    if (px.x < 0 || px.y < 0 || px.x >= res.x || px.y >= res.y) {
+        return 1.0;
+    }
+    return 1.0 - textureLoad(src_tex, px, 0).a;
 }
 fn fx_inner_glow(uv: vec2<f32>, color: vec4<f32>, size: f32, intensity: f32, glow: vec3<f32>, res: vec2<f32>) -> vec4<f32> {
     let k = clamp(intensity / 100.0, 0.0, 1.0);
@@ -1755,9 +1758,10 @@ pub fn rim_light_resample() -> ColorFilter {
     color_filter!(
         "rim_light_resample",
         r#"fn fx_rim_alpha(px: vec2<i32>, res: vec2<i32>) -> f32 {
-    let cx = clamp(px.x, 0, res.x - 1);
-    let cy = clamp(px.y, 0, res.y - 1);
-    return textureLoad(src_tex, vec2<i32>(cx, cy), 0).a;
+    if (px.x < 0 || px.y < 0 || px.x >= res.x || px.y >= res.y) {
+        return 0.0;
+    }
+    return textureLoad(src_tex, px, 0).a;
 }
 fn fx_rim_light(uv: vec2<f32>, color: vec4<f32>, mode: f32, direction: f32, width: f32, rim: vec3<f32>, intensity: f32, res: vec2<f32>) -> vec4<f32> {
     let k = clamp(intensity / 100.0, 0.0, 1.0);

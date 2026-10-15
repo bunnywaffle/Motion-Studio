@@ -1102,9 +1102,13 @@ pub fn apply_inner_glow(buf: &mut FloatBuf, size: f32, intensity: f32, color: Co
     let offs = [-r, -r * 0.5, 0.0, r * 0.5, r];
     let wts = [1.0f32, 2.0, 4.0, 2.0, 1.0];
     let at = |px: &[Px], w: u32, h: u32, x: i32, y: i32| -> f32 {
-        let cx = x.clamp(0, w as i32 - 1);
-        let cy = y.clamp(0, h as i32 - 1);
-        1.0 - px[(cy as u32 * w + cx as u32) as usize].a
+        // Outside the pixmap is transparent (hole = 1): this is what
+        // puts a contour on full-bleed layers instead of clamping the
+        // edge away.
+        if x < 0 || y < 0 || x >= w as i32 || y >= h as i32 {
+            return 1.0;
+        }
+        1.0 - px[(y as u32 * w + x as u32) as usize].a
     };
     let src = buf.px.clone();
     for y in 0..buf.h {
@@ -1180,13 +1184,16 @@ pub fn apply_dither(buf: &mut FloatBuf, amount: f32, levels: f32) {
     }
 }
 
-/// Sobel gradient of the alpha channel (clamp addressing, same taps
-/// the WGSL twin samples).
+/// Sobel gradient of the alpha channel (outside the pixmap reads as
+/// transparent, so full-bleed layers still get a contour edge).
 fn sobel_alpha_grad(snap: &[Px], w: u32, h: u32, x: u32, y: u32) -> (f32, f32) {
     let a = |dx: i32, dy: i32| -> f32 {
-        let cx = (x as i32 + dx).clamp(0, w as i32 - 1);
-        let cy = (y as i32 + dy).clamp(0, h as i32 - 1);
-        snap[(cy as u32 * w + cx as u32) as usize].a
+        let sx = x as i32 + dx;
+        let sy = y as i32 + dy;
+        if sx < 0 || sy < 0 || sx >= w as i32 || sy >= h as i32 {
+            return 0.0;
+        }
+        snap[(sy as u32 * w + sx as u32) as usize].a
     };
     let gx = -a(-1, -1) - 2.0 * a(-1, 0) - a(-1, 1) + a(1, -1) + 2.0 * a(1, 0) + a(1, 1);
     let gy = -a(-1, -1) - 2.0 * a(0, -1) - a(1, -1) + a(-1, 1) + 2.0 * a(0, 1) + a(1, 1);
@@ -1266,14 +1273,21 @@ mod tests {
     #[test]
     fn inner_glow_lights_the_contour_not_the_fill() {
         use project::Color;
-        let mut buf = alpha_edge_buf();
+        // Wide fixture: the 14px tent radius must not reach the pixmap
+        // border from the interior probe.
+        let mut buf = FloatBuf { w: 64, h: 64, px: vec![Px { r: 0.4, g: 0.4, b: 0.4, a: 1.0 }; 4096] };
+        for y in 0..64 {
+            for x in 48..64 {
+                buf.px[(y * 64 + x) as usize] = Px { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+            }
+        }
         apply_inner_glow(&mut buf, 60.0, 100.0, Color::WHITE);
-        // Just inside the edge (x=15): holes blur in → visible glow.
-        let edge = buf.px[16 * 32 + 15];
-        // Deep interior (x=4): holes blur out → near-original.
-        let inner = buf.px[16 * 32 + 4];
+        // Just inside the edge (x=47): holes blur in → visible glow.
+        let edge = buf.px[32 * 64 + 47];
+        // Deep interior (x=32): holes blur out → near-original.
+        let inner = buf.px[32 * 64 + 32];
         // Transparent side untouched.
-        let out = buf.px[16 * 32 + 20];
+        let out = buf.px[32 * 64 + 52];
         assert!(edge.r > 0.5, "edge must glow toward white, got {}", edge.r);
         assert!(inner.r < 0.45, "deep fill must stay near 0.4, got {}", inner.r);
         assert_eq!(out.a, 0.0);
@@ -1688,5 +1702,22 @@ mod tests {
         apply_effect_pixels(&mut buf, 32.0, 32.0, &eff, &ctx);
         assert!(buf.px[8 * 32 + 8].r < 0.15, "focus must be near stop 0");
         assert!(buf.px[31 * 32 + 31].r > 0.85, "far corner must reach stop 1");
+    }
+
+    #[test]
+    fn contour_effects_fire_on_full_bleed_content() {
+        use project::Color;
+        // Fully opaque mid-gray: no alpha edge anywhere inside, so the
+        // pixmap border itself must read as the contour.
+        let mut glow = FloatBuf { w: 32, h: 32, px: vec![Px { r: 0.4, g: 0.4, b: 0.4, a: 1.0 }; 1024] };
+        apply_inner_glow(&mut glow, 60.0, 100.0, Color::WHITE);
+        let border = glow.px[16 * 32].r;
+        let center = glow.px[16 * 32 + 16].r;
+        assert!(border > center + 0.05, "full-bleed border must glow inward: {border} vs {center}");
+        let mut rim = FloatBuf { w: 32, h: 32, px: vec![Px { r: 0.4, g: 0.4, b: 0.4, a: 1.0 }; 1024] };
+        apply_rim_light(&mut rim, false, 0.0, 60.0, Color::WHITE, 100.0);
+        let rborder = rim.px[16 * 32].r;
+        let rcenter = rim.px[16 * 32 + 16].r;
+        assert!(rborder > rcenter + 0.05, "full-bleed border must rim: {rborder} vs {rcenter}");
     }
 }
