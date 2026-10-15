@@ -657,6 +657,30 @@ pub enum EvaluatedEffectType {
         radius: f32,
         amount: f32,
     },
+    /// 3-way color match toward a reference layer. Zone averages are
+    /// filled at render time (zeros at eval = identity); the kernel
+    /// shifts each source zone toward its reference zone by `amount`.
+    MatchColor {
+        reference_layer: String,
+        amount: f32,
+        ref_shadow: Color,
+        ref_mid: Color,
+        ref_high: Color,
+        src_shadow: Color,
+        src_mid: Color,
+        src_high: Color,
+    },
+    /// 3-way luminance match (same sampling, hue preserved).
+    MatchLight {
+        reference_layer: String,
+        amount: f32,
+        ref_shadow: Color,
+        ref_mid: Color,
+        ref_high: Color,
+        src_shadow: Color,
+        src_mid: Color,
+        src_high: Color,
+    },
     /// Modular stock plug-in: evaluated scalar params in descriptor order
     /// plus resolved color slots.
     Stock {
@@ -702,6 +726,8 @@ impl EvaluatedEffectType {
             Self::Vignette { .. } => "Vignette",
             Self::CelShading { .. } => "Cel Shading",
             Self::OilPaint { .. } => "Oil Painting",
+            Self::MatchColor { .. } => "Match Color",
+            Self::MatchLight { .. } => "Match Light",
             Self::Curves { .. } => "Tone Curve",
             Self::OuterGlow { .. } => "Outer Glow",
             Self::Stock { plugin, .. } => plugin.descriptor().label,
@@ -744,6 +770,8 @@ impl EvaluatedEffectType {
             Self::Vignette { .. } => "net.sf.openfx.vignette",
             Self::CelShading { .. } => "net.sf.openfx.cel_shading",
             Self::OilPaint { .. } => "net.sf.openfx.oil_paint",
+            Self::MatchColor { .. } => "net.sf.openfx.match_color",
+            Self::MatchLight { .. } => "net.sf.openfx.match_light",
             Self::Curves { .. } => "net.sf.openfx.custom.tone_curve",
             Self::OuterGlow { .. } => "net.sf.openfx.outer_glow",
             Self::Stock { plugin, .. } => plugin.plugin_id(),
@@ -780,7 +808,9 @@ impl EvaluatedEffectType {
                     | Self::Sharpen { .. }
                     | Self::Vignette { .. }
                     | Self::CelShading { .. }
-                    | Self::OilPaint { .. }            ),
+                    | Self::OilPaint { .. }
+                    | Self::MatchColor { .. }
+                    | Self::MatchLight { .. }            ),
         }
     }
 
@@ -1027,7 +1057,7 @@ impl EvaluatedEffectType {
             // Sharpen (unsharp mask) and Vignette need neighbours / pixel
             // position: identity here, resolved by the rasterizer. Curves
             // needs its LUT: identity here, resolved by the rasterizer.
-            Self::Sharpen { .. } | Self::Vignette { .. } | Self::CelShading { .. } | Self::OilPaint { .. } | Self::Curves { .. } | Self::OuterGlow { .. } => c,
+            Self::Sharpen { .. } | Self::Vignette { .. } | Self::CelShading { .. } | Self::OilPaint { .. } | Self::MatchColor { .. } | Self::MatchLight { .. } | Self::Curves { .. } | Self::OuterGlow { .. } => c,
             // Stock per-pixel kernels; spatial stock is identity here.
             Self::Stock { plugin, params, .. } => process_color_stock(*plugin, params, c),
         }
@@ -2234,6 +2264,32 @@ impl LayerStackEvaluator {
                             EvaluatedEffectType::OilPaint {
                                 radius: eval_eff_prop("radius", radius.evaluate_at(time)),
                                 amount: eval_eff_prop("amount", amount.evaluate_at(time)),
+                            }
+                        }
+                        EffectType::MatchColor { reference_layer, amount } => {
+                            let z = Color::rgba(0.0, 0.0, 0.0, 1.0);
+                            EvaluatedEffectType::MatchColor {
+                                reference_layer: reference_layer.clone(),
+                                amount: eval_eff_prop("amount", amount.evaluate_at(time)),
+                                ref_shadow: z,
+                                ref_mid: z,
+                                ref_high: z,
+                                src_shadow: z,
+                                src_mid: z,
+                                src_high: z,
+                            }
+                        }
+                        EffectType::MatchLight { reference_layer, amount } => {
+                            let z = Color::rgba(0.0, 0.0, 0.0, 1.0);
+                            EvaluatedEffectType::MatchLight {
+                                reference_layer: reference_layer.clone(),
+                                amount: eval_eff_prop("amount", amount.evaluate_at(time)),
+                                ref_shadow: z,
+                                ref_mid: z,
+                                ref_high: z,
+                                src_shadow: z,
+                                src_mid: z,
+                                src_high: z,
                             }
                         }
                         EffectType::Curves { curve } => {

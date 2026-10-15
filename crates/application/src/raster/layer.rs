@@ -762,6 +762,8 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
         EvaluatedEffectType::Vignette { .. } => 25,
         EvaluatedEffectType::CelShading { .. } => 30,
         EvaluatedEffectType::OilPaint { .. } => 31,
+        EvaluatedEffectType::MatchColor { .. } => 36,
+        EvaluatedEffectType::MatchLight { .. } => 37,
         EvaluatedEffectType::Curves { .. } => 35,
         EvaluatedEffectType::TrimPath { .. } => 32,
         EvaluatedEffectType::SinePath { .. } => 33,
@@ -781,6 +783,17 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
             amount.to_bits().hash(h);
         }
         EvaluatedEffectType::Invert { amount } => amount.to_bits().hash(h),
+        EvaluatedEffectType::MatchColor { reference_layer, amount, ref_shadow, ref_mid, ref_high, src_shadow, src_mid, src_high }
+        | EvaluatedEffectType::MatchLight { reference_layer, amount, ref_shadow, ref_mid, ref_high, src_shadow, src_mid, src_high } => {
+            reference_layer.hash(h);
+            amount.to_bits().hash(h);
+            color_hash(ref_shadow, h);
+            color_hash(ref_mid, h);
+            color_hash(ref_high, h);
+            color_hash(src_shadow, h);
+            color_hash(src_mid, h);
+            color_hash(src_high, h);
+        }
         EvaluatedEffectType::DropShadow { distance, angle, softness, opacity, color } => {
             distance.to_bits().hash(h);
             angle.to_bits().hash(h);
@@ -1088,6 +1101,7 @@ pub fn rasterize_layer(
     playing: bool,
     duration_s: f32,
     assets: &HashMap<String, Arc<RgbaImage>>,
+    stack: Option<&compositor::EvaluatedStack>,
 ) -> (FloatBuf, Color, bool) {
     let (ow, oh) = (out_w.max(1), out_h.max(1));
     let mut out = FloatBuf::clear(ow, oh);
@@ -1339,7 +1353,16 @@ pub fn rasterize_layer(
     } else {
         (frame_ox, frame_oy)
     };
-    apply_layer_fx(&mut work, base_w, base_h, &layer.effects, &fx, true);
+    // Match Color/Light sample their reference at render time (needs the
+    // stack + assets); without a stack the baked zeros grade to identity.
+    let match_resolved = stack.and_then(|st| {
+        super::effects::resolve_match_stats(layer, &layer.effects, st, assets)
+    });
+    let effects: &[EvaluatedEffect] = match match_resolved.as_ref() {
+        Some(v) => v,
+        None => &layer.effects,
+    };
+    apply_layer_fx(&mut work, base_w, base_h, effects, &fx, true);
     let mut blur_total = 0.0f32;
     let mut bloom: Option<(f32, f32)> = None;
     for eff in &layer.effects {
@@ -2331,6 +2354,7 @@ mod tests {
             false,
             5.0,
             &assets,
+            None,
         );
         assert!(!empty, "negative-coord pen path must rasterize ink");
         assert!(buf.px.iter().any(|p| p.a > 0.05));
@@ -2678,7 +2702,7 @@ mod tests {
         let (base_w, base_h) = layer_base_dims(&layer, 1920.0, 1080.0, &assets);
         let (buf, _avg, empty) = rasterize_layer(
             &layer, base_w, base_h, 64, 64, 1920.0, 1080.0, Color::BLACK, None, 0.0, 0,
-            false, 5.0, &assets,
+            false, 5.0, &assets, None,
         );
         assert!(!empty);
         let edge = buf.get(3, 32);
@@ -2727,7 +2751,7 @@ mod tests {
         assert!((base_w - 76.0).abs() < 1e-3 && (base_h - 76.0).abs() < 1e-3, "outer box must grow by 2*nib: {base_w}x{base_h}");
         let (buf, _avg, empty) = rasterize_layer(
             &layer, base_w, base_h, 76, 76, 1920.0, 1080.0, Color::BLACK, None, 0.0, 0,
-            false, 5.0, &assets,
+            false, 5.0, &assets, None,
         );
         assert!(!empty, "outer stroke must hold ink");
         // Outer band (pad region, x < 8) inks; deep interior stays empty.
@@ -2777,7 +2801,7 @@ mod tests {
         let (base_w, base_h) = layer_base_dims(&layer, 1920.0, 1080.0, &assets);
         let (buf, _avg, empty) = rasterize_layer(
             &layer, base_w, base_h, 64, 64, 1920.0, 1080.0, Color::BLACK, None, 0.0, 0,
-            false, 5.0, &assets,
+            false, 5.0, &assets, None,
         );
         assert!(!empty, "trimmed rect must hold ink");
         assert!(buf.get(2, 32).a > 0.1, "left edge survives the trim: {:?}", buf.get(2, 32));
@@ -2808,7 +2832,7 @@ mod tests {
         let assets: HashMap<String, std::sync::Arc<image::RgbaImage>> = HashMap::new();
         let (buf, _avg, empty) = rasterize_layer(
             &layer, 100.0, 100.0, 100, 100, 1920.0, 1080.0, Color::BLACK, None, 0.0, 0,
-            false, 5.0, &assets,
+            false, 5.0, &assets, None,
         );
         (buf, empty)
     }
@@ -2927,9 +2951,9 @@ mod tests {
             let assets: HashMap<String, std::sync::Arc<image::RgbaImage>> = HashMap::new();
             let (base_w, base_h) = layer_base_dims(&layer, 1920.0, 1080.0, &assets);
             let (buf, _avg, empty) = rasterize_layer(
-                &layer, base_w, base_h, 64, 64, 1920.0, 1080.0, Color::BLACK, None, 0.0, 0,
-                false, 5.0, &assets,
-            );
+            &layer, base_w, base_h, 64, 64, 1920.0, 1080.0, Color::BLACK, None, 0.0, 0,
+            false, 5.0, &assets, None,
+        );
             assert!(!empty, "stroked shape must hold ink (base {base_w}x{base_h}, buf {}x{})", buf.w, buf.h);
             // Center stays transparent (no fill, stroke lives on the outline).
             assert!(
@@ -3019,7 +3043,7 @@ mod tests {
         let (base_w, base_h) = layer_base_dims(&layer, 1920.0, 1080.0, &assets);
         let (buf, _avg, empty) = rasterize_layer(
             &layer, base_w, base_h, 64, 32, 1920.0, 1080.0, Color::BLACK, None, 0.0, 0,
-            false, 5.0, &assets,
+            false, 5.0, &assets, None,
         );
         assert!(!empty, "masked text must hold ink");
         let ink = buf.px.iter().filter(|p| p.a > 0.5).count();
@@ -3050,7 +3074,7 @@ mod tests {
         let assets: HashMap<String, std::sync::Arc<image::RgbaImage>> = HashMap::new();
         let (buf, _avg, empty) = rasterize_layer(
             &layer, 1920.0, 1080.0, 480, 270, 1920.0, 1080.0, Color::BLACK, None, 0.0, 0,
-            false, 5.0, &assets,
+            false, 5.0, &assets, None,
         );
         let ink = buf.px.iter().filter(|p| p.a > 0.05).count();
         assert!(ink > 100, "small mask keeps visible ink, got {ink}");
@@ -3082,7 +3106,7 @@ mod tests {
         }
         let (buf, _avg, empty) = rasterize_layer(
             &layer, 100.0, 100.0, 100, 100, 1920.0, 1080.0, Color::WHITE, Some(&bg), 0.0, 0,
-            false, 5.0, &assets,
+            false, 5.0, &assets, None,
         );
         assert!(!empty);
         // Masked half: multiply red over white = red, opaque.
@@ -3155,7 +3179,7 @@ mod tests {
         let rh = (200.0 + pad * 2.0) as u32;
         let (buf, _avg, empty) = rasterize_layer(
             &eval_l, 200.0, 200.0, rw, rh, 1920.0, 1080.0, Color::BLACK, None, 0.0, 0,
-            false, 5.0, &assets,
+            false, 5.0, &assets, None,
         );
         assert!(!empty);
         let center = buf.get((rw / 2) as i32, (rh / 2) as i32);
@@ -3245,7 +3269,7 @@ mod tests {
             let rw = (200.0 + pad * 2.0).max(1.0) as u32;
             let (buf, _, _) = rasterize_layer(
                 &eval_l, 200.0, 200.0, rw, rw, 1920.0, 1080.0, Color::BLACK, None, 0.0, 0,
-                false, 5.0, &assets,
+                false, 5.0, &assets, None,
             );
             buf.px.iter().map(|p| p.a).sum::<f32>()
         };
@@ -3256,7 +3280,7 @@ mod tests {
         let plain_ink = {
             let (buf, _, _) = rasterize_layer(
                 &plain, 200.0, 200.0, 200, 200, 1920.0, 1080.0, Color::BLACK, None, 0.0, 0,
-                false, 5.0, &assets,
+                false, 5.0, &assets, None,
             );
             buf.px.iter().map(|p| p.a).sum::<f32>()
         };
@@ -3385,6 +3409,78 @@ mod tests {
             }
         }
         assert!(worst < 0.02, "GPU color chain must match CPU within u8 rounding: {worst}");
+    }
+
+    #[test]
+    fn gpu_match_grade_matches_cpu_within_tolerance() {
+        use compositor::{EvaluatedEffect, EvaluatedEffectType};
+        if !crate::raster::buffer::gpu_accelerated() {
+            return;
+        }
+        // 3-zone gradient: dark red shadows, gray mids, bright blue highs.
+        let mut base = FloatBuf::clear(64, 64);
+        for y in 0..64 {
+            for x in 0..64 {
+                let t = y as f32 / 63.0;
+                let (r, g, b) = if t < 0.33 {
+                    (0.5, 0.05, 0.05)
+                } else if t < 0.66 {
+                    (0.5, 0.5, 0.5)
+                } else {
+                    (0.1, 0.1, 0.9)
+                };
+                base.put(x, y, Px { r, g, b, a: 1.0 });
+            }
+        }
+        let fx = |id: &str, name: &str, effect_type: EvaluatedEffectType| EvaluatedEffect {
+            id: id.to_string(),
+            name: name.to_string(),
+            enabled: true,
+            effect_type,
+        };
+        // Filled zones as resolve_match_stats would bake them; the
+        // reference runs warm (+0.2 red per zone) so the grade moves.
+        let zones = crate::raster::effects::zone_avgs(&base);
+        let mk = |c: [f32; 3]| Color::rgba(c[0], c[1], c[2], 1.0);
+        let (rs, rm, rh) = (mk(zones.shadow), mk(zones.mid), mk(zones.high));
+        let ref_warm = |c: Color| Color::rgba((c.r + 0.2).min(1.0), c.g, c.b, 1.0);
+        let effects = vec![
+            fx("mc", "Match Color", EvaluatedEffectType::MatchColor {
+                reference_layer: "ref".to_string(),
+                amount: 80.0,
+                ref_shadow: ref_warm(rs),
+                ref_mid: ref_warm(rm),
+                ref_high: ref_warm(rh),
+                src_shadow: rs,
+                src_mid: rm,
+                src_high: rh,
+            }),
+            fx("ml", "Match Light", EvaluatedEffectType::MatchLight {
+                reference_layer: "ref".to_string(),
+                amount: 60.0,
+                ref_shadow: ref_warm(rs),
+                ref_mid: ref_warm(rm),
+                ref_high: ref_warm(rh),
+                src_shadow: rs,
+                src_mid: rm,
+                src_high: rh,
+            }),
+        ];
+        let ctx = RasterFx { time_s: 0.0, frame: 0, res_w: 64.0, res_h: 64.0, duration_s: 0.0, playing: false };
+        let mut cpu = base.clone();
+        apply_layer_fx(&mut cpu, 64.0, 64.0, &effects, &ctx, false);
+        let mut gpu = base.clone();
+        apply_layer_fx(&mut gpu, 64.0, 64.0, &effects, &ctx, true);
+        let mut worst = 0.0f32;
+        for (c, g) in cpu.px.iter().zip(gpu.px.iter()) {
+            for (cc, gg) in [c.r, c.g, c.b, c.a].into_iter().zip([g.r, g.g, g.b, g.a]) {
+                worst = worst.max((cc - gg).abs());
+            }
+        }
+        assert!(worst < 0.02, "GPU match grade must match CPU within u8 rounding: {worst}");
+        // The grade must actually move pixels (not a silent identity).
+        let moved = cpu.px.iter().zip(base.px.iter()).filter(|(a, b)| (a.r - b.r).abs() > 0.01).count();
+        assert!(moved > 1000, "match grade must shift the image, moved {moved}");
     }
 
     fn gpu_parity_base() -> FloatBuf {

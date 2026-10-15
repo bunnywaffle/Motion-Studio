@@ -3892,6 +3892,7 @@ impl Render for CompositionViewerPanel {
                                 fast_gesture,
                                 duration_s,
                                 &self.asset_cache,
+                                eval_stack.as_ref(),
                             );
                             let bgra_vec = buf.to_bgra8();
                             let render_image = if !empty && rw > 0 && rh > 0 {
@@ -11965,9 +11966,97 @@ fn render_applied_effects(
                 | EffectType::Vignette { .. }
                 | EffectType::CelShading { .. }
                 | EffectType::OilPaint { .. }
+                | EffectType::MatchColor { .. }
+                | EffectType::MatchLight { .. }
                 | EffectType::TrimPath { .. }
                 | EffectType::SinePath { .. }
                 | EffectType::InstancePath { .. } => {
+                    // Match Color/Light prepend a reference-layer chip row
+                    // (layer list is dynamic; declarations stay static).
+                    if let EffectType::MatchColor { reference_layer, .. }
+                    | EffectType::MatchLight { reference_layer, .. } = &effect.effect_type
+                    {
+                        let current = reference_layer.clone();
+                        let others: Vec<(String, String)> = state
+                            .read(cx)
+                            .active_composition()
+                            .map(|c| {
+                                c.layers
+                                    .iter()
+                                    .filter(|l| l.id != layer.id)
+                                    .map(|l| (l.id.clone(), l.name.clone()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let mut chips = h_flex().gap_1().items_center().flex_wrap();
+                        let s_none = state.clone();
+                        let lid_none = layer.id.clone();
+                        let eid_none = eff_id.clone();
+                        chips = chips.child(
+                            div()
+                                .id(SharedString::from(format!("match_ref_none_{eff_id}")))
+                                .test_support()
+                                .cursor_pointer()
+                                .px_2()
+                                .py_0p5()
+                                .rounded_sm()
+                                .text_xs()
+                                .bg(if current.is_empty() { cx.theme().accent } else { cx.theme().muted })
+                                .text_color(if current.is_empty() {
+                                    cx.theme().accent_foreground
+                                } else {
+                                    cx.theme().muted_foreground
+                                })
+                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                    s_none.update(cx, |s, cx| {
+                                        let _ = s.set_match_reference(&lid_none, &eid_none, "");
+                                        cx.notify();
+                                    });
+                                })
+                                .child("None"),
+                        );
+                        for (oid, oname) in others {
+                            let s_c = state.clone();
+                            let lid_c = layer.id.clone();
+                            let eid_c = eff_id.clone();
+                            let sel = current == oid;
+                            chips = chips.child(
+                                div()
+                                    .id(SharedString::from(format!("match_ref_{eff_id}_{oid}")))
+                                    .test_support()
+                                    .cursor_pointer()
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .text_xs()
+                                    .bg(if sel { cx.theme().accent } else { cx.theme().muted })
+                                    .text_color(if sel {
+                                        cx.theme().accent_foreground
+                                    } else {
+                                        cx.theme().muted_foreground
+                                    })
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        let oid_c = oid.clone();
+                                        s_c.update(cx, |s, cx| {
+                                            let _ = s.set_match_reference(&lid_c, &eid_c, &oid_c);
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child(oname),
+                            );
+                        }
+                        effect_box = effect_box.child(
+                            v_flex()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child("Reference"),
+                                )
+                                .child(chips),
+                        );
+                    }
                     for decl in effect.declarations() {
                         effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, enums, cx));
                     }
@@ -16132,6 +16221,8 @@ pub(crate) fn effect_template_for(plugin_id: &str) -> Option<EffectType> {
         "net.sf.openfx.cel_shading" => EffectType::cel_shading(4.0, 60.0),
         "net.sf.openfx.custom.tone_curve" => EffectType::curves(),
         "net.sf.openfx.oil_paint" => EffectType::oil_paint(2.0, 100.0),
+        "net.sf.openfx.match_color" => EffectType::match_color(100.0),
+        "net.sf.openfx.match_light" => EffectType::match_light(100.0),
         "net.sf.openfx.trim_path" => EffectType::trim_path(0.0, 100.0, 0.0),
         "net.sf.openfx.sine_path" => EffectType::sine_path(20.0, 1.0, 0.0),
         "net.sf.openfx.instance_path" => EffectType::instance_path(5.0, 100.0, 0.0, 100.0, 100.0),

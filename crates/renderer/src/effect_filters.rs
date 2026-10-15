@@ -1626,6 +1626,46 @@ pub fn cel_shade_resample() -> ColorFilter {
     )
 }
 
+/// 3-way match grade (mirrors `apply_match_grade`): shift each pixel's
+/// luma zones from source averages toward reference averages.
+/// `mode` 0 = full RGB (Match Color), 1 = luminance only (Match Light).
+pub fn match_grade_resample() -> ColorFilter {
+    color_filter!(
+        "match_grade_resample",
+        r#"fn fx_match_luma(c: vec3<f32>) -> f32 {
+    return dot(c, vec3<f32>(0.299, 0.587, 0.114));
+}
+fn fx_match_ss(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = clamp((x - e0) / (e1 - e0), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+fn fx_match_grade(uv: vec2<f32>, color: vec4<f32>, amount: f32, ref_s: vec3<f32>, ref_m: vec3<f32>, ref_h: vec3<f32>, src_s: vec3<f32>, src_m: vec3<f32>, src_h: vec3<f32>, mode: f32) -> vec4<f32> {
+    let k = clamp(amount / 100.0, 0.0, 1.0);
+    if (k <= 0.0 || color.a <= 0.0) {
+        return color;
+    }
+    let l = fx_match_luma(color.rgb);
+    let ws = 1.0 - fx_match_ss(0.25, 0.45, l);
+    let wh = fx_match_ss(0.55, 0.75, l);
+    let wm = max(1.0 - ws - wh, 0.0);
+    let dz_s = ref_s - src_s;
+    let dz_m = ref_m - src_m;
+    let dz_h = ref_h - src_h;
+    var rgb = color.rgb;
+    if (mode < 0.5) {
+        let dr = (ws * dz_s.r + wm * dz_m.r + wh * dz_h.r) * k;
+        let dg = (ws * dz_s.g + wm * dz_m.g + wh * dz_h.g) * k;
+        let db = (ws * dz_s.b + wm * dz_m.b + wh * dz_h.b) * k;
+        rgb = rgb + vec3<f32>(dr, dg, db);
+    } else {
+        let dl = ws * fx_match_luma(dz_s) + wm * fx_match_luma(dz_m) + wh * fx_match_luma(dz_h);
+        rgb = rgb + vec3<f32>(dl * k);
+    }
+    return vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)), color.a);
+}"#
+    )
+}
+
 /// Oil painting: classic Kuwahara smoothing (mirrors `apply_oil_paint`).
 /// Quadrant layout, mean/variance order, and straight-space sampling all
 /// match the CPU kernel exactly.
@@ -2448,6 +2488,7 @@ pub fn resample_filters() -> Vec<ColorFilter> {
         stock_god_rays(),
         stock_lens_flare(),
         cel_shade_resample(),
+        match_grade_resample(),
         oil_paint_resample(),
     ]
 }
@@ -2630,6 +2671,7 @@ mod tests {
             ("stock_god_rays", "fx_stock_god_rays(uv, color, u.params[0], u.params[1], u.params[2], u.colors[0].rgb, RES)"),
             ("stock_lens_flare", "fx_stock_lens_flare(uv, color, u.params[0], u.params[1], u.params[2], u.colors[0].rgb, RES)"),
             ("cel_shade_resample", "fx_cel_shade(uv, color, u.params[0].x, u.params[0].y, u.params[0].z, u.params[0].w, u.colors[0].rgb, u.params[1].x, u.colors[1].rgb, u.params[1].y, RES)"),
+            ("match_grade_resample", "fx_match_grade(uv, color, u.params[0].x, u.colors[0].rgb, u.colors[1].rgb, u.colors[2].rgb, u.colors[3].rgb, vec3<f32>(u.params[0].y, u.params[0].z, u.params[0].w), vec3<f32>(u.params[1].x, u.params[1].y, u.params[1].z), 0.0)"),
             ("oil_paint_resample", "fx_oil_paint(uv, color, u.params[0].x, u.params[0].y, RES)"),
         ];
         let twins = resample_filters();

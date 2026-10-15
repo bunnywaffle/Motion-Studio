@@ -666,6 +666,23 @@ pub enum EffectType {
         radius: Property<f32>,
         amount: Property<f32>,
     },
+    /// Match Color: grade each luma zone (shadow/midtone/highlight)
+    /// toward the same zone sampled from a reference layer's content.
+    /// OFX plug-in `net.sf.openfx.match_color`. Zone averages are sampled
+    /// at render time (reference content only — no ref effects/masks, so
+    /// no cycles and no ordering constraints); missing refs grade to
+    /// identity.
+    MatchColor {
+        /// Source layer id sampled for zone averages ("" = identity).
+        reference_layer: String,
+        amount: Property<f32>,
+    },
+    /// Match Light: like Match Color but only luminance moves (hue kept).
+    /// OFX plug-in `net.sf.openfx.match_light`.
+    MatchLight {
+        reference_layer: String,
+        amount: Property<f32>,
+    },
     /// Tone curve: master luminance remap through an editable curve
     /// (empty = linear identity). OFX plug-in
     /// `net.sf.openfx.custom.tone_curve`.
@@ -725,6 +742,8 @@ impl EffectType {
             Self::Vignette { .. } => "Vignette",
             Self::CelShading { .. } => "Cel Shading",
             Self::OilPaint { .. } => "Oil Painting",
+            Self::MatchColor { .. } => "Match Color",
+            Self::MatchLight { .. } => "Match Light",
             Self::Curves { .. } => "Tone Curve",
             Self::Stock { plugin, .. } => plugin.descriptor().label,
         }
@@ -1194,6 +1213,23 @@ impl EffectType {
         Self::Curves { curve: Vec::new() }
     }
 
+    /// Construct a Match Color effect type (identity until a reference
+    /// layer is picked on the card).
+    pub fn match_color(amount: f32) -> Self {
+        Self::MatchColor {
+            reference_layer: String::new(),
+            amount: Property::new("Amount", amount.clamp(0.0, 100.0)),
+        }
+    }
+
+    /// Construct a Match Light effect type.
+    pub fn match_light(amount: f32) -> Self {
+        Self::MatchLight {
+            reference_layer: String::new(),
+            amount: Property::new("Amount", amount.clamp(0.0, 100.0)),
+        }
+    }
+
     /// Construct a Vignette effect type.
     pub fn vignette(amount: f32, softness: f32) -> Self {
         Self::Vignette {
@@ -1240,6 +1276,8 @@ impl EffectType {
             Self::Vignette { .. } => "net.sf.openfx.vignette",
             Self::CelShading { .. } => "net.sf.openfx.cel_shading",
             Self::OilPaint { .. } => "net.sf.openfx.oil_paint",
+            Self::MatchColor { .. } => "net.sf.openfx.match_color",
+            Self::MatchLight { .. } => "net.sf.openfx.match_light",
             Self::Curves { .. } => "net.sf.openfx.custom.tone_curve",
             Self::Stock { plugin, .. } => plugin.plugin_id(),
         }
@@ -2531,6 +2569,12 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     return true;
                 }
             }
+            EffectType::MatchColor { amount, .. } | EffectType::MatchLight { amount, .. } => {
+                if param_name.eq_ignore_ascii_case("amount") {
+                    amount.set_value((amount.value + delta).clamp(0.0, 100.0));
+                    return true;
+                }
+            }
             EffectType::Stock { plugin, params, .. } => {
                 let desc = plugin.descriptor();
                 for (i, p) in desc.params.iter().enumerate() {
@@ -2988,6 +3032,13 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     .position(|p| param_name.eq_ignore_ascii_case(p.name))?;
                 params.get(idx)
             }
+            EffectType::MatchColor { amount, .. } | EffectType::MatchLight { amount, .. } => {
+                if param_name.eq_ignore_ascii_case("amount") {
+                    Some(amount)
+                } else {
+                    None
+                }
+            }
             // Puppet pin components are dynamic (`pin_{i}_{x|y}`) tracks.
             EffectType::Puppet { pins, .. } => Self::pin_component(pins, param_name),
             // Shader Lab values are dynamic, not `Property<f32>` tracks.
@@ -3406,6 +3457,13 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     .iter()
                     .position(|p| param_name.eq_ignore_ascii_case(p.name))?;
                 params.get_mut(idx)
+            }
+            EffectType::MatchColor { amount, .. } | EffectType::MatchLight { amount, .. } => {
+                if param_name.eq_ignore_ascii_case("amount") {
+                    Some(amount)
+                } else {
+                    None
+                }
             }
             // Puppet pin components are dynamic (`pin_{i}_{x|y}`) tracks.
             EffectType::Puppet { pins, .. } => Self::pin_component_mut(pins, param_name),
@@ -3837,7 +3895,13 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
             ],
             EffectType::OilPaint { radius, amount } => vec![
                 scalar("radius", "Radius", WidgetKind::Slider, px1(1.0, 4.0, 1.0, 2.0), radius),
-                scalar("amount", "Amount", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), amount),
+                scalar("amount", "Amount", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), amount)
+            ],
+            // Match Color/Light: amount rides the generic scalar loop; the
+            // reference-layer picker is a bespoke card row (layer list is
+            // dynamic, declarations are static).
+            EffectType::MatchColor { amount, .. } | EffectType::MatchLight { amount, .. } => vec![
+                scalar("amount", "Amount", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), amount)
             ],
             // Curves renders through its bespoke card arm (curve editor);
             // no scalar/color declarations.

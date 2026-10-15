@@ -34,7 +34,7 @@ pub mod text;
 pub use affine::{Aff, aff_apply, aff_invert, aff_mul, fold_transform, skew_about};
 pub use buffer::{FloatBuf, blur_buffer, gpu_accelerated, gpu_fx_chain};
 pub use comp::rasterize_comp;
-pub use effects::{RasterFx, apply_effect_pixels};
+pub use effects::{RasterFx, ZoneAvgs, apply_effect_pixels, apply_match_grade, resolve_match_stats, zone_avgs};
 pub use layer::{
     RasterEntry, decoded_asset, gizmo_local_corners, layer_cache_key, layer_content_origin,
     layer_effect_padding, layer_local_box, layer_render_box, rasterize_layer,

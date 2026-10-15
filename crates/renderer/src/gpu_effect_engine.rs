@@ -728,6 +728,15 @@ impl GpuEffectEngine {
                         EvaluatedEffectType::OilPaint { radius, amount } => {
                             ("oil_paint", [*radius, *amount, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
                         }
+                        EvaluatedEffectType::MatchColor { amount, src_mid, src_high, .. } => {
+                            // Zone RGBs ride colors[0..3] + params (the 10
+                            // scalar slots hold amount + src mid/high; see
+                            // the colors match below).
+                            ("match_color", [*amount, src_mid.r, src_mid.g, src_mid.b, src_high.r, src_high.g, src_high.b, 0.0, 0.0, 0.0])
+                        }
+                        EvaluatedEffectType::MatchLight { amount, src_mid, src_high, .. } => {
+                            ("match_light", [*amount, src_mid.r, src_mid.g, src_mid.b, src_high.r, src_high.g, src_high.b, 0.0, 0.0, 0.0])
+                        }
                         // NOTE: no OuterGlow branch on purpose (blit-stage
                         // effect; a chain pass would double-apply, see the
                         // for_builtin note). It falls to `_ => continue`
@@ -746,13 +755,24 @@ impl GpuEffectEngine {
                         _ => continue,
                     };
                     // Cel tints ride the colors array (params convention is
-                    // full at 10 slots); every other builtin uses none.
-                    let tint_colors: [[f32; 4]; 2] = match eff_type {
+                    // full at 10 slots); match zones take all four color
+                    // slots (ref S/M/H + src shadow; src mid/high ride
+                    // params); every other builtin uses none.
+                    let tint_colors: [[f32; 4]; 4] = match eff_type {
                         EvaluatedEffectType::CelShading { highlight_tint, shadow_tint, .. } => [
                             [highlight_tint.r, highlight_tint.g, highlight_tint.b, 1.0],
                             [shadow_tint.r, shadow_tint.g, shadow_tint.b, 1.0],
+                            [0.0; 4],
+                            [0.0; 4],
                         ],
-                        _ => [[0.0; 4]; 2],
+                        EvaluatedEffectType::MatchColor { ref_shadow, ref_mid, ref_high, src_shadow, .. }
+                        | EvaluatedEffectType::MatchLight { ref_shadow, ref_mid, ref_high, src_shadow, .. } => [
+                            [ref_shadow.r, ref_shadow.g, ref_shadow.b, 1.0],
+                            [ref_mid.r, ref_mid.g, ref_mid.b, 1.0],
+                            [ref_high.r, ref_high.g, ref_high.b, 1.0],
+                            [src_shadow.r, src_shadow.g, src_shadow.b, 1.0],
+                        ],
+                        _ => [[0.0; 4]; 4],
                     };
                     if let Some(pass) = self.builtin_pass_cache.get(id) {
                         let uniforms = FxUniforms::pack(&params, &tint_colors, time_s, width as f32, height as f32, 0.0);

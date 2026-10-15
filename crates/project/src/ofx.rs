@@ -376,6 +376,24 @@ pub const OFX_SUITE: &[OfxEffectDescriptor] = &[
         spatial: true,
     },
     OfxEffectDescriptor {
+        id: "net.sf.openfx.match_color",
+        label: "Match Color",
+        category: OfxCategory::Color,
+        params: &[
+            OfxParamDescriptor { name: "amount", label: "Amount", min: 0.0, max: 100.0, default: 100.0 },
+        ],
+        spatial: false,
+    },
+    OfxEffectDescriptor {
+        id: "net.sf.openfx.match_light",
+        label: "Match Light",
+        category: OfxCategory::Color,
+        params: &[
+            OfxParamDescriptor { name: "amount", label: "Amount", min: 0.0, max: 100.0, default: 100.0 },
+        ],
+        spatial: false,
+    },
+    OfxEffectDescriptor {
         id: "net.sf.openfx.checkerboard",
         label: "Checkerboard",
         category: OfxCategory::Generate,

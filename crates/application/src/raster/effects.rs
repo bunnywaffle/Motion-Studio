@@ -1,5 +1,8 @@
 use compositor::EvaluatedEffectType;
+use image::RgbaImage;
 use project::Color;
+use std::collections::HashMap;
+use std::sync::Arc;
 use super::buffer::FloatBuf;
 use super::pixel::{gradient_axis, sample_fill_gradient, Px};
 use super::stock::apply_stock;
@@ -355,6 +358,32 @@ pub fn apply_effect_pixels(
         }
         EvaluatedEffectType::OilPaint { radius, amount } => {
             apply_oil_paint(buf, *radius, *amount);
+        }
+        EvaluatedEffectType::MatchColor { amount, ref_shadow, ref_mid, ref_high, src_shadow, src_mid, src_high, .. } => {
+            let refz = ZoneAvgs {
+                shadow: [ref_shadow.r, ref_shadow.g, ref_shadow.b],
+                mid: [ref_mid.r, ref_mid.g, ref_mid.b],
+                high: [ref_high.r, ref_high.g, ref_high.b],
+            };
+            let src = ZoneAvgs {
+                shadow: [src_shadow.r, src_shadow.g, src_shadow.b],
+                mid: [src_mid.r, src_mid.g, src_mid.b],
+                high: [src_high.r, src_high.g, src_high.b],
+            };
+            apply_match_grade(buf, &refz, &src, *amount, false);
+        }
+        EvaluatedEffectType::MatchLight { amount, ref_shadow, ref_mid, ref_high, src_shadow, src_mid, src_high, .. } => {
+            let refz = ZoneAvgs {
+                shadow: [ref_shadow.r, ref_shadow.g, ref_shadow.b],
+                mid: [ref_mid.r, ref_mid.g, ref_mid.b],
+                high: [ref_high.r, ref_high.g, ref_high.b],
+            };
+            let src = ZoneAvgs {
+                shadow: [src_shadow.r, src_shadow.g, src_shadow.b],
+                mid: [src_mid.r, src_mid.g, src_mid.b],
+                high: [src_high.r, src_high.g, src_high.b],
+            };
+            apply_match_grade(buf, &refz, &src, *amount, true);
         }
         EvaluatedEffectType::Curves { curve } => {
             apply_tone_curve(buf, curve);
@@ -858,11 +887,201 @@ pub fn apply_oil_paint(buf: &mut FloatBuf, radius: f32, amount: f32) {
     }
 }
 
+/// 3-way match sampling: per-zone average RGB of a buffer, zones split
+/// by luma thirds with the same smooth weights the grade kernel uses.
+/// Stride-samples to a ≤48px grid so full-res image decodes stay cheap;
+/// transparent pixels are skipped, empty zones fall back to the global
+/// average (stable, never NaN).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ZoneAvgs {
+    pub shadow: [f32; 3],
+    pub mid: [f32; 3],
+    pub high: [f32; 3],
+}
+
+fn match_luma(r: f32, g: f32, b: f32) -> f32 {
+    0.299 * r + 0.587 * g + 0.114 * b
+}
+
+/// WGSL `smoothstep` twin (edge0 < edge1 only): the GPU kernel must
+/// agree with this bit for bit within parity tolerance.
+fn match_smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Zone weights for a luma value (shadow / mid / high sum to ≤ 1).
+fn zone_weights(l: f32) -> (f32, f32, f32) {
+    let s = 1.0 - match_smoothstep(0.25, 0.45, l);
+    let h = match_smoothstep(0.55, 0.75, l);
+    let m = (1.0 - s - h).max(0.0);
+    (s, m, h)
+}
+
+pub fn zone_avgs(buf: &FloatBuf) -> ZoneAvgs {
+    if buf.w == 0 || buf.h == 0 || buf.px.is_empty() {
+        return ZoneAvgs::default();
+    }
+    let step = ((buf.w.max(buf.h) as f32 / 48.0).ceil() as u32).max(1);
+    let mut acc = [[0.0f64; 3]; 3];
+    let mut cnt = [0u32; 3];
+    let mut gacc = [0.0f64; 3];
+    let mut gcnt = 0u32;
+    let mut y = 0;
+    while y < buf.h {
+        let mut x = 0;
+        while x < buf.w {
+            let p = buf.px[(y * buf.w + x) as usize];
+            if p.a > 0.01 {
+                let (s, m, h) = zone_weights(match_luma(p.r, p.g, p.b));
+                let ws = [s, m, h];
+                for (i, w) in ws.iter().enumerate() {
+                    if *w > 0.001 {
+                        acc[i][0] += (p.r * w) as f64;
+                        acc[i][1] += (p.g * w) as f64;
+                        acc[i][2] += (p.b * w) as f64;
+                        // Weighted counts keep small zones honest.
+                        cnt[i] += 1;
+                    }
+                }
+                gacc[0] += p.r as f64;
+                gacc[1] += p.g as f64;
+                gacc[2] += p.b as f64;
+                gcnt += 1;
+            }
+            x += step;
+        }
+        y += step;
+    }
+    let global = if gcnt > 0 {
+        [gacc[0] / gcnt as f64, gacc[1] / gcnt as f64, gacc[2] / gcnt as f64]
+    } else {
+        [0.0, 0.0, 0.0]
+    };
+    let zone = |i: usize| {
+        if cnt[i] > 0 {
+            [
+                (acc[i][0] / cnt[i] as f64) as f32,
+                (acc[i][1] / cnt[i] as f64) as f32,
+                (acc[i][2] / cnt[i] as f64) as f32,
+            ]
+        } else {
+            [global[0] as f32, global[1] as f32, global[2] as f32]
+        }
+    };
+    ZoneAvgs { shadow: zone(0), mid: zone(1), high: zone(2) }
+}
+
+/// 3-way grade in place: shift each pixel's zones from `src` averages
+/// toward `refz` averages by `amount` 0..100. `luma_only` keeps hue
+/// (Match Light); otherwise full RGB moves (Match Color).
+pub fn apply_match_grade(
+    buf: &mut FloatBuf,
+    refz: &ZoneAvgs,
+    src: &ZoneAvgs,
+    amount: f32,
+    luma_only: bool,
+) {
+    let k = (amount / 100.0).clamp(0.0, 1.0);
+    if k <= 0.0 || buf.w == 0 || buf.h == 0 {
+        return;
+    }
+    let dz = [
+        [refz.shadow[0] - src.shadow[0], refz.shadow[1] - src.shadow[1], refz.shadow[2] - src.shadow[2]],
+        [refz.mid[0] - src.mid[0], refz.mid[1] - src.mid[1], refz.mid[2] - src.mid[2]],
+        [refz.high[0] - src.high[0], refz.high[1] - src.high[1], refz.high[2] - src.high[2]],
+    ];
+    for p in buf.px.iter_mut() {
+        if p.a <= 0.0 {
+            continue;
+        }
+        let l = match_luma(p.r, p.g, p.b);
+        let (ws, wm, wh) = zone_weights(l);
+        if luma_only {
+            let dl = ws * match_luma(dz[0][0], dz[0][1], dz[0][2])
+                + wm * match_luma(dz[1][0], dz[1][1], dz[1][2])
+                + wh * match_luma(dz[2][0], dz[2][1], dz[2][2]);
+            let d = dl * k;
+            p.r = (p.r + d).clamp(0.0, 1.0);
+            p.g = (p.g + d).clamp(0.0, 1.0);
+            p.b = (p.b + d).clamp(0.0, 1.0);
+        } else {
+            let dr = (ws * dz[0][0] + wm * dz[1][0] + wh * dz[2][0]) * k;
+            let dg = (ws * dz[0][1] + wm * dz[1][1] + wh * dz[2][1]) * k;
+            let db = (ws * dz[0][2] + wm * dz[1][2] + wh * dz[2][2]) * k;
+            p.r = (p.r + dr).clamp(0.0, 1.0);
+            p.g = (p.g + dg).clamp(0.0, 1.0);
+            p.b = (p.b + db).clamp(0.0, 1.0);
+        }
+    }
+}
+
+/// Fill Match Color/Light zone averages on a cloned effect list:
+/// reference content (raw, no ref effects/masks — so no cycles and no
+/// ordering constraints) plus the layer's own content as the source.
+/// Missing/empty references grade to identity. Returns `None` when no
+/// match effect needs filling (callers keep the borrowed original).
+pub fn resolve_match_stats(
+    layer: &compositor::EvaluatedLayer,
+    effects: &[compositor::EvaluatedEffect],
+    stack: &compositor::EvaluatedStack,
+    assets: &HashMap<String, Arc<RgbaImage>>,
+) -> Option<Vec<compositor::EvaluatedEffect>> {
+    use compositor::EvaluatedEffectType as E;
+    let needs = effects.iter().any(|e| {
+        e.enabled
+            && matches!(
+                &e.effect_type,
+                E::MatchColor { reference_layer, .. } | E::MatchLight { reference_layer, .. }
+                if !reference_layer.is_empty()
+            )
+    });
+    if !needs {
+        return None;
+    }
+    let sample = |l: &compositor::EvaluatedLayer| {
+        super::layer::raster_layer_content(l, 64.0, 64.0, assets)
+            .map(|b| zone_avgs(&b))
+            .unwrap_or_default()
+    };
+    let src_zones = sample(layer);    let mut out = effects.to_vec();
+    for eff in out.iter_mut() {
+        let ref_id = match &eff.effect_type {
+            E::MatchColor { reference_layer, .. } | E::MatchLight { reference_layer, .. } => {
+                if reference_layer.is_empty() {
+                    continue;
+                }
+                reference_layer.clone()
+            }
+            _ => continue,
+        };
+        let rz = stack
+            .get_layer(&ref_id)
+            .map(&sample)
+            .unwrap_or_default();
+        let fill = |dst: &mut project::Color, z: [f32; 3]| {
+            *dst = Color::rgba(z[0], z[1], z[2], 1.0);
+        };
+        match &mut eff.effect_type {
+            E::MatchColor { ref_shadow, ref_mid, ref_high, src_shadow, src_mid, src_high, .. }
+            | E::MatchLight { ref_shadow, ref_mid, ref_high, src_shadow, src_mid, src_high, .. } => {
+                fill(ref_shadow, rz.shadow);
+                fill(ref_mid, rz.mid);
+                fill(ref_high, rz.high);
+                fill(src_shadow, src_zones.shadow);
+                fill(src_mid, src_zones.mid);
+                fill(src_high, src_zones.high);
+            }
+            _ => {}
+        }
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use compositor::evaluation::EvaluatedEffectType;
-
     #[test]
     fn cel_shade_bands_luminance_and_inks_edges() {
         use project::Color;

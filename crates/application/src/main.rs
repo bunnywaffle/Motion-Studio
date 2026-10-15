@@ -7148,7 +7148,8 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
     }
 
     #[test]
-    fn test_modifier_driver_resolves_modern_effect_param() {        use compositor::{SceneGraph, resolve_property_link_value};
+    fn test_modifier_driver_resolves_modern_effect_param() {
+        use compositor::{SceneGraph, resolve_property_link_value};
         use project::{Composition, Effect, EffectType, Layer, Project, Property, TimeCode};
         use std::collections::HashSet;
 
@@ -7172,6 +7173,63 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         let mut visited = HashSet::new();
         let val = resolve_property_link_value(&graph, "a1", "effect:e1:exposure", &tc, &mut visited);
         assert_eq!(val, Some(2.0), "modern effect params must resolve as driver sources");
+    }
+
+    #[test]
+    fn test_match_color_samples_reference_and_grades() {
+        use compositor::{LayerStackEvaluator, SceneGraph};
+        use project::{Color, Composition, Effect, EffectType, Layer, Project, TimeCode};
+        use std::collections::HashMap;
+
+        let mut project = Project::new("p", "Proj");
+        let tc = TimeCode::from_frames(0, 30.0);
+        let tc_end = TimeCode::from_frames(150, 30.0);
+        let mut comp = Composition::new("c", "Comp", 100, 100, 30.0, tc_end);
+        // Warm dark-red reference; neutral gray source.
+        let ref_layer = Layer::solid("ref", "Ref", Color::rgb(0.5, 0.08, 0.05), 100, 100, tc, tc_end);
+        let mut src = Layer::solid("src", "Src", Color::rgb(0.5, 0.5, 0.5), 100, 100, tc, tc_end);
+        src.effects.push(Effect {
+            id: "m1".to_string(),
+            name: "Match Color".to_string(),
+            enabled: true,
+            effect_type: EffectType::MatchColor {
+                reference_layer: "ref".to_string(),
+                amount: project::Property::new("Amount", 100.0),
+            },
+        });
+        comp.add_layer(ref_layer).unwrap();
+        comp.add_layer(src).unwrap();
+        project.add_composition(comp).unwrap();
+        let graph = SceneGraph::from_project(&project, "c").unwrap();
+        let stack = LayerStackEvaluator::new().evaluate(&graph, &tc);
+        let src_eval = stack.get_layer("src").unwrap();
+        let assets: HashMap<String, std::sync::Arc<image::RgbaImage>> = HashMap::new();
+        let filled = crate::raster::resolve_match_stats(src_eval, &src_eval.effects, &stack, &assets)
+            .expect("match effect must fill");
+        let zones = match &filled[0].effect_type {
+            compositor::EvaluatedEffectType::MatchColor { ref_mid, src_mid, .. } => (*ref_mid, *src_mid),
+            _ => panic!("expected match"),
+        };
+        // Reference mid must read warm red; source mid neutral gray.
+        assert!(zones.0.r > 0.4 && zones.0.g < 0.2, "ref zones must sample warm red");
+        assert!((zones.1.r - 0.5).abs() < 0.05, "src zones must sample gray");
+        // And the grade must pull gray toward warm red.
+        let mut buf = crate::raster::FloatBuf::clear(16, 16);
+        for p in buf.px.iter_mut() {
+            *p = crate::raster::Px { r: 0.5, g: 0.5, b: 0.5, a: 1.0 };
+        }
+        let refz = crate::raster::ZoneAvgs {
+            shadow: [zones.0.r, zones.0.g, zones.0.b],
+            mid: [zones.0.r, zones.0.g, zones.0.b],
+            high: [zones.0.r, zones.0.g, zones.0.b],
+        };
+        let srcz = crate::raster::ZoneAvgs {
+            shadow: [0.5, 0.5, 0.5],
+            mid: [0.5, 0.5, 0.5],
+            high: [0.5, 0.5, 0.5],
+        };
+        crate::raster::apply_match_grade(&mut buf, &refz, &srcz, 100.0, false);
+        assert!(buf.px[0].r > buf.px[0].b + 0.1, "grade must warm the gray toward red");
     }
 
     #[test]
@@ -7546,7 +7604,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             let (base_w, base_h) = crate::raster::layer::layer_base_dims(&layer, 1920.0, 1080.0, &assets);
             let (buf, _avg, _empty) = crate::raster::rasterize_layer(
                 &layer, base_w, base_h, 64, 64, 1920.0, 1080.0, project::Color::BLACK, None, 0.0, 0,
-                false, 5.0, &assets,
+                false, 5.0, &assets, None,
             );
             buf.px.iter().filter(|p| p.r > 0.5 && p.a > 0.1).count()
         });
@@ -7592,7 +7650,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             let (base_w, base_h) = crate::raster::layer::layer_base_dims(&layer, 1920.0, 1080.0, &assets);
             let (buf, _avg, _empty) = crate::raster::rasterize_layer(
                 &layer, base_w, base_h, 128, 128, 1920.0, 1080.0, project::Color::BLACK, None, 0.0, 0,
-                false, 5.0, &assets,
+                false, 5.0, &assets, None,
             );
             buf.px.iter().filter(|p| p.r > 0.5 && p.a > 0.1).count()
         });
@@ -7664,7 +7722,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             let (base_w, base_h) = crate::raster::layer::layer_base_dims(&layer, 1920.0, 1080.0, &assets);
             let (buf, _avg, empty) = crate::raster::rasterize_layer(
                 &layer, base_w, base_h, 128, 128, 1920.0, 1080.0, project::Color::BLACK, None, 0.0, 0,
-                false, 5.0, &assets,
+                false, 5.0, &assets, None,
             );
             assert!(!empty, "filled path must hold ink");
             buf.px.iter().filter(|p| p.r > 0.5 && p.a > 0.5).count()
@@ -9147,6 +9205,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             false,
             5.0,
             &std::collections::HashMap::new(),
+            None,
         );
         let has_visible_pixels = buf.px.iter().any(|p| p.a > 0.5);
         assert!(has_visible_pixels, "Layer must remain visible while mask is being drawn");
@@ -11054,6 +11113,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             false,
             5.0,
             &std::collections::HashMap::new(),
+            None,
         );
         let filled_pixels = path_buf.px.iter().filter(|p| p.a > 0.8).count();
         assert!(filled_pixels > 100, "Closed path must have filled interior");
@@ -11099,6 +11159,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             false,
             5.0,
             &std::collections::HashMap::new(),
+            None,
         );
 
         // Under Multiply, purple (0.658, 0.333, 0.968) * blue (0.0, 0.0, 1.0) = (0.0, 0.0, 0.968)
@@ -11411,6 +11472,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             false,
             5.0,
             &assets,
+            None,
         );
         assert!(!empty, "adjustment layer must not be marked empty");
         let center_px = out.get(50, 50);
@@ -11444,6 +11506,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             false,
             5.0,
             &assets,
+            None,
         );
         assert!(!empty_masked);
 
@@ -11482,6 +11545,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             false,
             5.0,
             &assets,
+            None,
         );
         let mid_px = out_50.get(50, 50);
         assert!((mid_px.a - 0.5).abs() < 0.05, "alpha should reflect 50% opacity");
@@ -11874,6 +11938,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             false,
             10.0,
             &assets,
+            None,
         );
         assert!(empty, "Adjustment layer with zero effects should be empty pass-through");
 
@@ -11911,6 +11976,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             false,
             10.0,
             &assets,
+            None,
         );
         assert!(!empty_with_fx, "Adjustment layer with active effects should produce renderable pixels");
     }

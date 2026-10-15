@@ -2413,6 +2413,33 @@ impl EditorState {
         Ok(id)
     }
 
+    /// Set a Match Color / Match Light effect's reference layer.
+    pub fn set_match_reference(
+        &mut self,
+        layer_id: &str,
+        effect_id: &str,
+        reference_layer_id: &str,
+    ) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| "No such layer".to_string())?;
+        let fx = layer
+            .get_effect_mut(effect_id)
+            .ok_or_else(|| "No such effect".to_string())?;
+        match &mut fx.effect_type {
+            EffectType::MatchColor { reference_layer, .. }
+            | EffectType::MatchLight { reference_layer, .. } => {
+                *reference_layer = reference_layer_id.to_string();
+                Ok(())
+            }
+            _ => Err("Not a match effect".to_string()),
+        }
+    }
+
     /// Remove an effect by ID from a specific layer.
     pub fn remove_layer_effect(&mut self, layer_id: &str, effect_id: &str) -> Result<(), String> {
         self.checkpoint();

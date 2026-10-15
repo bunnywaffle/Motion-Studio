@@ -225,7 +225,16 @@ pub fn rasterize_comp(
                 }
                 work = padded;
             }
-            apply_layer_fx(&mut work, base_w, base_h, &layer.effects, &fx, false);
+            // Match Color/Light sample their reference here (stack +
+            // assets available); filled zones ride the effects into both
+            // the CPU chain and the GPU uniforms.
+            let match_resolved =
+                super::effects::resolve_match_stats(layer, &layer.effects, stack, assets);
+            let fx_effects: &[compositor::EvaluatedEffect] = match match_resolved.as_ref() {
+                Some(v) => v,
+                None => &layer.effects,
+            };
+            apply_layer_fx(&mut work, base_w, base_h, fx_effects, &fx, false);
             // Blur + bloom radius (convolution on the content pixmap).
             let mut blur_total = 0.0f32;
             let mut bloom: Option<(f32, f32)> = None;

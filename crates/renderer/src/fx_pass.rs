@@ -516,6 +516,16 @@ impl FxPass {
                 "fx_oil_paint(uv, color, u.params[0].x, u.params[0].y, vec2<f32>(u.misc.y, u.misc.z))",
                 true,
             ),
+            "match_color" => (
+                ef::match_grade_resample().wgsl,
+                "fx_match_grade(uv, color, u.params[0].x, u.colors[0].rgb, u.colors[1].rgb, u.colors[2].rgb, u.colors[3].rgb, vec3<f32>(u.params[0].y, u.params[0].z, u.params[0].w), vec3<f32>(u.params[1].x, u.params[1].y, u.params[1].z), 0.0)",
+                false,
+            ),
+            "match_light" => (
+                ef::match_grade_resample().wgsl,
+                "fx_match_grade(uv, color, u.params[0].x, u.colors[0].rgb, u.colors[1].rgb, u.colors[2].rgb, u.colors[3].rgb, vec3<f32>(u.params[0].y, u.params[0].z, u.params[0].w), vec3<f32>(u.params[1].x, u.params[1].y, u.params[1].z), 1.0)",
+                false,
+            ),
             // NOTE: no "outer_glow" arm on purpose. Outer glow is a
             // blit-stage effect (blurred silhouette under content); a
             // chain twin would double-apply against the blit pass, and the
@@ -1009,7 +1019,7 @@ pub const CHAIN_SAFE_STOCK: [StockPlugin; 39] = [
 /// CPU kernel within u8 rounding (gentle point math, no time seeds, no
 /// spatial resampling): the set the live GPU chain may take without
 /// visual change. Same audit bar as [`CHAIN_SAFE_STOCK`].
-pub const CHAIN_SAFE_BUILTIN: [&str; 16] = [
+pub const CHAIN_SAFE_BUILTIN: [&str; 18] = [
     "brightness_contrast",
     "tint",
     "levels",
@@ -1026,6 +1036,8 @@ pub const CHAIN_SAFE_BUILTIN: [&str; 16] = [
     "oil_paint",
     "checkerboard",
     "gradient_ramp",
+    "match_color",
+    "match_light",
 ];
 
 /// Stable built-in id for a GPU-ported evaluated effect, if any.
@@ -1046,6 +1058,8 @@ pub fn builtin_gpu_id(effect: &compositor::EvaluatedEffectType) -> Option<&'stat
         E::DisplacementMap { .. } => Some("displacement"),
         E::Warp { .. } => Some("warp"),
         E::OilPaint { .. } => Some("oil_paint"),
+        E::MatchColor { .. } => Some("match_color"),
+        E::MatchLight { .. } => Some("match_light"),
         E::Checkerboard { .. } => Some("checkerboard"),
         E::GradientRamp { .. } => Some("gradient_ramp"),
         _ => None,
