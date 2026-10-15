@@ -359,15 +359,15 @@ pub fn apply_effect_pixels(
         EvaluatedEffectType::OilPaint { radius, amount } => {
             apply_oil_paint(buf, *radius, *amount);
         }
-        EvaluatedEffectType::InnerGlow { size, intensity, color } => {
-            apply_inner_glow(buf, *size, *intensity, *color);
+        EvaluatedEffectType::InnerGlow { size, intensity, color, blend } => {
+            apply_inner_glow(buf, *size, *intensity, *color, *blend);
         }
         EvaluatedEffectType::Dither { amount, levels } => {
             apply_dither(buf, *amount, *levels);
         }
-        EvaluatedEffectType::RimLight { mode, direction, width, color, intensity } => {
+        EvaluatedEffectType::RimLight { mode, direction, width, color, intensity, blend } => {
             let directional = matches!(mode, project::RimMode::Directional);
-            apply_rim_light(buf, directional, *direction, *width, *color, *intensity);
+            apply_rim_light(buf, directional, *direction, *width, *color, *intensity, *blend);
         }
         EvaluatedEffectType::MatchColor { amount, ref_shadow, ref_mid, ref_high, src_shadow, src_mid, src_high, .. } => {
             let refz = ZoneAvgs {
@@ -1088,28 +1088,62 @@ pub fn resolve_match_stats(
     Some(out)
 }
 
+/// 5x5 tent-blur of the alpha holes at `(x, y)` with radius `r`
+/// (offsets ±r, ±r/2, weights 1-2-4-2-1, sum 144). Outside the pixmap
+/// reads as hole: full-bleed layers get a contour. Shared by inner
+/// glow (falloff) and rim light (band placement); the WGSL twins
+/// unroll the same taps.
+fn tent_holes(snap: &[Px], w: u32, h: u32, x: u32, y: u32, r: f32) -> f32 {
+    let hole = |sx: i32, sy: i32| -> f32 {
+        if sx < 0 || sy < 0 || sx >= w as i32 || sy >= h as i32 {
+            return 1.0;
+        }
+        1.0 - snap[(sy as u32 * w + sx as u32) as usize].a
+    };
+    let mut acc = 0.0f32;
+    for i in -2i32..=2 {
+        let wi = if i == 0 { 4.0 } else if i.abs() == 1 { 2.0 } else { 1.0 };
+        for j in -2i32..=2 {
+            let wj = if j == 0 { 4.0 } else if j.abs() == 1 { 2.0 } else { 1.0 };
+            let sx = (x as f32 + j as f32 * r * 0.5 + 0.5).floor() as i32;
+            let sy = (y as f32 + i as f32 * r * 0.5 + 0.5).floor() as i32;
+            acc += wi * wj * hole(sx, sy);
+        }
+    }
+    acc / 144.0
+}
+
+/// Combine source with a glow color under `g` (0..1 envelope) using
+/// the card's blend mode. Twins mirror this branch for branch.
+fn glow_combine(c: Color, glow: Color, g: f32, blend: project::GlowBlend) -> Color {
+    use project::GlowBlend as B;
+    let g = g.clamp(0.0, 1.0);
+    let (br, bg, bb) = match blend {
+        B::Normal => (glow.r, glow.g, glow.b),
+        B::Screen => (
+            1.0 - (1.0 - c.r) * (1.0 - glow.r),
+            1.0 - (1.0 - c.g) * (1.0 - glow.g),
+            1.0 - (1.0 - c.b) * (1.0 - glow.b),
+        ),
+        B::Add => (
+            (c.r + glow.r).min(1.0),
+            (c.g + glow.g).min(1.0),
+            (c.b + glow.b).min(1.0),
+        ),
+        B::Multiply => (c.r * glow.r, c.g * glow.g, c.b * glow.b),
+    };
+    Color::rgba(c.r + (br - c.r) * g, c.g + (bg - c.g) * g, c.b + (bb - c.b) * g, c.a)
+}
+
 /// Inner glow in place: light spilling inward from the alpha contour.
-/// `size` 0..100 maps to a tent-blur radius up to 24px (fixed 5x5 taps,
-/// so CPU and GPU twins agree exactly); `intensity` blends the glow
-/// color over content, strongest at the edge, alpha untouched.
-pub fn apply_inner_glow(buf: &mut FloatBuf, size: f32, intensity: f32, color: Color) {
+/// `size` 0..100 maps to a tent radius up to a quarter of the smaller
+/// buffer side (resolution-independent); `intensity` scales the envelope.
+pub fn apply_inner_glow(buf: &mut FloatBuf, size: f32, intensity: f32, color: Color, blend: project::GlowBlend) {
     let k = (intensity / 100.0).clamp(0.0, 1.0);
-    let r = (size.clamp(0.0, 100.0) / 100.0 * 24.0).max(0.0);
     if k <= 0.0 || buf.w == 0 || buf.h == 0 {
         return;
     }
-    // Tent offsets: -r, -r/2, 0, r/2, r with weights 1-2-4-2-1 (sum 144).
-    let offs = [-r, -r * 0.5, 0.0, r * 0.5, r];
-    let wts = [1.0f32, 2.0, 4.0, 2.0, 1.0];
-    let at = |px: &[Px], w: u32, h: u32, x: i32, y: i32| -> f32 {
-        // Outside the pixmap is transparent (hole = 1): this is what
-        // puts a contour on full-bleed layers instead of clamping the
-        // edge away.
-        if x < 0 || y < 0 || x >= w as i32 || y >= h as i32 {
-            return 1.0;
-        }
-        1.0 - px[(y as u32 * w + x as u32) as usize].a
-    };
+    let r = size.clamp(0.0, 100.0) / 100.0 * buf.w.min(buf.h) as f32 * 0.25;
     let src = buf.px.clone();
     for y in 0..buf.h {
         for x in 0..buf.w {
@@ -1118,25 +1152,8 @@ pub fn apply_inner_glow(buf: &mut FloatBuf, size: f32, intensity: f32, color: Co
             if p.a <= 0.0 {
                 continue;
             }
-            let mut acc = 0.0f32;
-            for (i, oy) in offs.iter().enumerate() {
-                for (j, ox) in offs.iter().enumerate() {
-                    // floor(v + 0.5): matches the WGSL twin's texel
-                    // rounding exactly (Rust round() differs on halves).
-                    let sx = (x as f32 + ox + 0.5).floor() as i32;
-                    let sy = (y as f32 + oy + 0.5).floor() as i32;
-                    acc += wts[i] * wts[j] * at(&src, buf.w, buf.h, sx, sy);
-                }
-            }
-            let g = (acc / 144.0 * k).clamp(0.0, 1.0);
-            let c = p.to_color();
-            let out = Color::rgba(
-                c.r + (color.r - c.r) * g,
-                c.g + (color.g - c.g) * g,
-                c.b + (color.b - c.b) * g,
-                c.a,
-            );
-            buf.px[idx] = Px::from_color(out);
+            let g = tent_holes(&src, buf.w, buf.h, x, y, r) * k;
+            buf.px[idx] = Px::from_color(glow_combine(p.to_color(), color, g, blend));
         }
     }
 }
@@ -1200,9 +1217,10 @@ fn sobel_alpha_grad(snap: &[Px], w: u32, h: u32, x: u32, y: u32) -> (f32, f32) {
     (gx, gy)
 }
 
-/// Stylized rim light in place: Sobel alpha-contour glow. `direction`
-/// (degrees, screen space) keys `Directional` mode to one side; `Full`
-/// glows all around. `width` scales edge reach, `intensity` blends.
+/// Stylized rim light in place: a soft band straddling the alpha
+/// contour. `width` 0..100 grows the band (tent radius up to 32px);
+/// `direction` (degrees, screen space) keys `Directional` mode to one
+/// side; `Full` glows all around.
 pub fn apply_rim_light(
     buf: &mut FloatBuf,
     directional: bool,
@@ -1210,12 +1228,13 @@ pub fn apply_rim_light(
     width: f32,
     color: Color,
     intensity: f32,
+    blend: project::GlowBlend,
 ) {
     let k = (intensity / 100.0).clamp(0.0, 1.0);
-    let wg = (width.clamp(0.0, 100.0) / 100.0 * 4.0).max(0.0);
     if k <= 0.0 || buf.w == 0 || buf.h == 0 {
         return;
     }
+    let r = width.clamp(0.0, 100.0) / 100.0 * 32.0;
     let rad = direction.to_radians();
     let (lx, ly) = (rad.cos(), rad.sin());
     let src = buf.px.clone();
@@ -1226,29 +1245,23 @@ pub fn apply_rim_light(
             if p.a <= 0.0 {
                 continue;
             }
-            let (gx, gy) = sobel_alpha_grad(&src, buf.w, buf.h, x, y);
-            let mag = (gx * gx + gy * gy).sqrt();
-            if mag <= 1e-5 {
+            let g = tent_holes(&src, buf.w, buf.h, x, y, r);
+            // Band peaks at the contour (g ≈ 0.3) and widens with r.
+            let band = match_smoothstep(0.03, 0.3, g) * (1.0 - match_smoothstep(0.3, 0.6, g));
+            if band <= 0.001 {
                 continue;
             }
-            let edge = (mag * wg * 0.25).clamp(0.0, 1.0);
-            // Contour normal vs light direction (both screen-space,
-            // y-down — no flips needed). The alpha gradient points INTO
-            // the content, so the outward normal is its negation.
-            let side = if directional {
+            // Facing factor from the contour outward normal (negated
+            // alpha gradient, screen-space y-down).
+            let (gx, gy) = sobel_alpha_grad(&src, buf.w, buf.h, x, y);
+            let mag = (gx * gx + gy * gy).sqrt();
+            let side = if directional && mag > 1e-5 {
                 ((gx / mag) * -lx + (gy / mag) * -ly).clamp(0.0, 1.0)
             } else {
                 1.0
             };
-            let g = (edge * side * k).clamp(0.0, 1.0);
             let c = p.to_color();
-            let out = Color::rgba(
-                c.r + (color.r - c.r) * g,
-                c.g + (color.g - c.g) * g,
-                c.b + (color.b - c.b) * g,
-                c.a,
-            );
-            buf.px[idx] = Px::from_color(out);
+            buf.px[idx] = Px::from_color(glow_combine(c, color, band * side * k, blend));
         }
     }
 }
@@ -1281,7 +1294,7 @@ mod tests {
                 buf.px[(y * 64 + x) as usize] = Px { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
             }
         }
-        apply_inner_glow(&mut buf, 60.0, 100.0, Color::WHITE);
+        apply_inner_glow(&mut buf, 60.0, 100.0, Color::WHITE, project::GlowBlend::Normal);
         // Just inside the edge (x=47): holes blur in → visible glow.
         let edge = buf.px[32 * 64 + 47];
         // Deep interior (x=32): holes blur out → near-original.
@@ -1320,9 +1333,9 @@ mod tests {
     fn rim_light_directional_and_full_differ() {
         use project::Color;
         let mut dir = alpha_edge_buf();
-        apply_rim_light(&mut dir, true, 0.0, 60.0, Color::WHITE, 100.0);
+        apply_rim_light(&mut dir, true, 0.0, 60.0, Color::WHITE, 100.0, project::GlowBlend::Normal);
         let mut full = alpha_edge_buf();
-        apply_rim_light(&mut full, false, 0.0, 60.0, Color::WHITE, 100.0);
+        apply_rim_light(&mut full, false, 0.0, 60.0, Color::WHITE, 100.0, project::GlowBlend::Normal);
         let d = dir.px[16 * 32 + 15].r;
         let f = full.px[16 * 32 + 15].r;
         assert!(f > 0.6, "full rim must light the contour, got {f}");
@@ -1331,7 +1344,7 @@ mod tests {
         assert!(d > 0.6, "facing contour must light, got {d}");
         // …but flipping the light to 180° must kill it.
         let mut back = alpha_edge_buf();
-        apply_rim_light(&mut back, true, 180.0, 60.0, Color::WHITE, 100.0);
+        apply_rim_light(&mut back, true, 180.0, 60.0, Color::WHITE, 100.0, project::GlowBlend::Normal);
         let b = back.px[16 * 32 + 15].r;
         assert!(b < d - 0.2, "backlit contour must stay dark: {b} vs {d}");
     }
@@ -1710,14 +1723,53 @@ mod tests {
         // Fully opaque mid-gray: no alpha edge anywhere inside, so the
         // pixmap border itself must read as the contour.
         let mut glow = FloatBuf { w: 32, h: 32, px: vec![Px { r: 0.4, g: 0.4, b: 0.4, a: 1.0 }; 1024] };
-        apply_inner_glow(&mut glow, 60.0, 100.0, Color::WHITE);
+        apply_inner_glow(&mut glow, 60.0, 100.0, Color::WHITE, project::GlowBlend::Normal);
         let border = glow.px[16 * 32].r;
         let center = glow.px[16 * 32 + 16].r;
         assert!(border > center + 0.05, "full-bleed border must glow inward: {border} vs {center}");
         let mut rim = FloatBuf { w: 32, h: 32, px: vec![Px { r: 0.4, g: 0.4, b: 0.4, a: 1.0 }; 1024] };
-        apply_rim_light(&mut rim, false, 0.0, 60.0, Color::WHITE, 100.0);
+        apply_rim_light(&mut rim, false, 0.0, 60.0, Color::WHITE, 100.0, project::GlowBlend::Normal);
         let rborder = rim.px[16 * 32].r;
         let rcenter = rim.px[16 * 32 + 16].r;
         assert!(rborder > rcenter + 0.05, "full-bleed border must rim: {rborder} vs {rcenter}");
+    }
+
+    #[test]
+    fn rim_width_widens_the_lit_band() {
+        use project::Color;
+        let lit = |width: f32| {
+            let mut buf = alpha_edge_buf();
+            apply_rim_light(&mut buf, false, 0.0, width, Color::WHITE, 100.0, project::GlowBlend::Normal);
+            buf.px.iter().filter(|p| p.r > 0.55).count()
+        };
+        let narrow = lit(15.0);
+        let wide = lit(85.0);
+        assert!(wide > narrow + 20, "width must widen the band: {narrow} vs {wide}");
+    }
+
+    #[test]
+    fn glow_blend_modes_differ() {
+        use project::{Color, GlowBlend};
+        let base = Color::rgb(0.2, 0.2, 0.2);
+        let glow = Color::rgb(0.6, 0.4, 0.2);
+        let r = |b: GlowBlend| glow_combine(base, glow, 1.0, b).r;
+        let (n, s, a, m) = (r(GlowBlend::Normal), r(GlowBlend::Screen), r(GlowBlend::Add), r(GlowBlend::Multiply));
+        assert!((n - 0.6).abs() < 1e-5, "normal mixes to glow: {n}");
+        assert!((s - 0.68).abs() < 1e-5, "screen lifts: {s}");
+        assert!((a - 0.8).abs() < 1e-5, "add sums: {a}");
+        assert!((m - 0.12).abs() < 1e-5, "multiply darkens: {m}");
+        // And the kernel actually routes the card's blend choice.
+        let mut buf = FloatBuf { w: 16, h: 16, px: vec![Px { r: 0.2, g: 0.2, b: 0.2, a: 1.0 }; 256] };
+        for y in 0..16 {
+            for x in 8..16 {
+                buf.px[(y * 16 + x) as usize] = Px { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+            }
+        }
+        let mut scr = buf.clone();
+        apply_inner_glow(&mut scr, 100.0, 100.0, glow, GlowBlend::Screen);
+        let mut mul = buf;
+        apply_inner_glow(&mut mul, 100.0, 100.0, glow, GlowBlend::Multiply);
+        let edge = |b: &FloatBuf| b.px[8 * 16 + 7].r;
+        assert!((edge(&scr) - edge(&mul)).abs() > 0.05, "kernel must honor blend");
     }
 }

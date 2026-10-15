@@ -737,18 +737,18 @@ impl GpuEffectEngine {
                         EvaluatedEffectType::MatchLight { amount, src_mid, src_high, .. } => {
                             ("match_light", [*amount, src_mid.r, src_mid.g, src_mid.b, src_high.r, src_high.g, src_high.b, 0.0, 0.0, 0.0])
                         }
-                        EvaluatedEffectType::InnerGlow { size, intensity, .. } => {
-                            ("inner_glow", [*size, *intensity, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+                        EvaluatedEffectType::InnerGlow { size, intensity, blend, .. } => {
+                            ("inner_glow", [*size, *intensity, blend.id(), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
                         }
                         EvaluatedEffectType::Dither { amount, levels } => {
                             ("dither", [*amount, *levels, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
                         }
-                        EvaluatedEffectType::RimLight { mode, direction, width, intensity, .. } => {
+                        EvaluatedEffectType::RimLight { mode, direction, width, intensity, blend, .. } => {
                             let m = match mode {
                                 project::RimMode::Directional => 0.0,
                                 project::RimMode::Full => 1.0,
                             };
-                            ("rim_light", [m, *direction, *width, 0.0, *intensity, 0.0, 0.0, 0.0, 0.0, 0.0])
+                            ("rim_light", [m, *direction, *width, blend.id(), *intensity, 0.0, 0.0, 0.0, 0.0, 0.0])
                         }
                         // NOTE: no OuterGlow branch on purpose (blit-stage
                         // effect; a chain pass would double-apply, see the

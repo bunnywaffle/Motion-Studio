@@ -3303,6 +3303,11 @@ pub enum ViewerGizmoDrag {    Rotate {
         start_rot: f32,
         start_angle: f32,
     },
+    Translate {
+        layer_id: String,
+        start_comp: Vec2,
+        start_pos: Vec2,
+    },
     Scale {
         layer_id: String,
         uniform: bool,
@@ -3658,6 +3663,8 @@ impl Render for CompositionViewerPanel {
                         let n_fit = scale_x;
                         let n_cw = comp_w;
                         let n_ch = comp_h;
+                        let n_frame = frame_org;
+                        let n_start_pos = layer.transform.position;
                         let origin = layer.local_to_world_point(project::Vec2::ZERO);
                         let x_axis = layer.local_to_world_point(project::Vec2::new(1.0, 0.0));
                         let mut dx = x_axis.x - origin.x;
@@ -3779,16 +3786,24 @@ impl Render for CompositionViewerPanel {
                                     )
                                     .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
                                         let (mx, my) = (event.position.x / px(1.0), event.position.y / px(1.0));
+                                        let (cmx, cmy) = gizmo_to_comp(mx, my, n_frame, n_fit, n_cw, n_ch);
+                                        let lid_t = null_lid.clone();
+                                        let start_pos = n_start_pos;
                                         null_state.update(cx, |s, cx| {
+                                            // Gesture start: checkpoint, select, preview-fast.
                                             s.checkpoint();
-                                            s.select_layer(Some(null_lid.clone()));
+                                            s.select_layer(Some(lid_t.clone()));
                                             s.preview_fast = true;
                                             cx.notify();
                                         });
                                         null_panel.update(cx, |this, cx| {
-                                            this.is_dragging_canvas = true;
-                                            this.last_canvas_mouse = Some((mx, my));
-                                            this.empty_down = None;
+                                            // Transform-gizmo drags win over canvas
+                                            // drags and ignore the active tool.
+                                            this.gizmo_drag = Some(ViewerGizmoDrag::Translate {
+                                                layer_id: lid_t,
+                                                start_comp: Vec2::new(cmx, cmy),
+                                                start_pos,
+                                            });
                                             cx.notify();
                                         });
                                     })
@@ -5548,6 +5563,18 @@ impl Render for CompositionViewerPanel {
                     let cmy = (curr_y - foy) / fit_here - ch / 2.0;
                     let st = this.state.clone();
                     match drag {
+                        ViewerGizmoDrag::Translate { layer_id, start_comp, start_pos } => {
+                            let dx = cmx - start_comp.x;
+                            let dy = cmy - start_comp.y;
+                            st.update(cx, |s, cx| {
+                                s.preview_fast = true;
+                                s.set_layer_position(
+                                    &layer_id,
+                                    Vec2::new(start_pos.x + dx, start_pos.y + dy),
+                                );
+                                cx.notify();
+                            });
+                        }
                         ViewerGizmoDrag::Rotate { layer_id, start_rot, start_angle } => {
                             // Cached drag frame: anchor world from the cheap
                             // matrix path, no full scene evaluation per move.
@@ -19192,15 +19219,14 @@ impl TimelinePanel {
     }
 
     /// Visible time span (start_time_s, visible_duration_s) for the timeline lanes and ruler.
-    /// Zoom 1.0 fits the whole comp; below 1.0 (min 0.25) the comp is
-    /// right-aligned with padding on the left (zoom works from the right
-    /// edge at every level).
+    /// Zoom 1.0 fits the whole comp; below 1.0 (min 0.25) the comp hugs
+    /// the left with padding on the right (zoom-out pins left).
     pub fn visible_time_span(&self, total_duration: f64) -> (f64, f64) {
         let zoom = (self.timeline_zoom as f64).clamp(0.25, 16.0);
         let visible_duration = (total_duration / zoom).max(0.05);
         if visible_duration >= total_duration {
-            // Zoomed out past fit: lock right-aligned with padding left.
-            return (total_duration - visible_duration, visible_duration);
+            // Zoomed out past fit: lock left-aligned with padding right.
+            return (0.0, visible_duration);
         }
         let max_start = (total_duration - visible_duration).max(0.0);
         let start = self.timeline_view_t0.clamp(0.0, max_start);
@@ -19213,7 +19239,7 @@ impl TimelinePanel {
         self.set_zoom(new_zoom, total_duration);
     }
 
-    /// Zoom out on the timeline, pinned on the view's right edge.
+    /// Zoom out on the timeline, pinned on the view's left edge.
     pub fn zoom_out(&mut self, total_duration: f64) {
         let new_zoom = (self.timeline_zoom / 1.5).max(0.25);
         self.set_zoom(new_zoom, total_duration);
@@ -19225,14 +19251,15 @@ impl TimelinePanel {
         self.timeline_view_t0 = 0.0;
     }
 
-    /// Set explicit zoom factor pinned on the view's RIGHT edge: the
-    /// rightmost visible frame stays put and content grows/shrinks
-    /// leftward.
+    /// Set explicit zoom factor. Zooming IN pins the view's right edge
+    /// (content grows leftward); zooming OUT pins the left edge at zero
+    /// (content shrinks rightward). Below fit the comp hugs the left
+    /// with padding on the right.
     pub fn set_zoom(&mut self, new_zoom: f32, total_duration: f64) {
-        // Anchor on the pre-zoom right edge: capture it before touching
-        // `timeline_zoom` (the span reader uses the stored zoom).
+        // Capture the pre-zoom span before touching `timeline_zoom`
+        // (the span reader uses the stored zoom).
         let (cur_t0, cur_vis) = self.visible_time_span(total_duration);
-        let right = cur_t0 + cur_vis;
+        let zooming_in = new_zoom >= self.timeline_zoom;
         self.timeline_zoom = new_zoom.clamp(0.25, 16.0);
         if (self.timeline_zoom - 1.0).abs() < 0.001 {
             self.timeline_zoom = 1.0;
@@ -19241,18 +19268,22 @@ impl TimelinePanel {
         }
         let new_visible = total_duration / self.timeline_zoom as f64;
         if new_visible >= total_duration {
-            // Below 100%: right-aligned padding, no pan window.
-            self.timeline_view_t0 = total_duration - new_visible;
+            // Below 100%: left-aligned padding, no pan window.
+            self.timeline_view_t0 = 0.0;
             return;
         }
         let max_start = (total_duration - new_visible).max(0.0);
-        self.timeline_view_t0 = (right - new_visible).clamp(0.0, max_start);
+        self.timeline_view_t0 = if zooming_in {
+            (cur_t0 + cur_vis - new_visible).clamp(0.0, max_start)
+        } else {
+            cur_t0.clamp(0.0, max_start)
+        };
     }
 
     /// Pan timeline view window to the left.
     pub fn pan_left(&mut self, total_duration: f64) {
         let (_, vis_dur) = self.visible_time_span(total_duration);
-        // Zoomed out past fit: view is locked centered, nothing to pan.
+        // Zoomed out past fit: view is locked left, nothing to pan.
         if vis_dur >= total_duration {
             return;
         }
@@ -19263,7 +19294,7 @@ impl TimelinePanel {
     /// Pan timeline view window to the right.
     pub fn pan_right(&mut self, total_duration: f64) {
         let (start, vis_dur) = self.visible_time_span(total_duration);
-        // Zoomed out past fit: view is locked centered, nothing to pan.
+        // Zoomed out past fit: view is locked left, nothing to pan.
         if vis_dur >= total_duration {
             return;
         }

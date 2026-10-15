@@ -1680,12 +1680,23 @@ pub fn inner_glow_resample() -> ColorFilter {
     }
     return 1.0 - textureLoad(src_tex, px, 0).a;
 }
-fn fx_inner_glow(uv: vec2<f32>, color: vec4<f32>, size: f32, intensity: f32, glow: vec3<f32>, res: vec2<f32>) -> vec4<f32> {
+fn fx_glow_mix(base: vec3<f32>, glow: vec3<f32>, g: f32, blend: f32) -> vec3<f32> {
+    var bc = glow;
+    if (blend > 2.5) {
+        bc = base * glow;
+    } else if (blend > 1.5) {
+        bc = clamp(base + glow, vec3<f32>(0.0), vec3<f32>(1.0));
+    } else if (blend > 0.5) {
+        bc = vec3<f32>(1.0) - (vec3<f32>(1.0) - base) * (vec3<f32>(1.0) - glow);
+    }
+    return mix(base, bc, clamp(g, 0.0, 1.0));
+}
+fn fx_inner_glow(uv: vec2<f32>, color: vec4<f32>, size: f32, intensity: f32, glow: vec3<f32>, blend: f32, res: vec2<f32>) -> vec4<f32> {
     let k = clamp(intensity / 100.0, 0.0, 1.0);
     if (k <= 0.0 || color.a <= 0.0) {
         return color;
     }
-    let r = clamp(size, 0.0, 100.0) / 100.0 * 24.0;
+    let r = clamp(size, 0.0, 100.0) / 100.0 * min(res.x, res.y) * 0.25;
     let X = uv * res - vec2<f32>(0.5);
     let ri = vec2<i32>(i32(res.x), i32(res.y));
     // Tent 1-2-4-2-1 by index arithmetic (no arrays: dynamic indexing
@@ -1704,8 +1715,8 @@ fn fx_inner_glow(uv: vec2<f32>, color: vec4<f32>, size: f32, intensity: f32, glo
             acc = acc + wi * wj * fx_inner_hole(vec2<i32>(sx, sy), ri);
         }
     }
-    let g = clamp(acc / 144.0 * k, 0.0, 1.0);
-    return vec4<f32>(mix(color.rgb, glow, g), color.a);
+    let g = acc / 144.0 * k;
+    return vec4<f32>(fx_glow_mix(color.rgb, glow, g, blend), color.a);
 }"#
     )
 }
@@ -1763,31 +1774,68 @@ pub fn rim_light_resample() -> ColorFilter {
     }
     return textureLoad(src_tex, px, 0).a;
 }
-fn fx_rim_light(uv: vec2<f32>, color: vec4<f32>, mode: f32, direction: f32, width: f32, rim: vec3<f32>, intensity: f32, res: vec2<f32>) -> vec4<f32> {
+fn fx_rim_ss(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = clamp((x - e0) / (e1 - e0), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+fn fx_rim_hole(px: vec2<i32>, res: vec2<i32>) -> f32 {
+    if (px.x < 0 || px.y < 0 || px.x >= res.x || px.y >= res.y) {
+        return 1.0;
+    }
+    return 1.0 - textureLoad(src_tex, px, 0).a;
+}
+fn fx_glow_mix_rim(base: vec3<f32>, glow: vec3<f32>, g: f32, blend: f32) -> vec3<f32> {
+    var bc = glow;
+    if (blend > 2.5) {
+        bc = base * glow;
+    } else if (blend > 1.5) {
+        bc = clamp(base + glow, vec3<f32>(0.0), vec3<f32>(1.0));
+    } else if (blend > 0.5) {
+        bc = vec3<f32>(1.0) - (vec3<f32>(1.0) - base) * (vec3<f32>(1.0) - glow);
+    }
+    return mix(base, bc, clamp(g, 0.0, 1.0));
+}
+fn fx_rim_light(uv: vec2<f32>, color: vec4<f32>, mode: f32, direction: f32, width: f32, rim: vec3<f32>, intensity: f32, blend: f32, res: vec2<f32>) -> vec4<f32> {
     let k = clamp(intensity / 100.0, 0.0, 1.0);
     if (k <= 0.0 || color.a <= 0.0) {
         return color;
     }
-    let wg = clamp(width, 0.0, 100.0) / 100.0 * 4.0;
+    let r = clamp(width, 0.0, 100.0) / 100.0 * 32.0;
     let rad = radians(direction);
     let L = vec2<f32>(cos(rad), sin(rad));
     let X = uv * res - vec2<f32>(0.5);
     let xi = i32(floor(X.x + 0.5));
     let yi = i32(floor(X.y + 0.5));
     let ri = vec2<i32>(i32(res.x), i32(res.y));
+    // Band straddling the contour from the tent-blurred holes: peaks
+    // at the edge, widens with r. Same taps/order as the CPU kernel.
+    var acc = 0.0;
+    for (var i = -2; i <= 2; i++) {
+        var wi = 1.0;
+        if (abs(i) == 1) { wi = 2.0; }
+        if (i == 0) { wi = 4.0; }
+        for (var j = -2; j <= 2; j++) {
+            var wj = 1.0;
+            if (abs(j) == 1) { wj = 2.0; }
+            if (j == 0) { wj = 4.0; }
+            let sx = i32(floor(X.x + f32(j) * r * 0.5 + 0.5));
+            let sy = i32(floor(X.y + f32(i) * r * 0.5 + 0.5));
+            acc = acc + wi * wj * fx_rim_hole(vec2<i32>(sx, sy), ri);
+        }
+    }
+    let g = acc / 144.0;
+    let band = fx_rim_ss(0.03, 0.3, g) * (1.0 - fx_rim_ss(0.3, 0.6, g));
+    if (band <= 0.001) {
+        return color;
+    }
     let gx = -fx_rim_alpha(vec2<i32>(xi - 1, yi - 1), ri) - 2.0 * fx_rim_alpha(vec2<i32>(xi - 1, yi), ri) - fx_rim_alpha(vec2<i32>(xi - 1, yi + 1), ri) + fx_rim_alpha(vec2<i32>(xi + 1, yi - 1), ri) + 2.0 * fx_rim_alpha(vec2<i32>(xi + 1, yi), ri) + fx_rim_alpha(vec2<i32>(xi + 1, yi + 1), ri);
     let gy = -fx_rim_alpha(vec2<i32>(xi - 1, yi - 1), ri) - 2.0 * fx_rim_alpha(vec2<i32>(xi, yi - 1), ri) - fx_rim_alpha(vec2<i32>(xi + 1, yi - 1), ri) + fx_rim_alpha(vec2<i32>(xi - 1, yi + 1), ri) + 2.0 * fx_rim_alpha(vec2<i32>(xi, yi + 1), ri) + fx_rim_alpha(vec2<i32>(xi + 1, yi + 1), ri);
     let mag = length(vec2<f32>(gx, gy));
-    if (mag <= 0.00001) {
-        return color;
-    }
-    let edge = clamp(mag * wg * 0.25, 0.0, 1.0);
     var side = 1.0;
-    if (mode < 0.5) {
+    if (mode < 0.5 && mag > 0.00001) {
         side = clamp(dot(vec2<f32>(gx, gy) / mag, vec2<f32>(-L.x, -L.y)), 0.0, 1.0);
     }
-    let g = clamp(edge * side * k, 0.0, 1.0);
-    return vec4<f32>(mix(color.rgb, rim, g), color.a);
+    return vec4<f32>(fx_glow_mix_rim(color.rgb, rim, band * side * k, blend), color.a);
 }"#
     )
 }
@@ -2801,9 +2849,9 @@ mod tests {
             ("stock_lens_flare", "fx_stock_lens_flare(uv, color, u.params[0], u.params[1], u.params[2], u.colors[0].rgb, RES)"),
             ("cel_shade_resample", "fx_cel_shade(uv, color, u.params[0].x, u.params[0].y, u.params[0].z, u.params[0].w, u.colors[0].rgb, u.params[1].x, u.colors[1].rgb, u.params[1].y, RES)"),
             ("match_grade_resample", "fx_match_grade(uv, color, u.params[0].x, u.colors[0].rgb, u.colors[1].rgb, u.colors[2].rgb, u.colors[3].rgb, vec3<f32>(u.params[0].y, u.params[0].z, u.params[0].w), vec3<f32>(u.params[1].x, u.params[1].y, u.params[1].z), 0.0)"),
-            ("inner_glow_resample", "fx_inner_glow(uv, color, u.params[0].x, u.params[0].y, u.colors[0].rgb, RES)"),
+            ("inner_glow_resample", "fx_inner_glow(uv, color, u.params[0].x, u.params[0].y, u.colors[0].rgb, u.params[0].z, RES)"),
             ("dither_filter", "fx_dither(uv, color, u.params[0].x, u.params[0].y, RES)"),
-            ("rim_light_resample", "fx_rim_light(uv, color, u.params[0].x, u.params[0].y, u.params[0].z, u.colors[0].rgb, u.params[1].x, RES)"),
+            ("rim_light_resample", "fx_rim_light(uv, color, u.params[0].x, u.params[0].y, u.params[0].z, u.colors[0].rgb, u.params[1].x, u.params[0].w, RES)"),
             ("oil_paint_resample", "fx_oil_paint(uv, color, u.params[0].x, u.params[0].y, RES)"),
         ];
         let twins = resample_filters();

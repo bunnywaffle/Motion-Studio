@@ -198,6 +198,56 @@ impl RimMode {
     }
 }
 
+/// Glow color combine mode (inner glow + rim light).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GlowBlend {
+    /// Linear mix toward the glow color.
+    #[default]
+    Normal,
+    /// Screen (classic light glow).
+    Screen,
+    /// Additive.
+    Add,
+    /// Multiply.
+    Multiply,
+}
+
+impl GlowBlend {
+    /// All modes in Combobox order.
+    pub const ALL: [Self; 4] = [Self::Normal, Self::Screen, Self::Add, Self::Multiply];
+
+    /// Human label.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Normal => "Normal",
+            Self::Screen => "Screen",
+            Self::Add => "Add",
+            Self::Multiply => "Multiply",
+        }
+    }
+
+    /// Parse a [`Self::label`] back into a mode (Combobox commit path).
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.label() == label)
+    }
+
+    /// Combobox index of this mode.
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Normal => 0,
+            Self::Screen => 1,
+            Self::Add => 2,
+            Self::Multiply => 3,
+        }
+    }
+
+    /// Shader/chain numeric id.
+    pub const fn id(self) -> f32 {
+        self.index() as f32
+    }
+}
+
 /// Tiler cell aperture shape (grid + radial lattices; hexagon mode always
 /// uses hex cells). Non-square cells punch transparency outside the shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -727,6 +777,8 @@ pub enum EffectType {
         intensity: Property<f32>,
         #[serde(deserialize_with = "crate::property::de_property_or_value", default)]
         color: Property<Color>,
+        #[serde(default)]
+        blend: GlowBlend,
     },
     /// Ordered dither: posterize to `levels` + Bayer threshold.
     /// OFX plug-in `net.sf.openfx.dither`.
@@ -744,6 +796,8 @@ pub enum EffectType {
         #[serde(deserialize_with = "crate::property::de_property_or_value", default)]
         color: Property<Color>,
         intensity: Property<f32>,
+        #[serde(default)]
+        blend: GlowBlend,
     },
     /// Tone curve: master luminance remap through an editable curve
     /// (empty = linear identity). OFX plug-in
@@ -1301,6 +1355,7 @@ impl EffectType {
             size: Property::new("Size", size.clamp(0.0, 100.0)),
             intensity: Property::new("Intensity", intensity.clamp(0.0, 100.0)),
             color: Property::new("Color", color),
+            blend: GlowBlend::Normal,
         }
     }
 
@@ -1320,6 +1375,7 @@ impl EffectType {
             width: Property::new("Width", width.clamp(0.0, 100.0)),
             color: Property::new("Color", color),
             intensity: Property::new("Intensity", intensity.clamp(0.0, 100.0)),
+            blend: GlowBlend::Normal,
         }
     }
 
@@ -2113,10 +2169,24 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 }
                 false
             }
-            EffectType::RimLight { mode, .. } => {
+            EffectType::RimLight { mode, blend, .. } => {
                 if field.eq_ignore_ascii_case("mode") {
                     if let Some(m) = RimMode::ALL.get(index).copied() {
                         *mode = m;
+                        return true;
+                    }
+                } else if field.eq_ignore_ascii_case("blend") {
+                    if let Some(b) = GlowBlend::ALL.get(index).copied() {
+                        *blend = b;
+                        return true;
+                    }
+                }
+                false
+            }
+            EffectType::InnerGlow { blend, .. } => {
+                if field.eq_ignore_ascii_case("blend") {
+                    if let Some(b) = GlowBlend::ALL.get(index).copied() {
+                        *blend = b;
                         return true;
                     }
                 }
@@ -2149,9 +2219,18 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                     None
                 }
             }
-            EffectType::RimLight { mode, .. } => {
+            EffectType::RimLight { mode, blend, .. } => {
                 if field.eq_ignore_ascii_case("mode") {
                     Some(mode.index())
+                } else if field.eq_ignore_ascii_case("blend") {
+                    Some(blend.index())
+                } else {
+                    None
+                }
+            }
+            EffectType::InnerGlow { blend, .. } => {
+                if field.eq_ignore_ascii_case("blend") {
+                    Some(blend.index())
                 } else {
                     None
                 }
@@ -4122,16 +4201,22 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
             EffectType::MatchColor { amount, .. } | EffectType::MatchLight { amount, .. } => vec![
                 scalar("amount", "Amount", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), amount)
             ],
-            EffectType::InnerGlow { size, intensity, color } => vec![
+            EffectType::InnerGlow { size, intensity, color, blend } => vec![
                 scalar("size", "Size", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 1.0, 0, "%", 40.0), size),
                 scalar("intensity", "Intensity", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 75.0), intensity),
                 PropDecl::color("color", "Color", color.value, color.is_animated()),
+                PropDecl::enumeration(
+                    "blend",
+                    "Blend",
+                    GlowBlend::ALL.iter().map(|m| m.label().to_string()).collect(),
+                    blend.index(),
+                ),
             ],
             EffectType::Dither { amount, levels } => vec![
                 scalar("amount", "Amount", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 100.0), amount),
                 scalar("levels", "Levels", WidgetKind::Slider, px1(2.0, 32.0, 1.0, 8.0), levels),
             ],
-            EffectType::RimLight { mode, direction, width, color, intensity } => vec![
+            EffectType::RimLight { mode, direction, width, color, intensity, blend } => vec![
                 PropDecl::enumeration(
                     "mode",
                     "Mode",
@@ -4142,6 +4227,12 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 scalar("width", "Width", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 1.0, 0, "%", 30.0), width),
                 PropDecl::color("color", "Color", color.value, color.is_animated()),
                 scalar("intensity", "Intensity", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 5.0, 0, "%", 80.0), intensity),
+                PropDecl::enumeration(
+                    "blend",
+                    "Blend",
+                    GlowBlend::ALL.iter().map(|m| m.label().to_string()).collect(),
+                    blend.index(),
+                ),
             ],
             // Curves renders through its bespoke card arm (curve editor);
             // no scalar/color declarations.

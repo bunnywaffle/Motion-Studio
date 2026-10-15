@@ -7101,6 +7101,9 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         let layer = state.active_composition().unwrap().get_layer(&nid).unwrap().clone();
         assert!(matches!(layer.source, LayerSource::Null { .. }));
         assert!(layer.is_null());
+        // Spawns at the comp center (zero position + zero anchor).
+        assert_eq!(layer.transform.position.value, project::Vec2::ZERO);
+        assert_eq!(layer.transform.anchor_point.value, project::Vec2::ZERO);
         // Gizmo picker roundtrips every style.
         for g in [NullGizmo::Arrow, NullGizmo::Target, NullGizmo::Diamond] {
             state.set_null_gizmo(&nid, g).expect("gizmo");
@@ -13382,15 +13385,14 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             assert_eq!(span, 10.0);
         });
 
-        // 5. Zoom out below 100%: visible exceeds total, start goes
-        // negative so the comp hugs the right edge (padding left),
-        // pan locks.
+        // 5. Zoom out below 100%: visible exceeds total, view locks at
+        // zero (comp hugs the left, padding right), pan locks.
         timeline_panel.update(cx, |p, _| {
             p.set_zoom(0.5, 10.0);
             assert!((p.timeline_zoom - 0.5).abs() < 1e-4);
             let (start, span) = p.visible_time_span(10.0);
             assert!((span - 20.0).abs() < 1e-6);
-            assert!((start + 10.0).abs() < 1e-6);
+            assert!(start.abs() < 1e-6);
             p.pan_left(10.0);
             p.pan_right(10.0);
             let (start2, _) = p.visible_time_span(10.0);
@@ -13425,6 +13427,22 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             let r1 = s1 + v1;
             assert!((r1 - r0).abs() < 0.05, "zoom must keep right edge {r0} vs {r1}");
             assert!(v1 < v0);
+        });
+
+        // 8. Zooming OUT pins the left edge: zoom in twice, pan left
+        // twice (staying inside the zoomed-out window), zoom out, and
+        // the viewport start must not move.
+        timeline_panel.update(cx, |p, _| {
+            p.zoom_reset();
+            p.zoom_in(10.0);
+            p.zoom_in(10.0);
+            p.pan_left(10.0);
+            p.pan_left(10.0);
+            let (s0, v0) = p.visible_time_span(10.0);
+            p.zoom_out(10.0);
+            let (s1, v1) = p.visible_time_span(10.0);
+            assert!((s1 - s0).abs() < 0.05, "zoom-out must keep left edge {s0} vs {s1}");
+            assert!(v1 > v0);
         });
     }
 

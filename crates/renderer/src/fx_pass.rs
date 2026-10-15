@@ -528,7 +528,7 @@ impl FxPass {
             ),
             "inner_glow" => (
                 ef::inner_glow_resample().wgsl,
-                "fx_inner_glow(uv, color, u.params[0].x, u.params[0].y, u.colors[0].rgb, vec2<f32>(u.misc.y, u.misc.z))",
+                "fx_inner_glow(uv, color, u.params[0].x, u.params[0].y, u.colors[0].rgb, u.params[0].z, vec2<f32>(u.misc.y, u.misc.z))",
                 true,
             ),
             "dither" => (
@@ -538,7 +538,7 @@ impl FxPass {
             ),
             "rim_light" => (
                 ef::rim_light_resample().wgsl,
-                "fx_rim_light(uv, color, u.params[0].x, u.params[0].y, u.params[0].z, u.colors[0].rgb, u.params[1].x, vec2<f32>(u.misc.y, u.misc.z))",
+                "fx_rim_light(uv, color, u.params[0].x, u.params[0].y, u.params[0].z, u.colors[0].rgb, u.params[1].x, u.params[0].w, vec2<f32>(u.misc.y, u.misc.z))",
                 true,
             ),
             // NOTE: no "outer_glow" arm on purpose. Outer glow is a

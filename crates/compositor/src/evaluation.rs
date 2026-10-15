@@ -686,6 +686,7 @@ pub enum EvaluatedEffectType {
         size: f32,
         intensity: f32,
         color: Color,
+        blend: project::GlowBlend,
     },
     /// Ordered dither: posterize + Bayer threshold.
     Dither {
@@ -699,6 +700,7 @@ pub enum EvaluatedEffectType {
         width: f32,
         color: Color,
         intensity: f32,
+        blend: project::GlowBlend,
     },
     /// Modular stock plug-in: evaluated scalar params in descriptor order
     /// plus resolved color slots.
@@ -2320,11 +2322,12 @@ impl LayerStackEvaluator {
                                 src_high: z,
                             }
                         }
-                        EffectType::InnerGlow { size, intensity, color } => {
+                        EffectType::InnerGlow { size, intensity, color, blend } => {
                             EvaluatedEffectType::InnerGlow {
                                 size: eval_eff_prop("size", size.evaluate_at(time)),
                                 intensity: eval_eff_prop("intensity", intensity.evaluate_at(time)),
                                 color: color.evaluate_at(time),
+                                blend: *blend,
                             }
                         }
                         EffectType::Dither { amount, levels } => {
@@ -2333,13 +2336,14 @@ impl LayerStackEvaluator {
                                 levels: eval_eff_prop("levels", levels.evaluate_at(time)),
                             }
                         }
-                        EffectType::RimLight { mode, direction, width, color, intensity } => {
+                        EffectType::RimLight { mode, direction, width, color, intensity, blend } => {
                             EvaluatedEffectType::RimLight {
                                 mode: *mode,
                                 direction: eval_eff_prop("direction", direction.evaluate_at(time)),
                                 width: eval_eff_prop("width", width.evaluate_at(time)),
                                 color: color.evaluate_at(time),
                                 intensity: eval_eff_prop("intensity", intensity.evaluate_at(time)),
+                                blend: *blend,
                             }
                         }
                         EffectType::Curves { curve } => {

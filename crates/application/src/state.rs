@@ -1885,7 +1885,7 @@ impl EditorState {
     /// Add a Null control layer (no pixels — parenting + linkable values).
     pub fn add_null_layer(&mut self, name: Option<&str>) -> Result<String, String> {
         self.checkpoint();
-        let (id, in_pt, out_pt, comp_w, comp_h) = {
+        let (id, in_pt, out_pt) = {
             let comp = self
                 .active_composition()
                 .ok_or_else(|| "No active composition".to_string())?;
@@ -1899,18 +1899,15 @@ impl EditorState {
                 id,
                 TimeCode::zero(comp.frame_rate),
                 comp.duration,
-                comp.width,
-                comp.height,
             )
         };
 
         let layer_name = name.unwrap_or("Null 1");
         let mut layer = Layer::null(&id, layer_name, in_pt, out_pt);
+        // Zero/zero: the null point sits exactly at the comp center (world
+        // origin), and rotation pivots around the point itself.
         layer.transform.position.set_value(Vec2::ZERO);
-        layer.transform.anchor_point.set_value(Vec2::new(
-            (comp_w / 2) as f32,
-            (comp_h / 2) as f32,
-        ));
+        layer.transform.anchor_point.set_value(Vec2::ZERO);
 
         let comp_mut = self
             .active_composition_mut()

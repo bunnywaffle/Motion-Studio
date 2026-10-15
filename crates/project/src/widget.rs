@@ -247,7 +247,7 @@ impl PropDecl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::effect::{Effect, EffectType, RimMode};
+    use crate::effect::{Effect, EffectType, GlowBlend, RimMode};
     use crate::property::Property;
     use crate::stock::StockPlugin;
     use crate::timecode::TimeCode;
@@ -317,9 +317,9 @@ mod tests {
             fx(EffectType::OilPaint { radius: p(2.0), amount: p(100.0) }),
             fx(EffectType::MatchColor { reference_layer: String::new(), amount: p(100.0) }),
             fx(EffectType::MatchLight { reference_layer: String::new(), amount: p(100.0) }),
-            fx(EffectType::InnerGlow { size: p(40.0), intensity: p(75.0), color: c(Color::WHITE) }),
+            fx(EffectType::InnerGlow { size: p(40.0), intensity: p(75.0), color: c(Color::WHITE), blend: GlowBlend::Normal }),
             fx(EffectType::Dither { amount: p(100.0), levels: p(8.0) }),
-            fx(EffectType::RimLight { mode: RimMode::Directional, direction: p(135.0), width: p(30.0), color: c(Color::WHITE), intensity: p(80.0) }),
+            fx(EffectType::RimLight { mode: RimMode::Directional, direction: p(135.0), width: p(30.0), color: c(Color::WHITE), intensity: p(80.0), blend: GlowBlend::Normal }),
             fx(EffectType::TrimPath { start: p(0.0), end: p(100.0), offset: p(0.0) }),
             fx(EffectType::SinePath { amplitude: p(20.0), frequency: p(1.0), phase: p(0.0) }),
             fx(EffectType::InstancePath { count: p(5.0), spread: p(100.0), offset: p(0.0), follow: p(100.0), scale: p(100.0) }),

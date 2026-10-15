@@ -786,21 +786,23 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
             amount.to_bits().hash(h);
         }
         EvaluatedEffectType::Invert { amount } => amount.to_bits().hash(h),
-        EvaluatedEffectType::InnerGlow { size, intensity, color } => {
+        EvaluatedEffectType::InnerGlow { size, intensity, color, blend } => {
             size.to_bits().hash(h);
             intensity.to_bits().hash(h);
             color_hash(color, h);
+            (*blend as u8).hash(h);
         }
         EvaluatedEffectType::Dither { amount, levels } => {
             amount.to_bits().hash(h);
             levels.to_bits().hash(h);
         }
-        EvaluatedEffectType::RimLight { mode, direction, width, color, intensity } => {
+        EvaluatedEffectType::RimLight { mode, direction, width, color, intensity, blend } => {
             (*mode as u8).hash(h);
             direction.to_bits().hash(h);
             width.to_bits().hash(h);
             color_hash(color, h);
             intensity.to_bits().hash(h);
+            (*blend as u8).hash(h);
         }
         EvaluatedEffectType::MatchColor { reference_layer, amount, ref_shadow, ref_mid, ref_high, src_shadow, src_mid, src_high }
         | EvaluatedEffectType::MatchLight { reference_layer, amount, ref_shadow, ref_mid, ref_high, src_shadow, src_mid, src_high } => {
@@ -3529,6 +3531,7 @@ mod tests {
                 size: 40.0,
                 intensity: 80.0,
                 color: Color::rgba(1.0, 1.0, 1.0, 1.0),
+                blend: project::GlowBlend::Normal,
             }),
             // No dither here: ordered thresholds flip on u8-quantized
             // gradients, so it correctly declines the GPU chain (CPU
@@ -3539,6 +3542,7 @@ mod tests {
                 width: 40.0,
                 color: Color::rgba(1.0, 1.0, 1.0, 1.0),
                 intensity: 80.0,
+                blend: project::GlowBlend::Normal,
             }),
         ];
         let ctx = RasterFx { time_s: 0.0, frame: 0, res_w: 64.0, res_h: 64.0, duration_s: 0.0, playing: false };
