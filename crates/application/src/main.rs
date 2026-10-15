@@ -13177,15 +13177,15 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             assert_eq!(span, 10.0);
         });
 
-        // 2. Zoom in anchored on the view center (full 10s view: center 5.0s).
+        // 2. Zoom in pinned on the view's right edge (full 10s view:
+        // right edge 10.0s stays, content grows leftward).
         timeline_panel.update(cx, |p, _| {
             p.zoom_in(10.0);
             assert!(p.timeline_zoom > 1.0);
             let (start, span) = p.visible_time_span(10.0);
             assert!(span < 10.0);
-            // View should be centered around 5.0s
-            let center = start + span * 0.5;
-            assert!((center - 5.0).abs() < 0.5);
+            // Right edge must not move.
+            assert!((start + span - 10.0).abs() < 0.05);
         });
 
         // 3. Pan left and right
@@ -13237,19 +13237,19 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             assert_eq!(p.timeline_zoom, 1.0);
         });
 
-        // 7. Zoom anchors on the view center, not the playhead: pan right,
-        // zoom in twice, and the viewport middle must not move.
+        // 7. Zoom pins the right edge, not the center or playhead: pan
+        // left, zoom in twice, and the viewport's right edge must not move.
         timeline_panel.update(cx, |p, _| {
             p.zoom_reset();
             p.zoom_in(10.0);
-            p.pan_right(10.0);
-            p.pan_right(10.0);
+            p.pan_left(10.0);
+            p.pan_left(10.0);
             let (s0, v0) = p.visible_time_span(10.0);
-            let c0 = s0 + v0 * 0.5;
+            let r0 = s0 + v0;
             p.zoom_in(10.0);
             let (s1, v1) = p.visible_time_span(10.0);
-            let c1 = s1 + v1 * 0.5;
-            assert!((c1 - c0).abs() < 0.05, "zoom must keep view center {c0} vs {c1}");
+            let r1 = s1 + v1;
+            assert!((r1 - r0).abs() < 0.05, "zoom must keep right edge {r0} vs {r1}");
             assert!(v1 < v0);
         });
     }

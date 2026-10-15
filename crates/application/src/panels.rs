@@ -18890,14 +18890,13 @@ impl TimelinePanel {
         (start, visible_duration)
     }
 
-    /// Zoom in on the timeline, anchored on the current view center
-    /// (the frame under the viewport middle stays put).
+    /// Zoom in on the timeline, pinned on the view's right edge.
     pub fn zoom_in(&mut self, total_duration: f64) {
         let new_zoom = (self.timeline_zoom * 1.5).min(16.0);
         self.set_zoom(new_zoom, total_duration);
     }
 
-    /// Zoom out on the timeline, anchored on the current view center.
+    /// Zoom out on the timeline, pinned on the view's right edge.
     pub fn zoom_out(&mut self, total_duration: f64) {
         let new_zoom = (self.timeline_zoom / 1.5).max(0.25);
         self.set_zoom(new_zoom, total_duration);
@@ -18909,13 +18908,14 @@ impl TimelinePanel {
         self.timeline_view_t0 = 0.0;
     }
 
-    /// Set explicit zoom factor anchored on the current view center, so
-    /// zooming never jumps the viewport toward the playhead.
+    /// Set explicit zoom factor pinned on the view's RIGHT edge: the
+    /// rightmost visible frame stays put and content grows/shrinks
+    /// leftward.
     pub fn set_zoom(&mut self, new_zoom: f32, total_duration: f64) {
-        // Anchor on the pre-zoom view center: capture it before touching
+        // Anchor on the pre-zoom right edge: capture it before touching
         // `timeline_zoom` (the span reader uses the stored zoom).
         let (cur_t0, cur_vis) = self.visible_time_span(total_duration);
-        let center = cur_t0 + cur_vis / 2.0;
+        let right = cur_t0 + cur_vis;
         self.timeline_zoom = new_zoom.clamp(0.25, 16.0);
         if (self.timeline_zoom - 1.0).abs() < 0.001 {
             self.timeline_zoom = 1.0;
@@ -18929,7 +18929,7 @@ impl TimelinePanel {
             return;
         }
         let max_start = (total_duration - new_visible).max(0.0);
-        self.timeline_view_t0 = (center - new_visible * 0.5).clamp(0.0, max_start);
+        self.timeline_view_t0 = (right - new_visible).clamp(0.0, max_start);
     }
 
     /// Pan timeline view window to the left.
