@@ -351,6 +351,14 @@ impl GpuEffectEngine {
                         any = true;
                         continue;
                     }
+                    // Bokeh stays on the exact CPU path: the blurred-highlight
+                    // alpha tail below 1/255 carries full-strength screen
+                    // presence on the CPU (`screen_over` unpremultiplies)
+                    // but quantizes to zero in any u8 chain — an unboundable
+                    // halo fringe (measured 0.88 on gradients).
+                    if *plugin == StockPlugin::Bokeh {
+                        return false;
+                    }
                     if !crate::fx_pass::CHAIN_SAFE_STOCK.contains(plugin) {
                         return false;
                     }

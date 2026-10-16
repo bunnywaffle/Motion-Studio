@@ -312,5 +312,31 @@ mod tests {
             assert!(!engine.supports_fx_chain(&[edge.clone(), cartoon]));
         }
     }
+
+    /// Bokeh stays on the exact CPU path: the blurred-highlight alpha tail
+    /// below 1/255 carries full-strength screen presence on the CPU
+    /// (`screen_over` unpremultiplies) but quantizes to zero in any u8
+    /// chain — an unboundable halo fringe (measured 0.88 on gradients).
+    /// Bilateral takes the GPU bilateral compute path in the same breath.
+    #[test]
+    fn bokeh_declines_bilateral_takes_gpu_chain() {
+        if let Ok(gpu) = GpuContext::new_headless() {
+            let mut engine = GpuEffectEngine::new(gpu).expect("create gpu effect engine");
+            let stock = |plugin: project::StockPlugin, params: Vec<f32>| compositor::EvaluatedEffect {
+                id: format!("fx_{plugin:?}"),
+                name: format!("{plugin:?}"),
+                enabled: true,
+                effect_type: compositor::EvaluatedEffectType::Stock { plugin, params, colors: Vec::new() },
+            };
+            assert!(!engine.supports_fx_chain(std::slice::from_ref(&stock(
+                project::StockPlugin::Bokeh,
+                vec![10.0, 50.0]
+            ))));
+            assert!(engine.supports_fx_chain(std::slice::from_ref(&stock(
+                project::StockPlugin::Bilateral,
+                vec![3.0, 30.0]
+            ))));
+        }
+    }
 }
 

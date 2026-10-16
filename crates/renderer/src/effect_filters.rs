@@ -2032,6 +2032,80 @@ pub fn stock_zoom_blur_resample() -> ColorFilter {
     )
 }
 
+/// Stock bilateral blur (mirrors `k_bilateral`): two range-weighted 1D
+/// passes (H then V) FUSED into one fragment evaluation — the V pass
+/// recomputes its H-row values from source texels in registers, so no u8
+/// intermediate ever carries the alpha-normalized luminance the weights
+/// read (a separate compute path provably destroys faint centers: pass-1
+/// alpha below 1/255 quantizes to zero, flipping pass-2 weights ~100x).
+/// Radius is capped at 4 (81 taps max): cheap and D3D-safe (plain loops).
+pub fn stock_bilateral_resample() -> ColorFilter {
+    color_filter!(
+        "stock_bilateral_resample",
+        r#"fn fx_bi_px(px: vec2<i32>, res: vec2<i32>) -> vec4<f32> {
+    if (px.x < 0 || px.y < 0 || px.x >= res.x || px.y >= res.y) {
+        return vec4<f32>(0.0);
+    }
+    let t = textureLoad(src_tex, px, 0);
+    return vec4<f32>(t.rgb * t.a, t.a);
+}
+fn fx_bi_lum(t: vec4<f32>) -> f32 {
+    return (0.299 * t.r + 0.587 * t.g + 0.114 * t.b) / max(t.a, 0.000001);
+}
+fn fx_bi_h(cx: i32, cy: i32, r: i32, range: f32, res: vec2<i32>) -> vec4<f32> {
+    let c = fx_bi_px(vec2<i32>(cx, cy), res);
+    let lc = fx_bi_lum(c);
+    var acc = c;
+    var wsum = 1.0;
+    for (var i: i32 = -r; i <= r; i++) {
+        if (i == 0) {
+            continue;
+        }
+        let sx = cx + i;
+        if (sx < 0 || sx >= res.x) {
+            continue;
+        }
+        let s = fx_bi_px(vec2<i32>(sx, cy), res);
+        let w = exp(-abs(lc - fx_bi_lum(s)) / range);
+        acc += s * w;
+        wsum += w;
+    }
+    return acc / wsum;
+}
+fn fx_stock_bilateral_c(uv: vec2<f32>, color: vec4<f32>, radius_p: f32, range_p: f32, res: vec2<f32>) -> vec4<f32> {
+    let r = i32(min(clamp(radius_p, 0.0, 10.0), 4.0));
+    let range = clamp(range_p / 100.0, 0.01, 1.0);
+    if (r < 1) {
+        return color;
+    }
+    let X = uv * res - vec2<f32>(0.5);
+    let ri = vec2<i32>(i32(res.x), i32(res.y));
+    let xi = i32(floor(X.x + 0.5));
+    let yi = i32(floor(X.y + 0.5));
+    let c0 = fx_bi_h(xi, yi, r, range, ri);
+    let lc0 = fx_bi_lum(c0);
+    var acc = c0;
+    var wsum = 1.0;
+    for (var j: i32 = -r; j <= r; j++) {
+        if (j == 0) {
+            continue;
+        }
+        let sy = yi + j;
+        if (sy < 0 || sy >= ri.y) {
+            continue;
+        }
+        let s = fx_bi_h(xi, sy, r, range, ri);
+        let w = exp(-abs(lc0 - fx_bi_lum(s)) / range);
+        acc += s * w;
+        wsum += w;
+    }
+    let inv = 1.0 / wsum;
+    let a = acc.a * inv;
+    return vec4<f32>(select(acc.rgb * inv, acc.rgb / acc.a, acc.a > 0.0), a);
+}"#
+    )
+}
+
 /// Stock Card 3D (mirrors `k_card_3d` via the shared plan): inverse
 /// homography in uniforms (row-major, baked by `card_3d_plan`) with a
 /// TRUE projective divide — not the bilinear approximation the corner
@@ -2806,6 +2880,7 @@ pub fn resample_filters() -> Vec<ColorFilter> {
         stock_motion_blur_resample(),
         stock_radial_blur_resample(),
         stock_zoom_blur_resample(),
+        stock_bilateral_resample(),
     ]
 }
 

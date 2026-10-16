@@ -441,6 +441,11 @@ impl FxPass {
                 "fx_stock_zoom_blur_c(uv, color, u.params[0].x, u.params[0].y, 1.0, RES)",
                 true,
             ),
+            StockPlugin::Bilateral => (
+                ef::stock_bilateral_resample().wgsl,
+                "fx_stock_bilateral_c(uv, color, u.params[0].x, u.params[0].y, RES)",
+                true,
+            ),
             _ => {
                 return Err(format!("No native WGSL pass implemented for stock plugin {:?}", plugin));
             }
@@ -1009,13 +1014,17 @@ struct FxUniforms {
 /// screen amplifies any nonzero mask to full strength — unboundable in
 /// a u8 chain for the same reason as Threshold.
 ///
-/// Blur family: Directional/Motion/Radial/Zoom have exact fragment twins
-/// (premultiplied gather, unpremultiplied output); Box and Defocus run the
-/// separable box compute path (`ComputeBoxPipeline`) — no fragment twin, so
-/// they are members here but stay out of [`stock_wgsl_plugins`]. Bokeh and
-/// Bilateral stay on the exact CPU path (multi-stage highlight/screen and
-/// range-weighted passes do not fit a single u8 pass).
-pub const CHAIN_SAFE_STOCK: [StockPlugin; 45] = [
+/// Blur family: Directional/Motion/Radial/Zoom/Bilateral have exact
+/// fragment twins (premultiplied gather, unpremultiplied output;
+/// bilateral fuses both range-weighted passes in one evaluation so no
+/// u8 intermediate ever carries the alpha-normalized luminance the
+/// weights read). Box and Defocus run the separable box compute path
+/// (`ComputeBoxPipeline`) — no fragment twins, so they are members here
+/// but stay out of [`stock_wgsl_plugins`]. Bokeh stays on the exact CPU
+/// path: its blurred-highlight alpha tail below 1/255 carries
+/// full-strength screen presence on the CPU but quantizes to zero in any
+/// u8 chain (same family as the Glow decline).
+pub const CHAIN_SAFE_STOCK: [StockPlugin; 46] = [
     StockPlugin::Posterize,
     StockPlugin::TemperatureTint,
     StockPlugin::SpillSuppress,
@@ -1061,6 +1070,7 @@ pub const CHAIN_SAFE_STOCK: [StockPlugin; 45] = [
     StockPlugin::ZoomBlur,
     StockPlugin::BoxBlur,
     StockPlugin::Defocus,
+    StockPlugin::Bilateral,
 ];
 
 /// Built-in (non-stock) evaluated effects whose WGSL twin reproduces the
@@ -1171,6 +1181,7 @@ pub fn stock_wgsl_plugins() -> Vec<StockPlugin> {
         S::MotionBlur,
         S::RadialBlur,
         S::ZoomBlur,
+        S::Bilateral,
     ]
 }
 
