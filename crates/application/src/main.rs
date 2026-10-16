@@ -132,7 +132,8 @@ impl AppView {
         // Right dock: Tab group containing Properties and Effects tabs (After Effects workspace layout)
         let right_layout = DockLayout::tabs()
             .panel_view(panel_handle(panels.properties.clone()), cx)
-            .panel_view(panel_handle(panels.effects.clone()), cx);
+            .panel_view(panel_handle(panels.effects.clone()), cx)
+            .panel_view(panel_handle(panels.presets.clone()), cx);
 
         dock_area.update(cx, |dock, cx| {
             dock.set_dock(DockPlacement::Left, left_layout, window, cx);
@@ -4452,6 +4453,62 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
     }
 
     #[gpui_kit::test]
+    fn test_presets_panel_lists_saved_presets(cx: &mut TestAppContext) {
+        use crate::state::UserAnimationPreset;
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            Theme::change(ThemeMode::Dark, None, cx);
+        });
+
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
+            window.activate_window();
+            window.set_window_title("Motion Compositor");
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+
+            let panels = app_view.read(cx).panels().clone();
+            let presets_id = PanelId::from(panels.presets.entity_id());
+            let effects_id = PanelId::from(panels.effects.entity_id());
+            let dock_area = app_view.read(cx).dock_area().clone();
+            dock_area.update(cx, |dock, cx| {
+                assert!(dock.panel(effects_id).is_some(), "effects registered");
+                assert!(dock.panel(presets_id).is_some(), "presets registered");
+                dock.select_panel(presets_id, window, cx);
+            });
+            window.render_frame(cx);
+
+            // Empty library shows the save hint.
+            assert!(window.find("presets_empty_hint").visible());
+            assert!(window.find("preset_builtin_0").visible());
+
+            // A saved preset appears with apply / export / delete actions.
+            let state = app_view.read(cx).state().clone();
+            state.update(cx, |s, cx| {
+                s.user_animation_presets.push(UserAnimationPreset {
+                    name: "Test Move".to_string(),
+                    tracks: Vec::new(),
+                });
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert!(window.find("preset_apply_0").visible());
+            assert!(window.find("preset_export_0").visible());
+            assert!(window.find("preset_delete_0").visible());
+            assert!(window.try_find("presets_empty_hint").is_none());
+        })
+        .expect("update_window failed");
+    }
+
+    #[gpui_kit::test]
     fn test_editor_state_initialization(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let (_root, app_view) = setup_test_window(cx);
@@ -5049,6 +5106,37 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         }
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_user_animation_preset_single_export_roundtrip() {
+        use crate::state::{PresetTrack, UserAnimationPreset};
+        use project::{Keyframe, TimeCode};
+
+        // The Presets panel exports one preset object per file: it must
+        // deserialize back bit-identical.
+        let preset = UserAnimationPreset {
+            name: "Spin Fade".to_string(),
+            tracks: vec![PresetTrack::F32 {
+                path: "opacity".to_string(),
+                keyframes: vec![
+                    Keyframe::new(TimeCode::from_seconds(0.0, 30.0), 0.0f32),
+                    Keyframe::new(TimeCode::from_seconds(0.5, 30.0), 100.0f32),
+                ],
+            }],
+        };
+        let text = serde_json::to_string_pretty(&preset).expect("export preset");
+        let back: UserAnimationPreset = serde_json::from_str(&text).expect("reimport preset");
+        assert_eq!(back.name, "Spin Fade");
+        assert_eq!(back.tracks.len(), 1);
+        match &back.tracks[0] {
+            PresetTrack::F32 { path, keyframes } => {
+                assert_eq!(path, "opacity");
+                assert_eq!(keyframes.len(), 2);
+                assert_eq!(keyframes[1].value, 100.0);
+            }
+            other => panic!("expected F32 track, got {other:?}"),
+        }
     }
 
     #[test]

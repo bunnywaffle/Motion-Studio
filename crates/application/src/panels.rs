@@ -16489,6 +16489,322 @@ impl Panel for EffectsPanel {
     }
 }
 
+// --- Presets Panel ---
+
+/// Animation preset library: user-saved presets (click to apply to the
+/// selected layer, export to a `.json` file, delete) plus the built-in
+/// entrance/exit/emphasis set. Saving stays in the Timeline animation
+/// dropdown; this panel is the browse/apply/share home.
+pub struct PresetsPanel {
+    focus_handle: FocusHandle,
+    state: Option<Entity<EditorState>>,
+    _subscription: Option<Subscription>,
+    last_selected_id: Option<String>,
+    preset_names: Vec<String>,
+}
+
+impl PresetsPanel {
+    pub fn new(state: Entity<EditorState>, cx: &mut Context<Self>) -> Self {
+        let last_selected_id = state.read(cx).selected_layer_id.clone();
+        let preset_names = preset_names_of(&state, cx);
+        let _subscription = cx.observe(&state, |this, state, cx| {
+            let cur_sel = state.read(cx).selected_layer_id.clone();
+            let names = preset_names_of(&state, cx);
+            if this.last_selected_id != cur_sel || this.preset_names != names {
+                this.last_selected_id = cur_sel;
+                this.preset_names = names;
+                cx.notify();
+            }
+        });
+        Self {
+            focus_handle: cx.focus_handle(),
+            state: Some(state),
+            _subscription: Some(_subscription),
+            last_selected_id,
+            preset_names,
+        }
+    }
+}
+
+fn preset_names_of(state: &Entity<EditorState>, cx: &App) -> Vec<String> {
+    state
+        .read(cx)
+        .user_animation_presets
+        .iter()
+        .map(|p| p.name.clone())
+        .collect()
+}
+
+impl EventEmitter<PanelEvent> for PresetsPanel {}
+
+impl Focusable for PresetsPanel {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+fn presets_group_header(label: &'static str) -> impl IntoElement {
+    div()
+        .text_xs()
+        .text_color(ae::dim())
+        .font_semibold()
+        .py_0p5()
+        .px_2()
+        .child(label)
+}
+
+impl Render for PresetsPanel {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut root = v_flex()
+            .id("presets_panel")
+            .test_support()
+            .size_full()
+            .gap_0p5()
+            .p_2()
+            .overflow_y_scroll();
+        let Some(state) = self.state.clone() else {
+            return root.child("No project");
+        };
+        let presets: Vec<(String, usize)> = state
+            .read(cx)
+            .user_animation_presets
+            .iter()
+            .map(|p| (p.name.clone(), p.tracks.len()))
+            .collect();
+        let lid_opt = state.read(cx).selected_layer_id.clone();
+
+        root = root.child(presets_group_header("Custom"));
+        if presets.is_empty() {
+            root = root.child(
+                div()
+                    .id("presets_empty_hint")
+                    .test_support()
+                    .px_2()
+                    .py_0p5()
+                    .text_xs()
+                    .text_color(ae::dim())
+                    .child("Animate a layer, then save it via Timeline → Animation."),
+            );
+        }
+        for (idx, (pname, nt)) in presets.into_iter().enumerate() {
+            let s_apply = state.clone();
+            let l_apply = lid_opt.clone();
+            let n_apply = pname.clone();
+            let s_del = state.clone();
+            let s_exp = state.clone();
+            let n_exp = pname.clone();
+            let n_file = pname.clone();
+            let tracks = format!("{} track{}", nt, if nt == 1 { "" } else { "s" });
+            root = root.child(
+                h_flex()
+                    .justify_between()
+                    .items_center()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_sm()
+                    .text_xs()
+                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                    .child(
+                        div()
+                            .id(format!("preset_apply_{idx}"))
+                            .test_support()
+                            .cursor_pointer()
+                            .flex_1()
+                            .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                                match l_apply.clone() {
+                                    Some(lid) => s_apply.update(cx, |s, cx| {
+                                        // ponytail: reuse the app's single toast channel.
+                                        s.property_link_toast = Some(if s.apply_user_preset(&lid, idx) {
+                                            format!("Applied preset '{n_apply}'")
+                                        } else {
+                                            "Preset error: could not apply".to_string()
+                                        });
+                                        cx.notify();
+                                    }),
+                                    None => s_apply.update(cx, |s, cx| {
+                                        s.property_link_toast =
+                                            Some("Select a layer to apply a preset".to_string());
+                                        cx.notify();
+                                    }),
+                                }
+                            })
+                            .child(format!("{pname} ({tracks})")),
+                    )
+                    .child(
+                        div()
+                            .id(format!("preset_export_{idx}"))
+                            .test_support()
+                            .cursor_pointer()
+                            .px_1()
+                            .text_color(ae::dim())
+                            .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                                let s_exp = s_exp.clone();
+                                let n_exp = n_exp.clone();
+                                let n_file = n_file.clone();
+                                cx.spawn(|cx: &mut AsyncApp| {
+                                    let cx = cx.clone();
+                                    async move {
+                                        let (tx, rx) = std::sync::mpsc::channel();
+                                        let _ = std::thread::Builder::new()
+                                            .name("file-dialog-worker".to_string())
+                                            .stack_size(8 * 1024 * 1024)
+                                            .spawn(move || {
+                                                let file = rfd::FileDialog::new()
+                                                    .set_title("Export Animation Preset")
+                                                    .add_filter("Animation Preset", &["json"])
+                                                    .set_file_name(format!("{n_file}.json"))
+                                                    .save_file();
+                                                let _ = tx.send(file);
+                                            });
+                                        let path = match rx.recv() {
+                                            Ok(Some(p)) => p,
+                                            _ => return,
+                                        };
+                                        cx.update(|cx| {
+                                            s_exp.update(cx, |s, cx| {
+                                                let note = match s
+                                                    .user_animation_presets
+                                                    .iter()
+                                                    .find(|p| p.name == n_exp)
+                                                    .cloned()
+                                                {
+                                                    None => "Preset no longer exists".to_string(),
+                                                    Some(preset) => {
+                                                        match serde_json::to_string_pretty(&preset) {
+                                                            Ok(text) => match std::fs::write(&path, text) {
+                                                                Ok(()) => {
+                                                                    format!("Exported preset '{n_exp}'")
+                                                                }
+                                                                Err(e) => format!("Export error: {e}"),
+                                                            },
+                                                            Err(e) => format!("Export error: {e}"),
+                                                        }
+                                                    }
+                                                };
+                                                s.property_link_toast = Some(note);
+                                                cx.notify();
+                                            });
+                                        });
+                                    }
+                                })
+                                .detach();
+                            })
+                            .child("Export"),
+                    )
+                    .child(
+                        div()
+                            .id(format!("preset_delete_{idx}"))
+                            .test_support()
+                            .cursor_pointer()
+                            .px_1()
+                            .text_color(ae::dim())
+                            .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                                s_del.update(cx, |s, cx| {
+                                    s.delete_user_preset(idx);
+                                    cx.notify();
+                                });
+                            })
+                            .child("×"),
+                    ),
+            );
+        }
+
+        root = root.child(presets_group_header("Built-in"));
+        let groups = [
+            (
+                "Entrance",
+                vec![
+                    AnimationPreset::FadeIn,
+                    AnimationPreset::SlideInUp,
+                    AnimationPreset::SlideInDown,
+                    AnimationPreset::SlideInLeft,
+                    AnimationPreset::SlideInRight,
+                    AnimationPreset::PopIn,
+                    AnimationPreset::DropIn,
+                    AnimationPreset::WhipIn,
+                ],
+            ),
+            (
+                "Exit",
+                vec![
+                    AnimationPreset::FadeOut,
+                    AnimationPreset::SlideOutUp,
+                    AnimationPreset::SlideOutDown,
+                    AnimationPreset::SlideOutLeft,
+                    AnimationPreset::SlideOutRight,
+                    AnimationPreset::ShrinkOut,
+                    AnimationPreset::DropOut,
+                ],
+            ),
+            (
+                "Emphasis",
+                vec![
+                    AnimationPreset::Pulse,
+                    AnimationPreset::Shake,
+                    AnimationPreset::Float,
+                    AnimationPreset::Spin,
+                    AnimationPreset::Flash,
+                ],
+            ),
+        ];
+        let mut bi = 0usize;
+        for (group_name, items) in groups {
+            root = root.child(presets_group_header(group_name));
+            for preset in items {
+                let s_click = state.clone();
+                let l_click = lid_opt.clone();
+                let id = format!("preset_builtin_{bi}");
+                bi += 1;
+                root = root.child(
+                    div()
+                        .id(id)
+                        .test_support()
+                        .cursor_pointer()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_sm()
+                        .text_xs()
+                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                        .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                            match l_click.clone() {
+                                Some(lid) => s_click.update(cx, |s, cx| {
+                                    s.apply_animation_preset(&lid, preset);
+                                    s.property_link_toast =
+                                        Some(format!("Applied preset '{}'", preset.label()));
+                                    cx.notify();
+                                }),
+                                None => s_click.update(cx, |s, cx| {
+                                    s.property_link_toast =
+                                        Some("Select a layer to apply a preset".to_string());
+                                    cx.notify();
+                                }),
+                            }
+                        })
+                        .child(preset.label()),
+                );
+            }
+        }
+
+        root
+    }
+}
+
+impl BasePanel for PresetsPanel {
+    fn panel_name(&self) -> &'static str {
+        "presets"
+    }
+}
+
+impl Panel for PresetsPanel {
+    fn tab_name(&self, _cx: &App) -> Option<SharedString> {
+        Some("Presets".into())
+    }
+
+    fn title(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        "Presets"
+    }
+}
+
 // --- 5. Timeline Panel ---
 
 /// Track-matte option labels in Combobox order.
@@ -23843,6 +24159,7 @@ pub struct AppPanels {
     pub viewer: Entity<CompositionViewerPanel>,
     pub properties: Entity<PropertiesPanel>,
     pub effects: Entity<EffectsPanel>,
+    pub presets: Entity<PresetsPanel>,
     pub timeline: Entity<TimelinePanel>,
 }
 
@@ -23855,6 +24172,7 @@ impl AppPanels {
             viewer: composition,
             properties: cx.new(|cx| PropertiesPanel::new(state.clone(), cx)),
             effects: cx.new(|cx| EffectsPanel::new_with_state(state.clone(), cx)),
+            presets: cx.new(|cx| PresetsPanel::new(state.clone(), cx)),
             timeline: cx.new(|cx| TimelinePanel::new(state, cx)),
         }
     }
