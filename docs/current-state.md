@@ -12,7 +12,7 @@
 - Monochrome zinc dark theme (error/delete red + node-graph type hues excepted).
 - OS file drag-and-drop onto the window imports image/video/audio files into the Project bin.
 - Animation presets: 20 built-ins plus user-authored presets captured from a layer's animated transform and persisted to `<config>/MotionStudio/animation_presets.json` (timeline animation dropdown + dedicated Presets dock tab with apply/export-to-`.json`/delete).
-- **549 tests passing** (292 application, 137 project, 66 + 9 compositor, 38 renderer, incl. headless evaluation + UI suites), 0 failures, clippy clean modulo one pre-existing warning.
+- **553 tests passing** (296 application, 137 project, 66 + 9 compositor, 38 renderer, incl. headless evaluation + UI suites), 0 failures, clippy clean modulo one pre-existing warning.
 
 ## What Currently Works (original log, kept for history)
 - Cargo workspace initialized at repository root (`Cargo.toml`).

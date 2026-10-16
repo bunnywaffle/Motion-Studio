@@ -275,6 +275,7 @@ fn frame_origin_or_center(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProjectContextMenuTarget {
     BinBackground,
+    Composition(String),
     Asset(String),
     Solid(String),
     Generator(String),
@@ -2225,7 +2226,7 @@ impl Render for ProjectPanel {
             let sel_for_double = row.selection.clone();
             let p_rclick = cx.entity().clone();
             let rclick_target = match &row.selection {
-                ProjectSelection::Composition(_) => ProjectContextMenuTarget::BinBackground,
+                ProjectSelection::Composition(cid) => ProjectContextMenuTarget::Composition(cid.clone()),
                 ProjectSelection::Asset(aid) => ProjectContextMenuTarget::Asset(aid.clone()),
                 ProjectSelection::Solid(sid) => ProjectContextMenuTarget::Solid(sid.clone()),
                 ProjectSelection::Adjustment(lid) | ProjectSelection::Generator(lid) => ProjectContextMenuTarget::Generator(lid.clone()),
@@ -3010,6 +3011,60 @@ impl Render for ProjectPanel {
                                         });
                                     })
                                     .child("Delete Generator"),
+                            );
+                    }
+                    ProjectContextMenuTarget::Composition(comp_id) => {
+                        let cid = comp_id.clone();
+                        let s_open = s_menu.clone();
+                        let p_open = p_close.clone();
+                        let cid_open = comp_id.clone();
+                        let s_del = s_menu.clone();
+                        let p_del = p_close.clone();
+                        menu_items = menu_items
+                            .child(
+                                div()
+                                    .id("proj_ctx_open_comp")
+                                    .test_support()
+                                    .cursor_pointer()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .text_xs()
+                                    .font_semibold()
+                                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        s_open.update(cx, |s, cx| {
+                                            s.set_active_composition(&cid_open);
+                                            cx.notify();
+                                        });
+                                        p_open.update(cx, |this, cx| {
+                                            this.close_context_menu();
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child("Open Composition"),
+                            )
+                            .child(
+                                div()
+                                    .id("proj_ctx_del_comp")
+                                    .test_support()
+                                    .cursor_pointer()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .text_xs()
+                                    .hover(|s| s.bg(rgb(0xef4444)).text_color(rgb(0xffffff)))
+                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                        s_del.update(cx, |s, cx| {
+                                            let _ = s.delete_composition(&cid);
+                                            cx.notify();
+                                        });
+                                        p_del.update(cx, |this, cx| {
+                                            this.close_context_menu();
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child("Delete Composition"),
                             );
                     }
                 }
@@ -6380,7 +6435,45 @@ impl Render for CompositionViewerPanel {
                                                         s.update(cx, |s, cx| { let _ = s.move_selected_layer_down(); cx.notify(); });
                                                         p.update(cx, |this, cx| { this.close_context_menu(); cx.notify(); });
                                                     }
-                                                }));
+                                                }))
+                                                .child({
+                                                    let s = s_menu.clone();
+                                                    let p = p_close.clone();
+                                                    let t = lid.clone();
+                                                    div()
+                                                        .id("viewer_ctx_key_playhead")
+                                                        .test_support()
+                                                        .cursor_pointer()
+                                                        .px_2()
+                                                        .py_1()
+                                                        .rounded_sm()
+                                                        .text_xs()
+                                                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                            s.update(cx, |s, cx| { s.add_keyframe_to_all_transforms_at_playhead(&t); cx.notify(); });
+                                                            p.update(cx, |this, cx| { this.close_context_menu(); cx.notify(); });
+                                                        })
+                                                        .child("Keyframe at Playhead")
+                                                })
+                                                .child({
+                                                    let s = s_menu.clone();
+                                                    let p = p_close.clone();
+                                                    let t = lid.clone();
+                                                    div()
+                                                        .id("viewer_ctx_del_all_kf")
+                                                        .test_support()
+                                                        .cursor_pointer()
+                                                        .px_2()
+                                                        .py_1()
+                                                        .rounded_sm()
+                                                        .text_xs()
+                                                        .hover(|s| s.bg(rgb(0xef4444)).text_color(rgb(0xffffff)))
+                                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                            s.update(cx, |s, cx| { s.delete_all_keyframes_on_layer(&t); cx.notify(); });
+                                                            p.update(cx, |this, cx| { this.close_context_menu(); cx.notify(); });
+                                                        })
+                                                        .child("Delete All Keyframes")
+                                                });
                                         }
                                     }
 
@@ -10810,10 +10903,10 @@ fn render_masks_section(
                                 .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                                     s_p.update(cx, |s, cx| {
                                         let _ = s.toggle_mask_path_keyframe_at_current_time(&lid_p, &mid_p);
-                                        cx.notify();
-                                    });
-                                })
-                                .child("◆"),
+                                cx.notify();
+                            });
+                        })
+                        .child("◆"),
                         )
                         .child(
                             div()
@@ -17177,6 +17270,9 @@ fn timeline_keyframe_lane(
         let p_drag = panel_entity.clone();
         let lid_drag = layer_id.to_string();
         let path_drag = prop_path.to_string();
+        let p_rclick = panel_entity.clone();
+        let lid_rclick = layer_id.to_string();
+        let path_rclick = prop_path.to_string();
 
         lane = lane.child(
             div()
@@ -17241,6 +17337,30 @@ fn timeline_keyframe_lane(
                                 followers,
                             });
                         }
+                        cx.notify();
+                    });
+                })
+                .on_mouse_down(MouseButton::Right, move |event, _window, cx| {
+                    let pos = event.position;
+                    p_rclick.update(cx, |this, cx| {
+                        // Right-click selects the key when it is not part of
+                        // the selection, so the menu always acts on a
+                        // selected key.
+                        let one = (lid_rclick.clone(), path_rclick.clone(), t);
+                        let member = |s: &(String, String, f64)| {
+                            s.0 == one.0 && s.1 == one.1 && (s.2 - t).abs() <= tol
+                        };
+                        if !this.graph_sel_keys.iter().any(&member) {
+                            this.graph_sel_keys = vec![one];
+                        }
+                        this.open_context_menu(
+                            ContextMenuTarget::Keyframe {
+                                layer_id: lid_rclick.clone(),
+                                prop_path: path_rclick.clone(),
+                                at_s: t,
+                            },
+                            pos,
+                        );
                         cx.notify();
                     });
                 })
@@ -17523,6 +17643,9 @@ pub enum ContextMenuTarget {
     Effect { layer_id: String, effect_id: String },
     Property { layer_id: String, prop_path: &'static str },
     Mask { layer_id: String, mask_id: String },
+    /// One keyframe (timeline diamond or graph point): interpolation,
+    /// easing, and deletion act on this key only.
+    Keyframe { layer_id: String, prop_path: String, at_s: f64 },
     EmptyTrackArea,
 }
 
@@ -19099,12 +19222,12 @@ fn render_graph_view(
                 }
                 let p_down = panel_entity.clone();
                 let s_down_ck = state.clone();
-                let s_cycle = state.clone();
                 let lid_k = lid_graph.clone();
                 let path_k = se.path.clone();
                 let at_s = k.t;
                 let lid_r = lid_graph.clone();
                 let path_r = se.path.clone();
+                let p_rsel = panel_entity.clone();
                 plot = plot.child(
                     div()
                         .id(SharedString::from(format!(
@@ -19181,12 +19304,27 @@ fn render_graph_view(
                                 cx.notify();
                             });
                         })
-                        .on_mouse_down(MouseButton::Right, move |_event, _window, cx| {
-                            let lid = lid_r.clone();
-                            let path = path_r.clone();
-                            s_cycle.update(cx, |s, cx| {
-                                s.checkpoint();
-                                s.cycle_graph_key_interp(&lid, &path, at_s);
+                        .on_mouse_down(MouseButton::Right, move |event, _window, cx| {
+                            let pos = event.position;
+                            p_rsel.update(cx, |this, cx| {
+                                // Right-click selects the key when it is not
+                                // part of the selection, then offers
+                                // interpolation / easing / delete.
+                                let one = (lid_r.clone(), path_r.clone(), at_s);
+                                let is_member = |s: &(String, String, f64)| {
+                                    s.0 == one.0 && s.1 == one.1 && (s.2 - at_s).abs() <= half_frame2
+                                };
+                                if !this.graph_sel_keys.iter().any(&is_member) {
+                                    this.graph_sel_keys = vec![one];
+                                }
+                                this.open_context_menu(
+                                    ContextMenuTarget::Keyframe {
+                                        layer_id: lid_r.clone(),
+                                        prop_path: path_r.clone(),
+                                        at_s,
+                                    },
+                                    pos,
+                                );
                                 cx.notify();
                             });
                         })
@@ -22844,6 +22982,8 @@ impl Render for TimelinePanel {
                     let t3 = target_lid.clone();
                     menu_items = menu_items.child(
                         div()
+                            .id("timeline_ctx_key_playhead")
+                            .test_support()
                             .cursor_pointer()
                             .px_2()
                             .py_1()
@@ -22861,6 +23001,32 @@ impl Render for TimelinePanel {
                                 });
                             })
                             .child("Add Keyframe to Transforms at CTI"),
+                    );
+
+                    let s_dkf = s_menu.clone();
+                    let p_dkf = p_close.clone();
+                    let t_dkf = target_lid.clone();
+                    menu_items = menu_items.child(
+                        div()
+                            .id("timeline_ctx_del_all_kf")
+                            .test_support()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .hover(|s| s.bg(rgb(0xef4444)).text_color(rgb(0xffffff)))
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                s_dkf.update(cx, |s, cx| {
+                                    s.delete_all_keyframes_on_layer(&t_dkf);
+                                    cx.notify();
+                                });
+                                p_dkf.update(cx, |this, cx| {
+                                    this.close_context_menu();
+                                    cx.notify();
+                                });
+                            })
+                            .child("Delete All Keyframes"),
                     );
 
                     let s_piv = s_menu.clone();
@@ -23156,6 +23322,159 @@ impl Render for TimelinePanel {
                             })
                             .child("New Null Layer"),
                     );
+                }
+                ContextMenuTarget::Keyframe { layer_id, prop_path, at_s } => {
+                    let kf_lid = layer_id.clone();
+                    let kf_path = prop_path.clone();
+                    let kf_at = *at_s;
+                    // Current interpolation gets the checkmark (same read
+                    // the spline panel uses).
+                    let cur_interp = {
+                        let st = s_menu.read(cx);
+                        let fps = st.active_composition().map(|c| c.frame_rate).unwrap_or(30.0);
+                        let dur = st
+                            .active_composition()
+                            .map(|c| c.duration_seconds().max(0.01))
+                            .unwrap_or(1.0);
+                        st.get_spline_keyframe_points(&kf_lid, &kf_path)
+                            .into_iter()
+                            .find(|(t, _, _)| ((*t as f64) * dur - kf_at).abs() <= 0.5 / fps.max(1.0))
+                            .map(|(_, _, i)| i)
+                    };
+                    let acc = cx.theme().accent;
+                    let acc_fg = cx.theme().accent_foreground;
+                    let kf_item = |id: &'static str,
+                                   text: String,
+                                   checked: bool,
+                                   danger: bool,
+                                   on_pick: Box<dyn Fn(&mut App)>| {
+                        let mut row = h_flex()
+                            .id(id)
+                            .test_support()
+                            .gap_1()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .child(div().w(px(16.)).child(if checked { "✓" } else { "" }))
+                            .child(text);
+                        if danger {
+                            row = row.hover(move |s| {
+                                s.bg(rgb(0xef4444)).text_color(rgb(0xffffff))
+                            });
+                        } else {
+                            row = row.hover(move |s| s.bg(acc).text_color(acc_fg));
+                        }
+                        row.on_mouse_down(MouseButton::Left, move |_e, _w, cx| on_pick(cx))
+                    };
+                    let s_m = s_menu.clone();
+                    let p_m = p_close.clone();
+                    menu_items = menu_items.child(
+                        div()
+                            .text_xs()
+                            .text_color(ae::dim())
+                            .font_semibold()
+                            .py_0p5()
+                            .px_2()
+                            .child("Interpolation"),
+                    );
+                    for (id, label, interp) in [
+                        (
+                            "tl_ctx_kf_interp_linear",
+                            "Linear",
+                            project::KeyframeInterpolation::Linear,
+                        ),
+                        (
+                            "tl_ctx_kf_interp_bezier",
+                            "Bezier",
+                            project::KeyframeInterpolation::Bezier,
+                        ),
+                        (
+                            "tl_ctx_kf_interp_hold",
+                            "Hold",
+                            project::KeyframeInterpolation::Hold,
+                        ),
+                    ] {
+                        let s_i = s_m.clone();
+                        let p_i = p_m.clone();
+                        let lid = kf_lid.clone();
+                        let path = kf_path.clone();
+                        menu_items = menu_items.child(kf_item(
+                            id,
+                            label.to_string(),
+                            cur_interp == Some(interp),
+                            false,
+                            Box::new(move |cx: &mut App| {
+                                s_i.update(cx, |s, cx| {
+                                    s.set_graph_key_interp(&lid, &path, kf_at, interp);
+                                    cx.notify();
+                                });
+                                p_i.update(cx, |t, cx| {
+                                    t.close_context_menu();
+                                    cx.notify();
+                                });
+                            }),
+                        ));
+                    }
+                    menu_items = menu_items.child(
+                        div()
+                            .text_xs()
+                            .text_color(ae::dim())
+                            .font_semibold()
+                            .py_0p5()
+                            .px_2()
+                            .child("Easing"),
+                    );
+                    for (id, ease) in [
+                        ("tl_ctx_kf_ease_linear", KeyEase::Linear),
+                        ("tl_ctx_kf_ease_in", KeyEase::EaseIn),
+                        ("tl_ctx_kf_ease_out", KeyEase::EaseOut),
+                        ("tl_ctx_kf_ease_hold", KeyEase::Hold),
+                    ] {
+                        let s_e = s_m.clone();
+                        let p_e = p_m.clone();
+                        let lid = kf_lid.clone();
+                        let path = kf_path.clone();
+                        menu_items = menu_items.child(kf_item(
+                            id,
+                            ease.label().to_string(),
+                            false,
+                            false,
+                            Box::new(move |cx: &mut App| {
+                                s_e.update(cx, |s, cx| {
+                                    s.set_graph_key_easing(&lid, &path, kf_at, ease);
+                                    cx.notify();
+                                });
+                                p_e.update(cx, |t, cx| {
+                                    t.close_context_menu();
+                                    cx.notify();
+                                });
+                            }),
+                        ));
+                    }
+                    {
+                        let s_d = s_m.clone();
+                        let p_d = p_m.clone();
+                        let lid = kf_lid.clone();
+                        let path = kf_path.clone();
+                        menu_items = menu_items.child(kf_item(
+                            "tl_ctx_kf_delete",
+                            "Delete Keyframe".to_string(),
+                            false,
+                            true,
+                            Box::new(move |cx: &mut App| {
+                                s_d.update(cx, |s, cx| {
+                                    s.remove_graph_keyframe(&lid, &path, kf_at);
+                                    cx.notify();
+                                });
+                                p_d.update(cx, |t, cx| {
+                                    t.close_context_menu();
+                                    cx.notify();
+                                });
+                            }),
+                        ));
+                    }
                 }
                 ContextMenuTarget::Effect { layer_id, effect_id } => {
                     let lid = layer_id.clone();

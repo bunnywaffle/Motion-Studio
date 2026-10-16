@@ -9934,6 +9934,278 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
     }
 
     #[gpui_kit::test]
+    fn test_keyframe_context_menu_interp_easing_delete(cx: &mut TestAppContext) {
+        // Timeline/graph keyframe menu: Bezier -> Hold easing -> delete.
+        use crate::panels::ContextMenuTarget;
+        use gpui_kit::test::TestWindowExt;
+        use project::{Keyframe, KeyframeInterpolation, TimeCode, Vec2};
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        let fps = app_view.read_with(cx, |view, cx| {
+            view.state().read(cx).active_composition().unwrap().frame_rate
+        });
+        let kf_layer = app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, _| {
+                let id = s
+                    .add_solid_layer("KF Menu", project::Color::WHITE, 0, 0)
+                    .expect("solid layer");
+                let comp = s.active_composition_mut().expect("comp");
+                let layer = comp.get_layer_mut(&id).expect("layer");
+                layer.transform.position.add_keyframe(Keyframe::new(
+                    TimeCode::from_seconds(0.0, fps),
+                    Vec2::new(10.0, 20.0),
+                ));
+                layer.transform.position.add_keyframe(Keyframe::new(
+                    TimeCode::from_seconds(1.0, fps),
+                    Vec2::new(110.0, 220.0),
+                ));
+                id
+            })
+        });
+        let open_kf_menu = |app_view: &gpui_kit::Entity<AppView>, cx: &mut TestAppContext| {
+            let lid = kf_layer.clone();
+            app_view.update(cx, |view, cx| {
+                view.panels().timeline.update(cx, |p, _| {
+                    p.open_context_menu(
+                        ContextMenuTarget::Keyframe {
+                            layer_id: lid,
+                            prop_path: "transform.position".to_string(),
+                            at_s: 0.0,
+                        },
+                        gpui::point(gpui::px(150.), gpui::px(150.)),
+                    );
+                });
+            });
+        };
+        let interp_at_zero = |app_view: &gpui_kit::Entity<AppView>, cx: &mut TestAppContext| {
+            app_view.read_with(cx, |view, cx| {
+                view.state()
+                    .read(cx)
+                    .get_spline_keyframe_points(&kf_layer, "transform.position")
+                    .into_iter()
+                    .find(|(t, _, _)| t.abs() < 0.01)
+                    .map(|(_, _, i)| i)
+            })
+        };
+        let key_count = |app_view: &gpui_kit::Entity<AppView>, cx: &mut TestAppContext| {
+            app_view.read_with(cx, |view, cx| {
+                view.state()
+                    .read(cx)
+                    .get_spline_keyframe_points(&kf_layer, "transform.position")
+                    .len()
+            })
+        };
+        assert_eq!(key_count(&app_view, cx), 2);
+
+        open_kf_menu(&app_view, cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("tl_ctx_kf_interp_bezier").visible());
+            assert!(window.find("tl_ctx_kf_ease_hold").visible());
+            assert!(window.find("tl_ctx_kf_delete").visible());
+            window.click("tl_ctx_kf_interp_bezier", cx);
+        })
+        .expect("update_window failed");
+        assert_eq!(interp_at_zero(&app_view, cx), Some(KeyframeInterpolation::Bezier));
+
+        open_kf_menu(&app_view, cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("tl_ctx_kf_ease_hold", cx);
+        })
+        .expect("update_window failed");
+        assert_eq!(interp_at_zero(&app_view, cx), Some(KeyframeInterpolation::Hold));
+
+        open_kf_menu(&app_view, cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("tl_ctx_kf_delete", cx);
+        })
+        .expect("update_window failed");
+        assert_eq!(key_count(&app_view, cx), 1);
+    }
+
+    #[gpui_kit::test]
+    fn test_project_composition_menu_open_delete(cx: &mut TestAppContext) {
+        // Project composition menu: Open switches, Delete removes.
+        use crate::panels::ProjectContextMenuTarget;
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        let n0 = app_view.read_with(cx, |view, cx| {
+            view.state().read(cx).project.compositions.len()
+        });
+        let comp2 = app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, _| {
+                s.create_composition("Comp 2", 1920, 1080, 30.0, 5.0)
+            })
+        });
+        let open_comp_menu = |app_view: &gpui_kit::Entity<AppView>, cx: &mut TestAppContext, cid: &str| {
+            let cid = cid.to_string();
+            app_view.update(cx, |view, cx| {
+                view.panels().project.update(cx, |p, _| {
+                    p.open_context_menu(
+                        ProjectContextMenuTarget::Composition(cid),
+                        gpui::point(gpui::px(50.), gpui::px(50.)),
+                    );
+                });
+            });
+        };
+        open_comp_menu(&app_view, cx, "comp_main");
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("proj_ctx_open_comp").visible());
+            assert!(window.find("proj_ctx_del_comp").visible());
+            window.click("proj_ctx_open_comp", cx);
+        })
+        .expect("update_window failed");
+        assert!(app_view.read_with(cx, |view, cx| {
+            view.state().read(cx).active_comp_id == "comp_main"
+        }));
+
+        open_comp_menu(&app_view, cx, &comp2);
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("proj_ctx_del_comp", cx);
+        })
+        .expect("update_window failed");
+        assert!(app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            s.project.compositions.len() == n0 && s.active_comp_id == "comp_main"
+        }));
+    }
+
+    #[gpui_kit::test]
+    fn test_timeline_layer_menu_keyframe_items(cx: &mut TestAppContext) {
+        // Timeline layer menu: keyframe-at-playhead adds, delete-all clears.
+        use crate::panels::ContextMenuTarget;
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        let open_layer_menu = |app_view: &gpui_kit::Entity<AppView>, cx: &mut TestAppContext| {
+            app_view.update(cx, |view, cx| {
+                view.panels().timeline.update(cx, |p, _| {
+                    p.open_context_menu(
+                        ContextMenuTarget::Layer("layer_accent".to_string()),
+                        gpui::point(gpui::px(150.), gpui::px(150.)),
+                    );
+                });
+            });
+        };
+        let pos_animated = |app_view: &gpui_kit::Entity<AppView>, cx: &mut TestAppContext| {
+            app_view.read_with(cx, |view, cx| {
+                view.state()
+                    .read(cx)
+                    .active_composition()
+                    .unwrap()
+                    .get_layer("layer_accent")
+                    .unwrap()
+                    .transform
+                    .position
+                    .is_animated()
+            })
+        };
+        open_layer_menu(&app_view, cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("timeline_ctx_key_playhead").visible());
+            assert!(window.find("timeline_ctx_del_all_kf").visible());
+            window.click("timeline_ctx_key_playhead", cx);
+        })
+        .expect("update_window failed");
+        assert!(pos_animated(&app_view, cx));
+
+        open_layer_menu(&app_view, cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("timeline_ctx_del_all_kf", cx);
+        })
+        .expect("update_window failed");
+        assert!(!pos_animated(&app_view, cx));
+    }
+
+    #[gpui_kit::test]
+    fn test_viewer_layer_menu_keyframe_items(cx: &mut TestAppContext) {
+        // Viewer layer menu: same keyframe pair, clicked through the canvas menu.
+        use crate::panels::ViewerContextMenuTarget;
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        let open_layer_menu = |app_view: &gpui_kit::Entity<AppView>, cx: &mut TestAppContext| {
+            app_view.update(cx, |view, cx| {
+                view.panels().viewer.update(cx, |p, _| {
+                    p.open_context_menu(
+                        ViewerContextMenuTarget::Layer("layer_accent".to_string()),
+                        gpui::point(gpui::px(400.), gpui::px(300.)),
+                    );
+                });
+            });
+        };
+        let pos_animated = |app_view: &gpui_kit::Entity<AppView>, cx: &mut TestAppContext| {
+            app_view.read_with(cx, |view, cx| {
+                view.state()
+                    .read(cx)
+                    .active_composition()
+                    .unwrap()
+                    .get_layer("layer_accent")
+                    .unwrap()
+                    .transform
+                    .position
+                    .is_animated()
+            })
+        };
+        open_layer_menu(&app_view, cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("viewer_ctx_key_playhead").visible());
+            assert!(window.find("viewer_ctx_del_all_kf").visible());
+            window.click("viewer_ctx_key_playhead", cx);
+        })
+        .expect("update_window failed");
+        assert!(pos_animated(&app_view, cx));
+
+        open_layer_menu(&app_view, cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("viewer_ctx_del_all_kf", cx);
+        })
+        .expect("update_window failed");
+        assert!(!pos_animated(&app_view, cx));
+    }
+
+    #[gpui_kit::test]
     fn test_timeline_row_comboboxes_drive_blend_matte_parent(cx: &mut TestAppContext) {
         // Timeline row Comboboxes: open, arrow down, confirm commits.
         use gpui_kit::test::TestWindowExt;

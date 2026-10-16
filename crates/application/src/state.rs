@@ -6861,8 +6861,36 @@ impl EditorState {
     }
 
     /// Cycle a keyframe's interpolation Linear -> Bezier -> Hold.
-    pub fn cycle_graph_key_interp(&mut self, layer_id: &str, path: &str, at_s: f64) -> bool {
+    /// Set one graph key's interpolation directly (context-menu counterpart
+    /// to `cycle_graph_key_interp`: Linear / Bezier / Hold apply to the
+    /// targeted key only).
+    pub fn set_graph_key_interp(
+        &mut self,
+        layer_id: &str,
+        path: &str,
+        at_s: f64,
+        interp: KeyframeInterpolation,
+    ) -> bool {
         self.checkpoint();
+        let fps = match self.active_composition() {
+            Some(c) => c.frame_rate,
+            None => return false,
+        };
+        let comp = match self.active_composition_mut() {
+            Some(c) => c,
+            None => return false,
+        };
+        let layer = match comp.get_layer_mut(layer_id) {
+            Some(l) => l,
+            None => return false,
+        };
+        let tol = 0.5 / fps.max(1.0);
+        edit_graph_keyframe(layer, path, at_s, tol, |i, _, _| {
+            *i = interp;
+        })
+    }
+
+    pub fn cycle_graph_key_interp(&mut self, layer_id: &str, path: &str, at_s: f64) -> bool {        self.checkpoint();
         let fps = match self.active_composition() {
             Some(c) => c.frame_rate,
             None => return false,
