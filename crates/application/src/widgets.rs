@@ -207,6 +207,7 @@ pub(crate) fn widget_dropdown(
                 .test_support()
                 .child(
                     Combobox::new(st)
+                        .menu_width(px(260.))
                         .placeholder(label.to_string()),
                 )
                 .into_any_element(),
@@ -1120,7 +1121,7 @@ pub(crate) fn widget_for_decl(
                             )))
                             .test_support()
                             .child(
-                                Combobox::new(st).placeholder(label.clone()),
+                                Combobox::new(st).menu_width(px(260.)).placeholder(label.clone()),
                             )
                             .into_any_element(),
                         None => div()

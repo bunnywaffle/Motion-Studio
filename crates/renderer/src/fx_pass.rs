@@ -403,7 +403,7 @@ impl FxPass {
             ),
             StockPlugin::Solid => (
                 ef::stock_solid().wgsl,
-                "fx_stock_solid(uv, color, u.colors[0].rgb, u.params[0].x)",
+                "fx_stock_solid(uv, color, u.colors[0].rgb, u.params[0].x, u.params[0].y)",
                 false,
             ),
             StockPlugin::GridGen => (
@@ -579,7 +579,7 @@ impl FxPass {
             ),
             "gradient_ramp" => (
                 ef::gradient_ramp().wgsl,
-                "fx_gradient_ramp(uv, color, u.params[0].xyz, u.params[1].xyz, u.params[2].x, 1.0)",
+                "fx_gradient_ramp(uv, color, u.params[0].xyz, u.params[1].xyz, u.params[2].x, u.params[2].y)",
                 false,
             ),
             _ => {

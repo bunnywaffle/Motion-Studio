@@ -293,6 +293,7 @@ mod tests {
             center_y: 50.0,
             radius: 71.0,
             dither: 0.0,
+            fill_alpha: false,
         };
         apply_effect_pixels(&mut buf, 32.0, 1.0, &fx, &ctx);
         assert!(buf.px[0].r < 0.1);
@@ -319,6 +320,7 @@ mod tests {
             center_y: 50.0,
             radius: 71.0,
             dither: 0.0,
+            fill_alpha: false,
         };
         let ctx = RasterFx { time_s: 0.0, frame: 0, res_w: 32.0, res_h: 1.0, duration_s: 0.0, playing: false };
         apply_effect_pixels(&mut buf, 32.0, 1.0, &fx, &ctx);

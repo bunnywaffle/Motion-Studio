@@ -541,6 +541,8 @@ pub enum EvaluatedEffectType {
         center_y: f32,
         radius: f32,
         dither: f32,
+        #[serde(default)]
+        fill_alpha: bool,
     },
     Perspective {
         skew_x: f32,
@@ -2095,7 +2097,7 @@ impl LayerStackEvaluator {
                                 color_b: color_b.evaluate_at(time),
                             }
                         }
-                        EffectType::GradientRamp { color_a, color_b, angle, stops, gradient_type, center_x, center_y, radius, dither } => {
+                        EffectType::GradientRamp { color_a, color_b, angle, stops, gradient_type, center_x, center_y, radius, dither, fill_alpha } => {
                             let angle = eval_eff_prop("angle", angle.evaluate_at(time));
                             let stops = if stops.len() >= 2 {
                                 let mut sorted = stops.clone();
@@ -2117,6 +2119,7 @@ impl LayerStackEvaluator {
                                 center_y: eval_eff_prop("center_y", center_y.evaluate_at(time)),
                                 radius: eval_eff_prop("radius", radius.evaluate_at(time)),
                                 dither: eval_eff_prop("dither", dither.evaluate_at(time)),
+                                fill_alpha: fill_alpha.evaluate_at(time),
                             }
                         }
                         EffectType::Perspective { skew_x, skew_y } => {

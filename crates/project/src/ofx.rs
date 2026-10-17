@@ -927,6 +927,7 @@ pub const STOCK_SUITE: &[OfxEffectDescriptor] = &[
     // Generators (fill the frame; color slots documented in stock.rs)
     sd("net.sf.openfx.solid", "Solid", OfxCategory::Generate, &[
         pd!("opacity", "Opacity", 0.0, 100.0, 100.0),
+        pd!("fill_alpha", "Fill Alpha", 0.0, 1.0, 1.0),
     ], true),
     sd("net.sf.openfx.fractal_gen", "Fractal", OfxCategory::Generate, &[
         pd!("scale", "Scale", 0.1, 10.0, 1.5),

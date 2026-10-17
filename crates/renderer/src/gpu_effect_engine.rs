@@ -693,7 +693,11 @@ impl GpuEffectEngine {
                         continue;
                     }
                     if let Some(pass) = self.fx_pass_cache.get(plugin) {
-                        let uniforms = FxUniforms::pack(params, &stock_uniform_colors(*plugin, colors), time_s, width as f32, height as f32, 0.0);
+                        // Resolve against descriptor defaults so old saved
+                        // projects (shorter param vecs) match the CPU path,
+                        // which reads the same defaults via stock_p.
+                        let resolved = compositor::fx::stock_params_resolved(*plugin, params);
+                        let uniforms = FxUniforms::pack(&resolved, &stock_uniform_colors(*plugin, colors), time_s, width as f32, height as f32, 0.0);
                         pass.record_into(
                             &self.gpu,
                             &mut encoder,
@@ -828,10 +832,14 @@ impl GpuEffectEngine {
                             let cy = (height as f32 / s).max(1.0);
                             ("checkerboard", [cx, cy, 0.0, 0.0, color_a.r, color_a.g, color_a.b, color_b.r, color_b.g, color_b.b])
                         }
-                        EvaluatedEffectType::GradientRamp { gradient, .. } => {
+                        EvaluatedEffectType::GradientRamp { gradient, fill_alpha, .. } => {
                             let ca = gradient.stops.first().map(|s| s.color).unwrap_or(project::Color::BLACK);
                             let cb = gradient.stops.last().map(|s| s.color).unwrap_or(project::Color::WHITE);
-                            ("gradient_ramp", [ca.r, ca.g, ca.b, 0.0, cb.r, cb.g, cb.b, gradient.angle.to_radians(), 0.0, 0.0])
+                            // params[0]=ca+pad, params[1]=cb+pad, params[2]=(angle, fill).
+                            // Angle sits at params[2].x to match the twin call
+                            // below (it used to land at params[1].w, which the
+                            // twin never read — GPU ramps were always 0°).
+                            ("gradient_ramp", [ca.r, ca.g, ca.b, 0.0, cb.r, cb.g, cb.b, 0.0, gradient.angle.to_radians(), *fill_alpha as i32 as f32])
                         }
                         _ => continue,
                     };

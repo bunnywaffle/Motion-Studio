@@ -53,7 +53,7 @@ pub fn apply_effect_pixels(
                 }
             }
         }
-        EvaluatedEffectType::GradientRamp { gradient, center_x, center_y, radius, dither } => {
+        EvaluatedEffectType::GradientRamp { gradient, center_x, center_y, radius, dither, fill_alpha } => {
             let axis = gradient_axis(base_w, base_h, gradient.angle);
             // Animatable radial geometry: center (% of box) + radius (%
             // of half-diagonal). Linear/Angular keep the shared axis path.
@@ -65,7 +65,7 @@ pub fn apply_effect_pixels(
             for y in 0..buf.h {
                 for x in 0..buf.w {
                     let dst = buf.get(x as i32, y as i32);
-                    if dst.a <= 0.0 {
+                    if !fill_alpha && dst.a <= 0.0 {
                         continue;
                     }
                     let lx = x as f32 / w * base_w;
@@ -84,6 +84,10 @@ pub fn apply_effect_pixels(
                     } else {
                         sample_fill_gradient(gradient, lx, ly, axis)
                     };
+                    // Fill Alpha writes the ramp's own alpha (straight
+                    // color + stop alpha); off keeps dest alpha and tint
+                    // is clipped to the existing coverage.
+                    let a = if *fill_alpha { c.a } else { dst.a };
                     // IGN dither against 8-bit banding on smooth ramps.
                     if dk > 0.0001 {
                         let n = (super::stock::hash2(x as f32, y as f32, 11.0) - 0.5) * dk;
@@ -98,10 +102,10 @@ pub fn apply_effect_pixels(
                         x as i32,
                         y as i32,
                         Px {
-                            r: c.r * dst.a,
-                            g: c.g * dst.a,
-                            b: c.b * dst.a,
-                            a: dst.a,
+                            r: c.r * a,
+                            g: c.g * a,
+                            b: c.b * a,
+                            a,
                         },
                     );
                 }
@@ -1711,6 +1715,7 @@ mod tests {
             center_y: 25.0,
             radius: 71.0,
             dither: 0.0,
+            fill_alpha: false,
         };
         apply_effect_pixels(&mut buf, 32.0, 32.0, &eff, &ctx);
         assert!(buf.px[8 * 32 + 8].r < 0.15, "focus must be near stop 0");
@@ -1771,5 +1776,43 @@ mod tests {
         apply_inner_glow(&mut mul, 100.0, 100.0, glow, GlowBlend::Multiply);
         let edge = |b: &FloatBuf| b.px[8 * 16 + 7].r;
         assert!((edge(&scr) - edge(&mul)).abs() > 0.05, "kernel must honor blend");
+    }
+
+    #[test]
+    fn gradient_fill_alpha_writes_or_clips() {
+        let ctx = RasterFx { time_s: 0.0, frame: 0, res_w: 16.0, res_h: 16.0, duration_s: 0.0, playing: false };
+        // Stops carry alpha 0.5 so fill_alpha is actually observable.
+        let grad = project::FillGradient {
+            stops: vec![
+                project::GradientStop::new(0.0, project::Color::rgba(0.0, 0.0, 1.0, 0.5)),
+                project::GradientStop::new(1.0, project::Color::rgba(1.0, 0.0, 0.0, 0.5)),
+            ],
+            angle: 0.0,
+            gradient_type: project::GradientType::Linear,
+        };
+        // Fill on: the ramp writes its own (stop) alpha across the canvas.
+        let mut buf = FloatBuf::clear(16, 16);
+        let eff = EvaluatedEffectType::GradientRamp {
+            gradient: grad.clone(),
+            center_x: 50.0,
+            center_y: 50.0,
+            radius: 71.0,
+            dither: 0.0,
+            fill_alpha: true,
+        };
+        apply_effect_pixels(&mut buf, 16.0, 16.0, &eff, &ctx);
+        assert!((buf.px[0].a - 0.5).abs() < 1e-6, "ramp alpha written: {}", buf.px[0].a);
+        // Fill off (default): dest alpha excluded from the fill.
+        let mut buf = FloatBuf::clear(16, 16);
+        let eff = EvaluatedEffectType::GradientRamp {
+            gradient: grad,
+            center_x: 50.0,
+            center_y: 50.0,
+            radius: 71.0,
+            dither: 0.0,
+            fill_alpha: false,
+        };
+        apply_effect_pixels(&mut buf, 16.0, 16.0, &eff, &ctx);
+        assert_eq!(buf.px[0].a, 0.0);
     }
 }

@@ -117,6 +117,10 @@ fn default_gradient_dither() -> Property<f32> {
     Property::new("Dither", 30.0)
 }
 
+fn default_gradient_fill_alpha() -> Property<bool> {
+    Property::new("Fill Alpha", false)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TileMode {
@@ -561,6 +565,11 @@ pub enum EffectType {
         /// IGN dither 0..100 against banding, animatable.
         #[serde(default = "default_gradient_dither")]
         dither: Property<f32>,
+        /// Fill Alpha: false (default) tints RGB only inside existing
+        /// coverage and keeps dest alpha; true writes the ramp's own
+        /// alpha (full-canvas fill), animatable.
+        #[serde(default = "default_gradient_fill_alpha")]
+        fill_alpha: Property<bool>,
     },
     /// Fake-3D skew filter in degrees (spatial).
     Perspective {
@@ -1028,6 +1037,7 @@ impl EffectType {
             center_y: default_gradient_center(),
             radius: default_gradient_radius(),
             dither: default_gradient_dither(),
+            fill_alpha: default_gradient_fill_alpha(),
         }
     }
 
@@ -1043,6 +1053,7 @@ impl EffectType {
             center_y: default_gradient_center(),
             radius: default_gradient_radius(),
             dither: default_gradient_dither(),
+            fill_alpha: default_gradient_fill_alpha(),
         }
     }
 
@@ -2128,6 +2139,11 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
             {
                 Some(lock_layout)
             }
+            EffectType::GradientRamp { fill_alpha, .. }
+                if field.eq_ignore_ascii_case("fill_alpha") =>
+            {
+                Some(fill_alpha)
+            }
             _ => None,
         }
     }
@@ -2257,6 +2273,12 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 if field.eq_ignore_ascii_case("lock_layout") =>
             {
                 lock_layout.set_value(next);
+                true
+            }
+            EffectType::GradientRamp { fill_alpha, .. }
+                if field.eq_ignore_ascii_case("fill_alpha") =>
+            {
+                fill_alpha.set_value(next);
                 true
             }
             _ => false,
@@ -3992,7 +4014,7 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 PropDecl::color("color_b", "Color B", color_b.value, color_b.is_animated()),
                 scalar("size", "Size", WidgetKind::Slider, ParamMeta::slider(2.0, 512.0, 4.0, 0, "px", 100.0), size),
             ],
-            EffectType::GradientRamp { color_a, color_b, angle, center_x, center_y, radius, dither, .. } => vec![
+            EffectType::GradientRamp { color_a, color_b, angle, center_x, center_y, radius, dither, fill_alpha, .. } => vec![
                 PropDecl::color("color_a", "Start", color_a.value, color_a.is_animated()),
                 PropDecl::color("color_b", "End", color_b.value, color_b.is_animated()),
                 scalar("angle", "Angle", WidgetKind::Angle, ParamMeta::slider(0.0, 360.0, 5.0, 0, "°", 100.0), angle),
@@ -4000,6 +4022,7 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 scalar("center_y", "Center Y", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 1.0, 1, "%", 100.0), center_y),
                 scalar("radius", "Radius", WidgetKind::Percentage, ParamMeta::slider(1.0, 200.0, 1.0, 1, "%", 100.0), radius),
                 scalar("dither", "Dither", WidgetKind::Percentage, ParamMeta::slider(0.0, 100.0, 1.0, 0, "%", 100.0), dither),
+                PropDecl::boolean("fill_alpha", "Fill Alpha", fill_alpha.value, fill_alpha.is_animated()),
             ],
             EffectType::Perspective { skew_x, skew_y } => vec![
                 scalar("skew_x", "Skew X", WidgetKind::Angle, ParamMeta::slider(-60.0, 60.0, 1.0, 1, "°", 100.0), skew_x),

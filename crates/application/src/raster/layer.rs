@@ -879,13 +879,14 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
             color_hash(color_a, h);
             color_hash(color_b, h);
         }
-        EvaluatedEffectType::GradientRamp { gradient, center_x, center_y, radius, dither } => {
+        EvaluatedEffectType::GradientRamp { gradient, center_x, center_y, radius, dither, fill_alpha } => {
             (gradient.gradient_type as u8).hash(h);
             gradient.angle.to_bits().hash(h);
             center_x.to_bits().hash(h);
             center_y.to_bits().hash(h);
             radius.to_bits().hash(h);
             dither.to_bits().hash(h);
+            fill_alpha.hash(h);
             for stop in &gradient.stops {
                 stop.offset.to_bits().hash(h);
                 color_hash(&stop.color, h);
@@ -3366,6 +3367,39 @@ mod tests {
             }
         }
         assert!(worst < 0.02, "GPU chain must match CPU within u8 rounding: {worst}");
+    }
+
+    #[test]
+    fn gpu_solid_fill_alpha_matches_cpu_within_tolerance() {
+        use compositor::{EvaluatedEffect, EvaluatedEffectType};
+        if !crate::raster::buffer::gpu_accelerated() {
+            return;
+        }
+        // Half-alpha strip over transparent background: fill off must clip
+        // to the existing coverage on both paths; fill on overwrites.
+        let mut base = FloatBuf::clear(64, 64);
+        for y in 0..64 {
+            for x in 0..64 {
+                let a = if x < 32 { 0.5 } else { 0.0 };
+                base.put(x, y, Px { r: 0.2 * a, g: 0.2 * a, b: 0.2 * a, a });
+            }
+        }
+        let solid = |fill: f32| vec![
+            EvaluatedEffect {
+                id: "solid".to_string(),
+                name: "Solid".to_string(),
+                enabled: true,
+                effect_type: EvaluatedEffectType::Stock {
+                    plugin: StockPlugin::Solid,
+                    params: vec![100.0, fill],
+                    colors: vec![project::Color::rgb(1.0, 0.0, 0.0)],
+                },
+            },
+        ];
+        let worst_on = gpu_parity_worst(&base, &solid(1.0));
+        let worst_off = gpu_parity_worst(&base, &solid(0.0));
+        assert!(worst_on < 0.02, "solid fill must match CPU: {worst_on}");
+        assert!(worst_off < 0.02, "solid no-fill must match CPU: {worst_off}");
     }
 
     #[test]

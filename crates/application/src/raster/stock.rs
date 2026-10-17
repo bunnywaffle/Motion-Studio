@@ -1966,9 +1966,25 @@ fn stock_color(colors: &[Color], i: usize, fallback: Color) -> Color {
 
 fn k_solid(buf: &mut FloatBuf, p: &[f32], plugin: StockPlugin, colors: &[Color]) {
     let op = (stock_p(plugin, p, 0) / 100.0).clamp(0.0, 1.0);
+    let fill = stock_p(plugin, p, 1) >= 0.5;
     let c = stock_color(colors, 0, Color::WHITE);
-    for px in buf.px.iter_mut() {
-        *px = Px { r: c.r * op, g: c.g * op, b: c.b * op, a: op };
+    if fill {
+        for px in buf.px.iter_mut() {
+            *px = Px { r: c.r * op, g: c.g * op, b: c.b * op, a: op };
+        }
+        return;
+    }
+    // Alpha excluded from the fill: tint only where the buffer already
+    // has coverage, keeping its alpha (premultiplied RGB + kept alpha).
+    for y in 0..buf.h {
+        for x in 0..buf.w {
+            let dst = buf.get(x as i32, y as i32);
+            buf.put(
+                x as i32,
+                y as i32,
+                Px { r: c.r * op * dst.a, g: c.g * op * dst.a, b: c.b * op * dst.a, a: dst.a },
+            );
+        }
     }
 }
 
@@ -2276,6 +2292,40 @@ mod tests {
                 assert!((0.0..=1.0).contains(&v), "{plugin:?} out of range {v}");
             }
         }
+    }
+
+    #[test]
+    fn solid_fill_alpha_respects_toggle() {
+        let ctx = ctx_for(0);
+        let red = Color::rgb(1.0, 0.0, 0.0);
+        let base = |buf: &mut FloatBuf| {
+            for y in 4..8 {
+                for x in 4..8 {
+                    buf.px[(y * 16 + x) as usize] = Px { r: 0.0, g: 0.0, b: 0.0, a: 0.5 };
+                }
+            }
+        };
+        // Fill on (default): full canvas, alpha = opacity, premultiplied rgb.
+        let mut buf = FloatBuf::clear(16, 16);
+        base(&mut buf);
+        apply_stock(&mut buf, StockPlugin::Solid, &[100.0, 1.0], &[red], &ctx);
+        let inside = buf.px[(4 * 16 + 4) as usize];
+        assert!((inside.a - 1.0).abs() < 1e-6 && (inside.r - 1.0).abs() < 1e-6);
+        // Fill off: dest alpha kept; rgb clipped to the existing coverage
+        // (premult rgb = c.op * dst.a).
+        let mut buf = FloatBuf::clear(16, 16);
+        base(&mut buf);
+        apply_stock(&mut buf, StockPlugin::Solid, &[100.0, 0.0], &[red], &ctx);
+        assert!(buf.px[0].a <= 1e-6, "no fill outside coverage: {}", buf.px[0].a);
+        let inside = buf.px[(4 * 16 + 4) as usize];
+        assert!((inside.a - 0.5).abs() < 1e-6, "kept dest alpha: {}", inside.a);
+        assert!((inside.r - 0.5).abs() < 1e-6, "premult rgb: {}", inside.r);
+        // Legacy projects (missing fill param) fall back to the descriptor
+        // default: fill on.
+        let mut buf = FloatBuf::clear(16, 16);
+        base(&mut buf);
+        apply_stock(&mut buf, StockPlugin::Solid, &[100.0], &[red], &ctx);
+        assert!((buf.px[0].a - 1.0).abs() < 1e-6, "legacy default fills alpha");
     }
 
     #[test]

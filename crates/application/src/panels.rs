@@ -10749,7 +10749,7 @@ fn render_masks_section(
                         .child({
                             let key = format!("mask_mode_{mid}");
                             if let Some(cb) = combos.get(&key) {
-                                Combobox::new(cb).small().into_any_element()
+                                Combobox::new(cb).menu_width(px(260.)).small().into_any_element()
                             } else {
                                 div()
                                     .text_xs()
@@ -12009,8 +12009,9 @@ fn render_applied_effects(
                     if let Some(angle) = find("angle") {
                         effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &angle, wheels, enums, cx));
                     }
-                    // Animatable radial geometry + dither share the generic row.
-                    for f in &["center_x", "center_y", "radius", "dither"] {
+                    // Animatable radial geometry + dither + fill-alpha
+                    // share the generic row.
+                    for f in &["center_x", "center_y", "radius", "dither", "fill_alpha"] {
                         if let Some(decl) = find(f) {
                             effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, enums, cx));
                         }
@@ -12223,7 +12224,7 @@ fn render_applied_effects(
                             .id(SharedString::from(format!("stock_balance_cat_{eff_id}")))
                             .test_support()
                             .w(px(140.))
-                            .child(Combobox::new(cb).into_any_element())
+                            .child(Combobox::new(cb).menu_width(px(260.)).into_any_element())
                             .into_any_element(),
                         None => div()
                             .text_xs()
@@ -13961,13 +13962,13 @@ impl Render for PropertiesPanel {
 
                                 // Comboboxes for Font Family and Font Style
                                 let font_family_cb = if let Some(cb) = self.combobox_states.get("text_font_family") {
-                                    div().id("text_font_combobox").test_support().w_full().child(Combobox::new(cb)).into_any_element()
+                                    div().id("text_font_combobox").test_support().w_full().child(Combobox::new(cb).menu_width(px(260.))).into_any_element()
                                 } else {
                                     Input::new(&inputs.font_family).id("text_font_input").w_full().into_any_element()
                                 };
 
                                 let font_style_cb = if let Some(cb) = self.combobox_states.get("text_font_style") {
-                                    div().id("text_style_combobox").test_support().w_full().child(Combobox::new(cb)).into_any_element()
+                                    div().id("text_style_combobox").test_support().w_full().child(Combobox::new(cb).menu_width(px(260.))).into_any_element()
                                 } else {
                                     div().text_xs().text_color(cx.theme().muted_foreground).child("Regular").into_any_element()
                                 };
@@ -14349,12 +14350,12 @@ impl Render for PropertiesPanel {
                                 // Option dropdowns (retained Combobox states,
                                 // same pattern as font family/style above).
                                 let stroke_pos_combo = if let Some(cb) = self.combobox_states.get("text_stroke_pos") {
-                                    div().id("text_stroke_pos_combobox").test_support().w(px(140.)).child(Combobox::new(cb)).into_any_element()
+                                    div().id("text_stroke_pos_combobox").test_support().w(px(140.)).child(Combobox::new(cb).menu_width(px(260.))).into_any_element()
                                 } else {
                                     div().text_xs().text_color(cx.theme().muted_foreground).child("Center").into_any_element()
                                 };
                                 let paint_order_combo = if let Some(cb) = self.combobox_states.get("text_paint_order") {
-                                    div().id("text_paint_order_combobox").test_support().w(px(140.)).child(Combobox::new(cb)).into_any_element()
+                                    div().id("text_paint_order_combobox").test_support().w(px(140.)).child(Combobox::new(cb).menu_width(px(260.))).into_any_element()
                                 } else {
                                     div().text_xs().text_color(cx.theme().muted_foreground).child("Fill over Stroke").into_any_element()
                                 };
@@ -14436,12 +14437,12 @@ impl Render for PropertiesPanel {
 
                                 // 4. Paragraph Group Collapsible
                                 let align_combo = if let Some(cb) = self.combobox_states.get("text_align") {
-                                    div().id("text_align_combobox").test_support().w(px(140.)).child(Combobox::new(cb)).into_any_element()
+                                    div().id("text_align_combobox").test_support().w(px(140.)).child(Combobox::new(cb).menu_width(px(260.))).into_any_element()
                                 } else {
                                     div().text_xs().text_color(cx.theme().muted_foreground).child("Left").into_any_element()
                                 };
                                 let vert_combo = if let Some(cb) = self.combobox_states.get("text_vert") {
-                                    div().id("text_vert_combobox").test_support().w(px(140.)).child(Combobox::new(cb)).into_any_element()
+                                    div().id("text_vert_combobox").test_support().w(px(140.)).child(Combobox::new(cb).menu_width(px(260.))).into_any_element()
                                 } else {
                                     div().text_xs().text_color(cx.theme().muted_foreground).child("Top").into_any_element()
                                 };
@@ -15559,7 +15560,7 @@ impl Render for PropertiesPanel {
                                             .child({
                                                 let bm_key = format!("props_blend_mode_{}", layer.id);
                                                 if let Some(cb) = self.combobox_states.get(&bm_key).or_else(|| self.combobox_states.get("props_blend_mode")) {
-                                                    Combobox::new(cb).into_any_element()
+                                                    Combobox::new(cb).menu_width(px(260.)).into_any_element()
                                                 } else {
                                                     div().child(cur_bm.as_str()).into_any_element()
                                                 }
@@ -15581,7 +15582,7 @@ impl Render for PropertiesPanel {
                                             .child({
                                                 let tm_key = format!("props_track_matte_{}", layer.id);
                                                 if let Some(cb) = self.combobox_states.get(&tm_key).or_else(|| self.combobox_states.get("props_track_matte")) {
-                                                    Combobox::new(cb).into_any_element()
+                                                    Combobox::new(cb).menu_width(px(260.)).into_any_element()
                                                 } else {
                                                     div().child(match cur_matte {
                                                         project::TrackMatteMode::None => "No Matte",
@@ -15609,7 +15610,7 @@ impl Render for PropertiesPanel {
                                             .child({
                                                 let pl_key = format!("props_parent_layer_{}", layer.id);
                                                 if let Some(cb) = self.combobox_states.get(&pl_key).or_else(|| self.combobox_states.get("props_parent_layer")) {
-                                                    Combobox::new(cb).into_any_element()
+                                                    Combobox::new(cb).menu_width(px(260.)).into_any_element()
                                                 } else {
                                                     div().child(layer.parent_id.clone().unwrap_or_else(|| "None".to_string())).into_any_element()
                                                 }
@@ -20360,7 +20361,7 @@ impl Render for TimelinePanel {
                                     .child({
                                         let key = format!("tl_blend_{}", layer.id);
                                         if let Some(cb) = self.tl_combos.get(&key) {
-                                            Combobox::new(cb).xsmall().into_any_element()
+                                            Combobox::new(cb).menu_width(px(260.)).xsmall().into_any_element()
                                         } else {
                                             div()
                                                 .text_xs()
@@ -20380,7 +20381,7 @@ impl Render for TimelinePanel {
                                     .child({
                                         let key = format!("tl_matte_{}", layer.id);
                                         if let Some(cb) = self.tl_combos.get(&key) {
-                                            Combobox::new(cb).xsmall().into_any_element()
+                                            Combobox::new(cb).menu_width(px(260.)).xsmall().into_any_element()
                                         } else {
                                             div()
                                                 .text_xs()
@@ -20403,7 +20404,7 @@ impl Render for TimelinePanel {
                                     .child({
                                         let key = format!("tl_parent_{}", layer.id);
                                         if let Some(cb) = self.tl_combos.get(&key) {
-                                            Combobox::new(cb).xsmall().into_any_element()
+                                            Combobox::new(cb).menu_width(px(260.)).xsmall().into_any_element()
                                         } else {
                                             div()
                                                 .text_xs()
@@ -21386,7 +21387,7 @@ impl Render for TimelinePanel {
                                                             layer.id, mask.id
                                                         );
                                                         if let Some(cb) = self.tl_combos.get(&key) {
-                                                            Combobox::new(cb).xsmall().into_any_element()
+                                                            Combobox::new(cb).menu_width(px(260.)).xsmall().into_any_element()
                                                         } else {
                                                             div()
                                                                 .text_xs()

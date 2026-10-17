@@ -241,10 +241,14 @@ pub fn checkerboard() -> ColorFilter {
 pub fn gradient_ramp() -> ColorFilter {
     color_filter!(
         "gradient_ramp",
-        r#"fn fx_gradient_ramp(uv: vec2<f32>, color: vec4<f32>, color_a: vec3<f32>, color_b: vec3<f32>, angle: f32, alpha: f32) -> vec4<f32> {
+        r#"fn fx_gradient_ramp(uv: vec2<f32>, color: vec4<f32>, color_a: vec3<f32>, color_b: vec3<f32>, angle: f32, fill_alpha: f32) -> vec4<f32> {
     let d = vec2<f32>(cos(angle), sin(angle));
     let t = clamp(dot(uv - vec2<f32>(0.5), d) + 0.5, 0.0, 1.0);
-    return vec4<f32>(mix(color_a, color_b, t), alpha);
+    // Fill Alpha: the ramp replaces alpha (full-canvas); off keeps dest
+    // alpha and tints only the existing coverage (straight space; the
+    // write-back re-premultiplies).
+    let a = select(color.a, 1.0, fill_alpha >= 0.5);
+    return vec4<f32>(mix(color_a, color_b, t), a);
 }"#
     )
 }
@@ -876,11 +880,16 @@ pub fn stock_halftone() -> ColorFilter {
 pub fn stock_solid() -> ColorFilter {
     color_filter!(
         "stock_solid",
-        r#"fn fx_stock_solid(uv: vec2<f32>, color: vec4<f32>, fill: vec3<f32>, opacity: f32) -> vec4<f32> {
+        r#"fn fx_stock_solid(uv: vec2<f32>, color: vec4<f32>, fill: vec3<f32>, opacity: f32, fill_alpha: f32) -> vec4<f32> {
     let op = clamp(opacity / 100.0, 0.0, 1.0);
     // Straight-space chain: straight fill + coverage; the write-back
     // re-premultiplies (CPU stores fill * op the same way).
-    return vec4<f32>(fill, op);
+    if (fill_alpha >= 0.5) {
+        return vec4<f32>(fill, op);
+    }
+    // Alpha excluded from the fill: straight color at full opacity inside
+    // the existing coverage; the write-back scales RGB by dest alpha.
+    return vec4<f32>(fill * op, color.a);
 }"#
     )
 }
