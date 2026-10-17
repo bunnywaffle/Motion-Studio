@@ -574,6 +574,8 @@ pub enum NullGizmo {
     Target,
     /// Bounding diamond outline.
     Diamond,
+    /// Rotation-only control: a circle, dragging its handle spins the null.
+    Rotate,
 }
 
 impl LayerSource {

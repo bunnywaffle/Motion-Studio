@@ -7468,15 +7468,27 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
 
             // The Gizmo Color row mounts with its edit toggle.
             assert!(window.find("fx_wheel_btn_gizmo_color_null_gizmo").visible());
-            // Selected nulls grow an orbit rotate handle on the viewport
-            // (id needs the layer id; capture it from selection state).
-            let rotate_id = state
+            // Only the Rotate gizmo grows the orbit handle: the default
+            // Arrow null must not have one, switching to Rotate shows it.
+            let lid = state
                 .read(cx)
                 .selected_layer_id
                 .as_ref()
-                .map(|lid| format!("null_rotate_{}", lid))
+                .cloned()
                 .expect("null selected");
-            assert!(window.find(SharedString::from(rotate_id)).visible(), "rotate handle on selected null");
+            assert!(
+                window
+                    .try_find(SharedString::from(format!("null_rotate_{}", lid)))
+                    .is_none(),
+                "no orbit handle on the Arrow gizmo"
+            );
+            state
+                .update(cx, |s, _| {
+                    s.set_null_gizmo(&lid, project::NullGizmo::Rotate).expect("rotate gizmo");
+                });
+            window.render_frame(cx);
+            let rotate_id = format!("null_rotate_{}", lid);
+            assert!(window.find(SharedString::from(rotate_id)).visible(), "rotate handle on Rotate gizmo");
         })
         .expect("update_window failed");
         cx.update_window(handle.into(), |_, window, cx| {

@@ -3736,9 +3736,8 @@ impl Render for CompositionViewerPanel {
                             ((wx + n_cw / 2.0) * n_fit, (wy + n_ch / 2.0) * n_fit)
                         };
                         let (ccx, ccy) = c2s(0.0, 0.0);
-                        // Rotate handle position + drag-start captures
-                        // (selected nulls only render the handle below).
-                        let (rcx, rcy) = c2s(s * 2.2, 0.0);
+                        // Rotate handle rides the ring of the Rotate gizmo.
+                        let (rcx, rcy) = c2s(s, 0.0);
                         let accent = rgb(0xffffff);
                         let white = Rgba { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
                         let rot_state = null_state.clone();
@@ -3810,11 +3809,26 @@ impl Render for CompositionViewerPanel {
                                     thickness: 2.0,
                                 });
                             }
+                            project::NullGizmo::Rotate => {
+                                // Rotation-only control: a circle; its
+                                // handle dot (below) rides the ring and
+                                // dragging spins the null.
+                                const SEGS: usize = 36;
+                                let mut pts = Vec::with_capacity(SEGS + 1);
+                                for i in 0..=SEGS {
+                                    let a = i as f32 * std::f32::consts::TAU / SEGS as f32;
+                                    pts.push(pt(a.sin() * s, -a.cos() * s));
+                                }
+                                curves.push(OverlayCurve {
+                                    points: pts,
+                                    color: gcol,
+                                    thickness: 2.0,
+                                });
+                            }
                         }
-                        // Rotate handle for the selected null: same orbit
-                        // gesture as the transform-gizmo rotate dot, parked
-                        // past the arrow tip along the null's rotated x axis.
-                        let rot_handle: Option<AnyElement> = if null_sel {
+                        // Rotate handle: Only the Rotate gizmo carries it,
+                        // rendered for the selected null.
+                        let rot_handle: Option<AnyElement> = if null_sel && matches!(gizmo, project::NullGizmo::Rotate) {
                             Some(
                                 gizmo_dot(
                                     format!("null_rotate_{null_lid}"),
@@ -15208,6 +15222,7 @@ impl Render for PropertiesPanel {
                                     ("Arrow", project::NullGizmo::Arrow),
                                     ("Target", project::NullGizmo::Target),
                                     ("Diamond", project::NullGizmo::Diamond),
+                                    ("Rotate", project::NullGizmo::Rotate),
                                 ] {
                                     let s_g = self.state.clone();
                                     let lid_g = layer.id.clone();
