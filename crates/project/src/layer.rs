@@ -33,6 +33,10 @@ fn default_shape_stroke_width_prop() -> Property<f32> {
     Property::new("Stroke Width", 2.0)
 }
 
+fn default_null_gizmo_color() -> Color {
+    Color::rgb(0.65, 0.65, 0.7)
+}
+
 /// Zero width for shapes that never had strokes (Rectangle/Ellipse): old
 /// files must render exactly as before (no outline).
 fn default_shape_stroke_width_zero_prop() -> Property<f32> {
@@ -549,6 +553,11 @@ pub enum LayerSource {
     Null {
         #[serde(default)]
         gizmo: NullGizmo,
+        /// Viewport gizmo tint (purely visual). The overlay draws the
+        /// custom color full-strength when selected and slightly dimmed
+        /// when not.
+        #[serde(default = "default_null_gizmo_color")]
+        color: Color,
     },
 }
 
@@ -978,7 +987,7 @@ impl Layer {
         in_point: TimeCode,
         out_point: TimeCode,
     ) -> Self {
-        Self::new(id, name, LayerSource::Null { gizmo: NullGizmo::Arrow }, in_point, out_point)
+        Self::new(id, name, LayerSource::Null { gizmo: NullGizmo::Arrow, color: default_null_gizmo_color() }, in_point, out_point)
     }
 
     /// Check if this layer is a null control layer.

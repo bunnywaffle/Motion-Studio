@@ -7305,6 +7305,66 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         assert!(state.get_layer_modifier_graph(&rid, "shape.ellipse_rx").is_some());
     }
 
+    #[gpui_kit::test]
+    fn test_null_gizmo_color_row_and_editor(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            Theme::change(ThemeMode::Dark, None, cx);
+        });
+
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
+            window.activate_window();
+            window.set_window_title("Motion Compositor");
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+
+            // Select the properties right-dock tab; create + select a null.
+            let panels = app_view.read(cx).panels().clone();
+            let props_id = PanelId::from(panels.properties.entity_id());
+            let dock_area = app_view.read(cx).dock_area().clone();
+            dock_area.update(cx, |dock, cx| {
+                dock.select_panel(props_id, window, cx);
+            });
+            let state = app_view.read(cx).state().clone();
+            state.update(cx, |s, cx| {
+                let nid = s.add_null_layer(None).expect("null");
+                s.select_layer(Some(nid));
+                cx.notify();
+            });
+            window.render_frame(cx);
+
+            // The Gizmo Color row mounts with its edit toggle.
+            assert!(window.find("fx_wheel_btn_gizmo_color_null_gizmo").visible());
+        })
+        .expect("update_window failed");
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("fx_wheel_btn_gizmo_color_null_gizmo", cx);
+        })
+        .expect("update_window failed");
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            // Expanding reveals the editor; the HEX tab shows the hex field.
+            assert!(window.find("fx_gizmo_color_null_gizmo_tab_hex").visible());
+            window.click("fx_gizmo_color_null_gizmo_tab_hex", cx);
+        })
+        .expect("update_window failed");
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            // Mounted + hex mode active (empty scroll may clip visibility).
+            assert!(window.try_find("fx_gizmo_color_null_gizmo_hex_input").is_some());
+        })
+        .expect("update_window failed");
+    }
+
     #[test]
     fn test_null_layer_gizmo_and_transform_links() {
         use crate::state::EditorState;
@@ -7323,9 +7383,15 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         for g in [NullGizmo::Arrow, NullGizmo::Target, NullGizmo::Diamond] {
             state.set_null_gizmo(&nid, g).expect("gizmo");
             let l = state.active_composition().unwrap().get_layer(&nid).unwrap().clone();
-            assert!(matches!(l.source, LayerSource::Null { gizmo } if gizmo == g));
+            assert!(matches!(l.source, LayerSource::Null { gizmo, .. } if gizmo == g));
         }
         assert!(state.set_null_gizmo("nope", NullGizmo::Arrow).is_err());
+        // Gizmo color roundtrips (custom tint).
+        let tint = project::Color::from_hex("#30A8FF").unwrap();
+        state.set_null_gizmo_color(&nid, tint).expect("gizmo color");
+        let l = state.active_composition().unwrap().get_layer(&nid).unwrap().clone();
+        assert!(matches!(l.source, LayerSource::Null { color, .. } if color == tint));
+        assert!(state.set_null_gizmo_color("nope", tint).is_err());
         // Null evaluates (transform intact) but carries no source pixels.
         let cid = state.active_composition().unwrap().id.clone();
         let tc = TimeCode::from_frames(0, 30.0);

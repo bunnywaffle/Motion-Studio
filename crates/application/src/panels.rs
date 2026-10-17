@@ -3710,7 +3710,7 @@ impl Render for CompositionViewerPanel {
                     // points run through the world matrix (rotation follows
                     // parenting) at a fixed screen size; the center dot
                     // grabs a canvas move-drag.
-                    if let LayerSource::Null { gizmo } = &layer.source {
+                    if let LayerSource::Null { gizmo, color } = &layer.source {
                         let null_panel = cx.entity().clone();
                         let null_state = self.state.clone();
                         let null_lid = layer.id.clone();
@@ -3736,10 +3736,13 @@ impl Render for CompositionViewerPanel {
                             ((wx + n_cw / 2.0) * n_fit, (wy + n_ch / 2.0) * n_fit)
                         };
                         let (ccx, ccy) = c2s(0.0, 0.0);
-                        let gcol = if null_sel {
-                            rgb(0xffffff)
-                        } else {
-                            Rgba { r: 0.65, g: 0.65, b: 0.7, a: 0.85 }
+                        // Custom gizmo tint: full strength when selected,
+                        // slightly dimmed when not.
+                        let gcol = Rgba {
+                            r: color.r,
+                            g: color.g,
+                            b: color.b,
+                            a: if null_sel { 1.0 } else { 0.85 },
                         };
                         let pt = |ox: f32, oy: f32| {
                             let (x, y) = c2s(ox, oy);
@@ -12591,6 +12594,30 @@ impl Render for PropertiesPanel {
             }
         };
         let fx_editor = self.state.clone();
+        // Null-layer gizmo tint editor: one picker for the selected null,
+        // keyed by layer id so undo resyncs by construction.
+        let null_wheel_target = {
+            let s = self.state.read(cx);
+            s.active_composition()
+                .zip(s.selected_layer_id.clone())
+                .and_then(|(c, lid)| c.get_layer(&lid))
+                .filter(|l| matches!(l.source, LayerSource::Null { .. }))
+                .map(|l| l.id.clone())
+        };
+        let null_gizmo_wheel = null_wheel_target.map(|lid| {
+            let st = self.state.clone();
+            let lid_w = lid.clone();
+            window.use_keyed_state(SharedString::from(format!("null_gizmo_wheel_{lid}")), cx, move |window, cx| {
+                let st = st.clone();
+                let lid = lid_w.clone();
+                InspectorColorPicker::new(window, cx, Some(st.clone()), move |color, cx| {
+                    st.update(cx, |s, cx| {
+                        let _ = s.set_null_gizmo_color(&lid, color);
+                        cx.notify();
+                    });
+                })
+            })
+        });
         let mut fx_wheels: HashMap<(String, String), Entity<InspectorColorPicker>> =
             HashMap::new();
         for (eid, field) in fx_color_targets {
@@ -15115,8 +15142,9 @@ impl Render for PropertiesPanel {
                                 );
                                 props_items.push(adj_section);
                             }
-                            LayerSource::Null { gizmo } => {
+                            LayerSource::Null { gizmo, color } => {
                                 let current = *gizmo;
+                                let gcol = *color;
                                 let mut picker = h_flex().gap_1().items_center();
                                 for (label, g) in [
                                     ("Arrow", project::NullGizmo::Arrow),
@@ -15158,7 +15186,18 @@ impl Render for PropertiesPanel {
                                             .text_color(cx.theme().muted_foreground)
                                             .child("Control layer: no pixels. Parent layers to it and link its transform from graphs."),
                                     )
-                                    .child(picker);
+                                    .child(picker)
+                                    .child(fx_swatch_row(
+                                        &self.state,
+                                        &layer.id,
+                                        "null_gizmo",
+                                        "gizmo_color",
+                                        "Gizmo Color",
+                                        gcol,
+                                        null_gizmo_wheel.as_ref().map(|e| e as &Entity<InspectorColorPicker>),
+                                        &panel_entity,
+                                        cx,
+                                    ));
                                 let p_src = panel_entity.clone();
                                 let null_section = prop_section(
                                     "null_source",

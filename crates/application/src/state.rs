@@ -2042,8 +2042,25 @@ impl EditorState {
         let layer = comp
             .get_layer_mut(layer_id)
             .ok_or_else(|| "No such layer".to_string())?;
-        if let LayerSource::Null { gizmo: g } = &mut layer.source {
+        if let LayerSource::Null { gizmo: g, .. } = &mut layer.source {
             *g = gizmo;
+            Ok(())
+        } else {
+            Err("Not a null layer".to_string())
+        }
+    }
+
+    /// Set a null layer's viewport gizmo tint (purely visual).
+    pub fn set_null_gizmo_color(&mut self, layer_id: &str, color: Color) -> Result<(), String> {
+        self.checkpoint();
+        let comp = self
+            .active_composition_mut()
+            .ok_or_else(|| "No active composition".to_string())?;
+        let layer = comp
+            .get_layer_mut(layer_id)
+            .ok_or_else(|| "No such layer".to_string())?;
+        if let LayerSource::Null { color: c, .. } = &mut layer.source {
+            *c = color;
             Ok(())
         } else {
             Err("Not a null layer".to_string())
