@@ -3736,6 +3736,15 @@ impl Render for CompositionViewerPanel {
                             ((wx + n_cw / 2.0) * n_fit, (wy + n_ch / 2.0) * n_fit)
                         };
                         let (ccx, ccy) = c2s(0.0, 0.0);
+                        // Rotate handle position + drag-start captures
+                        // (selected nulls only render the handle below).
+                        let (rcx, rcy) = c2s(s * 2.2, 0.0);
+                        let accent = rgb(0xffffff);
+                        let white = Rgba { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+                        let rot_state = null_state.clone();
+                        let rot_panel = null_panel.clone();
+                        let lid_rot = null_lid.clone();
+                        let (r_frame, r_fit, r_cw, r_ch) = (n_frame, n_fit, n_cw, n_ch);
                         // Custom gizmo tint: full strength when selected,
                         // slightly dimmed when not.
                         let gcol = Rgba {
@@ -3802,6 +3811,54 @@ impl Render for CompositionViewerPanel {
                                 });
                             }
                         }
+                        // Rotate handle for the selected null: same orbit
+                        // gesture as the transform-gizmo rotate dot, parked
+                        // past the arrow tip along the null's rotated x axis.
+                        let rot_handle: Option<AnyElement> = if null_sel {
+                            Some(
+                                gizmo_dot(
+                                    format!("null_rotate_{null_lid}"),
+                                    rcx,
+                                    rcy,
+                                    14.0,
+                                    accent,
+                                    white,
+                                    true,
+                                )
+                                .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+                                    let (mx, my) = (event.position.x / px(1.0), event.position.y / px(1.0));
+                                    rot_state.update(cx, |s, cx| {
+                                        s.checkpoint();
+                                        s.select_layer(Some(lid_rot.clone()));
+                                        s.preview_fast = true;
+                                        cx.notify();
+                                    });
+                                    let (cmx, cmy) = gizmo_to_comp(mx, my, r_frame, r_fit, r_cw, r_ch);
+                                    let lay = rot_state
+                                        .read(cx)
+                                        .evaluate_current_frame()
+                                        .ok()
+                                        .and_then(|stack| stack.get_layer(&lid_rot).cloned());
+                                    if let Some(lay) = lay {
+                                        let aw = lay.local_to_world_point(lay.transform.anchor_point);
+                                        let ang = (cmy - aw.y).atan2(cmx - aw.x);
+                                        let rot = lay.transform.rotation;
+                                        rot_panel.update(cx, |this, cx| {
+                                            this.gizmo_drag = Some(ViewerGizmoDrag::Rotate {
+                                                layer_id: lid_rot.clone(),
+                                                start_rot: rot,
+                                                start_angle: ang,
+                                            });
+                                            cx.notify();
+                                        });
+                                    }
+                                })
+                                .test_support()
+                                .into_any_element(),
+                            )
+                        } else {
+                            None
+                        };
                         gizmo_els.push(
                             div()
                                 .id(SharedString::from(format!("null_gizmo_{}", null_lid)))
@@ -3867,6 +3924,7 @@ impl Render for CompositionViewerPanel {
                                     })
                                     .into_any_element(),
                                 )
+                                .children(rot_handle)
                                 .into_any_element(),
                         );
                         continue;
@@ -18861,13 +18919,69 @@ fn render_graph_view(
                 };
                 let path_tag = path.replace(['.', ':'], "_");
                 let ms = (at_s * 1000.0).round() as i64;
-                let mut row = h_flex().gap_1().items_center().child(
-                    div()
-                        .text_xs()
-                        .font_medium()
-                        .text_color(ae::amber())
-                        .child(format!("◆ {label}")),
-                );
+                // Manual value entry for the selected key: click the value
+                // pill (After Effects-style) to type a number. Supports the
+                // shared expression grammar ("+=", "1920/2"... committed via
+                // gk: relative arithmetic) and dismisses on Enter/blur/Esc.
+                let edit_key = format!("gk:{lid_graph}:{path}:{ms}");
+                let live_val = state.read(cx).graph_key_current_value(&lid_graph, &path, at_s);
+                let val_text = live_val.map(|v| format!("{:.2}{}", v, graph_unit(&path)));
+                let editing_here = {
+                    let ed = state.read(cx);
+                    ed.value_edit_key.as_deref() == Some(edit_key.as_str()) && ed.value_editor.is_some()
+                };
+                let editor_opt = state.read(cx).value_editor.clone();
+                let value_child: AnyElement = match (editing_here, editor_opt) {
+                    (true, Some(editor)) => div()
+                        .on_action({
+                            let st = state.clone();
+                            move |_: &Escape, _w: &mut Window, cx: &mut App| {
+                                st.update(cx, |s, cx| {
+                                    if s.end_value_edit_state() {
+                                        cx.notify();
+                                    }
+                                });
+                            }
+                        })
+                        .child(Input::new(&editor).id(edit_key.clone()).w(px(76.)))
+                        .into_any_element(),
+                    _ => {
+                        let p_v = panel_entity.clone();
+                        let lid_v = lid_graph.clone();
+                        let path_v = path.clone();
+                        div()
+                            .id(SharedString::from(format!(
+                                "graph_val_pill_{}_{}_{}",
+                                lid_graph, path_tag, ms
+                            )))
+                            .test_support()
+                            .cursor_pointer()
+                            .px_1p5()
+                            .py_0p5()
+                            .rounded_sm()
+                            .bg(ae::control())
+                            .text_color(ae::text())
+                            .hover(|s| s.bg(ae::hover()))
+                            .text_xs()
+                            .on_mouse_down(MouseButton::Left, move |_e, window, cx| {
+                                p_v.update(cx, |this, cx| {
+                                    this.begin_graph_key_value_edit(&lid_v, &path_v, ms, window, cx);
+                                });
+                            })
+                            .child(val_text.unwrap_or_else(|| "—".to_string()))
+                            .into_any_element()
+                    }
+                };
+                let mut row = h_flex().gap_1().items_center();
+                row = row
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_medium()
+                            .text_color(ae::amber())
+                            .child(format!("◆ {label}")),
+                    )
+                    .child(value_child);
                 for ease in [KeyEase::Linear, KeyEase::EaseIn, KeyEase::EaseOut, KeyEase::Hold] {
                     let s_e = state.clone();
                     let lid_e = lid_graph.clone();
@@ -19806,6 +19920,66 @@ impl TimelinePanel {
     }
 
     /// Open keyboard entry for a timeline value row (`tl:<layer>:<key>`).
+    /// Manual value entry for a selected spline/graph keyframe. Mirrors
+    /// `begin_timeline_value_edit` with a `gk:{layer}:{path}:{ms}` edit key;
+    /// `commit_typed_value` keeps the key's time and writes only the value.
+    pub fn begin_graph_key_value_edit(
+        &mut self,
+        layer_id: &str,
+        path: &str,
+        at_ms: i64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let prop = format!("gk:{layer_id}:{path}:{at_ms}");
+        let at_s = at_ms as f64 / 1000.0;
+        let initial = self
+            .state
+            .read(cx)
+            .graph_key_current_value(layer_id, path, at_s)
+            .map(|v| {
+                if (v - v.round()).abs() < 1e-4 {
+                    format!("{}", v.round() as i64)
+                } else {
+                    format!("{v:.2}")
+                }
+            })
+            .unwrap_or_default();
+        let editor = cx.new(|cx| {
+            let mut st = InputState::new(window, cx);
+            st.set_value(initial, window, cx);
+            st.select_all(window, cx);
+            st
+        });
+        let st = self.state.clone();
+        let sub = cx.subscribe(
+            &editor,
+            move |_: &mut Self, input: Entity<InputState>, event: &InputEvent, cx| {
+                match event {
+                    InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                        let text = input.read(cx).value().trim().to_string();
+                        st.update(cx, |s, cx| {
+                            if s.value_edit_key.is_some() {
+                                s.commit_typed_value(&text);
+                                s.end_value_edit_state();
+                                cx.notify();
+                            }
+                        });
+                    }
+                    _ => {}
+                }
+            },
+        );
+        let handle = editor.read(cx).focus_handle(cx);
+        self.state.update(cx, |s, _| {
+            s.value_edit_key = Some(prop);
+            s.value_editor = Some(editor);
+            s.value_editor_sub = Some(sub);
+        });
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
     /// Mirrors `PropertiesPanel::begin_value_edit` with layer-targeted keys.
     pub fn begin_timeline_value_edit(
         &mut self,

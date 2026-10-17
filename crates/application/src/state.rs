@@ -1501,6 +1501,23 @@ impl EditorState {
         let Some(prop) = self.value_edit_key.clone() else {
             return false;
         };
+        // Graph key values: "gk:{layer_id}:{path}:{ms}" retimes nothing —
+        // keeps the key's time and writes only the value.
+        if let Some(rest) = prop.strip_prefix("gk:") {
+            let (meta, ms) = match rest.rsplit_once(':') {
+                Some(v) => v,
+                None => return false,
+            };
+            let (lid, path) = match meta.split_once(':') {
+                Some(v) => v,
+                None => return false,
+            };
+            let at_s = ms.parse::<i64>().map(|m| m as f64 / 1000.0).unwrap_or(0.0);
+            let Some(v) = parse_numeric_expression(text, self.graph_key_current_value(lid, path, at_s)) else {
+                return false;
+            };
+            return self.move_graph_keyframe(lid, path, at_s, at_s, v);
+        }
         let current = if let Some(rest) = prop.strip_prefix("tl:") {
             if let Some((lid, key)) = rest.split_once(':') {
                 self.timeline_current_value(lid, key)
@@ -7080,6 +7097,24 @@ impl EditorState {
                 }
             }
         }
+    }
+
+    /// Value of the graph key at `at_s` for manual value entry (typed
+    /// numbers in the graph bottom bar). Nearest key wins, tolerance-free.
+    pub fn graph_key_current_value(&self, layer_id: &str, path: &str, at_s: f64) -> Option<f32> {
+        self.graph_series(layer_id)
+            .into_iter()
+            .find(|se| se.path == path)
+            .and_then(|se| {
+                se.keys
+                    .into_iter()
+                    .map(|k| ((k.t - at_s).abs(), k.v))
+                    .min_by(|a, b| {
+                        a.0.partial_cmp(&b.0)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .map(|(_, v)| v)
+            })
     }
 
     pub fn graph_series(&self, layer_id: &str) -> Vec<GraphSeries> {

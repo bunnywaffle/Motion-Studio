@@ -6209,6 +6209,130 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         assert!(!state.set_graph_key_easing("layer_accent", "transform.position.x", 99.0, KeyEase::Linear));
     }
 
+    #[gpui_kit::test]
+    fn test_graph_key_value_pill_click_opens_editor(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.select_layer(Some("layer_accent".to_string()));
+                if !s.spline_editor_open {
+                    s.toggle_spline_editor();
+                }
+                cx.notify();
+            });
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            // Selecting a key mounts the value pill in the corner bar.
+            let snap = window.find("graph_key_layer_accent_transform_position_x_2000");
+            assert!(snap.visible());
+            window.click("graph_key_layer_accent_transform_position_x_2000", cx);
+        })
+        .expect("update_window failed");
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window
+                    .try_find("graph_val_pill_layer_accent_transform_position_x_2000")
+                    .map(|s| s.visible())
+                    == Some(true),
+                "value pill appears for the selected key"
+            );
+            window.click("graph_val_pill_layer_accent_transform_position_x_2000", cx);
+        })
+        .expect("update_window failed");
+        app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            assert_eq!(
+                s.value_edit_key.as_deref(),
+                Some("gk:layer_accent:transform.position.x:2000"),
+                "clicking the pill opens the type session on that key"
+            );
+            assert!(s.value_editor.is_some());
+        });
+    }
+
+    #[test]
+    fn test_typed_graph_key_value_updates_key() {
+        use crate::state::EditorState;
+
+        let mut state = EditorState::new();
+        // Fixture keys at 0s/2s/4s: type an absolute value into the 2s key's
+        // editor (gk:{layer}:{path}:{ms} keeps time, writes value).
+        let at = "gk:layer_accent:transform.position.x:2000";
+        assert_eq!(
+            state.graph_key_current_value("layer_accent", "transform.position.x", 2.0),
+            state
+                .active_composition()
+                .unwrap()
+                .get_layer("layer_accent")
+                .unwrap()
+                .transform
+                .position
+                .keyframes()
+                .iter()
+                .find(|k| (k.time_seconds() - 2.0).abs() < 1e-6)
+                .map(|k| k.value.x),
+            "lookup mirrors the stored key value"
+        );
+        state.value_edit_key = Some(at.to_string());
+        assert!(state.commit_typed_value("123.45"));
+        let kfs = state
+            .active_composition()
+            .unwrap()
+            .get_layer("layer_accent")
+            .unwrap()
+            .transform
+            .position
+            .keyframes();
+        assert_eq!(kfs.len(), 3, "typed value must not add/remove keys");
+        let kf = kfs.iter().find(|k| (k.time_seconds() - 2.0).abs() < 1e-6).unwrap();
+        assert!((kf.value.x - 123.45).abs() < 1e-3, "typed value lands on the key");
+        assert!(kf.value.y.abs() < 1e-6, "other axis untouched");
+        // Relative arithmetic works against the live value.
+        assert!(state.commit_typed_value("+=2.25"));
+        let kf2 = state
+            .active_composition()
+            .unwrap()
+            .get_layer("layer_accent")
+            .unwrap()
+            .transform
+            .position
+            .keyframes()
+            .iter()
+            .find(|k| (k.time_seconds() - 2.0).abs() < 1e-6)
+            .unwrap()
+            .clone();
+        assert!((kf2.value.x - 125.70).abs() < 1e-2, "relative modifiers apply");
+        // Nonsense input is a no-op.
+        assert!(!state.commit_typed_value("abc"));
+        let kf3 = state
+            .active_composition()
+            .unwrap()
+            .get_layer("layer_accent")
+            .unwrap()
+            .transform
+            .position
+            .keyframes()
+            .iter()
+            .find(|k| (k.time_seconds() - 2.0).abs() < 1e-6)
+            .unwrap()
+            .clone();
+        assert!((kf3.value.x - kf2.value.x).abs() < 1e-3, "no value change on bad input");
+        assert!(state.end_value_edit_state(), "edit session still open");
+        assert!(state.value_edit_key.is_none() && state.value_editor.is_none());
+    }
+
     #[test]
     fn test_graph_series_includes_all_effect_scalars() {
         use crate::state::EditorState;
@@ -7344,6 +7468,15 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
 
             // The Gizmo Color row mounts with its edit toggle.
             assert!(window.find("fx_wheel_btn_gizmo_color_null_gizmo").visible());
+            // Selected nulls grow an orbit rotate handle on the viewport
+            // (id needs the layer id; capture it from selection state).
+            let rotate_id = state
+                .read(cx)
+                .selected_layer_id
+                .as_ref()
+                .map(|lid| format!("null_rotate_{}", lid))
+                .expect("null selected");
+            assert!(window.find(SharedString::from(rotate_id)).visible(), "rotate handle on selected null");
         })
         .expect("update_window failed");
         cx.update_window(handle.into(), |_, window, cx| {
