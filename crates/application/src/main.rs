@@ -55,6 +55,8 @@ pub struct AppView {
     show_new_project: bool,
     /// Project settings / manager dialog visibility.
     pub show_project_manager: bool,
+    /// App settings dialog visibility (theme + app-level options).
+    pub show_settings: bool,
     /// Export dialog visibility + options.
     pub show_export: bool,
     pub export_format_idx: usize,
@@ -162,6 +164,7 @@ impl AppView {
             show_about: false,
             show_new_project: false,
             show_project_manager: false,
+            show_settings: false,
             show_export: false,
             export_format_idx: 0,
             export_busy: false,
@@ -1347,6 +1350,26 @@ fn render_menu_dropdown(
                             },
                         ));
                     }
+                    items = items.child(
+                        div().h(px(1.)).my_0p5().bg(cx.theme().border),
+                    );
+                    {
+                        let a = app.clone();
+                        items = items.child(menu_item(
+                            "menu_settings".to_string(),
+                            "Settings…".to_string(),
+                            None,
+                            true,
+                            cx,
+                            move |cx| {
+                                a.update(cx, |this, cx| {
+                                    this.open_menu = None;
+                                    this.show_settings = true;
+                                    cx.notify();
+                                });
+                            },
+                        ));
+                    }
                 }
                 TopMenu::Composition => {
                     {
@@ -2241,6 +2264,89 @@ impl Render for AppView {
                                                 .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                                                     a_close.update(cx, |this, cx| {
                                                         this.show_about = false;
+                                                        cx.notify();
+                                                    });
+                                                })
+                                                .child("Close"),
+                                        ),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+            );
+        }
+        if self.show_settings {
+            let a_close = cx.entity().clone();
+            let current_dark = cx.theme().mode == ThemeMode::Dark;
+            let dlg_pos = point(px((vw_f - 320.0).max(8.0) / 2.0), px((vh_f - 200.0).max(8.0) / 2.0));
+            // One mode-pill per gpui-kit ThemeMode; picks persist to
+            // settings.json and apply through Theme::change immediately.
+            let theme_option = |id: &'static str, label: &'static str, mode: ThemeMode, active: bool, a_pick: Entity<AppView>| {
+                div()
+                    .id(SharedString::from(id))
+                    .test_support()
+                    .cursor_pointer()
+                    .px_3()
+                    .py_1()
+                    .rounded_sm()
+                    .border_1()
+                    .text_xs()
+                    .font_semibold()
+                    .bg(if active { cx.theme().accent } else { cx.theme().transparent })
+                    .border_color(cx.theme().border)
+                    .text_color(if active { cx.theme().accent_foreground } else { cx.theme().muted_foreground })
+                    .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                    .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                        crate::state::store_theme(mode);
+                        Theme::change(mode, Some(window), cx);
+                        a_pick.update(cx, |this, cx| {
+                            this.menu_note = Some(format!("Theme: {mode:?}"));
+                            cx.notify();
+                        });
+                    })
+                    .child(label)
+            };
+            dialogs.push(
+                deferred(
+                    Positioner::corner(Anchor::TopLeft, dlg_pos)
+                        .margin(px(8.))
+                        .occlude()
+                        .child(
+                            div()
+                                .id("settings_dialog")
+                                .test_support()
+                                .w(px(320.))
+                                .bg(cx.theme().background)
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .rounded_md()
+                                .shadow_lg()
+                                .p_4()
+                                .child(
+                                    v_flex()
+                                        .gap_2()
+                                        .child(div().font_bold().text_sm().child("Settings"))
+                                        .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Appearance"))
+                                        .child(
+                                            h_flex()
+                                                .gap_2()
+                                                .child(theme_option("settings_theme_light", "Light", ThemeMode::Light, !current_dark, a_close.clone()))
+                                                .child(theme_option("settings_theme_dark", "Dark", ThemeMode::Dark, current_dark, a_close.clone())),
+                                        )
+                                        .child(
+                                            div()
+                                                .cursor_pointer()
+                                                .px_3()
+                                                .py_1()
+                                                .rounded_sm()
+                                                .bg(cx.theme().primary)
+                                                .text_color(cx.theme().primary_foreground)
+                                                .text_xs()
+                                                .font_semibold()
+                                                .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                    a_close.update(cx, |this, cx| {
+                                                        this.show_settings = false;
                                                         cx.notify();
                                                     });
                                                 })
@@ -3533,6 +3639,7 @@ impl Render for AppView {
                         this.show_about = false;
                         this.show_new_project = false;
                         this.show_project_manager = false;
+                        this.show_settings = false;
                         this.show_export = false;
                         cx.notify();
                     });
@@ -3680,7 +3787,8 @@ fn main() {
     let app = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
     app.run(|cx| {
         gpui_kit::init(cx);
-        Theme::change(ThemeMode::Dark, None, cx);
+        let boot_theme = crate::state::load_stored_theme();
+        Theme::change(boot_theme, None, cx);
 
         let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
         cx.open_window(
@@ -3691,7 +3799,7 @@ fn main() {
             |window, cx| {
                 window.activate_window();
                 window.set_window_title("Motion Compositor");
-                Theme::change(ThemeMode::Dark, Some(window), cx);
+                Theme::change(boot_theme, Some(window), cx);
                 let state = cx.new(|_| EditorState::blank());
                 let view = cx.new(|cx| AppView::new_with_state(state, window, cx));
                 cx.new(|cx| Root::new(view, window, cx).bg(cx.theme().background))
@@ -12518,6 +12626,73 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         app_view.read_with(cx, |this, _| {
             assert_eq!(this.open_menu, Some(TopMenu::File));
         });
+    }
+
+    #[gpui_kit::test]
+    fn test_settings_dialog_theme_switching_and_persistence(cx: &mut TestAppContext) {
+        use super::TopMenu;
+        cx.update(gpui_kit::init);
+        cx.update(|cx| Theme::change(ThemeMode::Dark, None, cx));
+
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
+            window.activate_window();
+            window.set_window_title("Motion Compositor");
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        cx.run_until_parked();
+
+        // Edit menu exposes a Settings… entry that opens the dialog.
+        app_view.update(cx, |this, cx| {
+            this.open_menu = Some(TopMenu::Edit);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            assert!(window.find("menu_settings").visible());
+            window.click("menu_settings", cx);
+            window.render_frame(cx);
+            assert!(
+                app_view.read(cx).show_settings,
+                "Settings… item must open the settings dialog"
+            );
+            assert!(window.find("settings_theme_light").visible());
+            assert!(window.find("settings_theme_dark").visible());
+
+            // Picking Light flips the live theme immediately (gpui-kit
+            // Theme::change semantics) and persists.
+            window.click("settings_theme_light", cx);
+            window.render_frame(cx);
+            assert_eq!(
+                Theme::global(cx).mode,
+                ThemeMode::Light,
+                "theme pick applies live"
+            );
+            assert!(
+                app_view.read(cx).show_settings,
+                "picking a mode keeps the dialog open"
+            );
+
+            // Round-trip back to Dark (also restores the boot default for
+            // the real settings.json the live pick wrote).
+            window.click("settings_theme_dark", cx);
+            window.render_frame(cx);
+            assert_eq!(Theme::global(cx).mode, ThemeMode::Dark);
+        })
+        .expect("update_window failed");
+
+        // Persistence honesty on a hermetic path: corrupt file falls back
+        // to the Dark default, valid file round-trips.
+        let mut p = std::env::temp_dir();
+        p.push("ms_settings_ui_test.json");
+        std::fs::write(&p, r#"invalid {"theme":"bogus"}"#).unwrap();
+        assert_eq!(crate::state::load_stored_theme_from(&p), ThemeMode::Dark);
+        crate::state::store_theme_to(&p, ThemeMode::Light).unwrap();
+        assert_eq!(crate::state::load_stored_theme_from(&p), ThemeMode::Light);
+        let _ = std::fs::remove_file(&p);
     }
 
     #[test]

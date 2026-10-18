@@ -1,5 +1,6 @@
 use compositor::{AffineTransform2D, EvaluatedStack, LayerStackEvaluator, SceneGraph};
 use gpui_kit::component::input::InputState;
+use gpui_kit::component::ThemeMode;
 use gpui_kit::{Entity, Subscription};
 use project::{
     Asset, AutoTraceOptions, BlendMode, Color, Composition, Effect, EffectType, FillGradient,
@@ -369,10 +370,65 @@ impl UserAnimationPreset {
 /// On-disk location for the persisted user-preset list
 /// (`<config>/MotionStudio/animation_presets.json`).
 fn user_presets_file() -> Option<PathBuf> {
+    app_config_dir().map(|d| d.join("animation_presets.json"))
+}
+
+/// App-owned writable config directory (`<config>/MotionStudio`).
+fn app_config_dir() -> Option<PathBuf> {
     let base = std::env::var_os("APPDATA").map(PathBuf::from)
         .or_else(|| std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from))
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(base.join("MotionStudio").join("animation_presets.json"))
+    Some(base.join("MotionStudio"))
+}
+
+/// Shape of `<config>/MotionStudio/settings.json` (missing fields default).
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct AppSettingsFile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    theme: Option<String>,
+}
+
+/// Parse the theme mode from the settings shape (`light`/`dark`).
+fn theme_mode_from_string(s: Option<&str>) -> Option<ThemeMode> {
+    match s {
+        Some("light") => Some(ThemeMode::Light),
+        Some("dark") => Some(ThemeMode::Dark),
+        _ => None,
+    }
+}
+
+/// Read the persisted app theme from `path` (missing/corrupt → Dark default).
+pub(crate) fn load_stored_theme_from(path: &StdPath) -> ThemeMode {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<AppSettingsFile>(&text).ok())
+        .and_then(|s| theme_mode_from_string(s.theme.as_deref()))
+        .unwrap_or(ThemeMode::Dark)
+}
+
+/// Read the persisted app theme, defaulting Dark.
+pub fn load_stored_theme() -> ThemeMode {
+    app_config_dir()
+        .map(|d| load_stored_theme_from(&d.join("settings.json")))
+        .unwrap_or(ThemeMode::Dark)
+}
+
+/// Persist the app theme to `path` (creates parent dirs).
+pub(crate) fn store_theme_to(path: &StdPath, mode: ThemeMode) -> Result<(), String> {
+    let file = AppSettingsFile { theme: Some(mode.name().to_string()) };
+    let text = serde_json::to_string_pretty(&file).map_err(|e| format!("serialize failed: {e}"))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir failed: {e}"))?;
+    }
+    std::fs::write(path, text).map_err(|e| format!("write failed: {e}"))
+}
+
+/// Persist the app theme to the real settings path (silently best-effort:
+/// a failed config write must not block theme switching).
+pub fn store_theme(mode: ThemeMode) {
+    if let Some(dir) = app_config_dir() {
+        let _ = store_theme_to(&dir.join("settings.json"), mode);
+    }
 }
 
 /// Read persisted user presets, tolerating a missing or corrupt file.
