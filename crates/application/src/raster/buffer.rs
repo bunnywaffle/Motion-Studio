@@ -185,6 +185,27 @@ fn write_straight_rgba8(buf: &mut FloatBuf, rgba: &[u8]) {
     }
 }
 
+/// Flag whether the current layer render may route the built-in aura
+/// (Drop Shadow / Outer Glow) through the GPU chain. Forwarded per raster
+/// (thread-local in the renderer, so parallel div renders never
+/// cross-talk); exotic blend modes composite the aura through their own
+/// math and keep the CPU path.
+pub fn set_aura_gpu_ok(ok: bool) {
+    renderer::set_aura_gpu_ok(ok);
+}
+
+/// Whether the last GPU chain pass served the aura stages itself: the
+/// rasterizer's CPU blit stage checks it right after `apply_layer_fx` and
+/// skips its own Drop Shadow / Outer Glow handling to avoid double-applying.
+pub fn aura_gpu_handled() -> bool {
+    renderer::aura_gpu_handled()
+}
+
+/// Clear the per-call handled marker (called at `apply_layer_fx` entry).
+pub fn reset_aura_gpu_handled() {
+    renderer::reset_aura_gpu_handled();
+}
+
 /// Run a layer's whole `apply_layer_fx` chain on the GPU when every
 /// enabled effect is in the parity-audited [`renderer::CHAIN_SAFE_STOCK`]
 /// / [`renderer::CHAIN_SAFE_BUILTIN`] sets (gentle point/rect twins; blur

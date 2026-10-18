@@ -17,6 +17,39 @@ use crate::fx_pass::{FxMergePass, FxPass, FxUniforms};
 use compositor::{EvaluatedEffect, EvaluatedEffectType};
 use project::StockPlugin;
 
+thread_local! {
+    /// Viewport-side gate mirrored from the rasterizer (per thread, so
+    /// concurrent per-layer div renders never cross-talk): exotic blend
+    /// modes composite the aura through their own math and keep it on the
+    /// exact CPU blit path; the export path never enables the chain at all.
+    static AURA_GPU_OK: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    /// Whether the last chain pass served the Drop Shadow / Outer Glow
+    /// aura stages on the GPU â€” the rasterizer's CPU blit stage checks
+    /// it right after and skips its own aura pass to avoid double-applying.
+    static AURA_GPU_HANDLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Flag whether the current layer render may route the built-in aura
+/// (Drop Shadow / Outer Glow) through the GPU chain. Called on the
+/// rasterizing thread before `gpu_fx_chain` (see `buffer.rs`).
+pub fn set_aura_gpu_ok(ok: bool) {
+    AURA_GPU_OK.with(|c| c.set(ok));
+}
+pub(crate) fn aura_gpu_ok() -> bool {
+    AURA_GPU_OK.with(|c| c.get())
+}
+/// Clear the per-call handled marker (must be called at the entry of every
+/// chain attempt so a stale flag never skips a following CPU aura pass).
+pub fn reset_aura_gpu_handled() {
+    AURA_GPU_HANDLED.with(|c| c.set(false));
+}
+pub fn aura_gpu_handled() -> bool {
+    AURA_GPU_HANDLED.with(|c| c.get())
+}
+fn set_aura_gpu_handled() {
+    AURA_GPU_HANDLED.with(|c| c.set(true));
+}
+
 /// Unified GPU Effect Engine.
 pub struct GpuEffectEngine {
     gpu: GpuContext,
@@ -30,8 +63,12 @@ pub struct GpuEffectEngine {
     bright_pass: Option<FxPass>,
     blit_pass: Option<FxPass>,
     /// Long-shadow march stage pass for the multi-stage stock path
-    /// (march → blur → under-merge).
+    /// (march â†’ blur â†’ under-merge).
     march_pass: Option<FxPass>,
+    /// Aura fill stages for the built-in Drop Shadow / Outer Glow path
+    /// (colorize â†’ compute blur â†’ under-merge).
+    glow_fill: Option<FxPass>,
+    shadow_fill: Option<FxPass>,
     /// Scratch target for multi-stage spatial effects (sharpen blur source,
     /// bloom blurred glow): same size as the ping-pong pair, pooled.
     scratch: Option<RenderTarget>,
@@ -87,6 +124,8 @@ impl GpuEffectEngine {
             bright_pass: None,
             blit_pass: None,
             march_pass: None,
+            glow_fill: None,
+            shadow_fill: None,
             scratch: None,
             readback: None,
         })
@@ -99,7 +138,7 @@ impl GpuEffectEngine {
 
     /// True when the engine runs on real hardware. Software-fallback
     /// adapters emulate compute on the CPU with submit + readback stalls
-    /// that dwarf the native CPU kernel — callers must prefer the CPU
+    /// that dwarf the native CPU kernel â€” callers must prefer the CPU
     /// path when this is false.
     pub fn is_hardware(&self) -> bool {
         !matches!(
@@ -154,6 +193,7 @@ impl GpuEffectEngine {
             let pass = match id {
                 "screen" => FxMergePass::screen(&self.gpu, format),
                 "shadow_under" => FxMergePass::shadow_under(&self.gpu, format),
+                "under_prem" => FxMergePass::under_prem(&self.gpu, format),
                 _ => FxMergePass::unsharp(&self.gpu, format),
             }
             .map_err(GpuError::ShaderCompilation)?;
@@ -170,6 +210,23 @@ impl GpuEffectEngine {
                 Some(FxPass::shadow_march(&self.gpu, format).map_err(GpuError::ShaderCompilation)?);
         }
         Ok(self.march_pass.as_ref().expect("just created"))
+    }
+
+    /// Get or create the built-in aura fill stages (both families compile
+    /// lazily in one go; the merge + blit pass ride the existing caches).
+    fn get_or_create_aura_fill_passes(&mut self) -> Result<(), GpuError> {
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        if self.glow_fill.is_none() {
+            self.glow_fill =
+                Some(FxPass::glow_fill(&self.gpu, format).map_err(GpuError::ShaderCompilation)?);
+        }
+        if self.shadow_fill.is_none() {
+            self.shadow_fill =
+                Some(FxPass::shadow_fill(&self.gpu, format).map_err(GpuError::ShaderCompilation)?);
+        }
+        self.get_or_create_merge_pass("under_prem")?;
+        self.get_or_create_blit_pass()?;
+        Ok(())
     }
 
     /// Get or create the bright-pass extract stage.
@@ -277,6 +334,20 @@ impl GpuEffectEngine {
     /// excluded: blur runs in its own raster stage via `blur_buffer`,
     /// which already picks the GPU compute path when hardware exists.
     pub fn supports_fx_chain(&mut self, effects: &[compositor::EvaluatedEffect]) -> bool {
+        // Two auras ride the CPU blit stage in authored order (shadow
+        // under glow); a GPU twin serving both below one content merge is
+        // out of scope, so multi-aura stacks keep the CPU path.
+        let aura_count = effects
+            .iter()
+            .filter(|e| {
+                e.enabled
+                    && matches!(
+                        e.effect_type,
+                        compositor::EvaluatedEffectType::DropShadow { .. }
+                            | compositor::EvaluatedEffectType::OuterGlow { .. }
+                    )
+            })
+            .count();
         let mut any = false;
         // Posterize-family after an edge map speckles: edge output sits on
         // posterize boundaries, and u8 inter-pass rounding flips whole
@@ -305,7 +376,7 @@ impl GpuEffectEngine {
                     // Multi-stage Glow stays CPU (see CHAIN_SAFE_STOCK):
                     // threshold presence flips across the u8 boundary
                     // while the white screen amplifies any nonzero mask
-                    // to full strength — unboundable in a u8 chain.
+                    // to full strength â€” unboundable in a u8 chain.
                     if *plugin == StockPlugin::Glow {
                         return false;
                     }
@@ -322,7 +393,7 @@ impl GpuEffectEngine {
                     }
                     // (Lens Flare streaks need no gate: the 48-tap streak
                     // footprint makes exact-zero straddles uninhabitable
-                    // on real gradients — the parity test guards this.)
+                    // on real gradients â€” the parity test guards this.)
                     if *plugin == StockPlugin::LongShadow {
                         use compositor::fx::stock_p;
                         if stock_p(*plugin, params, 5) > 8.0 {
@@ -354,7 +425,7 @@ impl GpuEffectEngine {
                     // Bokeh stays on the exact CPU path: the blurred-highlight
                     // alpha tail below 1/255 carries full-strength screen
                     // presence on the CPU (`screen_over` unpremultiplies)
-                    // but quantizes to zero in any u8 chain — an unboundable
+                    // but quantizes to zero in any u8 chain â€” an unboundable
                     // halo fringe (measured 0.88 on gradients).
                     if *plugin == StockPlugin::Bokeh {
                         return false;
@@ -367,6 +438,52 @@ impl GpuEffectEngine {
                     }
                 }
                 eff_type => {
+                    // Built-in aura (Drop Shadow / Outer Glow): colorize â†’
+                    // compute blur â†’ under-merge. Radii cap at the compute
+                    // blur's shared-memory apron (radii beyond that keep
+                    // the CPU kernel, which downsamples), and the caller
+                    // flags whether the aura is GPU-safe at all (viewport
+                    // Normal blend; exotic modes composite the aura
+                    // through their own math and stay CPU).
+                    if let compositor::EvaluatedEffectType::DropShadow {
+                        softness,
+                        opacity,
+                        ..
+                    } = eff_type
+                    {
+                        if aura_count > 1 || !aura_gpu_ok() || *softness > 8.0 {
+                            return false;
+                        }
+                        // CPU blit renders the shadow for any distance
+                        // (softness halo spreads past the content even at
+                        // distance 0) â€” only degenerate strength skips.
+                        if (opacity / 100.0).clamp(0.0, 1.0) * 0.75 <= 0.005 {
+                            continue;
+                        }
+                        if self.get_or_create_aura_fill_passes().is_err() {
+                            return false;
+                        }
+                        any = true;
+                        continue;
+                    }
+                    if let compositor::EvaluatedEffectType::OuterGlow {
+                        size, opacity, ..
+                    } = eff_type
+                    {
+                        if aura_count > 1 || !aura_gpu_ok() || *size > 8.0 {
+                            return false;
+                        }
+                        // CPU blit stage skips glow at opacity <= 1% and
+                        // radius < 0.5 px â€” mirror exactly.
+                        if (opacity / 100.0).clamp(0.0, 1.0) <= 0.01 || *size <= 0.5 {
+                            continue;
+                        }
+                        if self.get_or_create_aura_fill_passes().is_err() {
+                            return false;
+                        }
+                        any = true;
+                        continue;
+                    }
                     // Unsharp mask needs the blurred buffer beside the
                     // original: blur into scratch, then merge. A zero
                     // amount is a true no-op on both paths: skip it.
@@ -403,9 +520,9 @@ impl GpuEffectEngine {
                         }
                     }
                     // Displacement offsets derive from source luminance, so u8
-                    // source quantization (≈0.002) becomes a position error
+                    // source quantization (â‰ˆ0.002) becomes a position error
                     // that hard edges amplify into visible flips: keep large
-                    // offsets on the exact CPU path (empirically ≈0.0012
+                    // offsets on the exact CPU path (empirically â‰ˆ0.0012
                     // error per px of offset on hard-edge content).
                     if let compositor::EvaluatedEffectType::DisplacementMap { max_horizontal, max_vertical, source_mode, channel_h, channel_v, map_scale, wrap, .. } = eff_type {
                         if max_horizontal.abs() > 8.0 || max_vertical.abs() > 8.0 {
@@ -472,6 +589,11 @@ impl GpuEffectEngine {
                 let _ = self.get_or_create_merge_pass("unsharp");
             } else if let Some(id) = crate::fx_pass::builtin_gpu_id(&eff.effect_type) {
                 let _ = self.get_or_create_builtin_pass(id);
+            } else if matches!(
+                &eff.effect_type,
+                EvaluatedEffectType::DropShadow { .. } | EvaluatedEffectType::OuterGlow { .. }
+            ) {
+                let _ = self.get_or_create_aura_fill_passes();
             }
         }
 
@@ -615,7 +737,7 @@ impl GpuEffectEngine {
                             }
                         }
                     }
-                    // Stock Long Shadow: march → gaussian blur → under
+                    // Stock Long Shadow: march â†’ gaussian blur â†’ under
                     // merge (same stage shape; degenerate params skip
                     // exactly like the CPU early-out, in every mode).
                     if *plugin == StockPlugin::LongShadow {
@@ -709,6 +831,162 @@ impl GpuEffectEngine {
                     }
                 }
                 eff_type => {
+                    // Built-in aura (Drop Shadow / Outer Glow):
+                    // colorize -> compute blur -> under-merge, then land
+                    // the result back in the chain cursor. Exactly the CPU
+                    // rasterize_layer blit-stage order (aura strictly
+                    // behind content); marks the handled flag so the CPU
+                    // blit stage skips its own aura pass afterwards.
+                    if let EvaluatedEffectType::DropShadow {
+                        distance,
+                        angle,
+                        softness,
+                        opacity,
+                        color,
+                    } = eff_type
+                    {
+                        let strength = (opacity / 100.0).clamp(0.0, 1.0) * 0.75;
+                        if strength > 0.005 {
+                            let scratch = self.scratch.as_ref().expect("targets allocated");
+                            if let Some(fill) = self.shadow_fill.as_ref() {
+                                // CPU blit ties the offset to the raster
+                                // scale (kx, ky); the chain carries raw px
+                                // (identical at 1:1 viewport scale).
+                                let rad = angle.to_radians();
+                                let ox = distance * rad.cos();
+                                let oy = distance * rad.sin();
+                                let uniforms = FxUniforms::pack(
+                                    &[ox, oy, strength],
+                                    &[[color.r, color.g, color.b, color.a]],
+                                    time_s,
+                                    width as f32,
+                                    height as f32,
+                                    0.0,
+                                );
+                                fill.record_into(
+                                    &self.gpu,
+                                    &mut encoder,
+                                    targets.read_target().view(),
+                                    scratch,
+                                    uniforms,
+                                );
+                            }
+                            let soft = softness.clamp(0.0, 8.0);
+                            if soft > 0.5 {
+                                self.blur_pipeline.record_blur(
+                                    &self.gpu,
+                                    &mut encoder,
+                                    scratch,
+                                    intermediate,
+                                    targets.write_target(),
+                                    soft,
+                                );
+                            } else if let Some(blit) = self.blit_pass.as_ref() {
+                                blit.record_into(
+                                    &self.gpu,
+                                    &mut encoder,
+                                    scratch.view(),
+                                    targets.write_target(),
+                                    FxUniforms::pack(&[], &[], time_s, width as f32, height as f32, 0.0),
+                                );
+                            }
+                            if let Some(merge) = self.merge_pass_cache.get("under_prem") {
+                                merge.record_into(
+                                    &self.gpu,
+                                    &mut encoder,
+                                    targets.read_target().view(),
+                                    targets.write_target().view(),
+                                    intermediate,
+                                    FxUniforms::pack(
+                                        &[],
+                                        &[[color.r, color.g, color.b, color.a]],
+                                        time_s,
+                                        width as f32,
+                                        height as f32,
+                                        0.0,
+                                    ),
+                                );
+                            }
+                            if let Some(blit) = self.blit_pass.as_ref() {
+                                blit.record_into(
+                                    &self.gpu,
+                                    &mut encoder,
+                                    intermediate.view(),
+                                    targets.read_target(),
+                                    FxUniforms::pack(&[], &[], time_s, width as f32, height as f32, 0.0),
+                                );
+                            }
+                            set_aura_gpu_handled();
+                        }
+                        continue;
+                    }
+                    if let EvaluatedEffectType::OuterGlow {
+                        size,
+                        spread,
+                        opacity,
+                        color,
+                        ..
+                    } = eff_type
+                    {
+                        let strength = (opacity / 100.0).clamp(0.0, 1.0);
+                        let radius = (*size).clamp(0.5, 8.0);
+                        if strength > 0.01 && radius > 0.5 {
+                            let scratch = self.scratch.as_ref().expect("targets allocated");
+                            if let Some(fill) = self.glow_fill.as_ref() {
+                                let uniforms = FxUniforms::pack(
+                                    &[*spread, strength],
+                                    &[[color.r, color.g, color.b, color.a]],
+                                    time_s,
+                                    width as f32,
+                                    height as f32,
+                                    0.0,
+                                );
+                                fill.record_into(
+                                    &self.gpu,
+                                    &mut encoder,
+                                    targets.read_target().view(),
+                                    scratch,
+                                    uniforms,
+                                );
+                                self.blur_pipeline.record_blur(
+                                    &self.gpu,
+                                    &mut encoder,
+                                    scratch,
+                                    intermediate,
+                                    targets.write_target(),
+                                    radius,
+                                );
+                            }
+                            if let Some(merge) = self.merge_pass_cache.get("under_prem") {
+                                merge.record_into(
+                                    &self.gpu,
+                                    &mut encoder,
+                                    targets.read_target().view(),
+                                    targets.write_target().view(),
+                                    intermediate,
+                                    FxUniforms::pack(
+                                        &[],
+                                        &[[color.r, color.g, color.b, color.a]],
+                                        time_s,
+                                        width as f32,
+                                        height as f32,
+                                        0.0,
+                                    ),
+                                );
+                            }
+                            if let Some(blit) = self.blit_pass.as_ref() {
+                                blit.record_into(
+                                    &self.gpu,
+                                    &mut encoder,
+                                    intermediate.view(),
+                                    targets.read_target(),
+                                    FxUniforms::pack(&[], &[], time_s, width as f32, height as f32, 0.0),
+                                );
+                            }
+                            set_aura_gpu_handled();
+                        }
+                        continue;
+                    }
                     // Unsharp mask: compute-blur the chain cursor into
                     // scratch, then merge (orig, blurred) into write.
                     if let EvaluatedEffectType::Sharpen { amount, radius } = eff_type {
@@ -838,7 +1116,7 @@ impl GpuEffectEngine {
                             // params[0]=ca+pad, params[1]=cb+pad, params[2]=(angle, fill).
                             // Angle sits at params[2].x to match the twin call
                             // below (it used to land at params[1].w, which the
-                            // twin never read — GPU ramps were always 0°).
+                            // twin never read â€” GPU ramps were always 0Â°).
                             ("gradient_ramp", [ca.r, ca.g, ca.b, 0.0, cb.r, cb.g, cb.b, 0.0, gradient.angle.to_radians(), *fill_alpha as i32 as f32])
                         }
                         _ => continue,

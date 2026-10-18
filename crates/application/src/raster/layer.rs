@@ -1384,6 +1384,9 @@ pub fn rasterize_layer(
         Some(v) => v,
         None => &layer.effects,
     };
+    // Exotic blend modes composite the aura through their own math — the
+    // GPU aura (which rides the content pipework) stays Normal-only.
+    super::buffer::set_aura_gpu_ok(layer.blend_mode == BlendMode::Normal);
     apply_layer_fx(&mut work, base_w, base_h, effects, &fx, true);
     let mut blur_total = 0.0f32;
     let mut bloom: Option<(f32, f32)> = None;
@@ -1461,71 +1464,78 @@ pub fn rasterize_layer(
             }
         }
     }
-    // Drop shadow (softness blurs the silhouette once, up front).
+    // Drop shadow (softness blurs the silhouette once, up front). The
+    // GPU aura chain may have served it already — skip to avoid double-
+    // applying (and skip the rest of the stack, else CPU-only layers
+    // would still pay the sil extraction).
     let mut shadow = None;
     let mut shadow_blurred: Option<FloatBuf> = None;
-    for eff in &layer.effects {
-        if !eff.enabled {
-            continue;
-        }
-        if let EvaluatedEffectType::DropShadow { distance, angle, softness, opacity, color } =
-            &eff.effect_type
-        {
-            let rad = angle.to_radians();
-            shadow = Some((
-                distance * rad.cos() * kx,
-                distance * rad.sin() * ky,
-                (opacity / 100.0).clamp(0.0, 1.0) * 0.75,
-                *color,
-            ));
-            if *softness > 0.5 {
-                // Alpha-only silhouette, blurred in work px.
-                let mut sil = FloatBuf::clear(work.w, work.h);
-                for (d, s) in sil.px.iter_mut().zip(work.px.iter()) {
-                    *d = Px { r: 0.0, g: 0.0, b: 0.0, a: s.a };
-                }
-                blur_buffer(&mut sil, *softness);
-                shadow_blurred = Some(sil);
+    if !super::buffer::aura_gpu_handled() {
+        for eff in &layer.effects {
+            if !eff.enabled {
+                continue;
             }
-            break;
+            if let EvaluatedEffectType::DropShadow { distance, angle, softness, opacity, color } =
+                &eff.effect_type
+            {
+                let rad = angle.to_radians();
+                shadow = Some((
+                    distance * rad.cos() * kx,
+                    distance * rad.sin() * ky,
+                    (opacity / 100.0).clamp(0.0, 1.0) * 0.75,
+                    *color,
+                ));
+                if *softness > 0.5 {
+                    // Alpha-only silhouette, blurred in work px.
+                    let mut sil = FloatBuf::clear(work.w, work.h);
+                    for (d, s) in sil.px.iter_mut().zip(work.px.iter()) {
+                        *d = Px { r: 0.0, g: 0.0, b: 0.0, a: s.a };
+                    }
+                    blur_buffer(&mut sil, *softness);
+                    shadow_blurred = Some(sil);
+                }
+                break;
+            }
         }
     }
     // Outer glow (blurred expanded silhouette rendered outward).
-    for eff in &layer.effects {
-        if !eff.enabled {
-            continue;
-        }
-        if let EvaluatedEffectType::OuterGlow { size, spread, opacity, color, .. } =
-            &eff.effect_type
-        {
-            let glow_radius = (size * kx).clamp(0.5, 2048.0);
-            let glow_opacity = (opacity / 100.0).clamp(0.0, 1.0);
-            if glow_opacity > 0.01 && glow_radius > 0.5 {
-                // Build alpha silhouette with optional spread dilation
-                let mut sil = FloatBuf::clear(work.w, work.h);
-                let spread_val = *spread;
-                for (d, s) in sil.px.iter_mut().zip(work.px.iter()) {
-                    let a = if spread_val > 5.0 {
-                        (s.a * (1.0 + spread_val / 20.0)).clamp(0.0, 1.0)
-                    } else {
-                        s.a
-                    };
-                    *d = Px { r: 0.0, g: 0.0, b: 0.0, a };
-                }
-                blur_buffer(&mut sil, glow_radius);
-                let glow_params = Some((0.0, 0.0, glow_opacity, *color));
-                // Blit glow underneath onto out buffer
-                blit_affine(
-                    &mut out,
-                    &work,
-                    shifted,
-                    layer.effective_opacity.clamp(0.0, 1.0),
-                    BlendMode::Normal,
-                    glow_params,
-                    Some(&sil),
-                );
+    if !super::buffer::aura_gpu_handled() {
+        for eff in &layer.effects {
+            if !eff.enabled {
+                continue;
             }
-            break;
+            if let EvaluatedEffectType::OuterGlow { size, spread, opacity, color, .. } =
+                &eff.effect_type
+            {
+                let glow_radius = (size * kx).clamp(0.5, 2048.0);
+                let glow_opacity = (opacity / 100.0).clamp(0.0, 1.0);
+                if glow_opacity > 0.01 && glow_radius > 0.5 {
+                    // Build alpha silhouette with optional spread dilation
+                    let mut sil = FloatBuf::clear(work.w, work.h);
+                    let spread_val = *spread;
+                    for (d, s) in sil.px.iter_mut().zip(work.px.iter()) {
+                        let a = if spread_val > 5.0 {
+                            (s.a * (1.0 + spread_val / 20.0)).clamp(0.0, 1.0)
+                        } else {
+                            s.a
+                        };
+                        *d = Px { r: 0.0, g: 0.0, b: 0.0, a };
+                    }
+                    blur_buffer(&mut sil, glow_radius);
+                    let glow_params = Some((0.0, 0.0, glow_opacity, *color));
+                    // Blit glow underneath onto out buffer
+                    blit_affine(
+                        &mut out,
+                        &work,
+                        shifted,
+                        layer.effective_opacity.clamp(0.0, 1.0),
+                        BlendMode::Normal,
+                        glow_params,
+                        Some(&sil),
+                    );
+                }
+                break;
+            }
         }
     }
     let normal = layer.blend_mode == BlendMode::Normal;
@@ -2110,6 +2120,10 @@ pub(crate) fn apply_layer_fx(
     fx: &RasterFx,
     allow_gpu: bool,
 ) {
+    // Built-in aura stages (Drop Shadow / Outer Glow) may be served on
+    // the GPU chain above; the marker is per-call so a stale flag never
+    // skips a later CPU aura pass.
+    super::buffer::reset_aura_gpu_handled();
     // Whole-chain GPU fast path (viewport only; export stays CPU-exact):
     // deterministic stock twins run natively, everything else (or any GPU
     // miss) falls through to the per-pixel CPU chain below.
@@ -3748,6 +3762,91 @@ mod tests {
             }
         }
         worst
+    }
+
+    /// Built-in aura chain: the GPU stages must serve the Outer Glow /
+    /// Drop Shadow aura (flag flips for the blit stage to skip), keep the
+    /// content strictly on top, and carry the authored tint.
+    #[test]
+    fn gpu_aura_chain_serves_glow_and_shadow() {
+        use compositor::{EvaluatedEffect, EvaluatedEffectType};
+        use project::Color;
+        if !crate::raster::buffer::gpu_accelerated() {
+            return;
+        }
+        let fx = |id: &str, effect_type: EvaluatedEffectType| EvaluatedEffect {
+            id: id.to_string(),
+            name: id.to_string(),
+            enabled: true,
+            effect_type,
+        };
+        let ctx = RasterFx { time_s: 0.0, frame: 0, res_w: 64.0, res_h: 64.0, duration_s: 0.0, playing: false };
+        let mut base = FloatBuf::clear(64, 64);
+        for y in 0..16 {
+            for x in 0..16 {
+                base.put(x, y, Px { r: 0.8, g: 0.8, b: 0.8, a: 1.0 });
+            }
+        }
+        // Outer glow: aura grows outward from the box; content untouched.
+        let glow = vec![fx(
+            "glow",
+            EvaluatedEffectType::OuterGlow {
+                size: 3.0,
+                spread: 0.0,
+                opacity: 100.0,
+                color: Color::rgb(1.0, 0.0, 0.0),
+                range: 0.0,
+            },
+        )];
+        let mut gpu = base.clone();
+        apply_layer_fx(&mut gpu, 64.0, 64.0, &glow, &ctx, true);
+        assert!(crate::raster::buffer::aura_gpu_handled(), "GPU chain must serve the glow aura");
+        for y in 0..16 {
+            for x in 0..16 {
+                let (c, g) = (base.get(x, y), gpu.get(x, y));
+                assert!(
+                    (c.r - g.r).abs() < 0.03 && (c.g - g.g).abs() < 0.03
+                        && (c.b - g.b).abs() < 0.03 && (c.a - g.a).abs() < 0.03,
+                    "content must sit on top untouched at ({x},{y}): {c:?} vs {g:?}");
+            }
+        }
+        let near = gpu.get(17, 8);
+        let mid = gpu.get(18, 8);
+        let far = gpu.get(26, 8);
+        assert!(near.a > 0.02 && near.a < 0.9, "near-aura alpha {near:?}");
+        assert!(mid.a > 0.0, "mid-aura alpha {mid:?}");
+        assert!(far.a < 0.02, "aura must decay far from the edge {far:?}");
+        if near.a > 0.02 {
+            assert!(
+                ((near.r / near.a) - 1.0).abs() < 0.06,
+                "aura must carry the authored tint: {near:?}");
+        }
+        // Drop shadow: sharp silhouette displaced 6px down (softness 0
+        // exercises the direct-blit branch); content covers its own base.
+        let shadow = vec![fx(
+            "shadow",
+            EvaluatedEffectType::DropShadow {
+                distance: 6.0,
+                angle: 90.0,
+                softness: 0.0,
+                opacity: 100.0,
+                color: Color::rgb(1.0, 0.0, 0.0),
+            },
+        )];
+        let mut gpu2 = base.clone();
+        apply_layer_fx(&mut gpu2, 64.0, 64.0, &shadow, &ctx, true);
+        assert!(crate::raster::buffer::aura_gpu_handled(), "GPU chain must serve the shadow aura");
+        let hidden = gpu2.get(8, 8);
+        let cast = gpu2.get(8, 18);
+        let clear = gpu2.get(8, 30);
+        assert!(
+            (hidden.a - 1.0).abs() < 0.03 && (hidden.r - 0.8).abs() < 0.03,
+            "content must cover its own shadow base: {hidden:?}");
+        assert!(cast.a > 0.6 && cast.a < 0.9, "cast alpha {cast:?}");
+        assert!(
+            ((cast.r / cast.a) - 1.0).abs() < 0.06,
+            "shadow must carry the authored tint: {cast:?}");
+        assert!(clear.a < 0.02, "no shadow beyond the offset region {clear:?}");
     }
 
     #[test]

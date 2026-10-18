@@ -11,8 +11,9 @@
 - Modifier graphs drive opacity, transform, effect params, and shape scalars (`shape.*` paths, scrub-alias canonicalized); f32-only engine (no color modifiers).
 - Monochrome zinc dark theme (error/delete red + node-graph type hues excepted).
 - OS file drag-and-drop onto the window imports image/video/audio files into the Project bin.
+- GPU effect chain serves Drop Shadow / Outer Glow end-to-end (silhouette fill → compute blur → colorized under-merge), with the CPU blit-stage aura skipping via a handled flag and the effects panel badge marking all four aura-family plugins GPU-accelerated.
 - Animation presets: 20 built-ins plus user-authored presets captured from a layer's animated transform and persisted to `<config>/MotionStudio/animation_presets.json` (timeline animation dropdown + dedicated Presets dock tab with apply/export-to-`.json`/delete).
-- **560 tests passing** (302 application, 137 project, 66 + 9 compositor, 38 renderer, incl. headless evaluation + UI suites), 0 failures, clippy clean modulo one pre-existing warning.
+- **561 tests passing** (303 application, 137 project, 66 + 9 compositor, 38 renderer, incl. headless evaluation + UI suites), 0 failures, clippy clean modulo one pre-existing warning.
 
 ## What Currently Works (original log, kept for history)
 - Cargo workspace initialized at repository root (`Cargo.toml`).

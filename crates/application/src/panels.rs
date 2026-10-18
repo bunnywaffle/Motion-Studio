@@ -16216,11 +16216,15 @@ impl Focusable for EffectsPanel {
 }
 
 /// True when the plug-in has a real GPU fast path in this build:
-/// Gaussian blur (compute shader), the parity-audited stock chain
+/// Gaussian blur (compute shader), Drop Shadow / Outer Glow (multi-stage
+/// aura chain), the parity-audited stock chain
 /// (`renderer::CHAIN_SAFE_STOCK`), and the ported built-in color ops
 /// (`renderer::CHAIN_SAFE_BUILTIN`). Everything else previews on CPU.
 fn effect_gpu_accelerated(plugin_id: &str) -> bool {
     if plugin_id == "net.sf.openfx.blur" {
+        return true;
+    }
+    if plugin_id == "net.sf.openfx.drop_shadow" || plugin_id == "net.sf.openfx.outer_glow" {
         return true;
     }
     if matches!(
@@ -16239,6 +16243,8 @@ fn effect_gpu_accelerated(plugin_id: &str) -> bool {
             | "net.sf.openfx.displacement"
             | "net.sf.openfx.warp"
             | "net.sf.openfx.oil_paint"
+            | "net.sf.openfx.inner_glow"
+            | "net.sf.openfx.rim_light"
     ) {
         return true;
     }

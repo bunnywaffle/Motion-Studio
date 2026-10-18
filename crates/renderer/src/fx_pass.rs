@@ -749,6 +749,60 @@ impl FxPass {
             true,
         )
     }
+
+    /// Outer-glow aura fill for the multi-stage built-in aura path:
+    /// spread-boosted PURE-ALPHA silhouette (black rgb like the CPU
+    /// `sil` buffer), feeding the shared compute blur; the under-merge
+    /// applies the authored tint at composite time (exactly the CPU
+    /// blur-then-colorize order — colorizing after the sigma blur).
+    pub fn glow_fill(
+        gpu: &GpuContext,
+        target_format: wgpu::TextureFormat,
+    ) -> Result<Self, String> {
+        const BODY: &str = r#"fn fx_outer_glow_fill(uv: vec2<f32>, color: vec4<f32>) -> vec4<f32> {
+    let boost = select(1.0, 1.0 + u.params[0].x / 20.0, u.params[0].x > 5.0);
+    let a = min(color.a * boost, 1.0) * clamp(u.params[0].y, 0.0, 1.0);
+    if (a <= 0.002) {
+        return vec4<f32>(0.0);
+    }
+    return vec4<f32>(0.0, 0.0, 0.0, a);
+}"#;
+        Self::compile(
+            gpu,
+            "FxPass_glow_fill",
+            target_format,
+            BODY,
+            "fx_outer_glow_fill(uv, color)",
+            &[],
+        )
+    }
+
+    /// Drop-shadow aura fill: pure-alpha silhouette sampled at the shadow
+    /// offset via the resample helper (offset in px — blur commutes with
+    /// the constant offset, so sampling before blurring matches the CPU
+    /// order). The under-merge applies the tint.
+    pub fn shadow_fill(
+        gpu: &GpuContext,
+        target_format: wgpu::TextureFormat,
+    ) -> Result<Self, String> {
+        const BODY: &str = r#"fn fx_drop_shadow_fill(uv: vec2<f32>, color: vec4<f32>, res: vec2<f32>) -> vec4<f32> {
+    let px = uv * res - vec2<f32>(0.5);
+    let s = fx_sample_cpu(px - vec2<f32>(u.params[0].x, u.params[0].y), res);
+    let a = s.a * clamp(u.params[0].z, 0.0, 1.0);
+    if (a <= 0.002) {
+        return vec4<f32>(0.0);
+    }
+    return vec4<f32>(0.0, 0.0, 0.0, a);
+}"#;
+        Self::compile_resample(
+            gpu,
+            "FxPass_shadow_fill",
+            target_format,
+            BODY,
+            "fx_drop_shadow_fill(uv, color, vec2<f32>(u.misc.y, u.misc.z))",
+            true,
+        )
+    }
 }
 
 /// Two-texture merge pass: binary fullscreen ops (unsharp mix, screen)
@@ -934,6 +988,26 @@ struct FxUniforms {
             "FxMerge_shadow_under",
             "b.a <= 0.0 && u.params[0].x < 1.5",
             "select(select(vec4<f32>((o.rgb * o.a + b.rgb * b.a * (1.0 - b.a)) / max(o.a + b.a * (1.0 - o.a), 0.000001), o.a + b.a * (1.0 - o.a)), b, u.params[0].x >= 1.5), o, u.params[0].x >= 0.5 && u.params[0].x < 1.5 && o.a > 0.01)",
+        )
+    }
+
+    /// Aura under-merge: content over the blurred aura silhouette. The
+    /// aura holds pure-alpha bytes (black rgb — the CPU `sil` blur
+    /// feed), so this colorizes with `u.colors[0]` AT composite time,
+    /// mirroring the CPU colorize-after-blur order; bytes land normalized
+    /// back to straight alpha for the chain cursor.
+    pub fn under_prem(
+        gpu: &GpuContext,
+        target_format: wgpu::TextureFormat,
+    ) -> Result<Self, String> {
+        // Gates: no aura (pure content passthrough) and full content
+        // coverage (aura fully occluded — mirrors src-over's 1 - o.a ≈ 0).
+        Self::from_calls(
+            gpu,
+            target_format,
+            "FxMerge_under_prem",
+            "b.a <= 0.0 || o.a >= 0.999",
+            "vec4<f32>((o.rgb * o.a + u.colors[0].rgb * b.a * (1.0 - o.a)) / max(o.a + b.a * (1.0 - o.a), 0.000001), o.a + b.a * (1.0 - o.a))",
         )
     }
 
