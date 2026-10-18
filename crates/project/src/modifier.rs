@@ -180,7 +180,7 @@ impl NodeKind {
             Self::BreakVector { .. } => &["in"],
             Self::MakeColor => &["r", "g", "b", "a"],
             Self::BreakColor => &["in"],
-            Self::Output => &["result", "x", "y", "z", "r", "g", "b", "a"],
+            Self::Output => &["result"],
         }
     }
 
@@ -197,10 +197,11 @@ impl NodeKind {
             | Self::Noise { .. }
             | Self::Wave { .. }
             | Self::Stepped { .. } => &["result"],
-            Self::BaseValueIn => &["value", "x", "y", "z", "r", "g", "b", "a"],
-            Self::MakeVector { dims: 3 } | Self::BreakVector { dims: 3 } => &["x", "y", "z"],
-            Self::MakeVector { .. } | Self::BreakVector { .. } => &["x", "y"],
-            Self::MakeColor | Self::BreakColor => &["r", "g", "b", "a"],
+            Self::BaseValueIn => &["value"],
+            Self::MakeVector { .. } | Self::MakeColor => &["value"],
+            Self::BreakVector { dims: 3 } => &["x", "y", "z"],
+            Self::BreakVector { .. } => &["x", "y"],
+            Self::BreakColor => &["r", "g", "b", "a"],
             Self::Output => &[],
         }
     }
@@ -268,14 +269,28 @@ impl BaseComponents {
     pub fn fan(base: f32) -> Self {
         Self { x: base, y: base, z: base, w: base }
     }
+
+    /// Read one signed channel by socket name ("x"/"r", "y"/"g", "z"/"b", "a").
+    pub fn comp_value(&self, chan: &str) -> f32 {
+        match chan {
+            "x" | "r" => self.x,
+            "y" | "g" => self.y,
+            "z" | "b" => self.z,
+            _ => self.w,
+        }
+    }
 }
 
 /// Internal evaluation context threaded through the recursive resolver.
+/// `channel` is the session's query channel ("value" for scalar bindings,
+/// or "x"/"y"/"z"/"r"/"g"/"b"/"a" when the caller extracts one component of
+/// a multi-dimensional base).
 struct EvalCtx<'a> {
     base: f32,
     comp: &'a BaseComponents,
     factor: f32,
     resolver: &'a dyn Fn(&str, &str) -> f32,
+    channel: &'static str,
 }
 
 /// A graph of modifier nodes that evaluates on top of a property's base value
@@ -385,7 +400,7 @@ impl ModifierGraph {
         };
 
         let comp = BaseComponents::fan(base_value);
-        let ctx = EvalCtx { base: base_value, comp: &comp, factor, resolver };
+        let ctx = EvalCtx { base: base_value, comp: &comp, factor, resolver, channel: "value" };
         let mut memo: HashMap<(String, String), f32> = HashMap::new();
         let mut call_stack: HashSet<String> = HashSet::new();
 
@@ -405,9 +420,27 @@ impl ModifierGraph {
         self.evaluate_with_resolver(base_value, factor, &|_, _| 0.0)
     }
 
-    /// Evaluate a 2D vector binding. Channels bound on the Output node's
-    /// `x`/`y` inputs are computed per channel (make/break graphs); unbound
-    /// channels fall back to the legacy per-channel fan of the whole graph.
+    /// Evaluate one component of a multi-dimensional binding by re-running
+    /// the whole Output `result` path under that channel's query (make nodes
+    /// route by `ctx.channel`; break nodes expose per-channel sockets).
+    fn evaluate_channel(
+        &self,
+        out_id: &str,
+        query: &'static str,
+        base: f32,
+        comp: &BaseComponents,
+        factor: f32,
+        resolver: &dyn Fn(&str, &str) -> f32,
+    ) -> f32 {
+        let ctx = EvalCtx { base, comp, factor, resolver, channel: query };
+        let mut memo: HashMap<(String, String), f32> = HashMap::new();
+        let mut call_stack: HashSet<String> = HashSet::new();
+        self.resolve_input(out_id, "result", &ctx, &mut memo, &mut call_stack)
+            .unwrap_or(base)
+    }
+
+    /// Evaluate a 2D vector binding; each axis re-runs the combined
+    /// `Output.result` path (legacy scalar graphs fan per channel as before).
     pub fn evaluate_vec2(
         &self,
         base_x: f32,
@@ -420,19 +453,12 @@ impl ModifierGraph {
             None => return (base_x, base_y),
         };
         let comp = BaseComponents { x: base_x, y: base_y, z: 0.0, w: 1.0 };
-        let ctx = EvalCtx { base: base_x, comp: &comp, factor, resolver };
-        let mut memo: HashMap<(String, String), f32> = HashMap::new();
-        let mut call_stack: HashSet<String> = HashSet::new();
-        let x = self
-            .wired_output_channel(&out, "x", &ctx, &mut memo, &mut call_stack)
-            .unwrap_or_else(|| self.evaluate_with_resolver(base_x, factor, resolver));
-        let y = self
-            .wired_output_channel(&out, "y", &ctx, &mut memo, &mut call_stack)
-            .unwrap_or_else(|| self.evaluate_with_resolver(base_y, factor, resolver));
+        let x = self.evaluate_channel(&out, "x", base_x, &comp, factor, resolver);
+        let y = self.evaluate_channel(&out, "y", base_y, &comp, factor, resolver);
         (x, y)
     }
 
-    /// Evaluate a 3D vector binding (`x`/`y`/`z` out channels, legacy fan fallback).
+    /// Evaluate a 3D vector binding (x/y/z re-runs of the result path).
     pub fn evaluate_vec3(
         &self,
         base_x: f32,
@@ -446,24 +472,14 @@ impl ModifierGraph {
             None => return (base_x, base_y, base_z),
         };
         let comp = BaseComponents { x: base_x, y: base_y, z: base_z, w: 1.0 };
-        let ctx = EvalCtx { base: base_x, comp: &comp, factor, resolver };
-        let mut memo: HashMap<(String, String), f32> = HashMap::new();
-        let mut call_stack: HashSet<String> = HashSet::new();
-        let x = self
-            .wired_output_channel(&out, "x", &ctx, &mut memo, &mut call_stack)
-            .unwrap_or_else(|| self.evaluate_with_resolver(base_x, factor, resolver));
-        let y = self
-            .wired_output_channel(&out, "y", &ctx, &mut memo, &mut call_stack)
-            .unwrap_or_else(|| self.evaluate_with_resolver(base_y, factor, resolver));
-        let z = self
-            .wired_output_channel(&out, "z", &ctx, &mut memo, &mut call_stack)
-            .unwrap_or_else(|| self.evaluate_with_resolver(base_z, factor, resolver));
+        let x = self.evaluate_channel(&out, "x", base_x, &comp, factor, resolver);
+        let y = self.evaluate_channel(&out, "y", base_y, &comp, factor, resolver);
+        let z = self.evaluate_channel(&out, "z", base_z, &comp, factor, resolver);
         (x, y, z)
     }
 
-    /// Evaluate a color binding. Channels bound on the Output node's
-    /// `r`/`g`/`b`/`a` inputs are computed per channel (make/break graphs);
-    /// unbound channels fall back to the legacy per-channel fan.
+    /// Evaluate a color binding; each RGBA channel re-runs the combined
+    /// `Output.result` path (legacy scalar graphs fan per channel as before).
     pub fn evaluate_color(
         &self,
         base_r: f32,
@@ -478,36 +494,12 @@ impl ModifierGraph {
             None => return [base_r, base_g, base_b, base_a],
         };
         let comp = BaseComponents { x: base_r, y: base_g, z: base_b, w: base_a };
-        let ctx = EvalCtx { base: base_r, comp: &comp, factor, resolver };
-        let mut memo: HashMap<(String, String), f32> = HashMap::new();
-        let mut call_stack: HashSet<String> = HashSet::new();
-        let idx = [("r", 0), ("g", 1), ("b", 2), ("a", 3)];
-        let mut out_ch = [base_r, base_g, base_b, base_a];
-        for (socket, i) in idx {
-            out_ch[i] = self
-                .wired_output_channel(&out, socket, &ctx, &mut memo, &mut call_stack)
-                .unwrap_or_else(|| self.evaluate_with_resolver(out_ch[i], factor, resolver));
-        }
-        out_ch
-    }
-
-    /// Resolve one Output-node channel socket; `None` when not wired.
-    fn wired_output_channel(
-        &self,
-        out_id: &str,
-        socket: &str,
-        ctx: &EvalCtx,
-        memo: &mut HashMap<(String, String), f32>,
-        call_stack: &mut HashSet<String>,
-    ) -> Option<f32> {
-        if !self
-            .connections
-            .iter()
-            .any(|c| c.to_node == out_id && c.to_socket == socket)
-        {
-            return None;
-        }
-        self.resolve_input(out_id, socket, ctx, memo, call_stack)
+        [
+            self.evaluate_channel(&out, "r", base_r, &comp, factor, resolver),
+            self.evaluate_channel(&out, "g", base_g, &comp, factor, resolver),
+            self.evaluate_channel(&out, "b", base_b, &comp, factor, resolver),
+            self.evaluate_channel(&out, "a", base_a, &comp, factor, resolver),
+        ]
     }
 
     /// Resolve an input socket by looking up an incoming connection or falling back to node defaults.
@@ -564,7 +556,7 @@ impl ModifierGraph {
                 "y" | "g" => Some(ctx.comp.y),
                 "z" | "b" => Some(ctx.comp.z),
                 "a" => Some(ctx.comp.w),
-                _ => None,
+                _ => Some(base_value),
             },
             _ => None,
         }
@@ -608,35 +600,34 @@ impl ModifierGraph {
                     factor
                 }
             }
-            NodeKind::BaseValueIn => match socket {
-                "x" | "r" => ctx.comp.x,
-                "y" | "g" => ctx.comp.y,
-                "z" | "b" => ctx.comp.z,
-                "a" => ctx.comp.w,
-                _ => base_value,
-            },
+            NodeKind::BaseValueIn => base_value,
             NodeKind::MakeVector { .. } | NodeKind::MakeColor => {
-                // Echo the (possibly rewired or defaulted) input of the same name.
-                self.resolve_input(node_id, socket, ctx, memo, call_stack)
-                    .unwrap_or(base_value)
+                // Single combined output: the make echoes the input channel
+                // the session is currently querying ("value" -> ctx.base).
+                let chan = if socket == "value" { ctx.channel } else { socket };
+                self.resolve_input(node_id, chan, ctx, memo, call_stack)
+                    .unwrap_or(if chan == "value" { base_value } else { ctx.comp.comp_value(chan) })
             }
             NodeKind::BreakVector { .. } | NodeKind::BreakColor => {
-                // Follow the incoming wire and read the source's channel
-                // output; a scalar source replicates across channels.
+                // Follow the incoming wire: a make source is asked for the
+                // same component; a channel-output source (break bus) is read
+                // directly; a scalar source replicates across channels.
                 if let Some(conn) = self
                     .connections
                     .iter()
                     .find(|c| c.to_node == node_id && c.to_socket == "in")
                 {
                     let src = conn.from_node.clone();
-                    let has_channel = self
-                        .get_node(&src)
-                        .map(|n| n.kind.output_sockets().contains(&socket))
-                        .unwrap_or(false);
-                    if has_channel {
-                        self.evaluate_node_output(&src, socket, ctx, memo, call_stack)
-                    } else {
-                        self.evaluate_node_output(&src, &conn.from_socket, ctx, memo, call_stack)
+                    let src_kind = self.get_node(&src).map(|n| n.kind.clone());
+                    let query = if socket == "value" { ctx.channel } else { socket };
+                    match &src_kind {
+                        Some(NodeKind::MakeVector { .. }) | Some(NodeKind::MakeColor) => {
+                            self.evaluate_node_output(&src, query, ctx, memo, call_stack)
+                        }
+                        Some(k) if k.output_sockets().contains(&query) => {
+                            self.evaluate_node_output(&src, query, ctx, memo, call_stack)
+                        }
+                        _ => self.evaluate_node_output(&src, &conn.from_socket, ctx, memo, call_stack),
                     }
                 } else {
                     base_value
@@ -798,8 +789,7 @@ impl ModifierGraph {
                 (val * s).floor() / s
             }
             NodeKind::Output => {
-                let socket = if socket == "result" { "result" } else { socket };
-                self.resolve_input(node_id, socket, ctx, memo, call_stack)
+                self.resolve_input(node_id, "result", ctx, memo, call_stack,)
                     .unwrap_or(base_value)
             }
         };
@@ -1076,42 +1066,45 @@ mod tests {
                 ModifierNode::new("out", 220.0, 0.0, NodeKind::Output),
             ],
             connections: vec![
-                NodeConnection::new("in", "x", "addx", "a"),
+                NodeConnection::new("in", "value", "addx", "a"),
                 NodeConnection::new("addc", "value", "addx", "b"),
                 NodeConnection::new("addx", "result", "mk", "x"),
-                NodeConnection::new("mk", "x", "out", "x"),
+                NodeConnection::new("mk", "value", "out", "result"),
             ],
         };
-        // Out.x wired (+25 on x); out.y unwired => legacy fan of y (same
-        // graph, scalar binding → identity here).
+        // x pass: make echoes its wired x input (+25); y pass: make's y
+        // input unwired → base y passthrough.
         let (x, y) = graph.evaluate_vec2(100.0, 200.0, 0.5, &|_, _| 0.0);
         assert!((x - 125.0).abs() < 1e-5, "x got {x}");
         assert!((y - 200.0).abs() < 1e-5, "y got {y}");
 
-        // Wire the y math out too: out.y wired → passes make.y (unwired
-        // make.y input defaults to comp.y); out.x now unwired → legacy fan.
+        // Rewire make.y via a subtract: only y is changed, x passes through.
         let mut g2 = graph.clone();
-        g2.connections.retain(|c| !(c.to_node == "out" && c.to_socket == "x"));
-        g2.connect("in", "y", "mk", "y");
-        g2.connect("mk", "y", "out", "y");
+        g2.connections.retain(|c| !(c.to_node == "mk" && c.to_socket == "x"));
+        g2.nodes.push(ModifierNode::new("c10", 60.0, 120.0, NodeKind::Constant { value: 10.0 }));
+        g2.nodes.push(ModifierNode::new("suby", 60.0, 180.0, NodeKind::Math { op: MathOp::Subtract, default_b: 0.0 }));
+        g2.connect("c10", "value", "suby", "b");
+        g2.connect("suby", "result", "mk", "y");
         let (x, y) = g2.evaluate_vec2(100.0, 200.0, 0.5, &|_, _| 0.0);
-        assert!((x - 100.0).abs() < 1e-5, "unwired out.x falls back to base, got {x}");
-        assert!((y - 200.0).abs() < 1e-5, "unwired make.y defaults to comp.y, got {y}");
+        assert!((x - 100.0).abs() < 1e-5, "unwired make channel defaults to comp.x, got {x}");
+        assert!((y - 190.0).abs() < 1e-5, "wired make.y 200-10, got {y}");
     }
 
-    /// Break 2D on the BaseValueIn bus unpacks x and y channels.
+    /// Break unpacks the base bus; make re-gathers into one combined output.
     #[test]
     fn test_break_vector_unpacks_base() {
         let graph = ModifierGraph {
             nodes: vec![
                 ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
-                ModifierNode::new("brk", 100.0, 0.0, NodeKind::BreakVector { dims: 2 }),
+                ModifierNode::new("brk", 60.0, 0.0, NodeKind::BreakVector { dims: 2 }),
+                ModifierNode::new("mkp", 140.0, 0.0, NodeKind::MakeVector { dims: 2 }),
                 ModifierNode::new("out", 220.0, 0.0, NodeKind::Output),
             ],
             connections: vec![
-                NodeConnection::new("in", "x", "brk", "in"),
-                NodeConnection::new("brk", "x", "out", "x"),
-                NodeConnection::new("brk", "y", "out", "y"),
+                NodeConnection::new("in", "value", "brk", "in"),
+                NodeConnection::new("brk", "x", "mkp", "x"),
+                NodeConnection::new("brk", "y", "mkp", "y"),
+                NodeConnection::new("mkp", "value", "out", "result"),
             ],
         };
         let (x, y) = graph.evaluate_vec2(100.0, 200.0, 0.5, &|_, _| 0.0);
@@ -1119,7 +1112,8 @@ mod tests {
         assert!((y - 200.0).abs() < 1e-5, "y got {y}");
     }
 
-    /// Make Color drives channels independently (classic black +50 red).
+    /// Make Color drives channels independently (classic black +50 red),
+    /// delivered to the Output through its single combined socket.
     #[test]
     fn test_make_color_per_channel() {
         let graph = ModifierGraph {
@@ -1130,7 +1124,7 @@ mod tests {
             ],
             connections: vec![
                 NodeConnection::new("cc", "value", "mk", "r"),
-                NodeConnection::new("mk", "r", "out", "r"),
+                NodeConnection::new("mk", "value", "out", "result"),
             ],
         };
         let fan = graph.evaluate_color(0.0, 0.0, 0.0, 1.0, 0.5, &|_, _| 0.0);

@@ -2839,14 +2839,13 @@ mod tests {
                 ModifierNode::new("out", 300.0, 60.0, NodeKind::Output),
             ],
             connections: vec![
-                NodeConnection::new("in", "x", "addx", "a"),
+                NodeConnection::new("in", "value", "addx", "a"),
                 NodeConnection::new("c25", "value", "addx", "b"),
-                NodeConnection::new("in", "y", "suby", "a"),
+                NodeConnection::new("in", "value", "suby", "a"),
                 NodeConnection::new("c10", "value", "suby", "b"),
                 NodeConnection::new("addx", "result", "mk", "x"),
                 NodeConnection::new("suby", "result", "mk", "y"),
-                NodeConnection::new("mk", "x", "out", "x"),
-                NodeConnection::new("mk", "y", "out", "y"),
+                NodeConnection::new("mk", "value", "out", "result"),
             ],
         };
         layer.set_modifier_graph("transform.position", mg_pos);
@@ -2861,7 +2860,7 @@ mod tests {
             ],
             connections: vec![
                 NodeConnection::new("c1", "value", "mkc", "r"),
-                NodeConnection::new("mkc", "r", "out", "r"),
+                NodeConnection::new("mkc", "value", "out", "result"),
             ],
         };
         layer.set_modifier_graph("solid.color", mg_color);
@@ -2877,13 +2876,12 @@ mod tests {
                 ModifierNode::new("out", 420.0, 0.0, NodeKind::Output),
             ],
             connections: vec![
-                NodeConnection::new("lin", "x", "brk", "in"),
+                NodeConnection::new("lin", "value", "brk", "in"),
                 NodeConnection::new("brk", "x", "mulx", "a"),
                 NodeConnection::new("c2", "value", "mulx", "b"),
                 NodeConnection::new("mulx", "result", "mkp", "x"),
                 NodeConnection::new("brk", "y", "mkp", "y"),
-                NodeConnection::new("mkp", "x", "out", "x"),
-                NodeConnection::new("mkp", "y", "out", "y"),
+                NodeConnection::new("mkp", "value", "out", "result"),
             ],
         };
         layer.set_modifier_graph("transform.scale", mg_scale);
@@ -2921,12 +2919,11 @@ mod tests {
                 ModifierNode::new("out", 420.0, 0.0, NodeKind::Output),
             ],
             connections: vec![
-                NodeConnection::new("in", "r", "brc", "in"),
+                NodeConnection::new("in", "value", "brc", "in"),
                 NodeConnection::new("brc", "g", "half", "a"),
                 NodeConnection::new("ch", "value", "half", "b"),
                 NodeConnection::new("half", "result", "mkc2", "g"),
-                NodeConnection::new("mkc2", "r", "out", "r"),
-                NodeConnection::new("mkc2", "g", "out", "g"),
+                NodeConnection::new("mkc2", "value", "out", "result"),
             ],
         };
         layer2.set_modifier_graph("effect:fx_ds:color", mg_fx);
