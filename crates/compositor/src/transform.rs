@@ -687,45 +687,54 @@ impl TransformResolver {
                     let mut visited = HashSet::new();
                     resolve_property_link_value(graph, d_lid, d_prop, time, &mut visited).unwrap_or(0.0)
                 };
+                // Whole-path vector graphs first (make/break capable: the
+                // Output node's x/y/z inputs bound per channel), then
+                // per-axis graphs override their own channel.
+                if let Some(mg) = node.modifier_graphs.get("transform.anchor_point") {
+                    let (ax, ay) = mg.evaluate_vec2(anchor.x, anchor.y, factor, &resolver);
+                    anchor = Vec2::new(ax, ay);
+                }
+                if let Some(mg) = node.modifier_graphs.get("transform.position") {
+                    let (px, py) = mg.evaluate_vec2(position.x, position.y, factor, &resolver);
+                    position = Vec2::new(px, py);
+                }
+                if let Some(mg) = node.modifier_graphs.get("transform.scale") {
+                    let (sx, sy) = mg.evaluate_vec2(scale.x, scale.y, factor, &resolver);
+                    scale = Vec2::new(sx, sy);
+                }
                 if let Some(mg) = node
                     .modifier_graphs
                     .get("transform.anchor_point.x")
-                    .or_else(|| node.modifier_graphs.get("transform.anchor_point"))
                 {
                     anchor.x = mg.evaluate_with_resolver(anchor.x, factor, &resolver);
                 }
                 if let Some(mg) = node
                     .modifier_graphs
                     .get("transform.anchor_point.y")
-                    .or_else(|| node.modifier_graphs.get("transform.anchor_point"))
                 {
                     anchor.y = mg.evaluate_with_resolver(anchor.y, factor, &resolver);
                 }
                 if let Some(mg) = node
                     .modifier_graphs
                     .get("transform.position.x")
-                    .or_else(|| node.modifier_graphs.get("transform.position"))
                 {
                     position.x = mg.evaluate_with_resolver(position.x, factor, &resolver);
                 }
                 if let Some(mg) = node
                     .modifier_graphs
                     .get("transform.position.y")
-                    .or_else(|| node.modifier_graphs.get("transform.position"))
                 {
                     position.y = mg.evaluate_with_resolver(position.y, factor, &resolver);
                 }
                 if let Some(mg) = node
                     .modifier_graphs
                     .get("transform.scale.x")
-                    .or_else(|| node.modifier_graphs.get("transform.scale"))
                 {
                     scale.x = mg.evaluate_with_resolver(scale.x, factor, &resolver);
                 }
                 if let Some(mg) = node
                     .modifier_graphs
                     .get("transform.scale.y")
-                    .or_else(|| node.modifier_graphs.get("transform.scale"))
                 {
                     scale.y = mg.evaluate_with_resolver(scale.y, factor, &resolver);
                 }

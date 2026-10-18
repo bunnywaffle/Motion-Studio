@@ -2811,6 +2811,139 @@ mod tests {
             _ => panic!("expected DropShadow"),
         }
     }
+
+    /// Make/Break graphs: one graph drives each channel independently
+    /// (position x/y split: +25x, -10y; solid fill split per color channel).
+    #[test]
+    fn test_modifier_graph_make_break_channels() {
+        use project::{
+            Effect, LayerSource, MathOp, ModifierGraph, ModifierNode, NodeConnection, NodeKind,
+        };
+        use crate::evaluation::EvaluatedEffectType as EV;
+
+        let mut comp = Composition::hd_1080p_30fps("comp_mkmix", "MG MakeMix", 10.0);        let tc0 = TimeCode::zero(30.0);
+        let tc299 = TimeCode::from_frames(299, 30.0);
+        let tc300 = TimeCode::from_frames(300, 30.0);
+
+        let mut layer = Layer::solid("l_mkmix", "MG MakeMix", Color::BLACK, 100, 100, tc0, tc300);
+
+        // Make 2D on position: x = base.x + 25, y = base.y - 10.
+        let mg_pos = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
+                ModifierNode::new("addx", 40.0, 0.0, NodeKind::Math { op: MathOp::Add, default_b: 0.0 }),
+                ModifierNode::new("c25", 40.0, 60.0, NodeKind::Constant { value: 25.0 }),
+                ModifierNode::new("suby", 40.0, 120.0, NodeKind::Math { op: MathOp::Subtract, default_b: 0.0 }),
+                ModifierNode::new("c10", 40.0, 180.0, NodeKind::Constant { value: 10.0 }),
+                ModifierNode::new("mk", 160.0, 60.0, NodeKind::MakeVector { dims: 2 }),
+                ModifierNode::new("out", 300.0, 60.0, NodeKind::Output),
+            ],
+            connections: vec![
+                NodeConnection::new("in", "x", "addx", "a"),
+                NodeConnection::new("c25", "value", "addx", "b"),
+                NodeConnection::new("in", "y", "suby", "a"),
+                NodeConnection::new("c10", "value", "suby", "b"),
+                NodeConnection::new("addx", "result", "mk", "x"),
+                NodeConnection::new("suby", "result", "mk", "y"),
+                NodeConnection::new("mk", "x", "out", "x"),
+                NodeConnection::new("mk", "y", "out", "y"),
+            ],
+        };
+        layer.set_modifier_graph("transform.position", mg_pos);
+
+        // Make Color split: only the red channel wired to 1.0 (classic
+        // "black to red" via channel gather).
+        let mg_color = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("c1", 0.0, 0.0, NodeKind::Constant { value: 1.0 }),
+                ModifierNode::new("mkc", 100.0, 0.0, NodeKind::MakeColor),
+                ModifierNode::new("out", 300.0, 0.0, NodeKind::Output),
+            ],
+            connections: vec![
+                NodeConnection::new("c1", "value", "mkc", "r"),
+                NodeConnection::new("mkc", "r", "out", "r"),
+            ],
+        };
+        layer.set_modifier_graph("solid.color", mg_color);
+
+        // Break 2D on scale: unpack base, double only x via Math Multiply.
+        let mg_scale = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("lin", 0.0, 0.0, NodeKind::BaseValueIn),
+                ModifierNode::new("brk", 100.0, 0.0, NodeKind::BreakVector { dims: 2 }),
+                ModifierNode::new("mulx", 200.0, 0.0, NodeKind::Math { op: MathOp::Multiply, default_b: 0.0 }),
+                ModifierNode::new("c2", 200.0, 60.0, NodeKind::Constant { value: 2.0 }),
+                ModifierNode::new("mkp", 300.0, 0.0, NodeKind::MakeVector { dims: 2 }),
+                ModifierNode::new("out", 420.0, 0.0, NodeKind::Output),
+            ],
+            connections: vec![
+                NodeConnection::new("lin", "x", "brk", "in"),
+                NodeConnection::new("brk", "x", "mulx", "a"),
+                NodeConnection::new("c2", "value", "mulx", "b"),
+                NodeConnection::new("mulx", "result", "mkp", "x"),
+                NodeConnection::new("brk", "y", "mkp", "y"),
+                NodeConnection::new("mkp", "x", "out", "x"),
+                NodeConnection::new("mkp", "y", "out", "y"),
+            ],
+        };
+        layer.set_modifier_graph("transform.scale", mg_scale);
+
+        comp.add_layer(layer).unwrap();
+        let graph = SceneGraph::from_composition(&comp).unwrap();
+        let evaluator = LayerStackEvaluator::new();
+
+        let eval = evaluator.evaluate(&graph, &tc299);
+        let l = eval.get_layer("l_mkmix").unwrap();
+
+        assert!((l.transform.position.x - 25.0).abs() < 1e-4, "x 0+25, got {}", l.transform.position.x);
+        assert!((l.transform.position.y + 10.0).abs() < 1e-4, "y 0-10, got {}", l.transform.position.y);
+        assert!((l.transform.scale.x - 200.0).abs() < 1e-4, "scale.x 100*2, got {}", l.transform.scale.x);
+        assert!((l.transform.scale.y - 100.0).abs() < 1e-4, "scale.y passthrough, got {}", l.transform.scale.y);
+
+        if let LayerSource::Solid { color, .. } = &l.source {
+            assert!((color.value.r - 1.0).abs() < 1e-5, "R wired to 1, got {}", color.value.r);
+            assert!((color.value.g - 0.0).abs() < 1e-5, "G falls back to base 0");
+            assert!((color.value.b - 0.0).abs() < 1e-5, "B falls back to base 0");
+            assert!((color.value.a - 1.0).abs() < 1e-5, "A falls back to base 1");
+        } else {
+            panic!("expected solid source");
+        }
+
+        // Break Color network: stdout channels distinct (has_channel path).
+        let mut layer2 = Layer::solid("l_mkmix_color", "MG MakeMix2", Color::BLACK, 100, 100, tc0, tc300);
+        let mg_fx = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
+                ModifierNode::new("brc", 100.0, 0.0, NodeKind::BreakColor),
+                ModifierNode::new("half", 200.0, 0.0, NodeKind::Math { op: MathOp::Multiply, default_b: 0.0 }),
+                ModifierNode::new("ch", 200.0, 60.0, NodeKind::Constant { value: 0.5 }),
+                ModifierNode::new("mkc2", 300.0, 0.0, NodeKind::MakeColor),
+                ModifierNode::new("out", 420.0, 0.0, NodeKind::Output),
+            ],
+            connections: vec![
+                NodeConnection::new("in", "r", "brc", "in"),
+                NodeConnection::new("brc", "g", "half", "a"),
+                NodeConnection::new("ch", "value", "half", "b"),
+                NodeConnection::new("half", "result", "mkc2", "g"),
+                NodeConnection::new("mkc2", "r", "out", "r"),
+                NodeConnection::new("mkc2", "g", "out", "g"),
+            ],
+        };
+        layer2.set_modifier_graph("effect:fx_ds:color", mg_fx);
+        layer2.add_effect(Effect::drop_shadow("fx_ds", 8.0, 45.0, 10.0, 75.0, Color::rgba(0.8, 0.4, 0.2, 1.0)));
+        comp.add_layer(layer2).unwrap();
+        let graph2 = SceneGraph::from_composition(&comp).unwrap();
+        let eval2 = evaluator.evaluate(&graph2, &tc299);
+        let l2 = eval2.get_layer("l_mkmix_color").unwrap();
+        match &l2.effects[0].effect_type {
+            EV::DropShadow { color, .. } => {
+                assert!((color.r - 0.8).abs() < 1e-5, "break r passthrough 0.8, got {}", color.r);
+                assert!((color.g - 0.2).abs() < 1e-5, "break g 0.4*0.5, got {}", color.g);
+                assert!((color.a - 1.0).abs() < 1e-5, "break channels unwired fan: a=1, got {}", color.a);
+            }
+            _ => panic!("expected DropShadow"),
+        }
+    }
 }
 
 

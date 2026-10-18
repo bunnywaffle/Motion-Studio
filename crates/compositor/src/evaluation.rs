@@ -60,10 +60,10 @@ fn eval_scalar_mg(
     }
 }
 
-/// Reshape one color through its modifier graph (if bound under `path`) by
-/// fanning it through the graph once per channel (R, G, B, A — 0..1 bases),
-/// recomposing with each channel clamped 0..1. A graph untouched per channel
-/// (BaseValueIn→Output) preserves the base color exactly.
+/// Reshape one color through its modifier graph (if bound under `path`),
+/// recomposed with each channel clamped 0..1. Channels wired to the Output
+/// node's r/g/b/a inputs run per channel (make/break graphs); unbound
+/// channels fall back to the legacy per-channel fan of the whole graph.
 /// Shared by effect color params and source fills — the graph engine is f32-only.
 pub(crate) fn eval_color_mg(
     graphs: &HashMap<String, project::ModifierGraph>,
@@ -74,8 +74,13 @@ pub(crate) fn eval_color_mg(
 ) -> project::Color {
     match graphs.get(path) {
         Some(mg) => {
-            let fan = |ch: f32| mg.evaluate_with_resolver(ch, factor, resolver).clamp(0.0, 1.0);
-            project::Color::rgba(fan(base_color.r), fan(base_color.g), fan(base_color.b), fan(base_color.a))
+            let fan = mg.evaluate_color(base_color.r, base_color.g, base_color.b, base_color.a, factor, resolver);
+            project::Color::rgba(
+                fan[0].clamp(0.0, 1.0),
+                fan[1].clamp(0.0, 1.0),
+                fan[2].clamp(0.0, 1.0),
+                fan[3].clamp(0.0, 1.0),
+            )
         }
         None => base_color,
     }

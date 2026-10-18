@@ -374,6 +374,12 @@ impl ModifierGraphView {
         let ent_wave = entity.clone();
         let ent_step = entity.clone();
         let ent_const = entity.clone();
+        let ent_make2d = entity.clone();
+        let ent_make3d = entity.clone();
+        let ent_mkcolor = entity.clone();
+        let ent_brk2d = entity.clone();
+        let ent_brk3d = entity.clone();
+        let ent_brkcolor = entity.clone();
         let ent_driver = entity.clone();
         let ent_paste_link = entity.clone();
         let ent_reset = entity.clone();
@@ -583,6 +589,24 @@ impl ModifierGraphView {
                     .child(self.toolbar_btn("Constant", ent_const, move |this, cx| {
                         this.add_node(NodeKind::Constant { value: 1.0 }, cx);
                     }, cx))
+                    .child(self.toolbar_btn("Mk 2D", ent_make2d, move |this, cx| {
+                        this.add_node(NodeKind::MakeVector { dims: 2 }, cx);
+                    }, cx))
+                    .child(self.toolbar_btn("Mk 3D", ent_make3d, move |this, cx| {
+                        this.add_node(NodeKind::MakeVector { dims: 3 }, cx);
+                    }, cx))
+                    .child(self.toolbar_btn("Mk Color", ent_mkcolor, move |this, cx| {
+                        this.add_node(NodeKind::MakeColor, cx);
+                    }, cx))
+                    .child(self.toolbar_btn("Brk 2D", ent_brk2d, move |this, cx| {
+                        this.add_node(NodeKind::BreakVector { dims: 2 }, cx);
+                    }, cx))
+                    .child(self.toolbar_btn("Brk 3D", ent_brk3d, move |this, cx| {
+                        this.add_node(NodeKind::BreakVector { dims: 3 }, cx);
+                    }, cx))
+                    .child(self.toolbar_btn("Brk Color", ent_brkcolor, move |this, cx| {
+                        this.add_node(NodeKind::BreakColor, cx);
+                    }, cx))
                     .child(self.toolbar_btn("Driver Link", ent_driver, move |this, cx| {
                         let copied = this.editor_state.read(cx).copied_property_link.clone();
                         let (driver_layer_id, driver_prop_path) = match copied {
@@ -646,11 +670,13 @@ impl ModifierGraphView {
             )
     }
 
-    fn toolbar_btn<F>(&self, label: &'static str, entity: Entity<Self>, on_click: F, cx: &App) -> Div
+    fn toolbar_btn<F>(&self, label: &'static str, entity: Entity<Self>, on_click: F, cx: &App) -> AnyElement
     where
         F: Fn(&mut Self, &mut Context<Self>) + 'static,
     {
         div()
+            .id(SharedString::from(format!("mg_add_{}", label.replace(' ', "_").to_lowercase())))
+            .test_support()
             .px_2()
             .py_0p5()
             .rounded_sm()
@@ -668,6 +694,7 @@ impl ModifierGraphView {
                 });
             })
             .child(label)
+            .into_any_element()
     }
 
     fn render_canvas(&mut self, entity: &Entity<Self>, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1011,6 +1038,9 @@ impl ModifierGraphView {
         let (banner_bg, banner_color) = match node.kind {
             NodeKind::GetLayerFactor | NodeKind::BaseValueIn | NodeKind::Constant { .. } => {
                 (rgb(0x1e3a8a), rgb(0x93c5fd)) // Deep blue
+            }
+            NodeKind::MakeVector { .. } | NodeKind::MakeColor | NodeKind::BreakVector { .. } | NodeKind::BreakColor => {
+                (rgb(0x0f766e), rgb(0x5eead4)) // Teal for vector/color buses
             }
             NodeKind::Math { .. } | NodeKind::Lerp { .. } | NodeKind::Clamp { .. } | NodeKind::Remap { .. } | NodeKind::Smoothstep { .. } => {
                 (rgb(0x581c87), rgb(0xd8b4fe)) // Deep purple

@@ -13769,6 +13769,107 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         });
     }
 
+    /// Make/Break toolbar buttons: clicking each adds its node kind to the
+    /// visible graph (gathers and unpacks for 2D/3D/color channels).
+    #[gpui_kit::test]
+    fn test_modifier_graph_make_break_toolbar_buttons(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            Theme::change(ThemeMode::Dark, None, cx);
+        });
+
+        let state = cx.new(|_cx| EditorState::new());
+        let layer_id = "layer_accent".to_string();
+        let prop_path = "transform.position".to_string();
+
+        let mut mg_view = None;
+        let root_handle = cx.open_window(size(px(1080.), px(720.)), |window, cx| {
+            window.activate_window();
+            Theme::change(ThemeMode::Dark, Some(window), cx);
+            let view = cx.new(|cx| {
+                crate::modifier_graph_view::ModifierGraphView::new(
+                    state.clone(),
+                    layer_id.clone(),
+                    prop_path.clone(),
+                    window,
+                    cx,
+                )
+            });
+            mg_view = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+
+        let view_entity = mg_view.expect("view created");
+        let has_kind = |this: &crate::modifier_graph_view::ModifierGraphView,
+                        k: &project::modifier::NodeKind| {
+            this.graph.nodes.iter().any(|n| match (k, &n.kind) {
+                (
+                    project::modifier::NodeKind::MakeVector { dims: a },
+                    project::modifier::NodeKind::MakeVector { dims: b },
+                )
+                | (
+                    project::modifier::NodeKind::BreakVector { dims: a },
+                    project::modifier::NodeKind::BreakVector { dims: b },
+                ) => a == b,
+                _ => std::mem::discriminant(k) == std::mem::discriminant(&n.kind),
+            })
+        };
+        view_entity.update(cx, |this, _cx| {
+            let base_count = this.graph.nodes.len();
+            assert!(!has_kind(this, &project::modifier::NodeKind::MakeColor));
+
+            for kind in [
+                project::modifier::NodeKind::MakeVector { dims: 2 },
+                project::modifier::NodeKind::MakeVector { dims: 3 },
+                project::modifier::NodeKind::MakeColor,
+                project::modifier::NodeKind::BreakVector { dims: 2 },
+                project::modifier::NodeKind::BreakVector { dims: 3 },
+                project::modifier::NodeKind::BreakColor,
+            ] {
+                this.add_node(kind, _cx);
+            }
+            assert_eq!(this.graph.nodes.len(), base_count + 6);
+            assert!(has_kind(this, &project::modifier::NodeKind::MakeVector { dims: 2 }));
+            assert!(has_kind(this, &project::modifier::NodeKind::MakeVector { dims: 3 }));
+            assert!(has_kind(this, &project::modifier::NodeKind::MakeColor));
+            assert!(has_kind(this, &project::modifier::NodeKind::BreakVector { dims: 2 }));
+            assert!(has_kind(this, &project::modifier::NodeKind::BreakVector { dims: 3 }));
+            assert!(has_kind(this, &project::modifier::NodeKind::BreakColor));
+        });
+
+        // The visible toolbar exposes all six buttons; clicking "Make Color"
+        // through the UI adds one more node.
+        use gpui_kit::test::TestWindowExt;
+        cx.update_window(root_handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            for (idx, id) in [
+                "mg_add_mk_2d",
+                "mg_add_mk_3d",
+                "mg_add_mk_color",
+                "mg_add_brk_2d",
+                "mg_add_brk_3d",
+                "mg_add_brk_color",
+            ]
+            .iter()
+            .enumerate()
+            {
+                assert!(window.find(SharedString::from(*id)).visible(), "toolbar btn {} should be visible", idx);
+            }
+            window.click("mg_add_mk_color", cx);
+        })
+        .expect("update_window failed");
+        cx.run_until_parked();
+        view_entity.read_with(cx, |this, _cx| {
+            let mk = this
+                .graph
+                .nodes
+                .iter()
+                .filter(|n| matches!(n.kind, project::modifier::NodeKind::MakeColor))
+                .count();
+            assert!(mk >= 2, "toolbar click added a second MakeColor node, got {mk}");
+        });
+    }
+
     #[gpui_kit::test]
     fn test_modifier_graph_wire_renders_single_canvas(cx: &mut TestAppContext) {
         // Committed wires render as one continuous canvas path, not bead

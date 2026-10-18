@@ -117,6 +117,20 @@ pub enum NodeKind {
         driver_prop_path: String,
     },
 
+    /// Gather scalar channels into one vector value (dims 2 = 2D, 3 = 3D).
+    /// Unwired channels pass the matching base component through.
+    MakeVector { dims: u8 },
+
+    /// Unpack an incoming vector bus (BaseValueIn / MakeVector) into scalar channels.
+    BreakVector { dims: u8 },
+
+    /// Gather R/G/B/A channels into one color value. Unwired channels pass
+    /// the matching base color component through.
+    MakeColor,
+
+    /// Unpack an incoming color bus (BaseValueIn / MakeColor) into scalar channels.
+    BreakColor,
+
     /// Terminal node that outputs the final value to the property.
     Output,
 }
@@ -137,6 +151,14 @@ impl NodeKind {
             Self::Noise { .. } => "Noise",
             Self::Wave { .. } => "Wave / Sine",
             Self::Stepped { .. } => "Stepped",
+            Self::MakeVector { dims: 2 } => "Make 2D",
+            Self::MakeVector { dims: 3 } => "Make 3D",
+            Self::MakeVector { .. } => "Make Vector",
+            Self::BreakVector { dims: 2 } => "Break 2D",
+            Self::BreakVector { dims: 3 } => "Break 3D",
+            Self::BreakVector { .. } => "Break Vector",
+            Self::MakeColor => "Make Color",
+            Self::BreakColor => "Break Color",
             Self::Output => "Output",
         }
     }
@@ -153,7 +175,12 @@ impl NodeKind {
             Self::Noise { .. } => &["factor", "freq", "amp"],
             Self::Wave { .. } => &["factor", "freq", "amp"],
             Self::Stepped { .. } => &["val", "steps"],
-            Self::Output => &["result"],
+            Self::MakeVector { dims: 3 } => &["x", "y", "z"],
+            Self::MakeVector { .. } => &["x", "y"],
+            Self::BreakVector { .. } => &["in"],
+            Self::MakeColor => &["r", "g", "b", "a"],
+            Self::BreakColor => &["in"],
+            Self::Output => &["result", "x", "y", "z", "r", "g", "b", "a"],
         }
     }
 
@@ -161,7 +188,7 @@ impl NodeKind {
     pub fn output_sockets(&self) -> &'static [&'static str] {
         match self {
             Self::GetLayerFactor => &["factor", "invert"],
-            Self::BaseValueIn | Self::Constant { .. } | Self::DriverLink { .. } => &["value"],
+            Self::Constant { .. } | Self::DriverLink { .. } => &["value"],
             Self::Math { .. }
             | Self::Lerp { .. }
             | Self::Clamp { .. }
@@ -170,6 +197,10 @@ impl NodeKind {
             | Self::Noise { .. }
             | Self::Wave { .. }
             | Self::Stepped { .. } => &["result"],
+            Self::BaseValueIn => &["value", "x", "y", "z", "r", "g", "b", "a"],
+            Self::MakeVector { dims: 3 } | Self::BreakVector { dims: 3 } => &["x", "y", "z"],
+            Self::MakeVector { .. } | Self::BreakVector { .. } => &["x", "y"],
+            Self::MakeColor | Self::BreakColor => &["r", "g", "b", "a"],
             Self::Output => &[],
         }
     }
@@ -221,6 +252,30 @@ impl NodeConnection {
             to_socket: to_socket.into(),
         }
     }
+}
+
+/// Base value unpacked into its components for vector/color modifier graphs.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct BaseComponents {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub w: f32,
+}
+
+impl BaseComponents {
+    /// Fan a scalar binding: every component mirrors the base value.
+    pub fn fan(base: f32) -> Self {
+        Self { x: base, y: base, z: base, w: base }
+    }
+}
+
+/// Internal evaluation context threaded through the recursive resolver.
+struct EvalCtx<'a> {
+    base: f32,
+    comp: &'a BaseComponents,
+    factor: f32,
+    resolver: &'a dyn Fn(&str, &str) -> f32,
 }
 
 /// A graph of modifier nodes that evaluates on top of a property's base value
@@ -329,15 +384,15 @@ impl ModifierGraph {
             None => return base_value,
         };
 
+        let comp = BaseComponents::fan(base_value);
+        let ctx = EvalCtx { base: base_value, comp: &comp, factor, resolver };
         let mut memo: HashMap<(String, String), f32> = HashMap::new();
         let mut call_stack: HashSet<String> = HashSet::new();
 
         self.resolve_input(
             &out_node.id,
             "result",
-            base_value,
-            factor,
-            resolver,
+            &ctx,
             &mut memo,
             &mut call_stack,
         )
@@ -350,18 +405,122 @@ impl ModifierGraph {
         self.evaluate_with_resolver(base_value, factor, &|_, _| 0.0)
     }
 
+    /// Evaluate a 2D vector binding. Channels bound on the Output node's
+    /// `x`/`y` inputs are computed per channel (make/break graphs); unbound
+    /// channels fall back to the legacy per-channel fan of the whole graph.
+    pub fn evaluate_vec2(
+        &self,
+        base_x: f32,
+        base_y: f32,
+        factor: f32,
+        resolver: &dyn Fn(&str, &str) -> f32,
+    ) -> (f32, f32) {
+        let out = match self.nodes.iter().find(|n| matches!(n.kind, NodeKind::Output)) {
+            Some(n) => n.id.clone(),
+            None => return (base_x, base_y),
+        };
+        let comp = BaseComponents { x: base_x, y: base_y, z: 0.0, w: 1.0 };
+        let ctx = EvalCtx { base: base_x, comp: &comp, factor, resolver };
+        let mut memo: HashMap<(String, String), f32> = HashMap::new();
+        let mut call_stack: HashSet<String> = HashSet::new();
+        let x = self
+            .wired_output_channel(&out, "x", &ctx, &mut memo, &mut call_stack)
+            .unwrap_or_else(|| self.evaluate_with_resolver(base_x, factor, resolver));
+        let y = self
+            .wired_output_channel(&out, "y", &ctx, &mut memo, &mut call_stack)
+            .unwrap_or_else(|| self.evaluate_with_resolver(base_y, factor, resolver));
+        (x, y)
+    }
+
+    /// Evaluate a 3D vector binding (`x`/`y`/`z` out channels, legacy fan fallback).
+    pub fn evaluate_vec3(
+        &self,
+        base_x: f32,
+        base_y: f32,
+        base_z: f32,
+        factor: f32,
+        resolver: &dyn Fn(&str, &str) -> f32,
+    ) -> (f32, f32, f32) {
+        let out = match self.nodes.iter().find(|n| matches!(n.kind, NodeKind::Output)) {
+            Some(n) => n.id.clone(),
+            None => return (base_x, base_y, base_z),
+        };
+        let comp = BaseComponents { x: base_x, y: base_y, z: base_z, w: 1.0 };
+        let ctx = EvalCtx { base: base_x, comp: &comp, factor, resolver };
+        let mut memo: HashMap<(String, String), f32> = HashMap::new();
+        let mut call_stack: HashSet<String> = HashSet::new();
+        let x = self
+            .wired_output_channel(&out, "x", &ctx, &mut memo, &mut call_stack)
+            .unwrap_or_else(|| self.evaluate_with_resolver(base_x, factor, resolver));
+        let y = self
+            .wired_output_channel(&out, "y", &ctx, &mut memo, &mut call_stack)
+            .unwrap_or_else(|| self.evaluate_with_resolver(base_y, factor, resolver));
+        let z = self
+            .wired_output_channel(&out, "z", &ctx, &mut memo, &mut call_stack)
+            .unwrap_or_else(|| self.evaluate_with_resolver(base_z, factor, resolver));
+        (x, y, z)
+    }
+
+    /// Evaluate a color binding. Channels bound on the Output node's
+    /// `r`/`g`/`b`/`a` inputs are computed per channel (make/break graphs);
+    /// unbound channels fall back to the legacy per-channel fan.
+    pub fn evaluate_color(
+        &self,
+        base_r: f32,
+        base_g: f32,
+        base_b: f32,
+        base_a: f32,
+        factor: f32,
+        resolver: &dyn Fn(&str, &str) -> f32,
+    ) -> [f32; 4] {
+        let out = match self.nodes.iter().find(|n| matches!(n.kind, NodeKind::Output)) {
+            Some(n) => n.id.clone(),
+            None => return [base_r, base_g, base_b, base_a],
+        };
+        let comp = BaseComponents { x: base_r, y: base_g, z: base_b, w: base_a };
+        let ctx = EvalCtx { base: base_r, comp: &comp, factor, resolver };
+        let mut memo: HashMap<(String, String), f32> = HashMap::new();
+        let mut call_stack: HashSet<String> = HashSet::new();
+        let idx = [("r", 0), ("g", 1), ("b", 2), ("a", 3)];
+        let mut out_ch = [base_r, base_g, base_b, base_a];
+        for (socket, i) in idx {
+            out_ch[i] = self
+                .wired_output_channel(&out, socket, &ctx, &mut memo, &mut call_stack)
+                .unwrap_or_else(|| self.evaluate_with_resolver(out_ch[i], factor, resolver));
+        }
+        out_ch
+    }
+
+    /// Resolve one Output-node channel socket; `None` when not wired.
+    fn wired_output_channel(
+        &self,
+        out_id: &str,
+        socket: &str,
+        ctx: &EvalCtx,
+        memo: &mut HashMap<(String, String), f32>,
+        call_stack: &mut HashSet<String>,
+    ) -> Option<f32> {
+        if !self
+            .connections
+            .iter()
+            .any(|c| c.to_node == out_id && c.to_socket == socket)
+        {
+            return None;
+        }
+        self.resolve_input(out_id, socket, ctx, memo, call_stack)
+    }
+
     /// Resolve an input socket by looking up an incoming connection or falling back to node defaults.
-    #[allow(clippy::too_many_arguments)]
     fn resolve_input(
         &self,
         node_id: &str,
         socket: &str,
-        base_value: f32,
-        factor: f32,
-        resolver: &dyn Fn(&str, &str) -> f32,
+        ctx: &EvalCtx,
         memo: &mut HashMap<(String, String), f32>,
         call_stack: &mut HashSet<String>,
     ) -> Option<f32> {
+        let base_value = ctx.base;
+        let factor = ctx.factor;
         if let Some(conn) = self
             .connections
             .iter()
@@ -370,11 +529,7 @@ impl ModifierGraph {
             return Some(self.evaluate_node_output(
                 &conn.from_node,
                 &conn.from_socket,
-                base_value,
-                factor,
-                resolver,
-                memo,
-                call_stack,
+                ctx, memo, call_stack,
             ));
         }
 
@@ -402,22 +557,31 @@ impl ModifierGraph {
             NodeKind::Wave { .. } if socket == "factor" => Some(factor),
             NodeKind::Stepped { steps } if socket == "steps" => Some(*steps),
             NodeKind::Stepped { .. } if socket == "val" => Some(factor),
+            // Make nodes: unwired channels pass the matching base component
+            // through (gathers stay identity when nothing is rewired).
+            NodeKind::MakeVector { .. } | NodeKind::MakeColor => match socket {
+                "x" | "r" => Some(ctx.comp.x),
+                "y" | "g" => Some(ctx.comp.y),
+                "z" | "b" => Some(ctx.comp.z),
+                "a" => Some(ctx.comp.w),
+                _ => None,
+            },
             _ => None,
         }
     }
 
     /// Evaluate an output socket of a node.
-    #[allow(clippy::too_many_arguments)]
     fn evaluate_node_output(
         &self,
         node_id: &str,
         socket: &str,
-        base_value: f32,
-        factor: f32,
-        resolver: &dyn Fn(&str, &str) -> f32,
+        ctx: &EvalCtx,
         memo: &mut HashMap<(String, String), f32>,
         call_stack: &mut HashSet<String>,
     ) -> f32 {
+        let base_value = ctx.base;
+        let factor = ctx.factor;
+        let resolver = ctx.resolver;
         let key = (node_id.to_string(), socket.to_string());
         if let Some(&val) = memo.get(&key) {
             return val;
@@ -444,17 +608,50 @@ impl ModifierGraph {
                     factor
                 }
             }
-            NodeKind::BaseValueIn => base_value,
+            NodeKind::BaseValueIn => match socket {
+                "x" | "r" => ctx.comp.x,
+                "y" | "g" => ctx.comp.y,
+                "z" | "b" => ctx.comp.z,
+                "a" => ctx.comp.w,
+                _ => base_value,
+            },
+            NodeKind::MakeVector { .. } | NodeKind::MakeColor => {
+                // Echo the (possibly rewired or defaulted) input of the same name.
+                self.resolve_input(node_id, socket, ctx, memo, call_stack)
+                    .unwrap_or(base_value)
+            }
+            NodeKind::BreakVector { .. } | NodeKind::BreakColor => {
+                // Follow the incoming wire and read the source's channel
+                // output; a scalar source replicates across channels.
+                if let Some(conn) = self
+                    .connections
+                    .iter()
+                    .find(|c| c.to_node == node_id && c.to_socket == "in")
+                {
+                    let src = conn.from_node.clone();
+                    let has_channel = self
+                        .get_node(&src)
+                        .map(|n| n.kind.output_sockets().contains(&socket))
+                        .unwrap_or(false);
+                    if has_channel {
+                        self.evaluate_node_output(&src, socket, ctx, memo, call_stack)
+                    } else {
+                        self.evaluate_node_output(&src, &conn.from_socket, ctx, memo, call_stack)
+                    }
+                } else {
+                    base_value
+                }
+            }
             NodeKind::Constant { value } => *value,
             NodeKind::DriverLink { driver_layer_id, driver_prop_path } => {
                 resolver(driver_layer_id, driver_prop_path)
             }
             NodeKind::Math { op, default_b } => {
                 let a = self
-                    .resolve_input(node_id, "a", base_value, factor, resolver, memo, call_stack)
+                    .resolve_input(node_id, "a", ctx, memo, call_stack,)
                     .unwrap_or(base_value);
                 let b = self
-                    .resolve_input(node_id, "b", base_value, factor, resolver, memo, call_stack)
+                    .resolve_input(node_id, "b", ctx, memo, call_stack,)
                     .unwrap_or(*default_b);
                 match op {
                     MathOp::Add => a + b,
@@ -475,25 +672,25 @@ impl ModifierGraph {
                 default_b,
             } => {
                 let a = self
-                    .resolve_input(node_id, "a", base_value, factor, resolver, memo, call_stack)
+                    .resolve_input(node_id, "a", ctx, memo, call_stack,)
                     .unwrap_or(*default_a);
                 let b = self
-                    .resolve_input(node_id, "b", base_value, factor, resolver, memo, call_stack)
+                    .resolve_input(node_id, "b", ctx, memo, call_stack,)
                     .unwrap_or(*default_b);
                 let w = self
-                    .resolve_input(node_id, "weight", base_value, factor, resolver, memo, call_stack)
+                    .resolve_input(node_id, "weight", ctx, memo, call_stack,)
                     .unwrap_or(factor);
                 a + (b - a) * w
             }
             NodeKind::Clamp { min, max } => {
                 let val = self
-                    .resolve_input(node_id, "val", base_value, factor, resolver, memo, call_stack)
+                    .resolve_input(node_id, "val", ctx, memo, call_stack,)
                     .unwrap_or(base_value);
                 let mn = self
-                    .resolve_input(node_id, "min", base_value, factor, resolver, memo, call_stack)
+                    .resolve_input(node_id, "min", ctx, memo, call_stack,)
                     .unwrap_or(*min);
                 let mx = self
-                    .resolve_input(node_id, "max", base_value, factor, resolver, memo, call_stack)
+                    .resolve_input(node_id, "max", ctx, memo, call_stack,)
                     .unwrap_or(*max);
                 val.clamp(mn.min(mx), mn.max(mx))
             }
@@ -504,19 +701,19 @@ impl ModifierGraph {
                 out_max,
             } => {
                 let val = self
-                    .resolve_input(node_id, "val", base_value, factor, resolver, memo, call_stack)
+                    .resolve_input(node_id, "val", ctx, memo, call_stack,)
                     .unwrap_or(factor);
                 let imin = self
-                    .resolve_input(node_id, "in_min", base_value, factor, resolver, memo, call_stack)
+                    .resolve_input(node_id, "in_min", ctx, memo, call_stack,)
                     .unwrap_or(*in_min);
                 let imax = self
-                    .resolve_input(node_id, "in_max", base_value, factor, resolver, memo, call_stack)
+                    .resolve_input(node_id, "in_max", ctx, memo, call_stack,)
                     .unwrap_or(*in_max);
                 let omin = self
-                    .resolve_input(node_id, "out_min", base_value, factor, resolver, memo, call_stack)
+                    .resolve_input(node_id, "out_min", ctx, memo, call_stack,)
                     .unwrap_or(*out_min);
                 let omax = self
-                    .resolve_input(node_id, "out_max", base_value, factor, resolver, memo, call_stack)
+                    .resolve_input(node_id, "out_max", ctx, memo, call_stack,)
                     .unwrap_or(*out_max);
                 let span_in = (imax - imin).abs().max(1e-6);
                 let t = ((val - imin) / span_in).clamp(0.0, 1.0);
@@ -524,13 +721,13 @@ impl ModifierGraph {
             }
             NodeKind::Smoothstep { edge0, edge1 } => {
                 let val = self
-                    .resolve_input(node_id, "val", base_value, factor, resolver, memo, call_stack)
+                    .resolve_input(node_id, "val", ctx, memo, call_stack,)
                     .unwrap_or(factor);
                 let e0 = self
-                    .resolve_input(node_id, "edge0", base_value, factor, resolver, memo, call_stack)
+                    .resolve_input(node_id, "edge0", ctx, memo, call_stack,)
                     .unwrap_or(*edge0);
                 let e1 = self
-                    .resolve_input(node_id, "edge1", base_value, factor, resolver, memo, call_stack)
+                    .resolve_input(node_id, "edge1", ctx, memo, call_stack,)
                     .unwrap_or(*edge1);
                 let span = (e1 - e0).abs().max(1e-6);
                 let t = ((val - e0) / span).clamp(0.0, 1.0);
@@ -541,13 +738,13 @@ impl ModifierGraph {
                 amplitude,
             } => {
                 let f = self
-                    .resolve_input(node_id, "factor", base_value, factor, resolver, memo, call_stack)
+                    .resolve_input(node_id, "factor", ctx, memo, call_stack,)
                     .unwrap_or(factor);
                 let freq = self
-                    .resolve_input(node_id, "freq", base_value, factor, resolver, memo, call_stack)
+                    .resolve_input(node_id, "freq", ctx, memo, call_stack,)
                     .unwrap_or(*frequency);
                 let amp = self
-                    .resolve_input(node_id, "amp", base_value, factor, resolver, memo, call_stack)
+                    .resolve_input(node_id, "amp", ctx, memo, call_stack,)
                     .unwrap_or(*amplitude);
                 let x = f * freq;
                 let i0 = x.floor() as i64;
@@ -567,13 +764,13 @@ impl ModifierGraph {
                 offset,
             } => {
                 let f = self
-                    .resolve_input(node_id, "factor", base_value, factor, resolver, memo, call_stack)
+                    .resolve_input(node_id, "factor", ctx, memo, call_stack,)
                     .unwrap_or(factor);
                 let freq = self
-                    .resolve_input(node_id, "freq", base_value, factor, resolver, memo, call_stack)
+                    .resolve_input(node_id, "freq", ctx, memo, call_stack,)
                     .unwrap_or(*frequency);
                 let amp = self
-                    .resolve_input(node_id, "amp", base_value, factor, resolver, memo, call_stack)
+                    .resolve_input(node_id, "amp", ctx, memo, call_stack,)
                     .unwrap_or(*amplitude);
                 let phase = f * freq + *offset;
                 match wave_type {
@@ -592,16 +789,17 @@ impl ModifierGraph {
             }
             NodeKind::Stepped { steps } => {
                 let val = self
-                    .resolve_input(node_id, "val", base_value, factor, resolver, memo, call_stack)
+                    .resolve_input(node_id, "val", ctx, memo, call_stack,)
                     .unwrap_or(factor);
                 let s = self
-                    .resolve_input(node_id, "steps", base_value, factor, resolver, memo, call_stack)
+                    .resolve_input(node_id, "steps", ctx, memo, call_stack,)
                     .unwrap_or(*steps)
                     .max(1.0);
                 (val * s).floor() / s
             }
             NodeKind::Output => {
-                self.resolve_input(node_id, "result", base_value, factor, resolver, memo, call_stack)
+                let socket = if socket == "result" { "result" } else { socket };
+                self.resolve_input(node_id, socket, ctx, memo, call_stack)
                     .unwrap_or(base_value)
             }
         };
@@ -864,5 +1062,81 @@ mod tests {
             }
         });
         assert_eq!(res, 90.0);
+    }
+
+    /// Make 2D fed by per-channel math; unwired Y passes the base through.
+    #[test]
+    fn test_make_vector_per_channel() {
+        let graph = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
+                ModifierNode::new("addx", 40.0, 0.0, NodeKind::Math { op: MathOp::Add, default_b: 0.0 }),
+                ModifierNode::new("addc", 40.0, 60.0, NodeKind::Constant { value: 25.0 }),
+                ModifierNode::new("mk", 120.0, 0.0, NodeKind::MakeVector { dims: 2 }),
+                ModifierNode::new("out", 220.0, 0.0, NodeKind::Output),
+            ],
+            connections: vec![
+                NodeConnection::new("in", "x", "addx", "a"),
+                NodeConnection::new("addc", "value", "addx", "b"),
+                NodeConnection::new("addx", "result", "mk", "x"),
+                NodeConnection::new("mk", "x", "out", "x"),
+            ],
+        };
+        // Out.x wired (+25 on x); out.y unwired => legacy fan of y (same
+        // graph, scalar binding → identity here).
+        let (x, y) = graph.evaluate_vec2(100.0, 200.0, 0.5, &|_, _| 0.0);
+        assert!((x - 125.0).abs() < 1e-5, "x got {x}");
+        assert!((y - 200.0).abs() < 1e-5, "y got {y}");
+
+        // Wire the y math out too: out.y wired → passes make.y (unwired
+        // make.y input defaults to comp.y); out.x now unwired → legacy fan.
+        let mut g2 = graph.clone();
+        g2.connections.retain(|c| !(c.to_node == "out" && c.to_socket == "x"));
+        g2.connect("in", "y", "mk", "y");
+        g2.connect("mk", "y", "out", "y");
+        let (x, y) = g2.evaluate_vec2(100.0, 200.0, 0.5, &|_, _| 0.0);
+        assert!((x - 100.0).abs() < 1e-5, "unwired out.x falls back to base, got {x}");
+        assert!((y - 200.0).abs() < 1e-5, "unwired make.y defaults to comp.y, got {y}");
+    }
+
+    /// Break 2D on the BaseValueIn bus unpacks x and y channels.
+    #[test]
+    fn test_break_vector_unpacks_base() {
+        let graph = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
+                ModifierNode::new("brk", 100.0, 0.0, NodeKind::BreakVector { dims: 2 }),
+                ModifierNode::new("out", 220.0, 0.0, NodeKind::Output),
+            ],
+            connections: vec![
+                NodeConnection::new("in", "x", "brk", "in"),
+                NodeConnection::new("brk", "x", "out", "x"),
+                NodeConnection::new("brk", "y", "out", "y"),
+            ],
+        };
+        let (x, y) = graph.evaluate_vec2(100.0, 200.0, 0.5, &|_, _| 0.0);
+        assert!((x - 100.0).abs() < 1e-5, "x got {x}");
+        assert!((y - 200.0).abs() < 1e-5, "y got {y}");
+    }
+
+    /// Make Color drives channels independently (classic black +50 red).
+    #[test]
+    fn test_make_color_per_channel() {
+        let graph = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("cc", 0.0, 0.0, NodeKind::Constant { value: 0.5 }),
+                ModifierNode::new("mk", 100.0, 0.0, NodeKind::MakeColor),
+                ModifierNode::new("out", 220.0, 0.0, NodeKind::Output),
+            ],
+            connections: vec![
+                NodeConnection::new("cc", "value", "mk", "r"),
+                NodeConnection::new("mk", "r", "out", "r"),
+            ],
+        };
+        let fan = graph.evaluate_color(0.0, 0.0, 0.0, 1.0, 0.5, &|_, _| 0.0);
+        assert!((fan[0] - 0.5).abs() < 1e-5, "r got {}", fan[0]);
+        assert!((fan[1] - 0.0).abs() < 1e-5, "g got {}", fan[1]);
+        assert!((fan[2] - 0.0).abs() < 1e-5, "b got {}", fan[2]);
+        assert!((fan[3] - 1.0).abs() < 1e-5, "a got {}", fan[3]);
     }
 }
