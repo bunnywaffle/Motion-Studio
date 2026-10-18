@@ -8119,6 +8119,26 @@ impl EditorState {
                 LayerSource::Text { box_height, .. } => box_height.evaluate_at(&tc),
                 _ => 0.0,
             },
+            // Color paths surface the RED channel (0..1) as the scalar view;
+            // a bound modifier graph fans its output over R/G/B/A.
+            "solid.color" => match &layer.source {
+                LayerSource::Solid { color, .. } => color.evaluate_at(&tc).r,
+                _ => 0.0,
+            },
+            "text.fill_color" => match &layer.source {
+                LayerSource::Text { fill_color, .. } => fill_color.evaluate_at(&tc).r,
+                _ => 0.0,
+            },
+            "text.stroke_color" => match &layer.source {
+                LayerSource::Text { stroke_color, .. } => stroke_color.evaluate_at(&tc).r,
+                _ => 0.0,
+            },
+            "shape.fill" => match &layer.source {
+                LayerSource::Shape { shape_type: ShapeType::Rectangle { fill, .. }
+                    | ShapeType::Ellipse { fill, .. }
+                    | ShapeType::Path { fill, .. } } => fill.evaluate_at(&tc).r,
+                _ => 0.0,
+            },
             _ => {
                 // Mask scalars share the canonical `mask:{mask}:{param}`
                 // path everywhere (graph, links, compositor).
@@ -8151,6 +8171,11 @@ impl EditorState {
                                         _ => {}
                                     }
                                 }
+                            }
+                            // Color params (incl. stock color slots) read as
+                            // the red channel of a modifier graph's base value.
+                            if let Some(col) = fx.get_color_property(parts[1]) {
+                                return col.evaluate_at(&tc).r;
                             }
                         }
                     }

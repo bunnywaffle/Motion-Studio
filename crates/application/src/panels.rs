@@ -8624,7 +8624,10 @@ fn property_keyframe_controls(
         .child(icon_box(IconName::Timer));
 
     let has_modifier = state.read(cx).get_layer_modifier_graph(layer_id, prop_path).is_some();
-    let modifier_btn = if has_modifier {
+    // Always offer the entry point: opening the editor binds an identity
+    // modifier graph (empty graph = passthrough), so sculpting can begin
+    // from any stopwatch row.
+    let modifier_btn = {
         let s_mg = editor.clone();
         let lid_mg = layer_id_str.clone();
         let p_mg = prop_path.to_string();
@@ -8645,10 +8648,8 @@ fn property_keyframe_controls(
                         cx,
                     );
                 })
-                .child(icon_box(IconName::Workflow))
+                .child(icon_box(if has_modifier { IconName::Workflow } else { IconName::Plus })),
         )
-    } else {
-        None
     };
 
     h_flex()
@@ -8791,7 +8792,7 @@ pub(crate) fn effect_param_keyframe_controls(
         .child(icon_box(IconName::Timer));
 
     let has_modifier = state.read(cx).get_layer_modifier_graph(layer_id, &prop_path).is_some();
-    let modifier_btn = if has_modifier {
+    let modifier_btn = {
         let s_mg = editor.clone();
         let lid_mg = layer_id_str.clone();
         let p_mg = prop_path.clone();
@@ -8812,10 +8813,8 @@ pub(crate) fn effect_param_keyframe_controls(
                         cx,
                     );
                 })
-                .child(icon_box(IconName::Workflow))
+                .child(icon_box(if has_modifier { IconName::Workflow } else { IconName::Plus })),
         )
-    } else {
-        None
     };
 
     h_flex()
@@ -8898,10 +8897,55 @@ fn fx_color_fields(effect: &project::Effect) -> Vec<&'static str> {
     }
 }
 
+/// Modifier-graph entry pill for an effect color field (3D/4D values: the
+/// graph fans over R/G/B/A). Rendered on effect color rows; non-effect
+/// callers (null-layer gizmo tint) draw nothing and stay unique ids.
+pub(crate) fn fx_color_modify_pill(
+    state: &Entity<EditorState>,
+    layer_id: &str,
+    eff_id: &str,
+    field: &str,
+    cx: &App,
+) -> Option<AnyElement> {
+    let has_effect = state
+        .read(cx)
+        .active_composition()
+        .and_then(|c| c.get_layer(layer_id))
+        .and_then(|l| l.get_effect(eff_id))
+        .is_some();
+    if !has_effect {
+        return None;
+    }
+    let st_mg = state.clone();
+    let lid_mg = layer_id.to_string();
+    let mg_path = format!("effect:{eff_id}:{field}");
+    let has_modifier = state.read(cx).get_layer_modifier_graph(layer_id, &mg_path).is_some();
+    Some(
+        div()
+            .id(SharedString::from(format!("fx_modifier_graph_{field}_{eff_id}")))
+            .test_support()
+            .cursor_pointer()
+            .p_0p5()
+            .rounded_sm()
+            .text_color(if has_modifier { cx.theme().accent_foreground } else { cx.theme().muted_foreground })
+            .hover(|s| s.bg(cx.theme().muted))
+            .child(icon_box(if has_modifier { IconName::Workflow } else { IconName::Plus }))
+            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                crate::modifier_graph_view::open_modifier_graph_window(
+                    st_mg.clone(),
+                    lid_mg.clone(),
+                    mg_path.clone(),
+                    cx,
+                );
+            })
+            .into_any_element(),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn fx_swatch_row(
-    _state: &Entity<EditorState>,
-    _layer_id: &str,
+    state: &Entity<EditorState>,
+    layer_id: &str,
     eff_id: &str,
     field: &str,
     label: &str,
@@ -8942,34 +8986,39 @@ pub(crate) fn fx_swatch_row(
                     )
                     .child(div().text_color(cx.theme().foreground).child(cur_hex)),
             )
-            .child(match wheel {
-                Some(picker) => {
-                    let ed = picker.clone();
-                    let open = picker.read(cx).expanded;
-                    div()
-                        .id(SharedString::from(format!("fx_wheel_btn_{field}_{eff_id}")))
-                        .test_support()
-                        .px_2()
-                        .py_0p5()
-                        .rounded_sm()
-                        .cursor_pointer()
-                        .text_xs()
-                        .text_color(if open { cx.theme().accent_foreground } else { cx.theme().muted_foreground })
-                        .bg(if open { cx.theme().accent } else { cx.theme().muted })
-                        .child(if open { "Close" } else { "Edit" })
-                        .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-                            ed.update(cx, |this, cx| {
-                                this.set_expanded(!open, current);
-                                cx.notify();
-                            });
-                            if !open {
-                                InspectorColorPicker::sync_inputs(&ed, None, window, cx);
-                            }
-                        })
-                        .into_any_element()
-                }
-                None => div().into_any_element(),
-            }),
+            .child(
+                h_flex()
+                    .gap_0p5()
+                    .children(fx_color_modify_pill(state, layer_id, eff_id, field, cx))
+                    .child(match wheel {
+                        Some(picker) => {
+                            let ed = picker.clone();
+                            let open = picker.read(cx).expanded;
+                            div()
+                                .id(SharedString::from(format!("fx_wheel_btn_{field}_{eff_id}")))
+                                .test_support()
+                                .px_1()
+                                .py_0p5()
+                                .rounded_sm()
+                                .cursor_pointer()
+                                .text_xs()
+                                .text_color(if open { cx.theme().accent_foreground } else { cx.theme().muted_foreground })
+                                .bg(if open { cx.theme().accent } else { cx.theme().muted })
+                                .child(if open { "Close" } else { "Edit" })
+                                .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                                    ed.update(cx, |this, cx| {
+                                        this.set_expanded(!open, current);
+                                        cx.notify();
+                                    });
+                                    if !open {
+                                        InspectorColorPicker::sync_inputs(&ed, None, window, cx);
+                                    }
+                                })
+                                .into_any_element()
+                        }
+                        None => div().into_any_element(),
+                    }),
+            ),
     );
     if let Some(picker) = wheel {
         if picker.read(cx).expanded {
@@ -11357,6 +11406,7 @@ fn render_applied_effects(
                                                 .bg(Rgba { r: color.r, g: color.g, b: color.b, a: color.a }),
                                         )
                                         .child(div().text_xs().text_color(cx.theme().foreground).child(hex.to_string()))
+                                        .children(fx_color_modify_pill(state, &layer.id, &eff_id, eid, cx))
                                         .child(
                                             div()
                                                 .id(toggle_id)
@@ -11438,6 +11488,7 @@ fn render_applied_effects(
                                                 .bg(Rgba { r: sc.r, g: sc.g, b: sc.b, a: sc.a }),
                                         )
                                         .child(div().text_xs().text_color(cx.theme().foreground).child(sc_hex))
+                                        .children(fx_color_modify_pill(state, &layer.id, &eff_id, "color", cx))
                                         .child(
                                             div()
                                                 .id("shadow_color_wheel")
@@ -11984,6 +12035,7 @@ fn render_applied_effects(
                                                 .text_color(cx.theme().foreground)
                                                 .child(ck_hex)
                                         )
+                                        .children(fx_color_modify_pill(state, &layer.id, &eff_id, "key_color", cx))
                                         .child(
                                             div()
                                                 .id("chroma_color_wheel")

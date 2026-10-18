@@ -2735,6 +2735,82 @@ mod tests {
         // Halfway between 0 and 120 is 60.0
         assert_eq!(follower_mid.transform.rotation, 60.0);
     }
+
+    #[test]
+    fn test_modifier_graph_color_and_2d_channel_fans() {
+        use project::{Effect, LayerSource, ModifierGraph, ModifierNode, NodeConnection, NodeKind};
+        use crate::evaluation::EvaluatedEffectType as EV;
+
+        let mut comp = Composition::hd_1080p_30fps("comp_mgdim", "MG Dim Test", 10.0);
+        let tc0 = TimeCode::zero(30.0);
+        let tc299 = TimeCode::from_frames(299, 30.0);
+        let tc300 = TimeCode::from_frames(300, 30.0);
+
+        let mut layer = Layer::solid("l_mgdim", "MG Dim", Color::RED, 100, 100, tc0, tc300);
+
+        // 4D color: whole-path graph fanned over R/G/B/A (Math Add +0.25,
+        // clamped 0..1 per channel). RED (1,0,0,1) -> (1, .25, .25, 1).
+        let mg_color = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("add", 0.0, 0.0, NodeKind::Math { op: project::MathOp::Add, default_b: 0.25 }),
+                ModifierNode::new("out", 200.0, 0.0, NodeKind::Output),
+            ],
+            connections: vec![NodeConnection::new("add", "result", "out", "result")],
+        };
+        layer.set_modifier_graph("solid.color", mg_color);
+
+        // Effect color (3D/4D): same engine fans DropShadow's slots.
+        let mg_fx_color = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("c", 0.0, 0.0, NodeKind::Constant { value: 0.5 }),
+                ModifierNode::new("out", 200.0, 30.0, NodeKind::Output),
+            ],
+            connections: vec![NodeConnection::new("c", "value", "out", "result")],
+        };
+        layer.set_modifier_graph("effect:fx_ds:color", mg_fx_color);
+        layer.add_effect(Effect::drop_shadow("fx_ds", 8.0, 45.0, 10.0, 75.0, Color::BLACK));
+
+        layer.transform.position.set_value(project::Vec2::new(100.0, 200.0));
+        // 2D vector: whole-path graph fanned per axis (Add +25).
+        let mg_pos = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("add", 0.0, 0.0, NodeKind::Math { op: project::MathOp::Add, default_b: 25.0 }),
+                ModifierNode::new("out", 200.0, 60.0, NodeKind::Output),
+            ],
+            connections: vec![NodeConnection::new("add", "result", "out", "result")],
+        };
+        layer.set_modifier_graph("transform.position", mg_pos);
+
+        comp.add_layer(layer).unwrap();
+        let graph = SceneGraph::from_composition(&comp).unwrap();
+        let evaluator = LayerStackEvaluator::new();
+
+        let eval = evaluator.evaluate(&graph, &tc299);
+        let l = eval.get_layer("l_mgdim").unwrap();
+
+        // Solid color channels fanned through the same graph.
+        if let LayerSource::Solid { color, .. } = &l.source {
+            assert!((color.value.r - 1.0).abs() < 1e-5, "R 1+0.25 clamps to 1");
+            assert!((color.value.g - 0.25).abs() < 1e-5, "G 0+0.25 = 0.25");
+            assert!((color.value.b - 0.25).abs() < 1e-5, "B 0+0.25 = 0.25");
+            assert!((color.value.a - 1.0).abs() < 1e-5, "A 1+0.25 clamps to 1");
+        } else {
+            panic!("expected solid source");
+        }
+
+        // Per-axis fan of the whole-path 2D binding.
+        assert!((l.transform.position.x - 125.0).abs() < 1e-4, "x 100+25");
+        assert!((l.transform.position.y - 225.0).abs() < 1e-4, "y 200+25");
+
+        // Effect color slots fanned through the graph.
+        match &l.effects[0].effect_type {
+            EV::DropShadow { color, .. } => {
+                assert!((color.r - 0.5).abs() < 1e-5 && (color.g - 0.5).abs() < 1e-5 && (color.b - 0.5).abs() < 1e-5, "constant graph drives every color channel");
+                assert!((color.a - 0.5).abs() < 1e-5, "alpha also fanned (4D)");
+            }
+            _ => panic!("expected DropShadow"),
+        }
+    }
 }
 
 

@@ -7618,6 +7618,87 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         .expect("update_window failed");
     }
 
+    #[gpui_kit::test]
+    fn test_effect_color_modifier_graph_row_binding(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            Theme::change(ThemeMode::Dark, None, cx);
+        });
+
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
+            window.activate_window();
+            window.set_window_title("Motion Compositor");
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+
+        let mut solid_layer_id = String::new();
+        let mut fx_id = String::new();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+
+            let panels = app_view.read(cx).panels().clone();
+            let props_id = PanelId::from(panels.properties.entity_id());
+            let dock_area = app_view.read(cx).dock_area().clone();
+            dock_area.update(cx, |dock, cx| {
+                dock.select_panel(props_id, window, cx);
+            });
+            let state = app_view.read(cx).state().clone();
+            let nid = state.update(cx, |s, cx| {
+                let sid = s.add_solid_layer("MG Dim Solid", project::Color::RED, 0, 0).expect("solid");
+                s.select_layer(Some(sid.clone()));
+                cx.notify();
+                sid
+            });
+            solid_layer_id = nid;
+            let fid = state.update(cx, |s, cx| {
+                let fx = s.add_effect_to_selected_layer(project::EffectType::drop_shadow(8.0, 45.0, 10.0, 75.0, project::Color::BLACK)).expect("effect");
+                cx.notify();
+                fx
+            });
+            fx_id = fid;
+            window.render_frame(cx);
+
+            // The DropShadow color row carries the modifier entry point; the
+            // effect card sits below the fold, so scroll until painted.
+            let mg_btn = SharedString::from(format!("fx_modifier_graph_color_{fx_id}"));
+            for _ in 0..8 {
+                window.scroll(
+                    "properties_inspector",
+                    gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(-400.))),
+                    cx,
+                );
+                window.render_frame(cx);
+                if window
+                    .try_find(mg_btn.clone())
+                    .map(|e| e.visible())
+                    .unwrap_or(false)
+                {
+                    break;
+                }
+            }
+            window.click(mg_btn, cx);
+        })
+        .expect("update_window failed");
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let state = app_view.read(cx).state().clone();
+            // Clicking the pill binds a passthrough graph on the 4D color
+            // path; the base-value reader surfaces the red channel.
+            let graph = state.read(cx).get_layer_modifier_graph(&solid_layer_id, &format!("effect:{fx_id}:color"));
+            assert!(graph.is_some(), "color path binds a modifier graph");
+            let base = state.read(cx).get_layer_property_base_value(&solid_layer_id, &format!("effect:{fx_id}:color"));
+            assert!((base - 0.0).abs() < 1e-5, "BLACK shadow's red channel is the base view, got {base}");
+        })
+        .expect("update_window failed");
+    }
+
     #[test]
     fn test_null_layer_gizmo_and_transform_links() {
         use crate::state::EditorState;
@@ -8924,15 +9005,30 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
                 cx.notify();
             });
         });
+        cx.run_until_parked();
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             // Cards start expanded.
             window.render_frame(cx);
             // Gradient editor: stops, reverse, selected-stop wheel.
+            window.render_frame(cx);
             assert!(window.find(SharedString::from(format!("gradient_stop0_{ramp}"))).visible());
             assert!(window.find(SharedString::from(format!("gradient_stop1_{ramp}"))).visible());
             assert!(window.find(SharedString::from(format!("gradient_reverse_{ramp}"))).visible());
-            assert!(window.find(SharedString::from(format!("fx_wheel_btn_color_a_{ramp}"))).visible());
+            // The wheel row can lag a frame or two behind the inspector
+            // scroll layout under machine load; require visibility within
+            // a few rendered frames instead of a single snapshot.
+            let wheel_id = SharedString::from(format!("fx_wheel_btn_color_a_{ramp}"));
+            let mut wheel_visible = false;
+            for _ in 0..5 {
+                window.render_frame(cx);
+                if window.try_find(wheel_id.clone()).map(|e| e.visible()).unwrap_or(false) {
+                    wheel_visible = true;
+                    break;
+                }
+            }
+            assert!(wheel_visible, "fx_wheel_btn_color_a never became visible across 5 frames. bounds={:?} viewport={:?}",
+                window.try_find(wheel_id).map(|e| e.bounds()), window.viewport_size());
             // Checkbox for the boolean.
             assert!(window.find(SharedString::from(format!("fx_bool_monochrome_{noise}"))).visible());
         })

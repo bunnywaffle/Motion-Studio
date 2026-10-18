@@ -8,12 +8,12 @@
 - Full AE-like compositor: project/composition/layer model (`crates/project`), scene-graph evaluation with nesting, mattes, keyframes, modifiers (`crates/compositor`), CPU raster viewport + wgpu/EGL effects (`crates/renderer`, `crates/application/src/raster`), GPUI Kit docks (Project / Viewer / Properties+Effects / Timeline) + top toolbar (single tool home: Move/Hand/Rotate/Pen/Text, 5-variant Shape group with flyout, quick-add, fill color, snapping, GPU dot).
 - Vector shapes (Rectangle/Ellipse/Pen Path + triangle/polygon/star tools) with spec panel: linked Size, Fill (None/Color/Gradient), Stroke + Width scrub, Corner Radius, STROKE group (Ends/Joints/Trim/Dash), true-kappa rounded corners, styled stroker (caps/joins/dashes), trim on all shapes.
 - First-class masks (modes, feather/expansion/opacity/invert, own transform with inspector rows).
-- Modifier graphs drive opacity, transform, effect params, and shape scalars (`shape.*` paths, scrub-alias canonicalized); f32-only engine (no color modifiers).
+- Modifier graphs drive opacity, transform, effect params, shape scalars (`shape.*` paths, scrub-alias canonicalized), and colors — the f32 engine fans each RGB(A) channel (clamped 0..1) through effect color sites and source fills; every color row offers a modifier entrance (plus/legend pill).
 - Monochrome zinc dark theme (error/delete red + node-graph type hues excepted).
 - OS file drag-and-drop onto the window imports image/video/audio files into the Project bin.
 - GPU effect chain serves Drop Shadow / Outer Glow end-to-end (silhouette fill → compute blur → colorized under-merge), with the CPU blit-stage aura skipping via a handled flag and the effects panel badge marking all four aura-family plugins GPU-accelerated.
 - Animation presets: 20 built-ins plus user-authored presets captured from a layer's animated transform and persisted to `<config>/MotionStudio/animation_presets.json` (timeline animation dropdown + dedicated Presets dock tab with apply/export-to-`.json`/delete).
-- **562 tests passing** (304 application, 137 project, 66 + 9 compositor, 38 renderer, incl. headless evaluation + UI suites), 0 failures, clippy clean modulo one pre-existing warning.
+- **563 tests passing** (305 application, 137 project, 67 + 9 compositor, 38 renderer, incl. headless evaluation + UI suites), 0 failures, clippy clean modulo one pre-existing warning.
 - Edit → Settings… dialog picks the app-wide gpui-kit theme (Light/Dark), applies it live and persists to `<config>/MotionStudio/settings.json` (loaded at boot).
 
 ## What Currently Works (original log, kept for history)

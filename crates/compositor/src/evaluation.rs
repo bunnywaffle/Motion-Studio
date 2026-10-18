@@ -60,6 +60,41 @@ fn eval_scalar_mg(
     }
 }
 
+/// Reshape one color through its modifier graph (if bound under `path`) by
+/// fanning it through the graph once per channel (R, G, B, A — 0..1 bases),
+/// recomposing with each channel clamped 0..1. A graph untouched per channel
+/// (BaseValueIn→Output) preserves the base color exactly.
+/// Shared by effect color params and source fills — the graph engine is f32-only.
+pub(crate) fn eval_color_mg(
+    graphs: &HashMap<String, project::ModifierGraph>,
+    path: &str,
+    base_color: project::Color,
+    factor: f32,
+    resolver: &dyn Fn(&str, &str) -> f32,
+) -> project::Color {
+    match graphs.get(path) {
+        Some(mg) => {
+            let fan = |ch: f32| mg.evaluate_with_resolver(ch, factor, resolver).clamp(0.0, 1.0);
+            project::Color::rgba(fan(base_color.r), fan(base_color.g), fan(base_color.b), fan(base_color.a))
+        }
+        None => base_color,
+    }
+}
+
+/// In-place variant of `eval_color_mg` for resolved source fills (the
+/// snapshot's `Property<Color>` was already resolved to `time`).
+pub(crate) fn eval_color_mg_prop(
+    graphs: &HashMap<String, project::ModifierGraph>,
+    path: &str,
+    prop: &mut project::Property<project::Color>,
+    factor: f32,
+    resolver: &dyn Fn(&str, &str) -> f32,
+) {
+    if graphs.contains_key(path) {
+        prop.set_value(eval_color_mg(graphs, path, prop.value, factor, resolver));
+    }
+}
+
 pub fn resolve_property_link_value(
     graph: &SceneGraph,
     driver_layer_id: &str,
@@ -1919,6 +1954,14 @@ impl LayerStackEvaluator {
             }
 
             let mut evaluated_effects = Vec::with_capacity(node.effects.len());
+            // Shared modifier reshaping pair: hoisted so effect params,
+            // source fills and mask scalars all fan through the same
+            // factor + link resolver.
+            let factor = node.progression_factor(time);
+            let resolver = |d_lid: &str, d_prop: &str| {
+                let mut visited = HashSet::new();
+                resolve_property_link_value(graph, d_lid, d_prop, time, &mut visited).unwrap_or(0.0)
+            };
             for eff in &node.effects {
                 if eff.enabled {
                     let eval_eff_prop = |param_name: &str, def_val: f32| -> f32 {
@@ -1932,14 +1975,20 @@ impl LayerStackEvaluator {
                         // Modifier graphs reshape the (possibly linked) base
                         // value, exactly like transform/opacity above.
                         if let Some(mg) = node.modifier_graphs.get(&path) {
-                            let factor = node.progression_factor(time);
-                            let resolver = |d_lid: &str, d_prop: &str| {
-                                let mut visited = HashSet::new();
-                                resolve_property_link_value(graph, d_lid, d_prop, time, &mut visited).unwrap_or(0.0)
-                            };
                             mg.evaluate_with_resolver(base, factor, &resolver)
                         } else {
                             base
+                        }
+                    };
+                    // Color params flow through the same f32 graph engine one
+                    // channel at a time (R/G/B/A, canonical slot names), so
+                    // modifier graphs can drive effect colors like any scalar.
+                    let eval_eff_color = |param_name: &str, def_val: project::Color| -> project::Color {
+                        let path = format!("effect:{}:{}", eff.id, param_name);
+                        if node.modifier_graphs.contains_key(&path) {
+                            eval_color_mg(&node.modifier_graphs, &path, def_val, factor, &resolver)
+                        } else {
+                            def_val
                         }
                     };
 
@@ -1961,8 +2010,8 @@ impl LayerStackEvaluator {
                             map_white,
                             amount,
                         } => EvaluatedEffectType::Tint {
-                            map_black: map_black.evaluate_at(time),
-                            map_white: map_white.evaluate_at(time),
+                            map_black: eval_eff_color("map_black", map_black.evaluate_at(time)),
+                            map_white: eval_eff_color("map_white", map_white.evaluate_at(time)),
                             amount: eval_eff_prop("amount", amount.evaluate_at(time)),
                         },
                         EffectType::Invert { amount } => EvaluatedEffectType::Invert {
@@ -1979,7 +2028,7 @@ impl LayerStackEvaluator {
                             angle: eval_eff_prop("angle", angle.evaluate_at(time)),
                             softness: eval_eff_prop("softness", softness.evaluate_at(time)),
                             opacity: eval_eff_prop("opacity", opacity.evaluate_at(time)),
-                            color: color.evaluate_at(time),
+                            color: eval_eff_color("color", color.evaluate_at(time)),
                         },
                         EffectType::OuterGlow {
                             size,
@@ -1991,7 +2040,7 @@ impl LayerStackEvaluator {
                             size: eval_eff_prop("size", size.evaluate_at(time)),
                             spread: eval_eff_prop("spread", spread.evaluate_at(time)),
                             opacity: eval_eff_prop("opacity", opacity.evaluate_at(time)),
-                            color: color.evaluate_at(time),
+                            color: eval_eff_color("color", color.evaluate_at(time)),
                             range: eval_eff_prop("range", range.evaluate_at(time)),
                         },
                         EffectType::GlslShader {
@@ -2031,7 +2080,7 @@ impl LayerStackEvaluator {
                             tolerance,
                             feather,
                         } => EvaluatedEffectType::ChromaKey {
-                            key_color: key_color.evaluate_at(time),
+                            key_color: eval_eff_color("key_color", key_color.evaluate_at(time)),
                             tolerance: eval_eff_prop("tolerance", tolerance.evaluate_at(time)),
                             feather: eval_eff_prop("feather", feather.evaluate_at(time)),
                         },
@@ -2043,8 +2092,8 @@ impl LayerStackEvaluator {
                         }
                         EffectType::SwapColor { from_color, to_color, tolerance, feather } => {
                             EvaluatedEffectType::SwapColor {
-                                from_color: from_color.evaluate_at(time),
-                                to_color: to_color.evaluate_at(time),
+                                from_color: eval_eff_color("from_color", from_color.evaluate_at(time)),
+                                to_color: eval_eff_color("to_color", to_color.evaluate_at(time)),
                                 tolerance: eval_eff_prop("tolerance", tolerance.evaluate_at(time)),
                                 feather: eval_eff_prop("feather", feather.evaluate_at(time)),
                             }
@@ -2093,8 +2142,8 @@ impl LayerStackEvaluator {
                         EffectType::Checkerboard { size, color_a, color_b } => {
                             EvaluatedEffectType::Checkerboard {
                                 size: eval_eff_prop("size", size.evaluate_at(time)),
-                                color_a: color_a.evaluate_at(time),
-                                color_b: color_b.evaluate_at(time),
+                                color_a: eval_eff_color("color_a", color_a.evaluate_at(time)),
+                                color_b: eval_eff_color("color_b", color_b.evaluate_at(time)),
                             }
                         }
                         EffectType::GradientRamp { color_a, color_b, angle, stops, gradient_type, center_x, center_y, radius, dither, fill_alpha } => {
@@ -2109,8 +2158,8 @@ impl LayerStackEvaluator {
                                 sorted
                             } else {
                                 vec![
-                                    GradientStop::new(0.0, color_a.evaluate_at(time)),
-                                    GradientStop::new(1.0, color_b.evaluate_at(time)),
+                                    GradientStop::new(0.0, eval_eff_color("color_a", color_a.evaluate_at(time))),
+                                    GradientStop::new(1.0, eval_eff_color("color_b", color_b.evaluate_at(time))),
                                 ]
                             };
                             EvaluatedEffectType::GradientRamp {
@@ -2131,7 +2180,7 @@ impl LayerStackEvaluator {
                         EffectType::TextOutline { width, color, offset } => {
                             EvaluatedEffectType::TextOutline {
                                 width: eval_eff_prop("width", width.evaluate_at(time)),
-                                color: color.evaluate_at(time),
+                                color: eval_eff_color("color", color.evaluate_at(time)),
                                 offset: eval_eff_prop("offset", offset.evaluate_at(time)),
                             }
                         }
@@ -2287,9 +2336,9 @@ impl LayerStackEvaluator {
                                 edge: eval_eff_prop("edge", edge.evaluate_at(time)),
                                 highlight_intensity: eval_eff_prop("highlight_intensity", highlight_intensity.evaluate_at(time)),
                                 shadow_intensity: eval_eff_prop("shadow_intensity", shadow_intensity.evaluate_at(time)),
-                                highlight_tint: highlight_tint.evaluate_at(time),
+                                highlight_tint: eval_eff_color("highlight_tint", highlight_tint.evaluate_at(time)),
                                 highlight_tint_amount: eval_eff_prop("highlight_tint_amount", highlight_tint_amount.evaluate_at(time)),
-                                shadow_tint: shadow_tint.evaluate_at(time),
+                                shadow_tint: eval_eff_color("shadow_tint", shadow_tint.evaluate_at(time)),
                                 shadow_tint_amount: eval_eff_prop("shadow_tint_amount", shadow_tint_amount.evaluate_at(time)),
                             }
                         }
@@ -2329,7 +2378,7 @@ impl LayerStackEvaluator {
                             EvaluatedEffectType::InnerGlow {
                                 size: eval_eff_prop("size", size.evaluate_at(time)),
                                 intensity: eval_eff_prop("intensity", intensity.evaluate_at(time)),
-                                color: color.evaluate_at(time),
+                                color: eval_eff_color("color", color.evaluate_at(time)),
                                 blend: *blend,
                             }
                         }
@@ -2344,7 +2393,7 @@ impl LayerStackEvaluator {
                                 mode: *mode,
                                 direction: eval_eff_prop("direction", direction.evaluate_at(time)),
                                 width: eval_eff_prop("width", width.evaluate_at(time)),
-                                color: color.evaluate_at(time),
+                                color: eval_eff_color("color", color.evaluate_at(time)),
                                 intensity: eval_eff_prop("intensity", intensity.evaluate_at(time)),
                                 blend: *blend,
                             }
@@ -2366,10 +2415,24 @@ impl LayerStackEvaluator {
                                     }
                                 })
                                 .collect();
+                            // Stock color slots fan through graphs one channel
+                            // at a time, keyed by the plug-in's slot names
+                            // (same names the inspector + persistence use).
+                            let slots = project::stock_color_slots(*plugin);
                             EvaluatedEffectType::Stock {
                                 plugin: *plugin,
                                 params: evaluated_params,
-                                colors: colors.iter().map(|p| p.evaluate_at(time)).collect(),
+                                colors: colors
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, p)| {
+                                        let base = p.evaluate_at(time);
+                                        match slots.get(i) {
+                                            Some(slot) => eval_eff_color(slot, base),
+                                            None => base,
+                                        }
+                                    })
+                                    .collect(),
                             }
                         }
                     };
@@ -2387,14 +2450,8 @@ impl LayerStackEvaluator {
             let mut source = node.source.clone();
             source.resolve_at(time);
             // Modifier graphs on shape/text source scalars (bound under
-            // shape.*/text.* paths). Colors can't be reshaped — the
-            // graph engine is f32-only.
-            // Hoisted: the mask block below reuses the same pair.
-            let factor = node.progression_factor(time);
-            let resolver = |d_lid: &str, d_prop: &str| {
-                let mut visited = HashSet::new();
-                resolve_property_link_value(graph, d_lid, d_prop, time, &mut visited).unwrap_or(0.0)
-            };
+            // shape.*/text.* paths) and on source fills/layer colors
+            // (channel-fanned under solid.color / text.*_color / shape.fill).
             if !node.modifier_graphs.is_empty() {
                 if let LayerSource::Text {
                     font_size,
@@ -2404,6 +2461,8 @@ impl LayerStackEvaluator {
                     baseline_shift,
                     box_width,
                     box_height,
+                    fill_color,
+                    stroke_color,
                     ..
                 } = &mut source
                 {
@@ -2414,6 +2473,11 @@ impl LayerStackEvaluator {
                     eval_scalar_mg(&node.modifier_graphs, "text.baseline_shift", baseline_shift, time, factor, &resolver);
                     eval_scalar_mg(&node.modifier_graphs, "text.box_width", box_width, time, factor, &resolver);
                     eval_scalar_mg(&node.modifier_graphs, "text.box_height", box_height, time, factor, &resolver);
+                    eval_color_mg_prop(&node.modifier_graphs, "text.fill_color", fill_color, factor, &resolver);
+                    eval_color_mg_prop(&node.modifier_graphs, "text.stroke_color", stroke_color, factor, &resolver);
+                }
+                if let LayerSource::Solid { color, .. } = &mut source {
+                    eval_color_mg_prop(&node.modifier_graphs, "solid.color", color, factor, &resolver);
                 }
                 if let LayerSource::Shape { shape_type } = &mut source {
                     match shape_type {
@@ -2428,13 +2492,14 @@ impl LayerStackEvaluator {
                         }
                         project::ShapeType::Path { .. } => {}
                     }
-                    let (stroke_width, dash, dash_gap, dash_offset) = match shape_type {
-                        project::ShapeType::Rectangle { stroke_width, dash, dash_gap, dash_offset, .. }
-                        | project::ShapeType::Ellipse { stroke_width, dash, dash_gap, dash_offset, .. }
-                        | project::ShapeType::Path { stroke_width, dash, dash_gap, dash_offset, .. } => {
-                            (stroke_width, dash, dash_gap, dash_offset)
+                    let (fill, stroke_width, dash, dash_gap, dash_offset) = match shape_type {
+                        project::ShapeType::Rectangle { fill, stroke_width, dash, dash_gap, dash_offset, .. }
+                        | project::ShapeType::Ellipse { fill, stroke_width, dash, dash_gap, dash_offset, .. }
+                        | project::ShapeType::Path { fill, stroke_width, dash, dash_gap, dash_offset, .. } => {
+                            (fill, stroke_width, dash, dash_gap, dash_offset)
                         }
                     };
+                    eval_color_mg_prop(&node.modifier_graphs, "shape.fill", fill, factor, &resolver);
                     eval_scalar_mg(&node.modifier_graphs, "shape.stroke_width", stroke_width, time, factor, &resolver);
                     eval_scalar_mg(&node.modifier_graphs, "shape.dash", dash, time, factor, &resolver);
                     eval_scalar_mg(&node.modifier_graphs, "shape.dash_gap", dash_gap, time, factor, &resolver);
