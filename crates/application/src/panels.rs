@@ -23901,6 +23901,44 @@ impl Render for TimelinePanel {
                             .child("Modifier Graph..."),
                     );
 
+                    // Per-axis context (e.g. a two-value Property like
+                    // `transform.position.x` right-clicked): also offer a
+                    // whole-value binding so one graph fans both axes.
+                    let per_axis_whole = ["transform.position", "transform.scale", "transform.anchor_point"]
+                        .iter()
+                        .copied()
+                        .find(|w| path == format!("{w}.x") || path == format!("{w}.y"));
+                    if let Some(whole) = per_axis_whole {
+                        let s_b = s_menu.clone();
+                        let p_b = p_close.clone();
+                        let l_b = lid.clone();
+                        let whole_path = whole.to_string();
+                        menu_items = menu_items.child(
+                            div()
+                                .id(SharedString::from(format!("timeline_ctx_modifier_graph_both_{path}")))
+                                .test_support()
+                                .cursor_pointer()
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .text_xs()
+                                .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                    crate::modifier_graph_view::open_modifier_graph_window(
+                                        s_b.clone(),
+                                        l_b.clone(),
+                                        whole_path.clone(),
+                                        cx,
+                                    );
+                                    p_b.update(cx, |this, cx| {
+                                        this.close_context_menu();
+                                        cx.notify();
+                                    });
+                                })
+                                .child("Modifier Graph (Both Axes)..."),
+                        );
+                    }
+
                     if path == "transform.position" || path == "transform.scale" || path == "transform.anchor_point" {
                         let s_x = s_menu.clone();
                         let p_x = p_close.clone();

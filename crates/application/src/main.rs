@@ -10349,6 +10349,44 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
     }
 
     #[gpui_kit::test]
+    fn test_two_value_context_menu_binds_whole_axes(cx: &mut TestAppContext) {
+        // Right-clicking one axis of a two-value Property (e.g. the X value
+        // of Position) must offer a whole-value binding that fans both axes.
+        use crate::panels::ContextMenuTarget;
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+        app_view.update(cx, |view, cx| {
+            view.panels().timeline.update(cx, |p, _| {
+                p.open_context_menu(
+                    ContextMenuTarget::Property {
+                        layer_id: "layer_accent".to_string(),
+                        prop_path: "transform.position.x",
+                    },
+                    gpui::point(gpui::px(150.), gpui::px(150.)),
+                );
+            });
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("timeline_ctx_modifier_graph_both_transform.position.x").visible());
+            window.click("timeline_ctx_modifier_graph_both_transform.position.x", cx);
+        })
+        .expect("update_window failed");
+        assert!(app_view.read_with(cx, |view, cx| {
+            view.state().read(cx).get_layer_modifier_graph("layer_accent", "transform.position").is_some()
+        }));
+    }
+
+    #[gpui_kit::test]
     fn test_keyframe_context_menu_interp_easing_delete(cx: &mut TestAppContext) {
         // Timeline/graph keyframe menu: Bezier -> Hold easing -> delete.
         use crate::panels::ContextMenuTarget;
