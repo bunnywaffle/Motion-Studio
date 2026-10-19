@@ -7926,6 +7926,14 @@ impl EditorState {
     /// Any scrub-keyed alias folds through the canonical funnel first, so
     /// storage (always canonical) is found in one lookup.
     pub fn get_layer_modifier_graph(&self, layer_id: &str, prop_path: &str) -> Option<project::ModifierGraph> {
+        // Node-graph effects carry their graph inline on the effect itself
+        // (`graph:{fx_id}`), not in the layer's modifier-graph map.
+        if let Some(fx_id) = prop_path.strip_prefix("graph:") {
+            let comp = self.active_composition()?;
+            let layer = comp.get_layer(layer_id)?;
+            let effect = layer.effects.iter().find(|e| e.id == fx_id)?;
+            return effect.node_graph_data().cloned();
+        }
         let comp = self.active_composition()?;
         let layer = comp.get_layer(layer_id)?;
         layer
@@ -7996,18 +8004,21 @@ impl EditorState {
 
     /// Set or update the modifier graph for a property path on a layer.
     pub fn set_layer_modifier_graph(&mut self, layer_id: &str, prop_path: &str, graph: project::ModifierGraph) {
+        // Node-graph effects store the graph inline (see get_layer_modifier_graph).
+        if let Some(fx_id) = prop_path.strip_prefix("graph:") {
+            let fx: &str = fx_id;
+            if let Some(comp) = self.active_composition_mut() {
+                if let Some(layer) = comp.get_layer_mut(layer_id) {
+                    if let Some(effect) = layer.effects.iter_mut().find(|e| e.id == fx) {
+                        effect.set_node_graph(graph);
+                    }
+                }
+            }
+            return;
+        }
         if let Some(comp) = self.active_composition_mut() {
             if let Some(layer) = comp.get_layer_mut(layer_id) {
                 layer.set_modifier_graph(Self::canonical_modifier_path(prop_path), graph);
-            }
-        }
-    }
-
-    /// Remove the modifier graph for a property path on a layer.
-    pub fn remove_layer_modifier_graph(&mut self, layer_id: &str, prop_path: &str) {
-        if let Some(comp) = self.active_composition_mut() {
-            if let Some(layer) = comp.get_layer_mut(layer_id) {
-                layer.remove_modifier_graph(&Self::canonical_modifier_path(prop_path));
             }
         }
     }
@@ -8020,6 +8031,15 @@ impl EditorState {
             let default_graph = project::ModifierGraph::default_passthrough();
             self.set_layer_modifier_graph(layer_id, prop_path, default_graph.clone());
             default_graph
+        }
+    }
+
+    /// Remove the modifier graph for a property path on a layer.
+    pub fn remove_layer_modifier_graph(&mut self, layer_id: &str, prop_path: &str) {
+        if let Some(comp) = self.active_composition_mut() {
+            if let Some(layer) = comp.get_layer_mut(layer_id) {
+                layer.remove_modifier_graph(&Self::canonical_modifier_path(prop_path));
+            }
         }
     }
 

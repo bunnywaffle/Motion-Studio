@@ -644,6 +644,13 @@ pub fn layer_cache_key(
         eff.id.hash(&mut h);
         eff.enabled.hash(&mut h);
         effect_hash(&eff.effect_type, &mut h);
+        // Graph edits must invalidate (rare shape → one Debug hash is fine;
+        // every other effect stays Debug-free in this hot key).
+        if let EvaluatedEffectType::NodeGraph {} = &eff.effect_type {
+            if let Some(graph) = &eff.graph {
+                format!("{:?}", graph).hash(&mut h);
+            }
+        }
     }
     // Masks: identity + on/off + path + shaped params + mode + transform.
     for mask in &layer.masks {
@@ -772,6 +779,7 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
         EvaluatedEffectType::SinePath { .. } => 33,
         EvaluatedEffectType::InstancePath { .. } => 34,
         EvaluatedEffectType::Stock { plugin, .. } => 100 + *plugin as u8,
+        EvaluatedEffectType::NodeGraph {} => 41,
     };
     disc.hash(h);
     match fx {
@@ -1019,6 +1027,7 @@ fn effect_hash(fx: &EvaluatedEffectType, h: &mut DefaultHasher) {
                 color_hash(c, h);
             }
         }
+        EvaluatedEffectType::NodeGraph {} => {}
         EvaluatedEffectType::TextSplitAnimator {
             split_by,
             order,
@@ -2134,6 +2143,10 @@ pub(crate) fn apply_layer_fx(
         if !eff.enabled {
             continue;
         }
+        if let EvaluatedEffectType::NodeGraph {} = &eff.effect_type {
+            super::effects::apply_graph_effect_pixels(buf, eff);
+            continue;
+        }
         match &eff.effect_type {
             EvaluatedEffectType::GaussianBlur { .. }
             | EvaluatedEffectType::DropShadow { .. }
@@ -2226,6 +2239,10 @@ pub(crate) fn apply_adjustment(buf: &mut FloatBuf, effects: &[EvaluatedEffect], 
     }
     for eff in effects {
         if !eff.enabled {
+            continue;
+        }
+        if let EvaluatedEffectType::NodeGraph {} = &eff.effect_type {
+            super::effects::apply_graph_effect_pixels(buf, eff);
             continue;
         }
         match &eff.effect_type {
@@ -2495,6 +2512,76 @@ mod tests {
         // Half the perimeter trimmed: ink drops substantially but stays > 0.
         assert!(a_cut < a_full * 0.7, "trimmed {a_cut} vs full {a_full}");
         assert!(a_cut > a_full * 0.2, "trimmed {a_cut} vs full {a_full}");
+    }
+
+    fn posterize_graph_project() -> (Project, String) {
+        let mut project = Project::new("p", "P");
+        let mut comp = Composition::hd_1080p_30fps("c", "C", 5.0);
+        let tc = TimeCode::from_frames(0, 30.0);
+        let mut layer = project::Layer::solid("l1", "L", Color::rgba(0.7, 0.2, 0.9, 1.0), 100, 100, tc, tc);
+        let mut fx = project::Effect::node_graph("ng");
+        fx.set_node_graph(project::ModifierGraph {
+            nodes: vec![
+                project::ModifierNode::new("in", 0.0, 0.0, project::NodeKind::BaseValueIn),
+                project::ModifierNode::new(
+                    "po",
+                    120.0,
+                    0.0,
+                    project::NodeKind::StockOp {
+                        plugin: project::StockPlugin::Posterize,
+                        params: vec![2.0],
+                    },
+                ),
+                project::ModifierNode::new("out", 240.0, 0.0, project::NodeKind::Output),
+            ],
+            connections: vec![
+                project::NodeConnection::new("in", "value", "po", "in"),
+                project::NodeConnection::new("po", "value", "out", "result"),
+            ],
+        });
+        layer.effects.push(fx);
+        comp.add_layer(layer).unwrap();
+        project.add_composition(comp).unwrap();
+        (project, "c".to_string())
+    }
+
+    #[test]
+    fn node_graph_effect_runs_per_pixel() {
+        let (project, comp_id) = posterize_graph_project();
+        let layer = eval_first(&project, &comp_id);
+        let eff = &layer.effects.iter().find(|e| e.id == "ng").expect("ng effect");
+        assert!(matches!(eff.effect_type, EvaluatedEffectType::NodeGraph {}));
+        assert!(eff.graph.is_some(), "evaluator must carry the inline graph");
+        let ctx = RasterFx { time_s: 0.0, frame: 0, res_w: 64.0, res_h: 64.0, duration_s: 5.0, playing: false };
+        let mut buf = FloatBuf::clear(64, 64);
+        let src = Px::from_color(Color::rgba(0.7, 0.2, 0.9, 1.0));
+        for p in buf.px.iter_mut() {
+            *p = src;
+        }
+        apply_layer_fx(&mut buf, 64.0, 64.0, std::slice::from_ref(eff), &ctx, false);
+        let p = buf.px[0];
+        // Posterize to a 2-level grid with endpoints: 0.7 → 1.0,
+        // 0.2 → 0.0, 0.9 → 1.0; alpha passes untouched.
+        assert!(p.r > 0.99, "r={}", p.r);
+        assert!(p.g < 1e-4, "g={}", p.g);
+        assert!(p.b > 0.99, "b={}", p.b);
+        assert!((p.a - 1.0).abs() < 1e-4, "a={}", p.a);
+    }
+
+    #[test]
+    fn graph_edit_invalidates_cache_key() {
+        let (mut project, comp_id) = posterize_graph_project();
+        let l1 = eval_first(&project, &comp_id);
+        let k1 = layer_cache_key(&l1, 0, 100, 100, false, 0);
+        let fx = project.compositions[0].layers[0]
+            .effects
+            .iter_mut()
+            .find(|e| e.id == "ng")
+            .expect("effect");
+        fx.set_node_graph(project::ModifierGraph::default_passthrough());
+        let l2 = eval_first(&project, &comp_id);
+        let k2 = layer_cache_key(&l2, 0, 100, 100, false, 0);
+        assert_ne!(k1, k2, "graph edit must change the cache key");
     }
 
     #[test]
@@ -3357,6 +3444,7 @@ mod tests {
             }
         }
         let stock = |plugin: StockPlugin, params: Vec<f32>| EvaluatedEffect {
+            graph: None,
             id: format!("fx_{plugin:?}"),
             name: format!("{plugin:?}"),
             enabled: true,
@@ -3400,6 +3488,7 @@ mod tests {
         }
         let solid = |fill: f32| vec![
             EvaluatedEffect {
+                graph: None,
                 id: "solid".to_string(),
                 name: "Solid".to_string(),
                 enabled: true,
@@ -3432,6 +3521,7 @@ mod tests {
             }
         }
         let stock = |plugin: StockPlugin, params: Vec<f32>| EvaluatedEffect {
+            graph: None,
             id: format!("fx_{plugin:?}"),
             name: format!("{plugin:?}"),
             enabled: true,
@@ -3472,6 +3562,7 @@ mod tests {
             }
         }
         let stock = |plugin: StockPlugin, params: Vec<f32>| EvaluatedEffect {
+            graph: None,
             id: format!("fx_{plugin:?}"),
             name: format!("{plugin:?}"),
             enabled: true,
@@ -3514,6 +3605,7 @@ mod tests {
             }
         }
         let stock = |plugin: StockPlugin, params: Vec<f32>| EvaluatedEffect {
+            graph: None,
             id: format!("fx_{plugin:?}"),
             name: format!("{plugin:?}"),
             enabled: true,
@@ -3558,6 +3650,7 @@ mod tests {
             }
         }
         let fx = |id: &str, name: &str, effect_type: EvaluatedEffectType| EvaluatedEffect {
+            graph: None,
             id: id.to_string(),
             name: name.to_string(),
             enabled: true,
@@ -3627,6 +3720,7 @@ mod tests {
             }
         }
         let fx = |id: &str, name: &str, effect_type: EvaluatedEffectType| EvaluatedEffect {
+            graph: None,
             id: id.to_string(),
             name: name.to_string(),
             enabled: true,
@@ -3694,6 +3788,7 @@ mod tests {
             }
         }
         let fx = |id: &str, name: &str, effect_type: EvaluatedEffectType| EvaluatedEffect {
+            graph: None,
             id: id.to_string(),
             name: name.to_string(),
             enabled: true,
@@ -3775,6 +3870,7 @@ mod tests {
             return;
         }
         let fx = |id: &str, effect_type: EvaluatedEffectType| EvaluatedEffect {
+            graph: None,
             id: id.to_string(),
             name: id.to_string(),
             enabled: true,
@@ -3855,6 +3951,7 @@ mod tests {
             return;
         }
         let fx = |id: &str, effect_type: EvaluatedEffectType| EvaluatedEffect {
+            graph: None,
             id: id.to_string(),
             name: id.to_string(),
             enabled: true,
@@ -3917,12 +4014,14 @@ mod tests {
             return;
         }
         let fx = |id: &str, effect_type: EvaluatedEffectType| EvaluatedEffect {
+            graph: None,
             id: id.to_string(),
             name: id.to_string(),
             enabled: true,
             effect_type,
         };
         let stock = |plugin: StockPlugin, params: Vec<f32>| EvaluatedEffect {
+            graph: None,
             id: format!("fx_{plugin:?}"),
             name: format!("{plugin:?}"),
             enabled: true,
@@ -3970,6 +4069,7 @@ mod tests {
             return;
         }
         let fx = |id: &str, effect_type: EvaluatedEffectType| EvaluatedEffect {
+            graph: None,
             id: id.to_string(),
             name: id.to_string(),
             enabled: true,
@@ -4006,6 +4106,7 @@ mod tests {
             return;
         }
         let stock = |plugin: StockPlugin, params: Vec<f32>| EvaluatedEffect {
+            graph: None,
             id: format!("fx_{plugin:?}"),
             name: format!("{plugin:?}"),
             enabled: true,
@@ -4045,6 +4146,7 @@ mod tests {
             return;
         }
         let fx = |id: &str, effect_type: EvaluatedEffectType| EvaluatedEffect {
+            graph: None,
             id: id.to_string(),
             name: id.to_string(),
             enabled: true,
@@ -4072,6 +4174,7 @@ mod tests {
             return;
         }
         let stock = |plugin: StockPlugin, params: Vec<f32>| EvaluatedEffect {
+            graph: None,
             id: format!("fx_{plugin:?}"),
             name: format!("{plugin:?}"),
             enabled: true,
@@ -4112,6 +4215,7 @@ mod tests {
             return;
         }
         let stock = |plugin: StockPlugin, params: Vec<f32>, colors: Vec<Color>| EvaluatedEffect {
+            graph: None,
             id: format!("fx_{plugin:?}"),
             name: format!("{plugin:?}"),
             enabled: true,
@@ -4172,6 +4276,7 @@ mod tests {
             return;
         }
         let stock = |plugin: StockPlugin, params: Vec<f32>, colors: Vec<Color>| EvaluatedEffect {
+            graph: None,
             id: format!("fx_{plugin:?}"),
             name: format!("{plugin:?}"),
             enabled: true,
@@ -4242,6 +4347,7 @@ mod tests {
             return;
         }
         let gen = |plugin: StockPlugin, params: Vec<f32>, colors: Vec<Color>| EvaluatedEffect {
+            graph: None,
             id: format!("fx_{plugin:?}"),
             name: format!("{plugin:?}"),
             enabled: true,

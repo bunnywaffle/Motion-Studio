@@ -2,6 +2,7 @@ use crate::color::Color;
 use crate::layer::{FillGradient, GradientStop, GradientType};
 use crate::path::ProfilePoint;
 use crate::property::Property;
+use crate::modifier::ModifierGraph;
 use crate::puppet::PuppetPin;
 use crate::shader::{parse_shader_params, ShaderParam, ShaderParamValue};
 use crate::stock::{stock_default_color, StockPlugin};
@@ -827,6 +828,13 @@ pub enum EffectType {
         #[serde(default, deserialize_with = "crate::property::de_vec_property_or_value")]
         colors: Vec<Property<Color>>,
     },
+    /// Node Graph effect: an editable per-pixel modifier graph stored inline
+    /// (Content / pointwise StockOp / Blend / Constant nodes back-walked from
+    /// Output). See `crate::modifier::ModifierGraph`.
+    NodeGraph {
+        #[serde(default)]
+        graph: Option<ModifierGraph>,
+    },
 }
 
 impl EffectType {
@@ -874,6 +882,7 @@ impl EffectType {
             Self::RimLight { .. } => "Rim Light",
             Self::Curves { .. } => "Tone Curve",
             Self::Stock { plugin, .. } => plugin.descriptor().label,
+            Self::NodeGraph { .. } => "Node Graph",
         }
     }
 
@@ -1443,6 +1452,7 @@ impl EffectType {
             Self::RimLight { .. } => "net.sf.openfx.rim_light",
             Self::Curves { .. } => "net.sf.openfx.custom.tone_curve",
             Self::Stock { plugin, .. } => plugin.plugin_id(),
+            Self::NodeGraph { .. } => "net.sf.openfx.custom.node_graph",
         }
     }
 
@@ -1707,6 +1717,35 @@ impl Effect {
                 plugin,
             },
         )
+    }
+
+    /// Factory for creating a node graph effect (content passthrough until
+    /// the user wires nodes in the graph editor).
+    pub fn node_graph(id: impl Into<String>) -> Self {
+        Self::new(id, "Node Graph", EffectType::NodeGraph { graph: Some(ModifierGraph::default_passthrough()) })
+    }
+
+    /// The inline modifier graph if this is a NodeGraph effect.
+    pub fn node_graph_data(&self) -> Option<&ModifierGraph> {
+        match &self.effect_type {
+            EffectType::NodeGraph { graph } => graph.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// Mutable access to the inline modifier graph if this is a NodeGraph effect.
+    pub fn node_graph_data_mut(&mut self) -> Option<&mut ModifierGraph> {
+        match &mut self.effect_type {
+            EffectType::NodeGraph { graph } => graph.as_mut(),
+            _ => None,
+        }
+    }
+
+    /// Store the inline modifier graph (no-op unless this is a NodeGraph effect).
+    pub fn set_node_graph(&mut self, replaced: ModifierGraph) {
+        if let EffectType::NodeGraph { graph } = &mut self.effect_type {
+            *graph = Some(replaced);
+        }
     }
 
     /// Factory for creating a Shader Lab runtime-shader effect.
@@ -2850,7 +2889,10 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
             }
             // Shader Lab values are dynamic (see nudge_shader_value).
             // Curves carry control points, not scalar params.
-            EffectType::ShaderLab { .. } | EffectType::Curves { .. } => {}
+            // Node graphs are edited as a whole (see Edit Graph).
+            EffectType::ShaderLab { .. }
+            | EffectType::Curves { .. }
+            | EffectType::NodeGraph { .. } => {}
         }
         false
     }
@@ -3334,7 +3376,10 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
             EffectType::Puppet { pins, .. } => Self::pin_component(pins, param_name),
             // Shader Lab values are dynamic, not `Property<f32>` tracks.
             // Curves carry control points, not scalar params.
-            EffectType::ShaderLab { .. } | EffectType::Curves { .. } => None,
+            // Node graphs are edited as a whole (see Edit Graph).
+            EffectType::ShaderLab { .. }
+            | EffectType::Curves { .. }
+            | EffectType::NodeGraph { .. } => None,
         }
     }
 
@@ -3789,7 +3834,10 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
             EffectType::Puppet { pins, .. } => Self::pin_component_mut(pins, param_name),
             // Shader Lab values are dynamic, not `Property<f32>` tracks.
             // Curves carry control points, not scalar params.
-            EffectType::ShaderLab { .. } | EffectType::Curves { .. } => None,
+            // Node graphs are edited as a whole (see Edit Graph).
+            EffectType::ShaderLab { .. }
+            | EffectType::Curves { .. }
+            | EffectType::NodeGraph { .. } => None,
         }
     }
 
@@ -4279,6 +4327,8 @@ void mainImage(out vec4 fragColor, in vec2 uv, in vec4 inColor) {
                 }
                 out
             }
+            // Node graphs are edited in the graph editor, not the inspector.
+            EffectType::NodeGraph { .. } => Vec::new(),
         }
     }
 }

@@ -1269,6 +1269,7 @@ impl GpuEffectEngine {
             name: "Gaussian Blur".to_string(),
             enabled: true,
             effect_type: EvaluatedEffectType::GaussianBlur { radius },
+            graph: None,
         };
         self.process_rgba_frame(src_rgba, width, height, &[eff], 0.0)
     }
@@ -1304,6 +1305,7 @@ mod tests {
             }
         }
         let eff = EvaluatedEffect {
+            graph: None,
             id: "rays".to_string(),
             name: "Rays".to_string(),
             enabled: true,

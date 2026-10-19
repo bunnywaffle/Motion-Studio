@@ -1048,6 +1048,12 @@ impl ModifierGraphView {
             NodeKind::Noise { .. } | NodeKind::Wave { .. } | NodeKind::Stepped { .. } => {
                 (rgb(0x14532d), rgb(0x86efac)) // Deep green
             }
+            NodeKind::Blend { .. } => {
+                (rgb(0x312e81), rgb(0xc7d2fe)) // Indigo
+            }
+            NodeKind::StockOp { .. } => {
+                (rgb(0x701a75), rgb(0xf0abfc)) // Deep magenta
+            }
             NodeKind::DriverLink { .. } => {
                 (rgb(0x7f1d1d), rgb(0xfca5a5)) // Deep red for driver links
             }

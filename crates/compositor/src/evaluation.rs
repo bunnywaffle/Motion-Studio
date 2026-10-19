@@ -751,6 +751,9 @@ pub enum EvaluatedEffectType {
         params: Vec<f32>,
         colors: Vec<Color>,
     },
+    /// Node Graph effect: no per-frame params; the inline graph is carried
+    /// on `EvaluatedEffect::graph`.
+    NodeGraph {},
 }
 
 impl EvaluatedEffectType {
@@ -797,6 +800,7 @@ impl EvaluatedEffectType {
             Self::Curves { .. } => "Tone Curve",
             Self::OuterGlow { .. } => "Outer Glow",
             Self::Stock { plugin, .. } => plugin.descriptor().label,
+            Self::NodeGraph { .. } => "Node Graph",
         }
     }
 
@@ -844,6 +848,7 @@ impl EvaluatedEffectType {
             Self::Curves { .. } => "net.sf.openfx.custom.tone_curve",
             Self::OuterGlow { .. } => "net.sf.openfx.outer_glow",
             Self::Stock { plugin, .. } => plugin.plugin_id(),
+            Self::NodeGraph { .. } => "net.sf.openfx.custom.node_graph",
         }
     }
 
@@ -1132,6 +1137,8 @@ impl EvaluatedEffectType {
             Self::Sharpen { .. } | Self::Vignette { .. } | Self::CelShading { .. } | Self::OilPaint { .. } | Self::MatchColor { .. } | Self::MatchLight { .. } | Self::InnerGlow { .. } | Self::Dither { .. } | Self::RimLight { .. } | Self::Curves { .. } | Self::OuterGlow { .. } => c,
             // Stock per-pixel kernels; spatial stock is identity here.
             Self::Stock { plugin, params, .. } => process_color_stock(*plugin, params, c),
+            // Graphs run per-pixel at raster time; identity on single colors.
+            Self::NodeGraph { .. } => c,
         }
     }
 }
@@ -1143,12 +1150,22 @@ pub struct EvaluatedEffect {
     pub name: String,
     pub enabled: bool,
     pub effect_type: EvaluatedEffectType,
+    /// Inline graph snapshot for NodeGraph effects (carried separately from
+    /// the param struct, which is serialization-tagged).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<project::ModifierGraph>,
 }
 impl EvaluatedEffect {
     /// Process a color through this evaluated effect if enabled.
     pub fn process_color(&self, color: Color) -> Color {
         if !self.enabled {
             return color;
+        }
+        if let (EvaluatedEffectType::NodeGraph {}, Some(graph)) = (&self.effect_type, &self.graph) {
+            // Single-pixel preview path: Content = the incoming color. The
+            // per-pixel buffer path handles graphs at raster time.
+            let [r, g, b, a] = graph.evaluate_color(color.r, color.g, color.b, color.a, 0.0, &|_, _| 0.0);
+            return Color::rgba(r, g, b, a);
         }
         self.effect_type.process_color(color)
     }
@@ -2440,12 +2457,14 @@ impl LayerStackEvaluator {
                                     .collect(),
                             }
                         }
+                        EffectType::NodeGraph { .. } => EvaluatedEffectType::NodeGraph {},
                     };
                     evaluated_effects.push(EvaluatedEffect {
                         id: eff.id.clone(),
                         name: eff.name.clone(),
                         enabled: true,
                         effect_type: eval_type,
+                        graph: eff.node_graph_data().cloned(),
                     });
                 }
             }

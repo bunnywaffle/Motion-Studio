@@ -553,6 +553,26 @@ pub fn apply_effect_pixels(
         EvaluatedEffectType::Stock { plugin, params, colors } => {
             apply_stock(buf, *plugin, params, colors, ctx);
         }
+        // Node graphs are intercepted by the caller (the graph resource is
+        // carried on EvaluatedEffect, not the param struct) — never hits
+        // this arm with a graph present.
+        EvaluatedEffectType::NodeGraph {} => {}
+    }
+}
+
+/// Per-pixel node-graph effect: Content = each pixel color, factor 0 (no
+/// layer factor plumbing on per-pixel effects).
+pub fn apply_graph_effect_pixels(buf: &mut FloatBuf, eff: &compositor::EvaluatedEffect) {
+    let Some(graph) = &eff.graph else {
+        return;
+    };
+    for p in buf.px.iter_mut() {
+        if p.a <= 0.0 {
+            continue;
+        }
+        let c = p.to_color();
+        let [r, g, b, a] = graph.evaluate_color(c.r, c.g, c.b, c.a, 0.0, &|_, _| 0.0);
+        *p = Px::from_color(Color::rgba(r, g, b, a));
     }
 }
 

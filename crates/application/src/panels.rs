@@ -12382,6 +12382,35 @@ fn render_applied_effects(
                         effect_box = effect_box.child(crate::widgets::widget_for_decl(state, panel_entity, &layer.id, &eff_id, &decl, wheels, enums, cx));
                     }
                 }
+                EffectType::NodeGraph { .. } => {
+                    // No params: one Edit Graph button opens the graph window
+                    // (graph carried inline on the effect under `graph:{id}`).
+                    let st = state.clone();
+                    let lid = layer.id.clone();
+                    let eid = eff_id.clone();
+                    effect_box = effect_box.child(
+                        div()
+                            .id(SharedString::from(format!("effect_edit_graph_{eff_id}")))
+                            .test_support()
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .bg(cx.theme().accent)
+                            .text_color(cx.theme().accent_foreground)
+                            .hover(|h| h.opacity(0.85))
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                crate::modifier_graph_view::open_modifier_graph_window(
+                                    st.clone(),
+                                    lid.clone(),
+                                    format!("graph:{eid}"),
+                                    cx,
+                                );
+                            })
+                            .child("Edit Graph"),
+                    );
+                }
             }
 
             // AE-style nested collapsible: the header (disclosure, eye,
@@ -16543,6 +16572,9 @@ pub(crate) fn effect_template_for(plugin_id: &str) -> Option<EffectType> {
             100.0,
         ),
         "net.sf.openfx.custom.shader_lab" => EffectType::shader_lab(shader_presets::GRADE),
+        "net.sf.openfx.custom.node_graph" => EffectType::NodeGraph {
+            graph: Some(project::ModifierGraph::default_passthrough()),
+        },
         _ => return None,
     })
 }

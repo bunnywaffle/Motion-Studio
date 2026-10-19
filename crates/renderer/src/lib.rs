@@ -231,6 +231,7 @@ mod tests {
 
             // Test GaussianBlur effect
             let eff = compositor::EvaluatedEffect {
+                graph: None,
                 id: "blur_1".to_string(),
                 name: "Blur".to_string(),
                 enabled: true,
@@ -249,6 +250,7 @@ mod tests {
         if let Ok(gpu) = GpuContext::new_headless() {
             let mut engine = GpuEffectEngine::new(gpu).expect("create gpu effect engine");
             let eff = |effect_type| compositor::EvaluatedEffect {
+                graph: None,
                 id: "levels".to_string(),
                 name: "Levels".to_string(),
                 enabled: true,
@@ -280,6 +282,7 @@ mod tests {
         if let Ok(gpu) = GpuContext::new_headless() {
             let mut engine = GpuEffectEngine::new(gpu).expect("create gpu effect engine");
             let eff = compositor::EvaluatedEffect {
+                graph: None,
                 id: "halftone".to_string(),
                 name: "Halftone".to_string(),
                 enabled: true,
@@ -301,6 +304,7 @@ mod tests {
         if let Ok(gpu) = GpuContext::new_headless() {
             let mut engine = GpuEffectEngine::new(gpu).expect("create gpu effect engine");
             let stock = |plugin: project::StockPlugin, params: Vec<f32>| compositor::EvaluatedEffect {
+                graph: None,
                 id: format!("fx_{plugin:?}"),
                 name: format!("{plugin:?}"),
                 enabled: true,
@@ -325,6 +329,7 @@ mod tests {
         if let Ok(gpu) = GpuContext::new_headless() {
             let mut engine = GpuEffectEngine::new(gpu).expect("create gpu effect engine");
             let stock = |plugin: project::StockPlugin, params: Vec<f32>| compositor::EvaluatedEffect {
+                graph: None,
                 id: format!("fx_{plugin:?}"),
                 name: format!("{plugin:?}"),
                 enabled: true,

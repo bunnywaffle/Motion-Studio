@@ -497,6 +497,13 @@ pub const OFX_SUITE: &[OfxEffectDescriptor] = &[
         params: NO_PARAMS,
         spatial: true,
     },
+    OfxEffectDescriptor {
+        id: "net.sf.openfx.custom.node_graph",
+        label: "Node Graph",
+        category: OfxCategory::Custom,
+        params: NO_PARAMS,
+        spatial: true,
+    },
 ];
 
 /// Look up a plug-in descriptor by id (legacy + stock suites).
