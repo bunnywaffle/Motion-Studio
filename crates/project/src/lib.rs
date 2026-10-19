@@ -46,7 +46,7 @@ pub use layer::{FillGradient, GradientStop, GradientType, Layer, LayerSource, Nu
 pub use marker::Marker;
 pub use mask::{Mask, MaskMode, MaskShapeKind};
 pub use matte::TrackMatteMode;
-pub use modifier::{MathOp, ModifierGraph, ModifierNode, NodeConnection, NodeKind, WaveType};
+pub use modifier::{ConstantMode, MathOp, ModifierGraph, ModifierNode, NodeConnection, NodeKind, WaveType};
 pub use ofx::{ofx_in_category, ofx_lookup, OfxCategory, OfxEffectDescriptor, OfxParamDescriptor, OFX_SUITE};
 pub use path::{Path, PathBooleanOp, PathPoint, PathPointKind, ProfilePoint, sample_tone_curve, sample_width_profile};
 pub use trace::{AutoTraceOptions, TraceChannel, TraceRange, TracedContour};

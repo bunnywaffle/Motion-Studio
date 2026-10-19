@@ -1,6 +1,18 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
+/// Value type of a Constant node (drives its scalar/vector/color storage).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ConstantMode {
+    #[default]
+    Float,
+    Int,
+    Color,
+    Vec2,
+    Vec3,
+}
+
 /// Mathematical operations supported by the Math node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -74,12 +86,23 @@ pub enum NodeKind {
     /// Reads the incoming base value of the property being modified.
     BaseValueIn,
 
-    /// Constant numeric value.
-    Constant { value: f32 },
+    /// Typed constant value: scalar (Float/Int) fans across channels;
+    /// vector/color modes hold per-channel components delivered through the
+    /// single combined `value` socket. Legacy `value` field = first channel.
+    Constant {
+        #[serde(default)]
+        mode: ConstantMode,
+        value: f32,
+        #[serde(default)]
+        g: f32,
+        #[serde(default)]
+        b: f32,
+        #[serde(default)]
+        a: f32,
+    },
 
     /// Binary math operator (+, −, ×, ÷, ^).
     Math { op: MathOp, default_b: f32 },
-
     /// Linear interpolation between A and B driven by weight/factor.
     Lerp { default_a: f32, default_b: f32 },
 
@@ -270,14 +293,26 @@ impl BaseComponents {
         Self { x: base, y: base, z: base, w: base }
     }
 
-    /// Read one signed channel by socket name ("x"/"r", "y"/"g", "z"/"b", "a").
+    /// Read one signed channel by socket name ("value"/"x"/"r", "y"/"g",
+    /// "z"/"b", "a"). Unknown names fall through to alpha.
     pub fn comp_value(&self, chan: &str) -> f32 {
         match chan {
-            "x" | "r" => self.x,
+            "value" | "x" | "r" => self.x,
             "y" | "g" => self.y,
             "z" | "b" => self.z,
             _ => self.w,
         }
+    }
+}
+
+/// Constant components per mode: scalars fan across every channel so legacy
+/// scalar graphs behave unchanged; vector/color modes hold real components.
+fn constant_comp(mode: ConstantMode, value: f32, g: f32, b: f32, a: f32) -> BaseComponents {
+    match mode {
+        ConstantMode::Float | ConstantMode::Int => BaseComponents::fan(value),
+        ConstantMode::Color => BaseComponents { x: value, y: g, z: b, w: a },
+        ConstantMode::Vec2 => BaseComponents { x: value, y: g, z: 0.0, w: 1.0 },
+        ConstantMode::Vec3 => BaseComponents { x: value, y: g, z: b, w: 1.0 },
     }
 }
 
@@ -633,7 +668,10 @@ impl ModifierGraph {
                     base_value
                 }
             }
-            NodeKind::Constant { value } => *value,
+            NodeKind::Constant { mode, value, g, b, a } => {
+                let chan = if socket == "value" { ctx.channel } else { socket };
+                constant_comp(*mode, *value, *g, *b, *a).comp_value(chan)
+            }
             NodeKind::DriverLink { driver_layer_id, driver_prop_path } => {
                 resolver(driver_layer_id, driver_prop_path)
             }
@@ -853,8 +891,8 @@ mod tests {
         for (op, expected) in ops {
             let graph = ModifierGraph {
                 nodes: vec![
-                    ModifierNode::new("c1", 0.0, 0.0, NodeKind::Constant { value: 10.0 }),
-                    ModifierNode::new("c2", 0.0, 50.0, NodeKind::Constant { value: 5.0 }),
+                    ModifierNode::new("c1", 0.0, 0.0, NodeKind::Constant { mode: ConstantMode::Float, value: 10.0, g: 0.0, b: 0.0, a: 1.0 }),
+                    ModifierNode::new("c2", 0.0, 50.0, NodeKind::Constant { mode: ConstantMode::Float, value: 5.0, g: 0.0, b: 0.0, a: 1.0 }),
                     ModifierNode::new("math", 100.0, 20.0, NodeKind::Math { op, default_b: 0.0 }),
                     ModifierNode::new("out", 200.0, 20.0, NodeKind::Output),
                 ],
@@ -1061,7 +1099,7 @@ mod tests {
             nodes: vec![
                 ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
                 ModifierNode::new("addx", 40.0, 0.0, NodeKind::Math { op: MathOp::Add, default_b: 0.0 }),
-                ModifierNode::new("addc", 40.0, 60.0, NodeKind::Constant { value: 25.0 }),
+                ModifierNode::new("addc", 40.0, 60.0, NodeKind::Constant { mode: ConstantMode::Float, value: 25.0, g: 0.0, b: 0.0, a: 1.0 }),
                 ModifierNode::new("mk", 120.0, 0.0, NodeKind::MakeVector { dims: 2 }),
                 ModifierNode::new("out", 220.0, 0.0, NodeKind::Output),
             ],
@@ -1081,7 +1119,7 @@ mod tests {
         // Rewire make.y via a subtract: only y is changed, x passes through.
         let mut g2 = graph.clone();
         g2.connections.retain(|c| !(c.to_node == "mk" && c.to_socket == "x"));
-        g2.nodes.push(ModifierNode::new("c10", 60.0, 120.0, NodeKind::Constant { value: 10.0 }));
+        g2.nodes.push(ModifierNode::new("c10", 60.0, 120.0, NodeKind::Constant { mode: ConstantMode::Float, value: 10.0, g: 0.0, b: 0.0, a: 1.0 }));
         g2.nodes.push(ModifierNode::new("suby", 60.0, 180.0, NodeKind::Math { op: MathOp::Subtract, default_b: 0.0 }));
         g2.connect("c10", "value", "suby", "b");
         g2.connect("suby", "result", "mk", "y");
@@ -1118,7 +1156,7 @@ mod tests {
     fn test_make_color_per_channel() {
         let graph = ModifierGraph {
             nodes: vec![
-                ModifierNode::new("cc", 0.0, 0.0, NodeKind::Constant { value: 0.5 }),
+                ModifierNode::new("cc", 0.0, 0.0, NodeKind::Constant { mode: ConstantMode::Float, value: 0.5, g: 0.0, b: 0.0, a: 1.0 }),
                 ModifierNode::new("mk", 100.0, 0.0, NodeKind::MakeColor),
                 ModifierNode::new("out", 220.0, 0.0, NodeKind::Output),
             ],
@@ -1132,5 +1170,60 @@ mod tests {
         assert!((fan[1] - 0.0).abs() < 1e-5, "g got {}", fan[1]);
         assert!((fan[2] - 0.0).abs() < 1e-5, "b got {}", fan[2]);
         assert!((fan[3] - 1.0).abs() < 1e-5, "a got {}", fan[3]);
+    }
+
+    /// Typed constants: a Vec2/Vec3/Color constant delivered straight to the
+    /// Output carries its per-channel components; Int behaves like Float.
+    #[test]
+    fn test_typed_constant_modes() {
+        let graph_of = |kind: NodeKind| ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("c", 0.0, 0.0, kind),
+                ModifierNode::new("out", 200.0, 0.0, NodeKind::Output),
+            ],
+            connections: vec![NodeConnection::new("c", "value", "out", "result")],
+        };
+
+        let v2 = graph_of(NodeKind::Constant {
+            mode: ConstantMode::Vec2,
+            value: 10.0,
+            g: 20.0,
+            b: 0.0,
+            a: 1.0,
+        });
+        let (x, y) = v2.evaluate_vec2(100.0, 200.0, 0.5, &|_, _| 0.0);
+        assert!((x - 10.0).abs() < 1e-5, "vec2 x got {x}");
+        assert!((y - 20.0).abs() < 1e-5, "vec2 y got {y}");
+
+        let v3 = graph_of(NodeKind::Constant {
+            mode: ConstantMode::Vec3,
+            value: 1.0,
+            g: 2.0,
+            b: 3.0,
+            a: 1.0,
+        });
+        let (x, y, z) = v3.evaluate_vec3(100.0, 200.0, 300.0, 0.5, &|_, _| 0.0);
+        assert!((x - 1.0).abs() < 1e-5 && (y - 2.0).abs() < 1e-5 && (z - 3.0).abs() < 1e-5);
+
+        let col = graph_of(NodeKind::Constant {
+            mode: ConstantMode::Color,
+            value: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        });
+        let fan = col.evaluate_color(0.0, 0.0, 0.0, 1.0, 0.5, &|_, _| 0.0);
+        assert!((fan[0] - 1.0).abs() < 1e-5 && (fan[1] - 0.0).abs() < 1e-5 && (fan[2] - 0.0).abs() < 1e-5 && (fan[3] - 1.0).abs() < 1e-5);
+
+        // Int mode evaluates like Float.
+        let int = graph_of(NodeKind::Constant {
+            mode: ConstantMode::Int,
+            value: 7.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        });
+        assert!((int.evaluate(0.0, 0.5) - 7.0).abs() < 1e-5);
+        assert!((int.evaluate_color(0.9, 0.9, 0.9, 0.9, 0.5, &|_, _| 0.0)[0] - 7.0).abs() < 1e-5);
     }
 }

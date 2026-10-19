@@ -18,6 +18,7 @@ pub use transform::{AffineTransform2D, BoundingBox2D, EvaluatedTransform, Transf
 #[cfg(test)]
 mod tests {
     use super::*;
+    use project::ConstantMode;
     use project::{Color, Composition, Layer, Project, TimeCode, Vec2};
     use std::collections::HashMap;
 
@@ -2537,7 +2538,7 @@ mod tests {
         let mg_opacity = ModifierGraph {
             nodes: vec![
                 ModifierNode::new("f", 0.0, 0.0, NodeKind::GetLayerFactor),
-                ModifierNode::new("c", 0.0, 50.0, NodeKind::Constant { value: 100.0 }),
+                ModifierNode::new("c", 0.0, 50.0, NodeKind::Constant { mode: ConstantMode::Float, value: 100.0, g: 0.0, b: 0.0, a: 1.0 }),
                 ModifierNode::new("mul", 100.0, 20.0, NodeKind::Math { op: project::MathOp::Multiply, default_b: 1.0 }),
                 ModifierNode::new("out", 200.0, 20.0, NodeKind::Output),
             ],
@@ -2592,7 +2593,7 @@ mod tests {
         // Modifier graph on the blur radius: Constant 42 -> output.
         let mg = ModifierGraph {
             nodes: vec![
-                ModifierNode::new("c", 0.0, 0.0, NodeKind::Constant { value: 42.0 }),
+                ModifierNode::new("c", 0.0, 0.0, NodeKind::Constant { mode: ConstantMode::Float, value: 42.0, g: 0.0, b: 0.0, a: 1.0 }),
                 ModifierNode::new("out", 200.0, 0.0, NodeKind::Output),
             ],
             connections: vec![NodeConnection::new("c", "value", "out", "result")],
@@ -2629,7 +2630,7 @@ mod tests {
 
         let make_const_graph = |val: f32| ModifierGraph {
             nodes: vec![
-                ModifierNode::new("c", 0.0, 0.0, NodeKind::Constant { value: val }),
+                ModifierNode::new("c", 0.0, 0.0, NodeKind::Constant { mode: ConstantMode::Float, value: val, g: 0.0, b: 0.0, a: 1.0 }),
                 ModifierNode::new("out", 200.0, 0.0, NodeKind::Output),
             ],
             connections: vec![NodeConnection::new("c", "value", "out", "result")],
@@ -2762,7 +2763,7 @@ mod tests {
         // Effect color (3D/4D): same engine fans DropShadow's slots.
         let mg_fx_color = ModifierGraph {
             nodes: vec![
-                ModifierNode::new("c", 0.0, 0.0, NodeKind::Constant { value: 0.5 }),
+                ModifierNode::new("c", 0.0, 0.0, NodeKind::Constant { mode: ConstantMode::Float, value: 0.5, g: 0.0, b: 0.0, a: 1.0 }),
                 ModifierNode::new("out", 200.0, 30.0, NodeKind::Output),
             ],
             connections: vec![NodeConnection::new("c", "value", "out", "result")],
@@ -2832,9 +2833,9 @@ mod tests {
             nodes: vec![
                 ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
                 ModifierNode::new("addx", 40.0, 0.0, NodeKind::Math { op: MathOp::Add, default_b: 0.0 }),
-                ModifierNode::new("c25", 40.0, 60.0, NodeKind::Constant { value: 25.0 }),
+                ModifierNode::new("c25", 40.0, 60.0, NodeKind::Constant { mode: ConstantMode::Float, value: 25.0, g: 0.0, b: 0.0, a: 1.0 }),
                 ModifierNode::new("suby", 40.0, 120.0, NodeKind::Math { op: MathOp::Subtract, default_b: 0.0 }),
-                ModifierNode::new("c10", 40.0, 180.0, NodeKind::Constant { value: 10.0 }),
+                ModifierNode::new("c10", 40.0, 180.0, NodeKind::Constant { mode: ConstantMode::Float, value: 10.0, g: 0.0, b: 0.0, a: 1.0 }),
                 ModifierNode::new("mk", 160.0, 60.0, NodeKind::MakeVector { dims: 2 }),
                 ModifierNode::new("out", 300.0, 60.0, NodeKind::Output),
             ],
@@ -2854,7 +2855,7 @@ mod tests {
         // "black to red" via channel gather).
         let mg_color = ModifierGraph {
             nodes: vec![
-                ModifierNode::new("c1", 0.0, 0.0, NodeKind::Constant { value: 1.0 }),
+                ModifierNode::new("c1", 0.0, 0.0, NodeKind::Constant { mode: ConstantMode::Float, value: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
                 ModifierNode::new("mkc", 100.0, 0.0, NodeKind::MakeColor),
                 ModifierNode::new("out", 300.0, 0.0, NodeKind::Output),
             ],
@@ -2871,7 +2872,7 @@ mod tests {
                 ModifierNode::new("lin", 0.0, 0.0, NodeKind::BaseValueIn),
                 ModifierNode::new("brk", 100.0, 0.0, NodeKind::BreakVector { dims: 2 }),
                 ModifierNode::new("mulx", 200.0, 0.0, NodeKind::Math { op: MathOp::Multiply, default_b: 0.0 }),
-                ModifierNode::new("c2", 200.0, 60.0, NodeKind::Constant { value: 2.0 }),
+                ModifierNode::new("c2", 200.0, 60.0, NodeKind::Constant { mode: ConstantMode::Float, value: 2.0, g: 0.0, b: 0.0, a: 1.0 }),
                 ModifierNode::new("mkp", 300.0, 0.0, NodeKind::MakeVector { dims: 2 }),
                 ModifierNode::new("out", 420.0, 0.0, NodeKind::Output),
             ],
@@ -2914,7 +2915,7 @@ mod tests {
                 ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
                 ModifierNode::new("brc", 100.0, 0.0, NodeKind::BreakColor),
                 ModifierNode::new("half", 200.0, 0.0, NodeKind::Math { op: MathOp::Multiply, default_b: 0.0 }),
-                ModifierNode::new("ch", 200.0, 60.0, NodeKind::Constant { value: 0.5 }),
+                ModifierNode::new("ch", 200.0, 60.0, NodeKind::Constant { mode: ConstantMode::Float, value: 0.5, g: 0.0, b: 0.0, a: 1.0 }),
                 ModifierNode::new("mkc2", 300.0, 0.0, NodeKind::MakeColor),
                 ModifierNode::new("out", 420.0, 0.0, NodeKind::Output),
             ],

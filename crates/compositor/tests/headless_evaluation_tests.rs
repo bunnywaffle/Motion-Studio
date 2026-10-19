@@ -3,7 +3,7 @@ use project::{
     Color, Composition, Keyframe, KeyframeTangent, LoopMode, Project, Property, ShapeType,
     TimeCode, TrackMatteMode, Vec2,
 };
-use project::modifier::{ModifierGraph, ModifierNode, NodeConnection, NodeKind};
+use project::modifier::{ConstantMode, ModifierGraph, ModifierNode, NodeConnection, NodeKind};
 use std::time::Instant;
 
 // 1. Multi-layer composite with mixed layer sources (Solids, Text, Shape, NestedCompositions)
@@ -1337,7 +1337,7 @@ fn test_performance_high_throughput_composition_evaluation() {
 fn const_graph(val: f32) -> ModifierGraph {
     ModifierGraph {
         nodes: vec![
-            ModifierNode::new("c", 0.0, 0.0, NodeKind::Constant { value: val }),
+            ModifierNode::new("c", 0.0, 0.0, NodeKind::Constant { mode: ConstantMode::Float, value: val, g: 0.0, b: 0.0, a: 1.0 }),
             ModifierNode::new("out", 200.0, 0.0, NodeKind::Output),
         ],
         connections: vec![NodeConnection::new("c", "value", "out", "result")],

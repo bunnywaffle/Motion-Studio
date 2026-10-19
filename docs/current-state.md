@@ -13,8 +13,8 @@
 - OS file drag-and-drop onto the window imports image/video/audio files into the Project bin.
 - GPU effect chain serves Drop Shadow / Outer Glow end-to-end (silhouette fill → compute blur → colorized under-merge), with the CPU blit-stage aura skipping via a handled flag and the effects panel badge marking all four aura-family plugins GPU-accelerated.
 - Animation presets: 20 built-ins plus user-authored presets captured from a layer's animated transform and persisted to `<config>/MotionStudio/animation_presets.json` (timeline animation dropdown + dedicated Presets dock tab with apply/export-to-`.json`/delete).
-- **569 tests passing** (307 application, 140 project, 68 + 9 compositor, 38 renderer, incl. headless evaluation + UI suites), 0 failures, clippy clean modulo one pre-existing warning.
-- Modifier graphs handle multi-channel values end to end: color fanning (R/G/B/A per channel) everywhere, whole-path "Both Axes" binding for two-value transforms, and Make/Break gather/unpack nodes for 2D, 3D and color (toolbar + teal banner nodes).
+- **571 tests passing** (308 application, 141 project, 68 + 9 compositor, 38 renderer, incl. headless evaluation + UI suites), 0 failures, clippy clean modulo one pre-existing warning.
+- Modifier graphs handle multi-channel values end to end: color fanning (R/G/B/A per channel) everywhere, whole-path "Both Axes" binding for two-value transforms, Make/Break gather/unpack nodes for 2D, 3D and color (toolbar + teal banner nodes), and typed Constant nodes (Float/Int/Color/2D/3D mode pills).
 - Edit → Settings… dialog picks the app-wide gpui-kit theme (Light/Dark), applies it live and persists to `<config>/MotionStudio/settings.json` (loaded at boot).
 
 ## What Currently Works (original log, kept for history)

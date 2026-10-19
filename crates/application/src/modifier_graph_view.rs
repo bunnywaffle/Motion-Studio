@@ -5,7 +5,7 @@ use gpui_kit::base::{h_flex, v_flex, StyledExt, TestSupportExt};
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
 use gpui_kit::*;
-use project::modifier::{MathOp, ModifierGraph, ModifierNode, NodeKind, WaveType};
+use project::modifier::{ConstantMode, MathOp, ModifierGraph, ModifierNode, NodeKind, WaveType};
 
 use crate::state::EditorState;
 
@@ -587,7 +587,7 @@ impl ModifierGraphView {
                         this.add_node(NodeKind::Stepped { steps: 5.0 }, cx);
                     }, cx))
                     .child(self.toolbar_btn("Constant", ent_const, move |this, cx| {
-                        this.add_node(NodeKind::Constant { value: 1.0 }, cx);
+                        this.add_node(NodeKind::Constant { mode: ConstantMode::Float, value: 1.0, g: 0.0, b: 0.0, a: 1.0 }, cx);
                     }, cx))
                     .child(self.toolbar_btn("Mk 2D", ent_make2d, move |this, cx| {
                         this.add_node(NodeKind::MakeVector { dims: 2 }, cx);
@@ -1416,18 +1416,57 @@ impl ModifierGraphView {
         let ent = entity.clone();
 
         match &node.kind {
-            NodeKind::Constant { value } => {
-                let v = *value;
-                h_flex()
+            NodeKind::Constant { mode, value, g, b, a } => {
+                let m = *mode;
+                let (v, gv, bv, av) = (*value, *g, *b, *a);
+                let mut col = v_flex()
                     .w_full()
                     .px_2()
                     .py_1p5()
+                    .gap_1()
                     .border_t_1()
-                    .border_color(rgb(0x2e303e))
-                    .justify_between()
-                    .items_center()
-                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Value:"))
-                    .child(self.param_scrub_input(nid, "value", v, rgb(0x38bdf8), ent, cx))
+                    .border_color(rgb(0x2e303e));
+
+                // Mode picker: Float / Int / Color / 2D / 3D
+                let mut pills = h_flex().w_full().gap_1();
+                pills = pills
+                    .child(self.const_mode_btn("Float", m == ConstantMode::Float, ent.clone(), nid.clone(), ConstantMode::Float, cx))
+                    .child(self.const_mode_btn("Int", m == ConstantMode::Int, ent.clone(), nid.clone(), ConstantMode::Int, cx))
+                    .child(self.const_mode_btn("Color", m == ConstantMode::Color, ent.clone(), nid.clone(), ConstantMode::Color, cx))
+                    .child(self.const_mode_btn("V2", m == ConstantMode::Vec2, ent.clone(), nid.clone(), ConstantMode::Vec2, cx))
+                    .child(self.const_mode_btn("V3", m == ConstantMode::Vec3, ent.clone(), nid.clone(), ConstantMode::Vec3, cx));
+                col = col.child(pills);
+
+                let row = |this: &Self, label: &'static str, pname: &'static str, val: f32, tint: u32| {
+                    h_flex()
+                        .w_full()
+                        .gap_1p5()
+                        .items_center()
+                        .child(div().text_xs().text_color(cx.theme().muted_foreground).child(label))
+                        .child(this.param_scrub_input(nid.clone(), pname, val, rgb(tint), ent.clone(), cx))
+                };
+                match m {
+                    ConstantMode::Float | ConstantMode::Int => {
+                        col = col.child(row(self, "Value:", "value", v, 0x38bdf8));
+                    }
+                    ConstantMode::Vec2 => {
+                        col = col.child(row(self, "X:", "value", v, 0x38bdf8));
+                        col = col.child(row(self, "Y:", "g", gv, 0x4ade80));
+                    }
+                    ConstantMode::Vec3 => {
+                        col = col.child(row(self, "X:", "value", v, 0x38bdf8));
+                        col = col.child(row(self, "Y:", "g", gv, 0x4ade80));
+                        col = col.child(row(self, "Z:", "b", bv, 0xfbbf24));
+                    }
+                    ConstantMode::Color => {
+                        col = col
+                            .child(row(self, "R:", "value", v, 0xf87171))
+                            .child(row(self, "G:", "g", gv, 0x4ade80))
+                            .child(row(self, "B:", "b", bv, 0x60a5fa))
+                            .child(row(self, "A:", "a", av, 0xe5e7eb));
+                    }
+                }
+                col
             }
 
             NodeKind::Math { op, default_b } => {
@@ -1589,6 +1628,54 @@ impl ModifierGraphView {
             .child(symbol)
     }
 
+    /// Mode pill for a Constant node — swaps the component layout in place
+    /// (wires survive because the node id never changes).
+    fn const_mode_btn(
+        &self,
+        label: &'static str,
+        active: bool,
+        entity: Entity<Self>,
+        node_id: String,
+        target_mode: ConstantMode,
+        _cx: &App,
+    ) -> AnyElement {
+        div()
+            .id(SharedString::from(format!(
+                "{}_{}",
+                node_id.replace('-', "_"),
+                label.to_lowercase()
+            )))
+            .test_support()
+            .px_1p5()
+            .py_0p5()
+            .rounded_sm()
+            .bg(if active { rgb(0x38bdf8) } else { rgb(0x232430) })
+            .hover(|s| s.bg(rgb(0x0ea5e9)).text_color(rgb(0xffffff)))
+            .cursor_pointer()
+            .text_xs()
+            .font_bold()
+            .text_color(if active { rgb(0x0b1120) } else { rgb(0x9ca3af) })
+            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                cx.stop_propagation();
+                let nid = node_id.clone();
+                entity.update(cx, |this, cx| {
+                    if let Some(n) = this.graph.get_node_mut(&nid) {
+                        if let NodeKind::Constant { mode, value: _, g: _, b: _, a } = &mut n.kind {
+                            if *mode != target_mode && target_mode == ConstantMode::Color && *a == 0.0 {
+                                // Entering color mode without an alpha yet:
+                                // default opaque so the constant isn't invisible.
+                                *a = 1.0;
+                            }
+                            *mode = target_mode;
+                            this.sync_to_state(cx);
+                        }
+                    }
+                });
+            })
+            .child(label)
+            .into_any_element()
+    }
+
     fn wave_btn(
         &self,
         label: &'static str,
@@ -1724,7 +1811,10 @@ impl ModifierGraphView {
             .graph
             .get_node(node_id)
             .map(|n| match (&n.kind, param_name) {
-                (NodeKind::Constant { value }, "value") => *value,
+                (NodeKind::Constant { value, .. }, "value") => *value,
+                (NodeKind::Constant { g, .. }, "g") => *g,
+                (NodeKind::Constant { b, .. }, "b") => *b,
+                (NodeKind::Constant { a, .. }, "a") => *a,
                 (NodeKind::Math { default_b, .. }, "default_b") => *default_b,
                 (NodeKind::Wave { frequency, .. }, "frequency") => *frequency,
                 (NodeKind::Stepped { steps }, "steps") => *steps,
@@ -1801,8 +1891,17 @@ impl ModifierGraphView {
         }
         if let Some(n) = self.graph.get_node_mut(node_id) {
             match (&mut n.kind, param_name) {
-                (NodeKind::Constant { value: v }, "value") => {
+                (NodeKind::Constant { value: v, .. }, "value") => {
                     *v = value;
+                }
+                (NodeKind::Constant { g, .. }, "g") => {
+                    *g = value;
+                }
+                (NodeKind::Constant { b, .. }, "b") => {
+                    *b = value;
+                }
+                (NodeKind::Constant { a, .. }, "a") => {
+                    *a = value;
                 }
                 (NodeKind::Math { default_b, .. }, "default_b") => {
                     *default_b = value;
@@ -1822,8 +1921,17 @@ impl ModifierGraphView {
     fn apply_param_scrub(&mut self, node_id: &str, param_name: &str, delta: f32, cx: &mut Context<Self>) {
         if let Some(n) = self.graph.get_node_mut(node_id) {
             match (&mut n.kind, param_name) {
-                (NodeKind::Constant { value }, "value") => {
+                (NodeKind::Constant { value, .. }, "value") => {
                     *value += delta;
+                }
+                (NodeKind::Constant { g, .. }, "g") => {
+                    *g += delta;
+                }
+                (NodeKind::Constant { b, .. }, "b") => {
+                    *b += delta;
+                }
+                (NodeKind::Constant { a, .. }, "a") => {
+                    *a += delta;
                 }
                 (NodeKind::Math { default_b, .. }, "default_b") => {
                     *default_b += delta;

@@ -5,7 +5,6 @@ pub mod raster;
 pub mod state;
 pub mod widgets;
 use state::{EditorState, EditorTool};
-
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -3813,6 +3812,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::AppView;
+    use project::modifier::ConstantMode;
     use crate::state::EditorState;
     use project::Vec2;
     use gpui_kit::component::dock::{DockPlacement, PanelId};
@@ -7809,7 +7809,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         use project::modifier::{ModifierGraph, ModifierNode, NodeConnection, NodeKind};
         ModifierGraph {
             nodes: vec![
-                ModifierNode::new("c", 0.0, 0.0, NodeKind::Constant { value: v }),
+                ModifierNode::new("c", 0.0, 0.0, NodeKind::Constant { mode: ConstantMode::Float, value: v, g: 0.0, b: 0.0, a: 1.0 }),
                 ModifierNode::new("out", 420.0, 140.0, NodeKind::Output),
             ],
             connections: vec![NodeConnection::new("c", "value", "out", "result")],
@@ -13870,6 +13870,77 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         });
     }
 
+    /// Constant nodes carry a mode (Float/Int/Color/2D/3D): switching the
+    /// mode keeps the value and re-renders the channel fields.
+    #[gpui_kit::test]
+    fn test_modifier_graph_constant_modes(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            Theme::change(ThemeMode::Dark, None, cx);
+        });
+
+        let state = cx.new(|_cx| EditorState::new());
+        let mut mg_view = None;
+        let root_handle = cx.open_window(size(px(1080.), px(720.)), |window, cx| {
+            window.activate_window();
+            Theme::change(ThemeMode::Dark, Some(window), cx);
+            let view = cx.new(|cx| {
+                crate::modifier_graph_view::ModifierGraphView::new(
+                    state.clone(),
+                    "layer_accent".to_string(),
+                    "solid.color".to_string(),
+                    window,
+                    cx,
+                )
+            });
+            mg_view = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+
+        let view_entity = mg_view.expect("view created");
+        view_entity.update(cx, |this, cx| {
+            this.add_node(
+                project::modifier::NodeKind::Constant {
+                    mode: ConstantMode::Float,
+                    value: 0.25,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                cx,
+            );
+        });
+        let const_id = view_entity.read_with(cx, |this, _cx| {
+            this.graph
+                .nodes
+                .iter()
+                .find(|n| matches!(n.kind, project::modifier::NodeKind::Constant { .. }))
+                .map(|n| n.id.clone())
+                .expect("constant node id")
+        });
+
+        use gpui_kit::test::TestWindowExt;
+        cx.update_window(root_handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find(SharedString::from(format!("{}_color", const_id))).visible());
+            window.click(SharedString::from(format!("{}_color", const_id)), cx);
+        })
+        .expect("update_window failed");
+        cx.run_until_parked();
+
+        view_entity.read_with(cx, |this, _cx| {
+            let n = this.graph.get_node(&const_id).expect("constant still present");
+            match &n.kind {
+                project::modifier::NodeKind::Constant { mode, value, a, .. } => {
+                    assert_eq!(*mode, ConstantMode::Color, "mode switched to Color");
+                    assert!((value - 0.25).abs() < 1e-6, "scalar value preserved as R channel");
+                    assert!((a - 1.0).abs() < 1e-6, "alpha defaulted opaque, got {a}");
+                }
+                _ => panic!("kind not a constant"),
+            }
+        });
+    }
+
     #[gpui_kit::test]
     fn test_modifier_graph_wire_renders_single_canvas(cx: &mut TestAppContext) {
         // Committed wires render as one continuous canvas path, not bead
@@ -13997,7 +14068,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         });
         let view = mg_view.expect("graph view created");
         let const_id = view.update(cx, |v, cx| {
-            v.add_node(project::modifier::NodeKind::Constant { value: 1.0 }, cx);
+            v.add_node(project::modifier::NodeKind::Constant { mode: ConstantMode::Float, value: 1.0, g: 0.0, b: 0.0, a: 1.0 }, cx);
             v.graph
                 .nodes
                 .iter()
@@ -14030,7 +14101,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         view.read_with(cx, |v, _| {
             let n = v.graph.get_node(&const_id).unwrap();
             assert!(
-                matches!(n.kind, project::modifier::NodeKind::Constant { value } if (value - 2.5).abs() < 1e-6),
+                matches!(n.kind, project::modifier::NodeKind::Constant { value, .. } if (value - 2.5).abs() < 1e-6),
                 "typed value must commit to the node"
             );
             assert!(v.editing_param.is_none(), "editor closes after commit");
@@ -14047,7 +14118,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         view.read_with(cx, |v, _| {
             let n = v.graph.get_node(&const_id).unwrap();
             assert!(
-                matches!(n.kind, project::modifier::NodeKind::Constant { value } if (value - 2.5).abs() < 1e-6),
+                matches!(n.kind, project::modifier::NodeKind::Constant { value, .. } if (value - 2.5).abs() < 1e-6),
                 "escape must keep the old value"
             );
             assert!(v.editing_param.is_none(), "editor closes on escape");
@@ -14120,7 +14191,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
 
             let make_const_graph = |val: f32| project::modifier::ModifierGraph {
                 nodes: vec![
-                    project::modifier::ModifierNode::new("c", 0.0, 0.0, project::modifier::NodeKind::Constant { value: val }),
+                    project::modifier::ModifierNode::new("c", 0.0, 0.0, project::modifier::NodeKind::Constant { mode: ConstantMode::Float, value: val, g: 0.0, b: 0.0, a: 1.0 }),
                     project::modifier::ModifierNode::new("out", 200.0, 0.0, project::modifier::NodeKind::Output),
                 ],
                 connections: vec![project::modifier::NodeConnection::new("c", "value", "out", "result")],
