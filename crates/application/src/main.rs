@@ -12065,6 +12065,59 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         }));
     }
 
+    /// Font Family dropdown has a search bar: opening the popup and typing
+    /// filters the system-font list; enter picks the first hit.
+    #[gpui_kit::test]
+    fn test_font_dropdown_search_bar(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1440.), px(1200.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, _| {
+                let tid = s.add_text_layer("Search Text", None).unwrap();
+                s.select_layer(Some(tid.clone()));
+            });
+        });
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("text_font_combobox").visible());
+            window.click("text_font_combobox", cx);
+            window.input("Arial", cx);
+        })
+        .expect("update_window failed");
+        cx.run_until_parked();
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.press("down", cx);
+            window.press("enter", cx);
+        })
+        .expect("update_window failed");
+        cx.run_until_parked();
+
+        app_view.read_with(cx, |view, cx| {
+            let s = view.state().read(cx);
+            let layer = s.selected_layer().expect("selected text layer");
+            match &layer.source {
+                project::LayerSource::Text { font_family, .. } => assert!(
+                    font_family.contains("Arial"),
+                    "font family should be an Arial search hit, got {font_family}"
+                ),
+                _ => panic!("selected layer is not text"),
+            }
+        });
+    }
+
     #[gpui_kit::test]
     fn test_path_tool_point_by_point_drawing_and_blend_mode_backdrop(_cx: &mut gpui::TestAppContext) {
         use crate::state::{EditorState, EditorTool};

@@ -13031,6 +13031,7 @@ impl Render for PropertiesPanel {
                         let delegate = SearchableVec::new(sys_fonts);
                         let cb = cx.new(|cx| {
                             ComboboxState::new(delegate, vec![IndexPath::new(sel_idx)], window, cx)
+                                .searchable(true)
                         });
                         let s_f = self.state.clone();
                         let lid_c = sel_lid.clone();
