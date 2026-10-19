@@ -234,7 +234,14 @@ pub fn rasterize_comp(
                 Some(v) => v,
                 None => &layer.effects,
             };
-            apply_layer_fx(&mut work, base_w, base_h, fx_effects, &fx, false);
+            // Stylized/color chains run on the parity-audited GPU pipeline
+            // (same twins the viewport layer path uses); a mismatching
+            // chain transparently falls back to the exact CPU treatment.
+            // Aura flag per layer: Normal blends may serve Drop Shadow /
+            // Outer Glow on the chain — comp blits the CPU aura itself
+            // otherwise, so the flag must match the layer's blend mode.
+            super::buffer::set_aura_gpu_ok(layer.blend_mode == BlendMode::Normal);
+            apply_layer_fx(&mut work, base_w, base_h, fx_effects, &fx, true);
             // Blur + bloom radius (convolution on the content pixmap).
             let mut blur_total = 0.0f32;
             let mut bloom: Option<(f32, f32)> = None;
@@ -259,27 +266,32 @@ pub fn rasterize_comp(
                     apply_bloom(&mut work, intensity, radius * k.max(0.5));
                 }
             }
-            // Drop shadow params (drawn under at blit).
+            // Drop shadow params (drawn under at blit). The GPU aura chain
+            // may have baked it into `work` already — skip to avoid doubles
+            // (same gating as the layer path).
             let mut shadow = None;
-            for eff in &layer.effects {
-                if !eff.enabled {
-                    continue;
-                }
-                if let EvaluatedEffectType::DropShadow { distance, angle, opacity, color, .. } =
-                    &eff.effect_type
-                {
-                    let rad = angle.to_radians();
-                    shadow = Some((
-                        distance * rad.cos() * k,
-                        distance * rad.sin() * k,
-                        (opacity / 100.0).clamp(0.0, 1.0) * 0.75,
-                        *color,
-                    ));
-                    break;
+            if !super::buffer::aura_gpu_handled() {
+                for eff in &layer.effects {
+                    if !eff.enabled {
+                        continue;
+                    }
+                    if let EvaluatedEffectType::DropShadow { distance, angle, opacity, color, .. } =
+                        &eff.effect_type
+                    {
+                        let rad = angle.to_radians();
+                        shadow = Some((
+                            distance * rad.cos() * k,
+                            distance * rad.sin() * k,
+                            (opacity / 100.0).clamp(0.0, 1.0) * 0.75,
+                            *color,
+                        ));
+                        break;
+                    }
                 }
             }
-            // Outer glow blit
-            for eff in &layer.effects {
+            // Outer glow blit (skipped when the GPU chain baked it).
+            if !super::buffer::aura_gpu_handled() {
+                for eff in &layer.effects {
                 if !eff.enabled {
                     continue;
                 }
@@ -329,6 +341,7 @@ pub fn rasterize_comp(
                         }
                     }
                     break;
+                }
                 }
             }
             // Blit sub-region.

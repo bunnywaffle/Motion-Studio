@@ -12626,6 +12626,70 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         assert!(p.b > 0.9, "blue should be high in magenta");
     }
 
+    /// The full-comp raster path (exports!) runs the parity-audited GPU
+    /// chain for stylized/stock effects: a gray ramp + Posterize(2) must
+    /// snap to 0 / 255 exactly like the CPU chain does.
+    #[test]
+    fn test_comp_raster_gpu_chain_stylized() {
+        use crate::raster::comp::rasterize_comp;
+        use compositor::{LayerStackEvaluator, SceneGraph};
+        use project::{Color, Composition, Effect, EffectType, Layer, Project, StockPlugin, TimeCode};
+        use std::collections::HashMap;
+
+        let aid = "grad_asset";
+        let mut assets: HashMap<String, std::sync::Arc<image::RgbaImage>> = HashMap::new();
+        let mut img = image::RgbaImage::new(32, 32);
+        for y in 0..32 {
+            for x in 0..32 {
+                let v = (x as f32 / 31.0 * 255.0).round() as u8;
+                img.put_pixel(x, y, image::Rgba([v, v, v, 255]));
+            }
+        }
+        assets.insert(aid.to_string(), std::sync::Arc::new(img));
+
+        let mut project = Project::new("p", "Proj");
+        let tc = TimeCode::from_frames(0, 30.0);
+        let tc_end = TimeCode::from_frames(60, 30.0);
+        let mut comp = Composition::new("c", "Comp", 32, 32, 30.0, tc_end);
+        comp.background_color = Color::BLACK;
+
+        let mut layer = Layer::image_with_dimensions("ramp", "Ramp", aid, 32, 32, tc, tc_end);
+        let mut params = EffectType::stock_params(StockPlugin::Posterize);
+        params[0] = project::Property::new("Steps", 2.0);
+        layer.effects.push(Effect {
+            id: "pose".to_string(),
+            name: "Posterize".to_string(),
+            enabled: true,
+            effect_type: EffectType::Stock {
+                plugin: StockPlugin::Posterize,
+                params,
+                colors: EffectType::stock_colors(StockPlugin::Posterize),
+            },
+        });
+        comp.add_layer(layer).unwrap();
+        project.add_composition(comp).unwrap();
+
+        let graph = SceneGraph::from_project(&project, "c").unwrap();
+        let stack = LayerStackEvaluator::new().evaluate(&graph, &tc);
+
+        let out = rasterize_comp(
+            &stack,
+            32.0,
+            32.0,
+            Color::BLACK,
+            32,
+            32,
+            0.0,
+            0,
+            false,
+            2.0,
+            &mut assets,
+        );
+        let at = |x: u32| out.get(x as i32, 16).r;
+        assert!(at(5) < 0.2, "dark half snapped to 0, got {}", at(5));
+        assert!(at(26) > 0.84, "bright half snapped to 1, got {}", at(26));
+    }
+
     #[gpui_kit::test]
     fn test_adjustment_layer_viewer_selection_and_gizmo(cx: &mut TestAppContext) {
         let (_root, app_view) = setup_test_window(cx);
