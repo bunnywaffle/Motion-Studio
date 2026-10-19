@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
+use crate::StockPlugin;
+
 /// Value type of a Constant node (drives its scalar/vector/color storage).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -71,6 +73,73 @@ impl WaveType {
             Self::Sine => "Sine Wave",
             Self::Triangle => "Triangle Wave",
             Self::Square => "Square Wave",
+        }
+    }
+}
+
+/// Pointwise blend modes of the Node Graph's Blend node. Applied per
+/// channel; a `weight` input (wired or default) mixes the mode result back
+/// toward side A, so unwired weight (factor 0 in effect graphs) keeps A.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphBlendMode {
+    #[default]
+    Linear,
+    Screen,
+    Multiply,
+    Add,
+    Subtract,
+    Difference,
+    Overlay,
+}
+
+impl GraphBlendMode {
+    pub const ALL: [Self; 7] = [
+        Self::Linear,
+        Self::Screen,
+        Self::Multiply,
+        Self::Add,
+        Self::Subtract,
+        Self::Difference,
+        Self::Overlay,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Linear => "Linear",
+            Self::Screen => "Screen",
+            Self::Multiply => "Multiply",
+            Self::Add => "Add",
+            Self::Subtract => "Subtract",
+            Self::Difference => "Difference",
+            Self::Overlay => "Overlay",
+        }
+    }
+
+    pub fn index(self) -> usize {
+        Self::ALL.iter().position(|m| *m == self).unwrap_or(0)
+    }
+
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.label() == label)
+    }
+
+    /// The mode's raw a/b mix; weight lerp happens in the node eval.
+    fn mix(self, a: f32, b: f32) -> f32 {
+        match self {
+            Self::Linear => a + (b - a),
+            Self::Screen => 1.0 - (1.0 - a) * (1.0 - b),
+            Self::Multiply => a * b,
+            Self::Add => a + b,
+            Self::Subtract => a - b,
+            Self::Difference => (a - b).abs(),
+            Self::Overlay => {
+                if a < 0.5 {
+                    2.0 * a * b
+                } else {
+                    1.0 - 2.0 * (1.0 - a) * (1.0 - b)
+                }
+            }
         }
     }
 }
@@ -154,6 +223,27 @@ pub enum NodeKind {
     /// Unpack an incoming color bus (BaseValueIn / MakeColor) into scalar channels.
     BreakColor,
 
+    /// Node Graph Blend: pointwise per-channel mix of two values (A and B)
+    /// by a `weight`. A unwired = base value, B unwired = stored default,
+    /// weight unwired = factor (0 inside effect graphs, so unwired blends
+    /// pass A through).
+    Blend {
+        #[serde(default)]
+        mode: GraphBlendMode,
+        #[serde(default)]
+        default_b: f32,
+    },
+
+    /// Node Graph stock plug-in (pointwise only): a whole per-pixel color
+    /// effect as a single node. Input is the color bus; params are raw
+    /// descriptor-order floats. Spatial plug-ins (Blur, Glow, ...) cannot
+    /// be nodes.
+    StockOp {
+        plugin: StockPlugin,
+        #[serde(default)]
+        params: Vec<f32>,
+    },
+
     /// Terminal node that outputs the final value to the property.
     Output,
 }
@@ -182,6 +272,8 @@ impl NodeKind {
             Self::BreakVector { .. } => "Break Vector",
             Self::MakeColor => "Make Color",
             Self::BreakColor => "Break Color",
+            Self::Blend { .. } => "Blend",
+            Self::StockOp { plugin, .. } => plugin.descriptor().label,
             Self::Output => "Output",
         }
     }
@@ -203,6 +295,8 @@ impl NodeKind {
             Self::BreakVector { .. } => &["in"],
             Self::MakeColor => &["r", "g", "b", "a"],
             Self::BreakColor => &["in"],
+            Self::Blend { .. } => &["a", "b", "weight"],
+            Self::StockOp { .. } => &["in"],
             Self::Output => &["result"],
         }
     }
@@ -225,6 +319,7 @@ impl NodeKind {
             Self::BreakVector { dims: 3 } => &["x", "y", "z"],
             Self::BreakVector { .. } => &["x", "y"],
             Self::BreakColor => &["r", "g", "b", "a"],
+            Self::Blend { .. } | Self::StockOp { .. } => &["value"],
             Self::Output => &[],
         }
     }
@@ -537,6 +632,41 @@ impl ModifierGraph {
         ]
     }
 
+    /// Whether the graph is a color-clean chain suitable for the WGSL GPU
+    /// twin: every node reachable backwards from Output must be Content
+    /// (BaseValueIn), Constant, pointwise StockOp, or Blend. Unwired Blend
+    /// inputs stay twin-safe (B → stored default, weight → factor, A →
+    /// the pixel itself); the renderer additionally caps uniform budget.
+    pub fn is_color_clean(&self) -> bool {
+        let Some(out) = self.nodes.iter().find(|n| matches!(n.kind, NodeKind::Output)) else {
+            return false;
+        };
+        let mut stack = vec![out.id.clone()];
+        let mut seen = HashSet::new();
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let Some(node) = self.get_node(&id) else {
+                return false;
+            };
+            let ok = match &node.kind {
+                NodeKind::Output | NodeKind::BaseValueIn | NodeKind::Constant { .. } | NodeKind::Blend { .. } => true,
+                NodeKind::StockOp { plugin, .. } => plugin.is_pointwise(),
+                _ => false,
+            };
+            if !ok {
+                return false;
+            }
+            for conn in &self.connections {
+                if conn.to_node == id {
+                    stack.push(conn.from_node.clone());
+                }
+            }
+        }
+        true
+    }
+
     /// Resolve an input socket by looking up an incoming connection or falling back to node defaults.
     fn resolve_input(
         &self,
@@ -584,6 +714,11 @@ impl ModifierGraph {
             NodeKind::Wave { .. } if socket == "factor" => Some(factor),
             NodeKind::Stepped { steps } if socket == "steps" => Some(*steps),
             NodeKind::Stepped { .. } if socket == "val" => Some(factor),
+            NodeKind::Blend { default_b, .. } if socket == "b" => Some(*default_b),
+            NodeKind::Blend { .. } if socket == "weight" => Some(factor),
+            // Unwired source color: pass the matching base component through
+            // (comp mirrors the session channel; "value" sessions fan).
+            NodeKind::StockOp { .. } if socket == "in" => Some(ctx.comp.comp_value(ctx.channel)),
             // Make nodes: unwired channels pass the matching base component
             // through (gathers stay identity when nothing is rewired).
             NodeKind::MakeVector { .. } | NodeKind::MakeColor => match socket {
@@ -825,6 +960,53 @@ impl ModifierGraph {
                     .unwrap_or(*steps)
                     .max(1.0);
                 (val * s).floor() / s
+            }
+            NodeKind::Blend { mode, .. } => {
+                let a = self
+                    .resolve_input(node_id, "a", ctx, memo, call_stack,)
+                    .unwrap_or(base_value);
+                let b = self
+                    .resolve_input(node_id, "b", ctx, memo, call_stack,)
+                    .unwrap_or(0.0);
+                let w = self
+                    .resolve_input(node_id, "weight", ctx, memo, call_stack,)
+                    .unwrap_or(factor);
+                let mixed = mode.mix(a, b);
+                a + (mixed - a) * w
+            }
+            NodeKind::StockOp { plugin, params } => {
+                // A stock node is a color bus: gather its source per RGBA
+                // channel by re-resolving the `in` wire under per-channel
+                // sub-contexts (independent memos, so cross-channel make/
+                // break wiring stays correct), run the shared pointwise
+                // kernel, and answer this session's channel component.
+                let chan = if socket == "value" { ctx.channel } else { socket };
+                let mut src = [0.0f32; 4];
+                for (i, ch) in ["r", "g", "b", "a"].iter().enumerate() {
+                    let ch = *ch;
+                    let sub = EvalCtx {
+                        base: ctx.comp.comp_value(ch),
+                        comp: ctx.comp,
+                        factor: ctx.factor,
+                        resolver: ctx.resolver,
+                        channel: ch,
+                    };                    let mut sub_memo = HashMap::new();
+                    let mut sub_stack = HashSet::new();
+                    src[i] = self
+                        .resolve_input(node_id, "in", &sub, &mut sub_memo, &mut sub_stack)
+                        .unwrap_or(sub.base);
+                }
+                let out = crate::stock::process_color_stock(
+                    *plugin,
+                    params,
+                    crate::Color::rgba(src[0], src[1], src[2], src[3]),
+                );
+                match chan {
+                    "r" => out.r,
+                    "g" => out.g,
+                    "b" => out.b,
+                    _ => out.a,
+                }
             }
             NodeKind::Output => {
                 self.resolve_input(node_id, "result", ctx, memo, call_stack,)
@@ -1308,5 +1490,181 @@ mod tests {
         assert!((fan[1] - 0.5).abs() < 1e-5, "g clamped to 0.5, got {}", fan[1]);
         assert!((fan[2] - 0.5).abs() < 1e-5, "b stays 0.5, got {}", fan[2]);
         assert!((fan[3] - 0.5).abs() < 1e-5, "a clamped to 0.5, got {}", fan[3]);
+    }
+
+    #[test]
+    fn test_blend_node_modes() {
+        // Content → Blend(B=red, weight=1) → Output: fully replaced by B.
+        let graph = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
+                ModifierNode::new("red", 60.0, 90.0, NodeKind::MakeColor),
+                ModifierNode::new("one", 60.0, 150.0, NodeKind::Constant {
+                    mode: ConstantMode::Float,
+                    value: 1.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                }),
+                ModifierNode::new("mix", 140.0, 30.0, NodeKind::Blend { mode: GraphBlendMode::Linear, default_b: 0.0 }),
+                ModifierNode::new("w", 60.0, 200.0, NodeKind::Constant { mode: ConstantMode::Float, value: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
+                ModifierNode::new("out", 240.0, 30.0, NodeKind::Output),
+            ],
+            connections: vec![
+                NodeConnection::new("in", "value", "mix", "a"),
+                NodeConnection::new("red", "value", "mix", "b"),
+                NodeConnection::new("one", "value", "red", "r"),
+                NodeConnection::new("w", "value", "mix", "weight"),
+                NodeConnection::new("mix", "result", "out", "result"),
+            ],
+        };
+        // Red's r is wired to 1.0; g/b/a pass the per-channel base. Linear at
+        // w=1 returns B entirely.
+        let out = graph.evaluate_color(0.1, 0.8, 0.4, 1.0, 0.0, &|_, _| 0.0);
+        assert!((out[0] - 1.0).abs() < 1e-5, "r={}", out[0]);
+        assert!((out[1] - 0.8).abs() < 1e-5, "g={}", out[1]);
+        assert!((out[2] - 0.4).abs() < 1e-5, "b={}", out[2]);
+        assert!((out[3] - 1.0).abs() < 1e-5, "a={}", out[3]);
+
+        // Multiply at w=0.5: a + (2a - a) * 0.5 = 1.5 a.
+        let w_graph = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
+                ModifierNode::new("half", 60.0, 140.0, NodeKind::Constant { mode: ConstantMode::Float, value: 0.5, g: 0.0, b: 0.0, a: 1.0 }),
+                ModifierNode::new("mix", 140.0, 30.0, NodeKind::Blend { mode: GraphBlendMode::Multiply, default_b: 2.0 }),
+                ModifierNode::new("out", 240.0, 30.0, NodeKind::Output),
+            ],
+            connections: vec![
+                NodeConnection::new("in", "value", "mix", "a"),
+                NodeConnection::new("half", "value", "mix", "b"),
+                NodeConnection::new("half", "value", "mix", "weight"),
+                NodeConnection::new("mix", "result", "out", "result"),
+            ],
+        };
+        let x = w_graph.evaluate_color(0.4, 0.4, 0.4, 0.4, 0.0, &|_, _| 0.0);
+        // Multiply mixes toward the product a*b: 0.4 + (0.2 - 0.4) * 0.5 = 0.3.
+        assert!((x[0] - 0.3).abs() < 1e-5, "0.4 + (0.2-0.4)*0.5 = 0.3, got {}", x[0]);
+    }
+
+    #[test]
+    fn test_stockop_pointwise_node() {
+        // Content → Posterize(steps=2) → Output, unwired `in` = base pixel.
+        let graph = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
+                ModifierNode::new("po", 120.0, 0.0, NodeKind::StockOp { plugin: crate::StockPlugin::Posterize, params: vec![2.0] }),
+                ModifierNode::new("out", 240.0, 0.0, NodeKind::Output),
+            ],
+            connections: vec![
+                NodeConnection::new("in", "value", "po", "in"),
+                NodeConnection::new("po", "value", "out", "result"),
+            ],
+        };
+        let out = graph.evaluate_color(0.7, 0.2, 0.9, 1.0, 0.0, &|_, _| 0.0);
+        assert!(out[0] > 0.9, "r snaps 1, got {}", out[0]);
+        assert!(out[1] < 0.1, "g snaps 0, got {}", out[1]);
+        assert!(out[2] > 0.9, "b snaps 1, got {}", out[2]);
+        assert!((out[3] - 1.0).abs() < 1e-5, "alpha untouched, got {}", out[3]);
+
+        // Chained stock: Threshold then Posterize (nested color buses).
+        let chain = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
+                ModifierNode::new("th", 80.0, 0.0, NodeKind::StockOp { plugin: crate::StockPlugin::Threshold, params: vec![50.0, 0.0] }),
+                ModifierNode::new("po", 160.0, 0.0, NodeKind::StockOp { plugin: crate::StockPlugin::Posterize, params: vec![2.0] }),
+                ModifierNode::new("out", 240.0, 0.0, NodeKind::Output),
+            ],
+            connections: vec![
+                NodeConnection::new("in", "value", "th", "in"),
+                NodeConnection::new("th", "value", "po", "in"),
+                NodeConnection::new("po", "value", "out", "result"),
+            ],
+        };
+        let white = chain.evaluate_color(0.9, 0.9, 0.9, 1.0, 0.0, &|_, _| 0.0);
+        let black = chain.evaluate_color(0.1, 0.1, 0.1, 1.0, 0.0, &|_, _| 0.0);
+        assert!(white[0] > 0.99, "bright → white, got {:?}", white);
+        assert!(black[0] < 0.01, "dark → black, got {:?}", black);
+    }
+
+    #[test]
+    fn test_graph_is_color_clean() {
+        // Default passthrough stays clean (unreachable GetLayerFactor).
+        assert!(ModifierGraph::default_passthrough().is_color_clean());
+
+        let stock = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
+                ModifierNode::new("po", 120.0, 0.0, NodeKind::StockOp { plugin: crate::StockPlugin::Posterize, params: vec![] }),
+                ModifierNode::new("out", 240.0, 0.0, NodeKind::Output),
+            ],
+            connections: vec![
+                NodeConnection::new("in", "value", "po", "in"),
+                NodeConnection::new("po", "value", "out", "result"),
+            ],
+        };
+        assert!(stock.is_color_clean());
+
+        // Math wired into a Blend weight makes the twin invalid.
+        let mixed = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
+                ModifierNode::new("math", 60.0, 90.0, NodeKind::Math { op: MathOp::Add, default_b: 0.0 }),
+                ModifierNode::new("mix", 140.0, 30.0, NodeKind::Blend { mode: GraphBlendMode::Linear, default_b: 0.0 }),
+                ModifierNode::new("out", 240.0, 30.0, NodeKind::Output),
+            ],
+            connections: vec![
+                NodeConnection::new("in", "value", "mix", "a"),
+                NodeConnection::new("math", "result", "mix", "weight"),
+                NodeConnection::new("mix", "result", "out", "result"),
+            ],
+        };
+        assert!(!mixed.is_color_clean());
+
+        // Spatial stock (box blur) is never a GPU node.
+        let blurred = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
+                ModifierNode::new("bb", 120.0, 0.0, NodeKind::StockOp { plugin: crate::StockPlugin::BoxBlur, params: vec![] }),
+                ModifierNode::new("out", 240.0, 0.0, NodeKind::Output),
+            ],
+            connections: vec![
+                NodeConnection::new("in", "value", "bb", "in"),
+                NodeConnection::new("bb", "value", "out", "result"),
+            ],
+        };
+        assert!(!blurred.is_color_clean());
+
+        // Noise node reached through any fan-in disqualifies.
+        let noisy = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
+                ModifierNode::new("n", 60.0, 90.0, NodeKind::Noise { frequency: 1.0, amplitude: 1.0 }),
+                ModifierNode::new("out", 240.0, 0.0, NodeKind::Output),
+            ],
+            connections: vec![NodeConnection::new("n", "result", "out", "result")],
+        };
+        assert!(!noisy.is_color_clean());
+    }
+
+    #[test]
+    fn test_graph_nodes_roundtrip_serde() {
+        use serde_json;
+        let graph = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
+                ModifierNode::new("blend", 100.0, 0.0, NodeKind::Blend { mode: GraphBlendMode::Screen, default_b: 0.4 }),
+                ModifierNode::new("po", 200.0, 0.0, NodeKind::StockOp { plugin: crate::StockPlugin::Posterize, params: vec![3.0, 5.0] }),
+                ModifierNode::new("out", 300.0, 0.0, NodeKind::Output),
+            ],
+            connections: vec![
+                NodeConnection::new("in", "value", "blend", "a"),
+                NodeConnection::new("in", "value", "po", "in"),
+                NodeConnection::new("po", "value", "blend", "b"),
+                NodeConnection::new("blend", "result", "out", "result"),
+            ],
+        };
+        let json = serde_json::to_string(&graph).unwrap();
+        let back: ModifierGraph = serde_json::from_str(&json).unwrap();
+        assert_eq!(graph, back);
     }
 }
