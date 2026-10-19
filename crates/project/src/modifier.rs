@@ -1226,4 +1226,87 @@ mod tests {
         assert!((int.evaluate(0.0, 0.5) - 7.0).abs() < 1e-5);
         assert!((int.evaluate_color(0.9, 0.9, 0.9, 0.9, 0.5, &|_, _| 0.0)[0] - 7.0).abs() < 1e-5);
     }
+
+    /// General nodes (Math, Lerp, Clamp…) accept every value format: their
+    /// scalar sockets evaluate under the session's per-channel query, so
+    /// vector/color flows just work when wired through Make's combined value.
+    #[test]
+    fn test_general_nodes_accept_all_value_formats() {
+        // Vec2 through Math: x = base.x * 2 (Multiply), y = base.y + 50 (Add).
+        let vec_math = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
+                ModifierNode::new("m2", 50.0, 0.0, NodeKind::Math { op: MathOp::Multiply, default_b: 2.0 }),
+                ModifierNode::new("a5", 50.0, 60.0, NodeKind::Math { op: MathOp::Add, default_b: 50.0 }),
+                ModifierNode::new("mk", 140.0, 30.0, NodeKind::MakeVector { dims: 2 }),
+                ModifierNode::new("out", 240.0, 30.0, NodeKind::Output),
+            ],
+            connections: vec![
+                NodeConnection::new("in", "value", "m2", "a"),
+                NodeConnection::new("m2", "result", "mk", "x"),
+                NodeConnection::new("in", "value", "a5", "a"),
+                NodeConnection::new("a5", "result", "mk", "y"),
+                NodeConnection::new("mk", "value", "out", "result"),
+            ],
+        };
+        let (x, y) = vec_math.evaluate_vec2(100.0, 10.0, 0.5, &|_, _| 0.0);
+        assert!((x - 200.0).abs() < 1e-5, "x 100*2, got {x}");
+        assert!((y - 60.0).abs() < 1e-5, "y 10+50, got {y}");
+
+        // Color through Lerp: mix base color with a red Make at weight 0.25.
+        let color_lerp = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
+                ModifierNode::new("red", 60.0, 60.0, NodeKind::MakeColor),
+                ModifierNode::new("one", 60.0, 120.0, NodeKind::Constant {
+                    mode: ConstantMode::Float,
+                    value: 1.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                }),
+                ModifierNode::new("w", 60.0, 180.0, NodeKind::Constant {
+                    mode: ConstantMode::Float,
+                    value: 0.25,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                }),
+                ModifierNode::new("lp", 140.0, 30.0, NodeKind::Lerp { default_a: 0.0, default_b: 1.0 }),
+                ModifierNode::new("out", 240.0, 30.0, NodeKind::Output),
+            ],
+            connections: vec![
+                NodeConnection::new("in", "value", "lp", "a"),
+                NodeConnection::new("red", "value", "lp", "b"),
+                NodeConnection::new("one", "value", "red", "r"),
+                NodeConnection::new("w", "value", "lp", "weight"),
+                NodeConnection::new("lp", "result", "out", "result"),
+            ],
+        };
+        // make.x wired: r = lerp(0, 1, 0.25) = 0.25; g/b/a channels unwired
+        // on the make → pass through the per-channel base.
+        let fan = color_lerp.evaluate_color(0.0, 0.0, 0.0, 1.0, 0.5, &|_, _| 0.0);
+        assert!((fan[0] - 0.25).abs() < 1e-5, "r lerp 0.25 → 0.25, got {}", fan[0]);
+        assert!((fan[1] - 0.0).abs() < 1e-5, "g passthrough");
+        assert!((fan[2] - 0.0).abs() < 1e-5, "b passthrough");
+        assert!((fan[3] - 1.0).abs() < 1e-5, "a passthrough");
+
+        // Scalar Clamp still works with a color value flowing per channel.
+        let clamped = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
+                ModifierNode::new("cl", 60.0, 0.0, NodeKind::Clamp { min: 0.0, max: 0.5 }),
+                ModifierNode::new("out", 160.0, 0.0, NodeKind::Output),
+            ],
+            connections: vec![
+                NodeConnection::new("in", "value", "cl", "val"),
+                NodeConnection::new("cl", "result", "out", "result"),
+            ],
+        };
+        let fan = clamped.evaluate_color(1.0, 0.75, 0.5, 1.0, 0.5, &|_, _| 0.0);
+        assert!((fan[0] - 0.5).abs() < 1e-5, "r clamped to 0.5, got {}", fan[0]);
+        assert!((fan[1] - 0.5).abs() < 1e-5, "g clamped to 0.5, got {}", fan[1]);
+        assert!((fan[2] - 0.5).abs() < 1e-5, "b stays 0.5, got {}", fan[2]);
+        assert!((fan[3] - 0.5).abs() < 1e-5, "a clamped to 0.5, got {}", fan[3]);
+    }
 }
