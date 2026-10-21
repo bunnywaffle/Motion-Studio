@@ -5,7 +5,10 @@ use gpui_kit::base::{h_flex, v_flex, StyledExt, TestSupportExt};
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
 use gpui_kit::*;
-use project::modifier::{ConstantMode, MathOp, ModifierGraph, ModifierNode, NodeKind, WaveType};
+use project::modifier::{
+    ConstantMode, GraphBlendMode, MathOp, ModifierGraph, ModifierNode, NodeKind, WaveType,
+};
+use project::StockPlugin;
 
 use crate::state::EditorState;
 
@@ -26,7 +29,15 @@ pub fn open_modifier_graph_window(
     cx: &mut App,
 ) {
     let bounds = Bounds::centered(None, size(px(1080.), px(720.)), cx);
-    let title = format!("Modifier Graph — {} (Layer {})", prop_path, layer_id);
+    let title = if prop_path.starts_with("graph:") {
+        format!(
+            "Effect Node Graph — Effect {} (Layer {})",
+            prop_path.trim_start_matches("graph:"),
+            layer_id
+        )
+    } else {
+        format!("Modifier Graph — {} (Layer {})", prop_path, layer_id)
+    };
     let es = editor_state.clone();
     let lid = layer_id.clone();
     let ppath = prop_path.clone();
@@ -69,6 +80,9 @@ pub struct ModifierGraphView {
     layer_id: String,
     prop_path: String,
     pub graph: ModifierGraph,
+    /// True when editing an inline effect graph (effect:"graph:" paths):
+    /// renames the Content node and applies effect-specific chrome.
+    is_effect_graph: bool,
     _subscription: Subscription,
     /// Dragging a node: `(node_id, initial_canvas_x, initial_canvas_y, initial_node_x, initial_node_y)`
     dragging_node: Option<(String, f32, f32, f32, f32)>,
@@ -102,6 +116,7 @@ impl ModifierGraphView {
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
+        let is_effect_graph = prop_path.starts_with("graph:");
         let graph = editor_state.update(cx, |s, _cx| {
             s.ensure_layer_modifier_graph(&layer_id, &prop_path)
         });
@@ -116,6 +131,7 @@ impl ModifierGraphView {
             layer_id,
             prop_path,
             graph,
+            is_effect_graph,
             _subscription: sub,
             dragging_node: None,
             connecting_wire: None,
@@ -374,6 +390,9 @@ impl ModifierGraphView {
         let ent_wave = entity.clone();
         let ent_step = entity.clone();
         let ent_const = entity.clone();
+        let ent_blend = entity.clone();
+        let ent_posterize = entity.clone();
+        let ent_threshold = entity.clone();
         let ent_make2d = entity.clone();
         let ent_make3d = entity.clone();
         let ent_mkcolor = entity.clone();
@@ -416,10 +435,11 @@ impl ModifierGraphView {
                                     .text_sm()
                                     .font_semibold()
                                     .text_color(cx.theme().foreground)
-                                    .child(format!(
-                                        "Modifier Graph: {}  (Layer: {})",
-                                        self.prop_path, self.layer_id
-                                    )),
+                                    .child(if self.is_effect_graph {
+                                        "Effect Node Graph".to_string()
+                                    } else {
+                                        format!("Modifier Graph: {}", self.prop_path)
+                                    }),
                             ),
                     )
                     .child(
@@ -516,7 +536,8 @@ impl ModifierGraphView {
                 // Row 2: Node Addition Toolbar
                 h_flex()
                     .w_full()
-                    .h(px(34.))
+                    .min_h(px(34.))
+                    .flex_wrap()
                     .px_3()
                     .gap_1p5()
                     .items_center()
@@ -588,6 +609,27 @@ impl ModifierGraphView {
                     }, cx))
                     .child(self.toolbar_btn("Constant", ent_const, move |this, cx| {
                         this.add_node(NodeKind::Constant { mode: ConstantMode::Float, value: 1.0, g: 0.0, b: 0.0, a: 1.0 }, cx);
+                    }, cx))
+                    .child(self.toolbar_btn("Blend", ent_blend, move |this, cx| {
+                        this.add_node(NodeKind::Blend { mode: GraphBlendMode::default(), default_b: 0.0 }, cx);
+                    }, cx))
+                    .child(self.toolbar_btn("Posterize", ent_posterize, move |this, cx| {
+                        this.add_node(
+                            NodeKind::StockOp {
+                                plugin: StockPlugin::Posterize,
+                                params: vec![2.0],
+                            },
+                            cx,
+                        );
+                    }, cx))
+                    .child(self.toolbar_btn("Threshold", ent_threshold, move |this, cx| {
+                        this.add_node(
+                            NodeKind::StockOp {
+                                plugin: StockPlugin::Threshold,
+                                params: vec![50.0, 30.0],
+                            },
+                            cx,
+                        );
                     }, cx))
                     .child(self.toolbar_btn("Mk 2D", ent_make2d, move |this, cx| {
                         this.add_node(NodeKind::MakeVector { dims: 2 }, cx);
@@ -1107,6 +1149,12 @@ impl ModifierGraphView {
 
         // 1. Header with title, drag handler, and delete button
         let is_output = matches!(node.kind, NodeKind::Output);
+        // Effect-graph windows read the incoming node as "Content".
+        let header_title = if matches!(node.kind, NodeKind::BaseValueIn) && self.is_effect_graph {
+            "Content".to_string()
+        } else {
+            node.title.clone()
+        };
         let header = h_flex()
             .w_full()
             .h(px(26.0))
@@ -1130,7 +1178,7 @@ impl ModifierGraphView {
                     .text_xs()
                     .font_semibold()
                     .text_color(banner_color)
-                    .child(node.title.clone()),
+                    .child(header_title),
             )
             .child(if !is_output {
                 div()
