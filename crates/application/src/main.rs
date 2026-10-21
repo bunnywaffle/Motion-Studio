@@ -14127,8 +14127,60 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         .expect("update_window failed");
     }
 
+    /// Wire finishing must work when the canvas is panned: the socket drag
+    /// start/finish map cursor coordinates through the pan offset (cards and
+    /// sockets are drawn panned). Pre-fix the finish target was offset by the
+    /// pan and the snap missed, leaving the wire unconnected.
     #[gpui_kit::test]
-    fn test_modifier_graph_right_click_pan_releases(cx: &mut TestAppContext) {        // Right-drag panning the canvas must end on right-button release
+    fn test_modifier_graph_wire_finish_is_pan_aware(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let state = cx.new(|_| EditorState::new());
+        let mut mg_view = None;
+        let handle = cx.open_window(size(px(1080.), px(720.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| {
+                crate::modifier_graph_view::ModifierGraphView::new(
+                    state.clone(),
+                    "layer_accent".to_string(),
+                    "transform.position.x".to_string(),
+                    window,
+                    cx,
+                )
+            });
+            mg_view = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let view = mg_view.expect("graph view created");
+        view.update(cx, |this, cx| {
+            this.disconnect_socket("node_output", "result", cx);
+            this.pan_offset = (40.0, 30.0);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.drag_to("out_node_base_value", "in_node_output_result", cx);
+            window.render_frame(cx);
+        })
+        .expect("update_window failed");
+        view.read_with(cx, |this, _| {
+            assert!(
+                this.graph
+                    .connections
+                    .iter()
+                    .any(|c| c.from_node == "node_base"
+                        && c.from_socket == "value"
+                        && c.to_node == "node_output"
+                        && c.to_socket == "result"),
+                "dragging the rendered sockets while panned must reconnect value -> result"
+            );
+            assert!(this.connecting_wire.is_none(), "wire must be consumed");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn test_modifier_graph_right_click_pan_releases(cx: &mut TestAppContext) {
+        // Right-drag panning the canvas must end on right-button release
         // (it used to stay stuck to the cursor: only Left-up cleared it).
         use gpui_kit::test::TestWindowExt;
 

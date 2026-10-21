@@ -12,10 +12,13 @@ use project::StockPlugin;
 
 use crate::state::EditorState;
 
-/// Total pixel height of the top header area (Row 1: 42px + Row 2: 34px + border: 1px = 77px).
+/// Default pixel height of the top header area (Row 1: 42px + Row 2: 34px + border: 1px = 77px).
+/// Only the boot default — the real canvas origin is measured at paint time
+/// (the toolbar row can wrap, growing the header).
 pub const HEADER_HEIGHT: f32 = 77.0;
 
-/// Map window-space cursor coordinates to canvas-space coordinates.
+/// Map window-space cursor coordinates to header-relative coordinates
+/// (no pan, no measured header growth). Kept for delta-only reads.
 #[inline]
 pub fn event_to_canvas_pos(pos: Point<Pixels>) -> (f32, f32) {
     (pos.x / px(1.0), (pos.y / px(1.0)) - HEADER_HEIGHT)
@@ -91,7 +94,10 @@ pub struct ModifierGraphView {
     /// Selected node ID
     selected_node: Option<String>,
     /// Canvas pan offset (X, Y)
-    pan_offset: (f32, f32),
+    pub(crate) pan_offset: (f32, f32),
+    /// Window-space origin of the canvas, measured at paint time. Cursors
+    /// map through this instead of a hardcoded header height.
+    canvas_origin: std::sync::Arc<std::sync::Mutex<(f32, f32)>>,
     /// Canvas panning: `(initial_canvas_x, initial_canvas_y, initial_pan_x, initial_pan_y)`
     pub(crate) panning_canvas: Option<(f32, f32, f32, f32)>,
     /// Scrubbing param: `(node_id, param_name, last_mouse_x, original_val)`
@@ -137,6 +143,7 @@ impl ModifierGraphView {
             connecting_wire: None,
             selected_node: None,
             pan_offset: (0.0, 0.0),
+            canvas_origin: std::sync::Arc::new(std::sync::Mutex::new((0.0, HEADER_HEIGHT))),
             panning_canvas: None,
             scrubbing_param: None,
             scrub_moved: false,
@@ -144,6 +151,19 @@ impl ModifierGraphView {
             param_editor: None,
             param_editor_sub: None,
         }
+    }
+
+    /// Window-space cursor → canvas space (pre-pan). Use for drag deltas only.
+    fn cursor_canvas(&self, pos: Point<Pixels>) -> (f32, f32) {
+        let (ox, oy) = *self.canvas_origin.lock().unwrap();
+        (pos.x / px(1.0) - ox, pos.y / px(1.0) - oy)
+    }
+
+    /// Window-space cursor → panned canvas space (the space cards, wires and
+    /// sockets are drawn and snap-tested in). Use for all absolute positions.
+    fn cursor_canvas_abs(&self, pos: Point<Pixels>) -> (f32, f32) {
+        let (x, y) = self.cursor_canvas(pos);
+        (x + self.pan_offset.0, y + self.pan_offset.1)
     }
 
     /// Sync the current graph back into EditorState so changes immediately evaluate in the compositor.
@@ -776,8 +796,11 @@ impl ModifierGraphView {
             .bg(rgb(0x101116))
             // Click empty canvas cancels pending wire or deselects node
             .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
-                let (curr_x, curr_y) = event_to_canvas_pos(event.position);
                 ent_canvas_down.update(cx, |this, cx| {
+                    // Absolute canvas-space positions include the pan offset
+                    // (wires and sockets are drawn panned); deltas below stay
+                    // pan-free so panning never compounds into drags.
+                    let (curr_x, curr_y) = this.cursor_canvas_abs(event.position);
                     if let Some(wire) = &this.connecting_wire {
                         let dist = ((curr_x - wire.start_x).powi(2) + (curr_y - wire.start_y).powi(2)).sqrt();
                         if dist > 8.0 {
@@ -806,10 +829,12 @@ impl ModifierGraphView {
                             changed = true;
                         }
                     }
-                    // Wire drag
+                    // Wire drag (absolute position must match the panned
+                    // socket coordinates the wire renders from)
+                    let (wx, wy) = this.cursor_canvas_abs(event.position);
                     if let Some(wire) = &mut this.connecting_wire {
-                        wire.cur_x = curr_x;
-                        wire.cur_y = curr_y;
+                        wire.cur_x = wx;
+                        wire.cur_y = wy;
                         changed = true;
                     }
                     // Param scrub
@@ -838,8 +863,9 @@ impl ModifierGraphView {
             })
             // Mouse up handler to finalize drag or drop wire
             .on_mouse_up(MouseButton::Left, move |event, _window, cx| {
-                let (curr_x, curr_y) = event_to_canvas_pos(event.position);
                 ent_up.update(cx, |this, cx| {
+                    // Snap/finish positions are pan-inclusive canvas space
+                    let (curr_x, curr_y) = this.cursor_canvas_abs(event.position);
                     if this.scrubbing_param.is_some() {
                         this.scrubbing_param = None;
                         this.scrub_moved = false;
@@ -893,6 +919,21 @@ impl ModifierGraphView {
                     }
                 });
             });
+
+        // 0. Paint-time canvas origin recorder: cursor handlers map through
+        // the measured origin instead of a hardcoded header height (the
+        // toolbar row can wrap and grow the header).
+        let origin_store = self.canvas_origin.clone();
+        canvas_div = canvas_div.child(
+            div().absolute().size_full().child(gpui::canvas(
+                move |_bounds, _window, _cx| {},
+                move |bounds, _, _window, _cx| {
+                    if let Ok(mut o) = origin_store.lock() {
+                        *o = (bounds.origin.x / px(1.0), bounds.origin.y / px(1.0));
+                    }
+                },
+            )),
+        );
 
         // 3. Render Connecting Wires (beads and midpoint disconnect button)
         for conn in &self.graph.connections {
@@ -1134,8 +1175,8 @@ impl ModifierGraphView {
             })
             .on_mouse_up(MouseButton::Left, move |event, _window, cx| {
                 cx.stop_propagation();
-                let (curr_x, curr_y) = event_to_canvas_pos(event.position);
                 ent_card_up.update(cx, |this, cx| {
+                    let (curr_x, curr_y) = this.cursor_canvas_abs(event.position);
                     if this.dragging_node.is_some() {
                         this.dragging_node = None;
                         this.sync_to_state(cx);
@@ -1284,16 +1325,16 @@ impl ModifierGraphView {
             .cursor_pointer()
             .on_mouse_up(MouseButton::Left, move |event, _window, cx| {
                 cx.stop_propagation();
-                let (curr_x, curr_y) = event_to_canvas_pos(event.position);
                 ent_up.update(cx, |this, cx| {
+                    let (curr_x, curr_y) = this.cursor_canvas_abs(event.position);
                     let (pan_x, pan_y) = this.pan_offset;
                     this.try_finish_wire_connection(curr_x, curr_y, pan_x, pan_y, cx);
                 });
             })
             .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
                 cx.stop_propagation();
-                let (curr_x, curr_y) = event_to_canvas_pos(event.position);
                 ent_down.update(cx, |this, cx| {
+                    let (curr_x, curr_y) = this.cursor_canvas_abs(event.position);
                     let (pan_x, pan_y) = this.pan_offset;
                     if this.connecting_wire.is_some() {
                         this.try_finish_wire_connection(curr_x, curr_y, pan_x, pan_y, cx);
@@ -1335,6 +1376,7 @@ impl ModifierGraphView {
             .child(
                 div()
                     .id(SharedString::from(format!("in_{}_{}", node_id, socket_name)))
+                    .test_support()
                     .w(px(12.0))
                     .h(px(12.0))
                     .rounded_full()
@@ -1396,16 +1438,16 @@ impl ModifierGraphView {
             .cursor_pointer()
             .on_mouse_up(MouseButton::Left, move |event, _window, cx| {
                 cx.stop_propagation();
-                let (curr_x, curr_y) = event_to_canvas_pos(event.position);
                 ent_up.update(cx, |this, cx| {
+                    let (curr_x, curr_y) = this.cursor_canvas_abs(event.position);
                     let (pan_x, pan_y) = this.pan_offset;
                     this.try_finish_wire_connection(curr_x, curr_y, pan_x, pan_y, cx);
                 });
             })
             .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
                 cx.stop_propagation();
-                let (curr_x, curr_y) = event_to_canvas_pos(event.position);
                 ent_down.update(cx, |this, cx| {
+                    let (curr_x, curr_y) = this.cursor_canvas_abs(event.position);
                     let (pan_x, pan_y) = this.pan_offset;
                     if this.connecting_wire.is_some() {
                         this.try_finish_wire_connection(curr_x, curr_y, pan_x, pan_y, cx);
@@ -1439,6 +1481,7 @@ impl ModifierGraphView {
             .child(
                 div()
                     .id(SharedString::from(format!("out_{}_{}", node_id, socket_name)))
+                    .test_support()
                     .w(px(12.0))
                     .h(px(12.0))
                     .rounded_full()
