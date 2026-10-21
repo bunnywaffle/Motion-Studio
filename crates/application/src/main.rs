@@ -14294,6 +14294,80 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         });
     }
 
+    #[gpui_kit::test]
+    fn test_modifier_graph_wgsl_code_edit_commits(cx: &mut TestAppContext) {
+        // Clicking a Wgsl node's code pill opens the editor seeded with the
+        // current body; Enter commits the new code to the node.
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let state = cx.new(|_| EditorState::new());
+        let mut mg_view = None;
+        let handle = cx.open_window(size(px(1080.), px(720.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| {
+                crate::modifier_graph_view::ModifierGraphView::new(
+                    state.clone(),
+                    "layer_accent".to_string(),
+                    "transform.position.x".to_string(),
+                    window,
+                    cx,
+                )
+            });
+            mg_view = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let view = mg_view.expect("graph view created");
+        let wgsl_id = view.update(cx, |v, cx| {
+            v.add_node(
+                project::modifier::NodeKind::Wgsl {
+                    code: "return color;".to_string(),
+                },
+                cx,
+            );
+            v.graph
+                .nodes
+                .iter()
+                .find(|n| matches!(n.kind, project::modifier::NodeKind::Wgsl { .. }))
+                .unwrap()
+                .id
+                .clone()
+        });
+        let pill = SharedString::from(format!("mg_wgsl_code_{wgsl_id}"));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find(pill.clone()).visible());
+            window.click(pill.clone(), cx);
+            window.render_frame(cx);
+            assert!(
+                view.read_with(cx, |v, _| v
+                    .editing_param
+                    .as_ref()
+                    .is_some_and(|(nid, pn)| nid == &wgsl_id && pn == "code")),
+                "clicking the code pill must open the code editor"
+            );
+            let ed = view.read_with(cx, |v, _| v.param_editor.clone().expect("editor open"));
+            ed.update(cx, |st, cx| {
+                st.set_value("let d = 0.5; return color * d;", window, cx);
+            });
+            window.render_frame(cx);
+            window.dispatch_keystroke(gpui_kit::Keystroke::parse("enter").unwrap(), cx);
+        })
+        .expect("update_window failed");
+        view.read_with(cx, |v, _| {
+            let n = v.graph.get_node(&wgsl_id).unwrap();
+            match &n.kind {
+                project::modifier::NodeKind::Wgsl { code } => assert_eq!(
+                    code,
+                    "let d = 0.5; return color * d;",
+                    "typed code must commit to the node"
+                ),
+                _ => panic!("node kind changed"),
+            }
+            assert!(v.editing_param.is_none(), "editor closes after commit");
+        });
+    }
+
     #[test]
     fn test_effect_path_helpers_for_modifier_graph() {
         use crate::state::EditorState;

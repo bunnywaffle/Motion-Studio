@@ -1,6 +1,6 @@
 # Current State
 
-> Snapshot — October 2026 (`main` @ `1be1ad1` and later). The sections below
+> Snapshot — October 2026 (`main` @ `747ab4f` and later). The sections below
 > preserve the original build-up history; this snapshot describes reality now.
 
 ## Snapshot: What the App Is Today
@@ -13,7 +13,7 @@
 - OS file drag-and-drop onto the window imports image/video/audio files into the Project bin.
 - GPU effect chain serves Drop Shadow / Outer Glow end-to-end (silhouette fill → compute blur → colorized under-merge), with the CPU blit-stage aura skipping via a handled flag and the effects panel badge marking all four aura-family plugins GPU-accelerated.
 - Animation presets: 20 built-ins plus user-authored presets captured from a layer's animated transform and persisted to `<config>/MotionStudio/animation_presets.json` (timeline animation dropdown + dedicated Presets dock tab with apply/export-to-`.json`/delete).
-- **584 tests passing** (312 application, 153 project, 63 + 9 compositor, 40 renderer, 7 export), 0 failures, clippy clean modulo one pre-existing warning.
+- **588 tests passing** (314 application, 155 project, 63 + 9 compositor, 40 renderer, 7 export), 0 failures, clippy clean modulo one pre-existing warning.
 - Node Graph effect: an editable per-pixel modifier graph (Content → pointwise stock ops / Blend / Constant) lives inside the effect, evaluates on CPU and (for color-clean graphs) through an exact GPU WGSL twin with automatic CPU fallback; graph edits invalidate caching and the graph window restyles for effect editing.
 - Modifier graphs handle multi-channel values end to end: color fanning (R/G/B/A per channel) everywhere, whole-path "Both Axes" binding for two-value transforms, Make/Break gather/unpack nodes for 2D, 3D and color (toolbar + teal banner nodes), and typed Constant nodes (Float/Int/Color/2D/3D mode pills).
 - Edit → Settings… dialog picks the app-wide gpui-kit theme (Light/Dark), applies it live and persists to `<config>/MotionStudio/settings.json` (loaded at boot).

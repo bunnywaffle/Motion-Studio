@@ -711,6 +711,11 @@ impl FxPass {
         struct Gs<'a> {
             graph: &'a project::ModifierGraph,
             bodies: Vec<&'static str>,
+            /// User Wgsl node functions (one per unique code), emitted
+            /// before `fx_graph_eval`.
+            fns: Vec<String>,
+            wgsl_memo: std::collections::HashMap<String, String>,
+            wgsl_seq: usize,
             params: Vec<f32>,
             preamble: String,
             memo: std::collections::HashMap<String, String>,
@@ -833,6 +838,31 @@ impl FxPass {
                         templ
                     }
                     NodeKind::Output => self.wire(node_id, "result")?.unwrap_or_else(|| "color".to_string()),
+                    NodeKind::Wgsl { code } => {
+                        if code.trim().is_empty() {
+                            return Err("Wgsl node has no code".into());
+                        }
+                        // One user fn per unique code; their bodies must
+                        // `return vec4<f32>(...)` (WGSL).
+                        let name = match self.wgsl_memo.get(code) {
+                            Some(n) => n.clone(),
+                            None => {
+                                let n = format!("wgsl_user_fn_{}", self.wgsl_seq);
+                                self.wgsl_seq += 1;
+                                self.wgsl_memo.insert(code.clone(), n.clone());
+                                self.fns.push(format!(
+                                    "fn {n}(color: vec4<f32>, uv: vec2<f32>, p: vec4<f32>) -> vec4<f32> {{\n{}\n}}\n",
+                                    code
+                                ));
+                                n
+                            }
+                        };
+                        let p0 = self.wire(node_id, "p0")?.unwrap_or_else(|| "0.0".to_string());
+                        let p1 = self.wire(node_id, "p1")?.unwrap_or_else(|| "0.0".to_string());
+                        let p2 = self.wire(node_id, "p2")?.unwrap_or_else(|| "0.0".to_string());
+                        let p3 = self.wire(node_id, "p3")?.unwrap_or_else(|| "0.0".to_string());
+                        format!("{}(color, uv, vec4<f32>({}, {}, {}, {}))", name, p0, p1, p2, p3)
+                    }
                     _ => return Err(format!("graph node not twinable: {:?}", kind)),
                 })
             }
@@ -841,6 +871,9 @@ impl FxPass {
         let mut gs = Gs {
             graph,
             bodies: Vec::new(),
+            fns: Vec::new(),
+            wgsl_memo: std::collections::HashMap::new(),
+            wgsl_seq: 0,
             params: Vec::new(),
             preamble: String::new(),
             memo: std::collections::HashMap::new(),
@@ -857,6 +890,9 @@ impl FxPass {
         for b in &gs.bodies {
             body.push_str(b);
             body.push('\n');
+        }
+        for f in &gs.fns {
+            body.push_str(f);
         }
         body.push_str(&format!(
             "fn fx_graph_eval(color: vec4<f32>, uv: vec2<f32>) -> vec4<f32> {{\n{}    return {};\n}}\n",

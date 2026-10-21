@@ -413,6 +413,7 @@ impl ModifierGraphView {
         let ent_blend = entity.clone();
         let ent_posterize = entity.clone();
         let ent_threshold = entity.clone();
+        let ent_wgsl = entity.clone();
         let ent_make2d = entity.clone();
         let ent_make3d = entity.clone();
         let ent_mkcolor = entity.clone();
@@ -647,6 +648,14 @@ impl ModifierGraphView {
                             NodeKind::StockOp {
                                 plugin: StockPlugin::Threshold,
                                 params: vec![50.0, 30.0],
+                            },
+                            cx,
+                        );
+                    }, cx))
+                    .child(self.toolbar_btn("Wgsl", ent_wgsl, move |this, cx| {
+                        this.add_node(
+                            NodeKind::Wgsl {
+                                code: "return color;".to_string(),
                             },
                             cx,
                         );
@@ -1136,6 +1145,9 @@ impl ModifierGraphView {
             }
             NodeKind::StockOp { .. } => {
                 (rgb(0x701a75), rgb(0xf0abfc)) // Deep magenta
+            }
+            NodeKind::Wgsl { .. } => {
+                (rgb(0x312e81), rgb(0xa5b4fc)) // Indigo-slate for shader nodes
             }
             NodeKind::DriverLink { .. } => {
                 (rgb(0x7f1d1d), rgb(0xfca5a5)) // Deep red for driver links
@@ -1658,6 +1670,8 @@ impl ModifierGraphView {
                     .child(self.param_scrub_input(nid, "steps", st, rgb(0x4ade80), ent, cx))
             }
 
+            NodeKind::Wgsl { code } => self.render_wgsl_params(&nid, code, entity, cx),
+
             NodeKind::DriverLink { driver_layer_id, driver_prop_path } => {
                 let dl = driver_layer_id.clone();
                 let dp = driver_prop_path.clone();
@@ -1723,6 +1737,86 @@ impl ModifierGraphView {
                 });
             })
             .child(symbol)
+    }
+
+    /// Wgsl node body: click-to-edit code pill + the shader signature hint.
+    fn render_wgsl_params(
+        &self,
+        node_id: &str,
+        code: &str,
+        entity: &Entity<Self>,
+        _cx: &mut Context<Self>,
+    ) -> Div {
+        let ent_open = entity.clone();
+        let is_editing = self
+            .editing_param
+            .as_ref()
+            .is_some_and(|(nid, pn)| nid == node_id && pn == "code");
+        if is_editing {
+            if let Some(editor) = self.param_editor.clone() {
+                let ent_esc = entity.clone();
+                return v_flex()
+                    .w_full()
+                    .px_2()
+                    .py_1p5()
+                    .gap_1()
+                    .border_t_1()
+                    .border_color(rgb(0x2e303e))
+                    .on_action(move |_: &Escape, _window, cx| {
+                        ent_esc.update(cx, |this, cx| this.cancel_param_edit(cx));
+                    })
+                    .child(Input::new(&editor).w_full());
+            }
+        }
+        let line = code.lines().next().unwrap_or("");
+        let truncated: String = if line.chars().count() > 34 {
+            format!("{}…", line.chars().take(34).collect::<String>())
+        } else {
+            line.to_string()
+        };
+        let display = if truncated.trim().is_empty() {
+            "return color;".to_string()
+        } else {
+            truncated
+        };
+        let nid_open = node_id.to_string();
+        v_flex()
+            .w_full()
+            .px_2()
+            .py_1p5()
+            .gap_1()
+            .border_t_1()
+            .border_color(rgb(0x2e303e))
+            .child(
+                div()
+                    .id(SharedString::from(format!("mg_wgsl_code_{node_id}")))
+                    .test_support()
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .bg(rgb(0x232430))
+                    .border_1()
+                    .border_color(rgb(0x3a3c4e))
+                    .hover(|s| s.border_color(rgb(0x8b5cf6)))
+                    .cursor_pointer()
+                    .text_xs()
+                    .text_color(rgb(0x93c5fd))
+                    .child(display)
+                    .on_mouse_down(MouseButton::Left, move |_ev, window, cx| {
+                        cx.stop_propagation();
+                        let nid = nid_open.clone();
+                        ent_open.update(cx, |this, cx| {
+                            this.begin_wgsl_code_edit(&nid, window, cx)
+                        });
+                    }),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x6b7280))
+                    .child("fn(color, uv, p) -> vec4 — WGSL runs on the GPU (CPU passes through)"),
+            )
     }
 
     /// Mode pill for a Constant node — swaps the component layout in place
@@ -1951,11 +2045,64 @@ impl ModifierGraphView {
         cx.notify();
     }
 
+    /// Open keyboard entry for a Wgsl node's raw code (same editor
+    /// machinery as param values; the commit path stores the string).
+    fn begin_wgsl_code_edit(
+        &mut self,
+        node_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let initial = self
+            .graph
+            .get_node(node_id)
+            .and_then(|n| match &n.kind {
+                NodeKind::Wgsl { code } => Some(code.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| "return color;".to_string());
+        let editor = cx.new(|cx| {
+            let mut st = InputState::new(window, cx);
+            st.set_value(initial, window, cx);
+            st.select_all(window, cx);
+            st
+        });
+        let nid = node_id.to_string();
+        let sub = cx.subscribe(
+            &editor,
+            move |this: &mut Self, _input: Entity<InputState>, event: &InputEvent, cx| {
+                match event {
+                    InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                        this.commit_open_param_edit(cx);
+                    }
+                    _ => {}
+                }
+            },
+        );
+        let handle = editor.read(cx).focus_handle(cx);
+        self.editing_param = Some((nid, "code".to_string()));
+        self.param_editor = Some(editor);
+        self.param_editor_sub = Some(sub);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
     /// Commit the open editor text as an absolute param value (Enter/Blur
     /// or starting to scrub elsewhere). Unparseable text keeps the old value.
+    /// The `code` param commits the raw string into the Wgsl node instead.
     fn commit_open_param_edit(&mut self, cx: &mut Context<Self>) {
         if let Some(editor) = self.param_editor.clone() {
             let text = editor.read(cx).value().trim().to_string();
+            if let Some((nid, pname)) = self.editing_param.clone() {
+                if pname == "code" {
+                    if let Some(n) = self.graph.get_node_mut(&nid) {
+                        if let NodeKind::Wgsl { code } = &mut n.kind {
+                            *code = text.clone();
+                        }
+                    }
+                    self.sync_to_state(cx);
+                }
+            }
             if let (Ok(v), Some((nid, pname))) = (text.parse::<f32>(), self.editing_param.clone()) {
                 self.apply_param_value(&nid, &pname, v, cx);
             }

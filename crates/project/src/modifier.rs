@@ -244,6 +244,17 @@ pub enum NodeKind {
         params: Vec<f32>,
     },
 
+    /// User WGSL shader as a node: the code is the body of
+    /// `fn wgsl(color: vec4<f32>, uv: vec2<f32>, p: vec4<f32>) -> vec4<f32>`
+    /// (explicit `return` required). `color` is the incoming pixel bus,
+    /// `p0`..`p3` are scalar input sockets (wire a Constant in) and the
+    /// single `value` output is the result. Runs on the GPU only; the CPU
+    /// eval passes the color bus through unchanged.
+    Wgsl {
+        #[serde(default)]
+        code: String,
+    },
+
     /// Terminal node that outputs the final value to the property.
     Output,
 }
@@ -274,6 +285,7 @@ impl NodeKind {
             Self::BreakColor => "Break Color",
             Self::Blend { .. } => "Blend",
             Self::StockOp { plugin, .. } => plugin.descriptor().label,
+            Self::Wgsl { .. } => "Wgsl",
             Self::Output => "Output",
         }
     }
@@ -297,6 +309,7 @@ impl NodeKind {
             Self::BreakColor => &["in"],
             Self::Blend { .. } => &["a", "b", "weight"],
             Self::StockOp { .. } => &["in"],
+            Self::Wgsl { .. } => &["color", "p0", "p1", "p2", "p3"],
             Self::Output => &["result"],
         }
     }
@@ -320,6 +333,7 @@ impl NodeKind {
             Self::BreakVector { .. } => &["x", "y"],
             Self::BreakColor => &["r", "g", "b", "a"],
             Self::Blend { .. } | Self::StockOp { .. } => &["value"],
+            Self::Wgsl { .. } => &["value"],
             Self::Output => &[],
         }
     }
@@ -653,6 +667,8 @@ impl ModifierGraph {
             let ok = match &node.kind {
                 NodeKind::Output | NodeKind::BaseValueIn | NodeKind::Constant { .. } | NodeKind::Blend { .. } => true,
                 NodeKind::StockOp { plugin, .. } => plugin.is_pointwise(),
+                // User WGSL is pure per-pixel math — color-clean by design.
+                NodeKind::Wgsl { .. } => true,
                 _ => false,
             };
             if !ok {
@@ -719,6 +735,10 @@ impl ModifierGraph {
             // Unwired source color: pass the matching base component through
             // (comp mirrors the session channel; "value" sessions fan).
             NodeKind::StockOp { .. } if socket == "in" => Some(ctx.comp.comp_value(ctx.channel)),
+            // Wgsl node: unwired color passes the matching base component
+            // through; unwired p sockets default to 0.0.
+            NodeKind::Wgsl { .. } if socket == "color" => Some(ctx.comp.comp_value(ctx.channel)),
+            NodeKind::Wgsl { .. } if socket.starts_with('p') => Some(0.0),
             // Make nodes: unwired channels pass the matching base component
             // through (gathers stay identity when nothing is rewired).
             NodeKind::MakeVector { .. } | NodeKind::MakeColor => match socket {
@@ -1006,6 +1026,35 @@ impl ModifierGraph {
                     "g" => out.g,
                     "b" => out.b,
                     _ => out.a,
+                }
+            }
+            NodeKind::Wgsl { .. } => {
+                // ponytail: WGSL executes on the GPU only (fx_pass.rs
+                // `for_graph`). CPU eval passes the color bus through
+                // byte-for-byte; running WGSL on CPU needs a naga-based
+                // interpreter. add when CPU-exact Wgsl export matters.
+                let chan = if socket == "value" { ctx.channel } else { socket };
+                let mut src = [0.0f32; 4];
+                for (i, ch) in ["r", "g", "b", "a"].iter().enumerate() {
+                    let ch = *ch;
+                    let sub = EvalCtx {
+                        base: ctx.comp.comp_value(ch),
+                        comp: ctx.comp,
+                        factor: ctx.factor,
+                        resolver: ctx.resolver,
+                        channel: ch,
+                    };
+                    let mut sub_memo = HashMap::new();
+                    let mut sub_stack = HashSet::new();
+                    src[i] = self
+                        .resolve_input(node_id, "color", &sub, &mut sub_memo, &mut sub_stack)
+                        .unwrap_or(sub.base);
+                }
+                match chan {
+                    "r" => src[0],
+                    "g" => src[1],
+                    "b" => src[2],
+                    _ => src[3],
                 }
             }
             NodeKind::Output => {
@@ -1666,5 +1715,67 @@ mod tests {
         let json = serde_json::to_string(&graph).unwrap();
         let back: ModifierGraph = serde_json::from_str(&json).unwrap();
         assert_eq!(graph, back);
+    }
+
+    #[test]
+    fn test_wgsl_node_sockets_serde_and_color_clean() {
+        let graph = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
+                ModifierNode::new(
+                    "wg",
+                    120.0,
+                    0.0,
+                    NodeKind::Wgsl {
+                        code: "let g = color.g; return vec4(g, g, g, color.a);".to_string(),
+                    },
+                ),
+                ModifierNode::new("out", 300.0, 0.0, NodeKind::Output),
+            ],
+            connections: vec![
+                NodeConnection::new("in", "value", "wg", "color"),
+                NodeConnection::new("wg", "value", "out", "result"),
+            ],
+        };
+        // Title + sockets
+        assert_eq!(
+            graph.get_node("wg").unwrap().kind.title(),
+            "Wgsl"
+        );
+        assert_eq!(
+            graph.get_node("wg").unwrap().kind.input_sockets(),
+            &["color", "p0", "p1", "p2", "p3"][..]
+        );
+        // Pure per-pixel user math: qualifies for the GPU twin.
+        assert!(graph.is_color_clean());
+        // Round-trips through JSON (serde default keeps old projects alive).
+        let json = serde_json::to_string(&graph).unwrap();
+        let back: ModifierGraph = serde_json::from_str(&json).unwrap();
+        assert_eq!(graph, back);
+    }
+
+    #[test]
+    fn test_wgsl_node_cpu_eval_successfully_passes_color_bus_through() {
+        fn resolver(_: &str, _: &str) -> f32 {
+            0.0
+        }
+        let graph = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
+                // The shader would tint everything red on the GPU...
+                ModifierNode::new("wg", 120.0, 0.0, NodeKind::Wgsl {
+                    code: "return vec4(1.0, 0.0, 0.0, 1.0);".to_string(),
+                }),
+                ModifierNode::new("out", 300.0, 0.0, NodeKind::Output),
+            ],
+            connections: vec![
+                NodeConnection::new("in", "value", "wg", "color"),
+                NodeConnection::new("wg", "value", "out", "result"),
+            ],
+        };
+        // ...but the CPU fallback (no GPU in this eval) passes the source
+        // pixel through byte-for-byte. Documented CPU/GPU divergence.
+        let out = graph.evaluate_color(0.25, 0.5, 0.75, 1.0, 0.5, &resolver);
+        assert_eq!(out, [0.25, 0.5, 0.75, 1.0]);
     }
 }
