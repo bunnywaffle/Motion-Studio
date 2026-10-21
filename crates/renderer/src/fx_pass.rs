@@ -1,11 +1,11 @@
-//! Native wgpu effect passes: run any WGSL filter on the GPU.
+﻿//! Native wgpu effect passes: run any WGSL filter on the GPU.
 //!
 //! [`FxPass`] is a generic fullscreen-triangle pass: source texture +
 //! sampler + one uniform block. Each stock effect maps to a WGSL body plus
 //! packed uniforms via [`fx_source_for`] / [`pack_stock_uniforms`], so the
 //! whole catalogue runs natively on wgpu (export path) with the same math
 //! the CPU preview uses. Multi-tap spatial effects (blurs, morphology,
-//! unsharp) run as multi-pass or CPU convolution — see each kernel's docs.
+//! unsharp) run as multi-pass or CPU convolution â€” see each kernel's docs.
 
 use crate::device::{GpuContext, RenderTarget};
 use bytemuck::{Pod, Zeroable};
@@ -74,6 +74,15 @@ struct FxUniforms {
 /// Build a complete fragment-stage source for one effect body: samples the
 /// source texture, runs `main_call` (which must assign `color`), and
 /// returns it. `uv_calls` run first for pre-sample remaps.
+/// Content hash for a graph (pass-cache key; `# ponytail:` Debug-format —
+/// graphs are tiny, collisions astronomically unlikely, zero plumbing).
+pub fn graph_key_of(graph: &project::ModifierGraph) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    format!("{:?}", graph).hash(&mut h);
+    h.finish()
+}
+
 pub fn fx_fragment_src(effect_body: &str, uv_calls: &[&str], main_call: &str) -> String {
     let mut src = String::from(FX_BINDINGS_WGSL);
     src.push_str(effect_body);
@@ -102,6 +111,8 @@ pub struct FxPass {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    /// Packed float params for graph passes (empty for stock/builtin).
+    pub graph_params: Vec<f32>,
 }
 
 impl FxPass {
@@ -199,7 +210,7 @@ impl FxPass {
             mipmap_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
-        Ok(Self { pipeline, bind_group_layout, sampler })
+        Ok(Self { pipeline, bind_group_layout, sampler, graph_params: Vec::new() })
     }
 
     /// Compile a pass for a supported stock plugin.
@@ -589,6 +600,279 @@ impl FxPass {
         Self::compile_resample(gpu, &format!("FxPass_builtin_{id}"), target_format, body, call, resample)
     }
 
+    /// Pointwise twin for one StockOp node in a Node Graph: (kernel body,
+    /// call template, floats consumed). Only pure per-pixel kernels, and
+    /// only twins that read no `u.colors` slots (StockOp nodes carry
+    /// float params only). Mirrors the pointwise arms of `for_stock`.
+    fn graph_stock_twin(plugin: StockPlugin) -> Option<(&'static str, &'static str, usize)> {
+        use crate::effect_filters as ef;
+        let (body, call, used): (&str, &str, usize) = match plugin {
+            StockPlugin::Posterize => (
+                ef::stock_posterize().wgsl,
+                "fx_stock_posterize(uv, color, u.params[0].x)",
+                1,
+            ),
+            StockPlugin::Threshold => (
+                ef::stock_threshold().wgsl,
+                "fx_stock_threshold(uv, color, u.params[0].x, u.params[0].y)",
+                2,
+            ),
+            StockPlugin::FilmGrain => (
+                ef::stock_film_grain().wgsl,
+                "fx_stock_film_grain(uv, color, u.params[0].x, u.misc.x, u.params[0].y)",
+                2,
+            ),
+            StockPlugin::Scanlines => (
+                ef::stock_scanlines().wgsl,
+                "fx_stock_scanlines(uv, color, u.params[0].x, u.params[0].y, u.misc.z)",
+                2,
+            ),
+            StockPlugin::Crop => (
+                ef::stock_crop().wgsl,
+                "fx_stock_crop(uv, color, u.params[0], vec2<f32>(u.misc.y, u.misc.z))",
+                4,
+            ),
+            StockPlugin::TemperatureTint => (
+                ef::stock_temperature_tint().wgsl,
+                "fx_stock_temperature_tint(uv, color, u.params[0].xy)",
+                2,
+            ),
+            StockPlugin::SpillSuppress => (
+                ef::stock_spill_suppress().wgsl,
+                "fx_stock_spill_suppress(uv, color, u.params[0].x)",
+                1,
+            ),
+            StockPlugin::DifferenceKey => (
+                ef::stock_difference_key().wgsl,
+                "fx_stock_difference_key(uv, color, u.params[0].x, u.params[0].y, u.params[0].z)",
+                3,
+            ),
+            StockPlugin::Curves => (
+                ef::stock_curves().wgsl,
+                "fx_stock_curves(uv, color, u.params[0].xyzw, u.params[1].x)",
+                5,
+            ),
+            StockPlugin::ColorBalance => (
+                ef::stock_color_balance().wgsl,
+                "fx_stock_color_balance(uv, color, vec3<f32>(u.params[0].x, u.params[0].y, u.params[0].z), vec3<f32>(u.params[0].w, u.params[1].x, u.params[1].y), vec3<f32>(u.params[1].z, u.params[1].w, u.params[2].x))",
+                9,
+            ),
+            StockPlugin::ColorWheels => (
+                ef::stock_color_wheels().wgsl,
+                "fx_stock_color_wheels(uv, color, u.params[0].xyz)",
+                3,
+            ),
+            StockPlugin::LightLeak => (
+                ef::stock_light_leak().wgsl,
+                "fx_stock_light_leak(uv, color, u.params[0].x, u.params[0].y, u.params[0].z, RES)",
+                3,
+            ),
+            StockPlugin::Halo => (
+                ef::stock_halo().wgsl,
+                "fx_stock_halo(uv, color, u.params[0].x, u.params[0].y, u.params[0].z, RES)",
+                3,
+            ),
+            _ => return None,
+        };
+        Some((body, call, used))
+    }
+
+    /// Shift every `u.params[i]` index in a stock call template forward by
+    /// `ofs` vec4 slots (the graph packs each StockOp's floats vec4-aligned).
+    fn param_shift(call: &str, ofs: usize) -> String {
+        let mut s = call.to_string();
+        for i in (0..4).rev() {
+            s = s.replace(&format!("u.params[{i}]"), &format!("u.params[{ofs}]"));
+        }
+        s
+    }
+
+    /// Compile a pass reproducing a color-clean Node Graph exactly: walk
+    /// backwards from Output, emit one vec4 WGSL expression per node.
+    /// Content (BaseValueIn) is the source pixel, Blend modes are inline
+    /// elementwise formulas, StockOp reuses the pointwise kernel twins with
+    /// vec4-aligned param slots. Anything else (Math/Lerp/Factor/Break,
+    /// spatial kernels, >16 float params, cycles) declines with Err â€” the
+    /// caller keeps that graph on the exact CPU path.
+    pub fn for_graph(
+        gpu: &GpuContext,
+        graph: &project::ModifierGraph,
+        target_format: wgpu::TextureFormat,
+    ) -> Result<Self, String> {
+                use project::{ConstantMode, NodeKind};
+        let Some(out_id) = graph.nodes.iter().find(|n| matches!(n.kind, NodeKind::Output)).map(|n| n.id.clone()) else {
+            return Err("graph has no Output node".into());
+        };
+        if !graph.is_color_clean() {
+            return Err("graph is not color-clean".into());
+        }
+
+
+        struct Gs<'a> {
+            graph: &'a project::ModifierGraph,
+            bodies: Vec<&'static str>,
+            params: Vec<f32>,
+            preamble: String,
+            memo: std::collections::HashMap<String, String>,
+            visiting: Vec<String>,
+            stock_seq: usize,
+        }
+
+        impl<'a> Gs<'a> {
+            /// Expression for one wire into `node_id`'s socket, if wired.
+            fn wire(&mut self, node_id: &str, socket: &str) -> Result<Option<String>, String> {
+                let hit = self
+                    .graph
+                    .connections
+                    .iter()
+                    .find(|c| c.to_node == node_id && c.to_socket == socket)
+                    .map(|c| (c.from_node.clone(), c.from_socket.clone()));
+                match hit {
+                    Some((from, from_socket)) => Ok(Some(self.select(&from, &from_socket)?)),
+                    None => Ok(None),
+                }
+            }
+
+            /// Expression for one node output socket. Clean graphs only
+            /// wire `value`/`result`/channel names: a vec4 bus or a `.c`
+            /// component read (which broadcasts through WGSL scalar math).
+            fn select(&mut self, node_id: &str, socket: &str) -> Result<String, String> {
+                let bus = self.node(node_id)?;
+                Ok(match socket {
+                    "value" | "result" | "" => bus,
+                    "r" | "x" => format!("({bus}).r"),
+                    "g" | "y" => format!("({bus}).g"),
+                    "b" | "z" => format!("({bus}).z"),
+                    _ => format!("({bus}).a"),
+                })
+            }
+
+            /// One vec4 WGSL expression per node, memoized.
+            fn node(&mut self, node_id: &str) -> Result<String, String> {
+                if let Some(e) = self.memo.get(node_id) {
+                    return Ok(e.clone());
+                }
+                if self.visiting.iter().any(|v| v == node_id) {
+                    return Err("cycle in color-clean graph".into());
+                }
+                self.visiting.push(node_id.to_string());
+                let node = match self.graph.get_node(node_id) {
+                    Some(n) => n.kind.clone(),
+                    None => {
+                        self.visiting.pop();
+                        return Ok("color".to_string());
+                    }
+                };
+                let res = self.node_kind(node_id, &node);
+                self.visiting.pop();
+                let expr = res?;
+                self.memo.insert(node_id.to_string(), expr.clone());
+                Ok(expr)
+            }
+
+            fn node_kind(&mut self, node_id: &str, kind: &project::NodeKind) -> Result<String, String> {
+                use project::modifier::GraphBlendMode;
+                Ok(match kind {
+                    NodeKind::BaseValueIn => "color".to_string(),
+                    NodeKind::Constant { mode, value, g, b, a } => {
+                        // Mirror of the engine's constant_comp expansion.
+                        let src = [*value, *g, *b, *a];
+                        let v: [f32; 4] = match mode {
+                            ConstantMode::Float | ConstantMode::Int => [src[0]; 4],
+                            ConstantMode::Color => src,
+                            ConstantMode::Vec2 => [src[0], src[1], 0.0, 1.0],
+                            ConstantMode::Vec3 => [src[0], src[1], src[2], 1.0],
+                        };
+                        format!("vec4<f32>({:.9}, {:.9}, {:.9}, {:.9})", v[0], v[1], v[2], v[3])
+                    }
+                    NodeKind::Blend { mode, .. } => {
+                        // a + (mode.mix(a,b) - a) * w — the CPU per-channel
+                        // walk folds to elementwise vector math here.
+                        let a = self.wire(node_id, "a")?.unwrap_or_else(|| "color".to_string());
+                        let b = self.wire(node_id, "b")?.unwrap_or_else(|| "vec4<f32>(0.0)".to_string());
+                        let w = self.wire(node_id, "weight")?.unwrap_or_else(|| "0.0".to_string());
+                        let mix = match mode {
+                            GraphBlendMode::Linear => b.clone(),
+                            GraphBlendMode::Screen => {
+                                format!("(1.0 - (1.0 - {a}) * (1.0 - {b}))")
+                            }
+                            GraphBlendMode::Multiply => format!("({a} * {b})"),
+                            GraphBlendMode::Add => format!("({a} + {b})"),
+                            GraphBlendMode::Subtract => format!("({a} - {b})"),
+                            GraphBlendMode::Difference => format!("(abs({a} - {b}))"),
+                            GraphBlendMode::Overlay => format!(
+                                "(select(1.0 - 2.0 * (1.0 - {a}) * (1.0 - {b}), 2.0 * {a} * {b}, {a} < vec4<f32>(0.5)))"
+                            ),
+                        };
+                        format!("(({a}) + ({mix} - ({a})) * ({w}))")
+                    }
+                    NodeKind::StockOp { plugin, params } => {
+                        let Some((body, call, used)) = FxPass::graph_stock_twin(*plugin) else {
+                            return Err(format!("no graph WGSL twin for {:?}", plugin));
+                        };
+                        if !self.bodies.contains(&body) {
+                            self.bodies.push(body);
+                        }
+                        // Vec4-aligned param slots, resolved against the
+                        // descriptor defaults exactly like the CPU.
+                        let resolved = project::stock::stock_params_resolved(*plugin, params);
+                        let slot = self.params.len().div_ceil(4);
+                        self.params.extend_from_slice(&resolved[..used]);
+                        while !self.params.len().is_multiple_of(4) {
+                            self.params.push(0.0);
+                        }
+                        let var = format!("s{}", self.stock_seq);
+                        self.stock_seq += 1;
+                        let input = self
+                            .wire(node_id, "in")?
+                            .unwrap_or_else(|| "color".to_string());
+                        self.preamble.push_str(&format!("    var {var} = {input};\n"));
+                        let templ = FxPass::param_shift(call, slot)
+                            .replace("(uv, color,", &format!("(uv, {var},"))
+                            .replace("RES", "vec2<f32>(u.misc.y, u.misc.z)");
+                        templ
+                    }
+                    NodeKind::Output => self.wire(node_id, "result")?.unwrap_or_else(|| "color".to_string()),
+                    _ => return Err(format!("graph node not twinable: {:?}", kind)),
+                })
+            }
+        }
+
+        let mut gs = Gs {
+            graph,
+            bodies: Vec::new(),
+            params: Vec::new(),
+            preamble: String::new(),
+            memo: std::collections::HashMap::new(),
+            visiting: Vec::new(),
+            stock_seq: 0,
+        };
+        let expr = gs.select(&out_id, "result")?;
+        // FxUniforms packs 16 float params (4x vec4); anything wider
+        // declines to the CPU path.
+        if gs.params.len() > 16 {
+            return Err(format!("graph params need {} floats > 16 budget", gs.params.len()));
+        }
+        let mut body = String::new();
+        for b in &gs.bodies {
+            body.push_str(b);
+            body.push('\n');
+        }
+        body.push_str(&format!(
+            "fn fx_graph_eval(color: vec4<f32>, uv: vec2<f32>) -> vec4<f32> {{\n{}    return {};\n}}\n",
+            gs.preamble, expr
+        ));
+        let mut pass = Self::compile(
+            gpu,
+            "FxPass_graph",
+            target_format,
+            &body,
+            "fx_graph_eval(color, uv)",
+            &[],
+        )?;
+        pass.graph_params = gs.params;
+        Ok(pass)
+    }
     fn compile(
         gpu: &GpuContext,
         label: &str,
@@ -754,7 +1038,7 @@ impl FxPass {
     /// spread-boosted PURE-ALPHA silhouette (black rgb like the CPU
     /// `sil` buffer), feeding the shared compute blur; the under-merge
     /// applies the authored tint at composite time (exactly the CPU
-    /// blur-then-colorize order — colorizing after the sigma blur).
+    /// blur-then-colorize order â€” colorizing after the sigma blur).
     pub fn glow_fill(
         gpu: &GpuContext,
         target_format: wgpu::TextureFormat,
@@ -778,7 +1062,7 @@ impl FxPass {
     }
 
     /// Drop-shadow aura fill: pure-alpha silhouette sampled at the shadow
-    /// offset via the resample helper (offset in px — blur commutes with
+    /// offset via the resample helper (offset in px â€” blur commutes with
     /// the constant offset, so sampling before blurring matches the CPU
     /// order). The under-merge applies the tint.
     pub fn shadow_fill(
@@ -972,8 +1256,8 @@ struct FxUniforms {
 
     /// Long-shadow under-merge: source over the blurred shadow layer
     /// (`u.params[0].x` = mode 0 behind / 1 cutout / 2 only). The shadow
-    /// layer holds straight bytes (tint, alpha — exactly the CPU
-    /// `to_rgba8` feed), so the composite re-premultiplies explicitly —
+    /// layer holds straight bytes (tint, alpha â€” exactly the CPU
+    /// `to_rgba8` feed), so the composite re-premultiplies explicitly â€”
     /// mirroring `k_long_shadow`'s odd-but-exact `d + s * (1 - s.a)` form
     /// rather than "fixing" it.
     pub fn shadow_under(
@@ -992,7 +1276,7 @@ struct FxUniforms {
     }
 
     /// Aura under-merge: content over the blurred aura silhouette. The
-    /// aura holds pure-alpha bytes (black rgb — the CPU `sil` blur
+    /// aura holds pure-alpha bytes (black rgb â€” the CPU `sil` blur
     /// feed), so this colorizes with `u.colors[0]` AT composite time,
     /// mirroring the CPU colorize-after-blur order; bytes land normalized
     /// back to straight alpha for the chain cursor.
@@ -1001,7 +1285,7 @@ struct FxUniforms {
         target_format: wgpu::TextureFormat,
     ) -> Result<Self, String> {
         // Gates: no aura (pure content passthrough) and full content
-        // coverage (aura fully occluded — mirrors src-over's 1 - o.a ≈ 0).
+        // coverage (aura fully occluded â€” mirrors src-over's 1 - o.a â‰ˆ 0).
         Self::from_calls(
             gpu,
             target_format,
@@ -1078,14 +1362,14 @@ struct FxUniforms {
 /// visual change. Excluded despite compiling: FilmGrain (frame-seeded CPU
 /// vs time-seeded twin), Threshold (steep smoothstep transfer curves
 /// amplify u8 rounding through cascades), and Halftone (luminance-
-/// thresholded binary dots flip on u8-quantized smooth gradients — the
+/// thresholded binary dots flip on u8-quantized smooth gradients â€” the
 /// twin is exact, but the chain cannot bound it); those stay on the exact
 /// CPU path, as does export. Saber is excluded too: its twin is a fixed
 /// beam generator while the CPU kernel is mask-driven with a blur-based
-/// glow, so the two cannot agree — it needs a multi-stage (blur + merge)
+/// glow, so the two cannot agree â€” it needs a multi-stage (blur + merge)
 /// pass before it can rejoin this set. Stock Glow is excluded as well:
 /// threshold presence flips across the u8 boundary while the white
-/// screen amplifies any nonzero mask to full strength — unboundable in
+/// screen amplifies any nonzero mask to full strength â€” unboundable in
 /// a u8 chain for the same reason as Threshold.
 ///
 /// Blur family: Directional/Motion/Radial/Zoom/Bilateral have exact
@@ -1093,7 +1377,7 @@ struct FxUniforms {
 /// bilateral fuses both range-weighted passes in one evaluation so no
 /// u8 intermediate ever carries the alpha-normalized luminance the
 /// weights read). Box and Defocus run the separable box compute path
-/// (`ComputeBoxPipeline`) — no fragment twins, so they are members here
+/// (`ComputeBoxPipeline`) â€” no fragment twins, so they are members here
 /// but stay out of [`stock_wgsl_plugins`]. Bokeh stays on the exact CPU
 /// path: its blurred-highlight alpha tail below 1/255 carries
 /// full-strength screen presence on the CPU but quantizes to zero in any

@@ -60,6 +60,7 @@ pub struct GpuEffectEngine {
     fx_pass_cache: std::collections::HashMap<StockPlugin, FxPass>,
     builtin_pass_cache: std::collections::HashMap<&'static str, FxPass>,
     merge_pass_cache: std::collections::HashMap<&'static str, FxMergePass>,
+    graph_pass_cache: std::collections::HashMap<u64, FxPass>,
     bright_pass: Option<FxPass>,
     blit_pass: Option<FxPass>,
     /// Long-shadow march stage pass for the multi-stage stock path
@@ -121,6 +122,7 @@ impl GpuEffectEngine {
             fx_pass_cache: std::collections::HashMap::new(),
             builtin_pass_cache: std::collections::HashMap::new(),
             merge_pass_cache: std::collections::HashMap::new(),
+            graph_pass_cache: std::collections::HashMap::new(),
             bright_pass: None,
             blit_pass: None,
             march_pass: None,
@@ -182,6 +184,23 @@ impl GpuEffectEngine {
             self.builtin_pass_cache.insert(id, pass);
         }
         Ok(&self.builtin_pass_cache[id])
+    }
+
+    /// Get or create the WGSL twin pass for a color-clean Node Graph,
+    /// keyed by graph content (`# ponytail:` Debug-format hash — graphs
+    /// are small and cache pressure is negligible).
+    fn get_or_create_graph_pass(
+        &mut self,
+        graph: &project::ModifierGraph,
+    ) -> Result<&FxPass, GpuError> {
+        let key = crate::fx_pass::graph_key_of(graph);
+        if !self.graph_pass_cache.contains_key(&key) {
+            let format = wgpu::TextureFormat::Rgba8Unorm;
+            let pass = FxPass::for_graph(&self.gpu, graph, format)
+                .map_err(GpuError::ShaderCompilation)?;
+            self.graph_pass_cache.insert(key, pass);
+        }
+        Ok(&self.graph_pass_cache[&key])
     }
 
     /// Get or create a two-texture merge pass ("unsharp" / "screen" /
@@ -503,6 +522,20 @@ impl GpuEffectEngine {
                         any = true;
                         continue;
                     }
+                    // Node Graph: a color-clean graph runs as ONE WGSL
+                    // pass; anything else (carried None, Math/Break/factor
+                    // nodes, spatial stock, param budget) declines the
+                    // whole chain to the exact CPU path.
+                    if let compositor::EvaluatedEffectType::NodeGraph {} = eff_type {
+                        let Some(graph) = &eff.graph else {
+                            return false;
+                        };
+                        if self.get_or_create_graph_pass(graph).is_err() {
+                            return false;
+                        }
+                        any = true;
+                        continue;
+                    }
                     let Some(id) = crate::fx_pass::builtin_gpu_id(eff_type) else {
                         return false;
                     };
@@ -589,6 +622,10 @@ impl GpuEffectEngine {
                 let _ = self.get_or_create_merge_pass("unsharp");
             } else if let Some(id) = crate::fx_pass::builtin_gpu_id(&eff.effect_type) {
                 let _ = self.get_or_create_builtin_pass(id);
+            } else if let (EvaluatedEffectType::NodeGraph {}, Some(graph)) =
+                (&eff.effect_type, &eff.graph)
+            {
+                let _ = self.get_or_create_graph_pass(graph);
             } else if matches!(
                 &eff.effect_type,
                 EvaluatedEffectType::DropShadow { .. } | EvaluatedEffectType::OuterGlow { .. }
@@ -831,6 +868,39 @@ impl GpuEffectEngine {
                     }
                 }
                 eff_type => {
+                    // Node Graph: one pre-compiled pass with the graph's
+                    // packed params (carried on the pass at compile time).
+                    // Carried None or a declined graph never reaches here
+                    // — supports_fx_chain gates the whole chain.
+                    if let (EvaluatedEffectType::NodeGraph {}, Some(graph)) =
+                        (eff_type, &eff.graph)
+                    {
+                        let key = crate::fx_pass::graph_key_of(graph);
+                        let packed = self
+                            .graph_pass_cache
+                            .get(&key)
+                            .map(|p| p.graph_params.clone())
+                            .unwrap_or_default();
+                        if let Some(pass) = self.graph_pass_cache.get(&key) {
+                            let uniforms = FxUniforms::pack(
+                                &packed,
+                                &[],
+                                time_s,
+                                width as f32,
+                                height as f32,
+                                0.0,
+                            );
+                            pass.record_into(
+                                &self.gpu,
+                                &mut encoder,
+                                targets.read_target().view(),
+                                targets.write_target(),
+                                uniforms,
+                            );
+                            targets.swap();
+                        }
+                        continue;
+                    }
                     // Built-in aura (Drop Shadow / Outer Glow):
                     // colorize -> compute blur -> under-merge, then land
                     // the result back in the chain cursor. Exactly the CPU
@@ -1354,5 +1424,171 @@ mod tests {
         }
         eprintln!("BLUR-PATHS worst={worst} at byte {at} cpu={} gpu={}", cpu_out[at], gpu_out[at]);
         assert!(worst <= 2, "blur paths must agree, worst {worst}");
+    }
+
+    /// Node Graph WGSL twin vs the CPU engine walk on identical gradients:
+    /// a Content -> Posterize -> Output graph must match per pixel (the
+    /// twin reuses the same pointwise kernel both sides).
+    #[test]
+    fn node_graph_posterize_parity() {
+        let Ok(gpu) = GpuContext::new_headless() else { return };
+        let Ok(mut engine) = GpuEffectEngine::new(gpu) else { return };
+        let graph = project::ModifierGraph {
+            nodes: vec![
+                project::ModifierNode::new("in", 0.0, 0.0, project::NodeKind::BaseValueIn),
+                project::ModifierNode::new(
+                    "po",
+                    120.0,
+                    0.0,
+                    project::NodeKind::StockOp {
+                        plugin: project::StockPlugin::Posterize,
+                        params: vec![3.0],
+                    },
+                ),
+                project::ModifierNode::new("out", 240.0, 0.0, project::NodeKind::Output),
+            ],
+            connections: vec![
+                project::NodeConnection::new("in", "value", "po", "in"),
+                project::NodeConnection::new("po", "value", "out", "result"),
+            ],
+        };
+        assert!(graph.is_color_clean());
+        let eff = EvaluatedEffect {
+            graph: Some(graph.clone()),
+            id: "ng".to_string(),
+            name: "Node Graph".to_string(),
+            enabled: true,
+            effect_type: EvaluatedEffectType::NodeGraph {},
+        };
+        assert!(engine.supports_fx_chain(std::slice::from_ref(&eff)));
+        let (w, h) = (16u32, 16u32);
+        let mut src = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                src[i] = (x * 15) as u8;
+                src[i + 1] = (y * 15) as u8;
+                src[i + 2] = 128;
+                src[i + 3] = (x * 15) as u8;
+            }
+        }
+        let out = engine
+            .process_rgba_frame(&src, w, h, std::slice::from_ref(&eff), 0.0)
+            .expect("process");
+        fn resolver(_: &str, _: &str) -> f32 { 0.0 }
+        let mut worst = 0f32;
+        let mut at = 0usize;
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                let want = graph.evaluate_color(
+                    src[i] as f32 / 255.0,
+                    src[i + 1] as f32 / 255.0,
+                    src[i + 2] as f32 / 255.0,
+                    src[i + 3] as f32 / 255.0,
+                    0.0,
+                    &resolver,
+                );
+                for (c, ch) in want.iter().enumerate() {
+                    let got = out[i + c] as f32 / 255.0;
+                    let d = (got - ch).abs();
+                    if d > worst {
+                        worst = d;
+                        at = i + c;
+                    }
+                }
+            }
+        }
+        eprintln!("NODE-GRAPH parity worst diff {worst:.4} at byte {at}");
+        assert!(worst < 0.02, "graph twin parity, worst {worst:.4}");
+    }
+
+    /// Blend-node twin parity: Screen/Overlay/Multiply/Add with a
+    /// Constant B and a wired weight, exercised on a gradient (guards the
+    /// elementwise select emission and the vec4 broadcast wiring).
+    #[test]
+    fn node_graph_blend_parity() {
+        use project::modifier::GraphBlendMode;
+        use project::{ConstantMode, ModifierNode, NodeConnection, NodeKind::*};
+        use project::StockPlugin;
+        let Ok(gpu) = GpuContext::new_headless() else { return };
+        let Ok(mut engine) = GpuEffectEngine::new(gpu) else { return };
+        fn resolver(_: &str, _: &str) -> f32 { 0.0 }
+        let expects = [
+            (GraphBlendMode::Screen, 96.0f32),
+            (GraphBlendMode::Overlay, 128.0),
+            (GraphBlendMode::Multiply, 64.0),
+            (GraphBlendMode::Add, 32.0),
+        ];
+        let (w, h) = (16u32, 16u32);
+        let mut src = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                src[i] = (96 + x * 10) as u8;
+                src[i + 1] = (x * 15) as u8;
+                src[i + 2] = (y * 15) as u8;
+                src[i + 3] = 255;
+            }
+        }
+        for (mode, lo) in expects {
+            let graph = project::ModifierGraph {
+                nodes: vec![
+                    ModifierNode::new("in", 0.0, 0.0, BaseValueIn),
+                    ModifierNode::new(
+                        "th",
+                        120.0,
+                        0.0,
+                        StockOp { plugin: StockPlugin::Threshold, params: vec![40.0, 90.0] },
+                    ),
+                    ModifierNode::new(
+                        "k",
+                        60.0,
+                        60.0,
+                        Constant { mode: ConstantMode::default(), value: lo / 255.0, g: 0.6, b: 0.2, a: 1.0 },
+                    ),
+                    ModifierNode::new("bl", 180.0, 120.0, Blend { mode, default_b: 0.0 }),
+                    ModifierNode::new("out", 240.0, 60.0, Output),
+                ],
+                connections: vec![
+                    NodeConnection::new("in", "value", "th", "in"),
+                    NodeConnection::new("th", "value", "bl", "a"),
+                    NodeConnection::new("k", "value", "bl", "b"),
+                    NodeConnection::new("k", "value", "bl", "weight"),
+                    NodeConnection::new("bl", "value", "out", "result"),
+                ],
+            };
+            assert!(graph.is_color_clean(), "{mode:?}");
+            let eff = EvaluatedEffect {
+                graph: Some(graph.clone()),
+                id: "ng".to_string(),
+                name: "Node Graph".to_string(),
+                enabled: true,
+                effect_type: EvaluatedEffectType::NodeGraph {},
+            };
+            assert!(engine.supports_fx_chain(std::slice::from_ref(&eff)), "{mode:?}");
+            let out = engine
+                .process_rgba_frame(&src, w, h, std::slice::from_ref(&eff), 0.0)
+                .expect("process");
+            let mut worst = 0f32;
+            for y in 0..h {
+                for x in 0..w {
+                    let i = ((y * w + x) * 4) as usize;
+                    let want = graph.evaluate_color(
+                        src[i] as f32 / 255.0,
+                        src[i + 1] as f32 / 255.0,
+                        src[i + 2] as f32 / 255.0,
+                        src[i + 3] as f32 / 255.0,
+                        0.0,
+                        &resolver,
+                    );
+                    for (c, ch) in want.iter().enumerate() {
+                        worst = worst.max((out[i + c] as f32 / 255.0 - ch).abs());
+                    }
+                }
+            }
+            eprintln!("NODE-GRAPH blend {mode:?} parity worst {worst:.4}");
+            assert!(worst < 0.02, "{mode:?} twin parity, worst {worst:.4}");
+        }
     }
 }
