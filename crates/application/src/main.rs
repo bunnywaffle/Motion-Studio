@@ -14368,6 +14368,62 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         });
     }
 
+    #[gpui_kit::test]
+    fn test_modifier_graph_blend_mode_pill_switches_mode(cx: &mut TestAppContext) {
+        // Blend nodes render a row of mode pills (Linear = mix default);
+        // clicking Screen through the real window swaps the node's mode.
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let state = cx.new(|_| EditorState::new());
+        let mut mg_view = None;
+        let handle = cx.open_window(size(px(1080.), px(720.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| {
+                crate::modifier_graph_view::ModifierGraphView::new(
+                    state.clone(),
+                    "layer_accent".to_string(),
+                    "transform.position.x".to_string(),
+                    window,
+                    cx,
+                )
+            });
+            mg_view = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let view = mg_view.expect("graph view created");
+        let blend_id = view.update(cx, |v, cx| {
+            v.add_node(
+                project::modifier::NodeKind::Blend {
+                    mode: project::modifier::GraphBlendMode::Linear,
+                    default_b: 0.0,
+                },
+                cx,
+            );
+            v.graph
+                .nodes
+                .iter()
+                .find(|n| matches!(n.kind, project::modifier::NodeKind::Blend { .. }))
+                .unwrap()
+                .id
+                .clone()
+        });
+        let pill = SharedString::from(format!("mg_blend_mode_{}_screen", blend_id.replace('-', "_")));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click(pill.clone(), cx);
+            window.render_frame(cx);
+        })
+        .expect("update_window failed");
+        view.read_with(cx, |v, _| {
+            let n = v.graph.get_node(&blend_id).unwrap();
+            assert!(
+                matches!(n.kind, project::modifier::NodeKind::Blend { mode: project::modifier::GraphBlendMode::Screen, .. }),
+                "clicking the Screen pill must switch the blend mode"
+            );
+        });
+    }
+
     #[test]
     fn test_effect_path_helpers_for_modifier_graph() {
         use crate::state::EditorState;

@@ -290,8 +290,18 @@ impl NodeKind {
         }
     }
 
-    /// Input socket names for this node.
-    pub fn input_sockets(&self) -> &'static [&'static str] {
+    /// Input socket names for this node. Wgsl nodes derive their `pN`
+    /// sockets from what the code actually references (p0..p3, dropping
+    /// unused ones) so the card only offers live inputs.
+    pub fn input_sockets(&self) -> Vec<&'static str> {
+        if let Self::Wgsl { code } = self {
+            return wgsl_param_sockets(code);
+        }
+        self.static_input_sockets().to_vec()
+    }
+
+    /// The static socket-table half of [`Self::input_sockets`].
+    fn static_input_sockets(&self) -> &'static [&'static str] {
         match self {
             Self::GetLayerFactor | Self::BaseValueIn | Self::Constant { .. } | Self::DriverLink { .. } => &[],
             Self::Math { .. } => &["a", "b"],
@@ -337,6 +347,33 @@ impl NodeKind {
             Self::Output => &[],
         }
     }
+}
+
+/// Sockets for a Wgsl node's code: `color` plus every p0..p3 the body
+/// actually references (identifier-boundary checked, so `p10` does not
+/// light up `p1`). Order is fixed p0..p3 regardless of code order.
+pub fn wgsl_param_sockets(code: &str) -> Vec<&'static str> {
+    const NAMES: [&str; 4] = ["p0", "p1", "p2", "p3"];
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let chars: Vec<(usize, char)> = code.char_indices().collect();
+    let mut out = vec!["color"];
+    for name in NAMES {
+        let used = chars
+            .windows(name.chars().count())
+            .position(|w| w.iter().map(|&(_, c)| c).eq(name.chars()))
+            .map(|pos| {
+                // Identifier boundaries: no word char hugging either side.
+                let before_ok = pos == 0 || !is_word(chars[pos - 1].1);
+                let after_idx = pos + name.chars().count();
+                let after_ok = after_idx == chars.len() || !is_word(chars[after_idx].1);
+                before_ok && after_ok
+            })
+            .unwrap_or(false);
+        if used {
+            out.push(name);
+        }
+    }
+    out
 }
 
 /// A node in the modifier graph.
@@ -1737,14 +1774,14 @@ mod tests {
                 NodeConnection::new("wg", "value", "out", "result"),
             ],
         };
-        // Title + sockets
+        // Title + sockets: the body references no p0..p3, so none offered.
         assert_eq!(
             graph.get_node("wg").unwrap().kind.title(),
             "Wgsl"
         );
         assert_eq!(
             graph.get_node("wg").unwrap().kind.input_sockets(),
-            &["color", "p0", "p1", "p2", "p3"][..]
+            vec!["color"]
         );
         // Pure per-pixel user math: qualifies for the GPU twin.
         assert!(graph.is_color_clean());
@@ -1777,5 +1814,22 @@ mod tests {
         // pixel through byte-for-byte. Documented CPU/GPU divergence.
         let out = graph.evaluate_color(0.25, 0.5, 0.75, 1.0, 0.5, &resolver);
         assert_eq!(out, [0.25, 0.5, 0.75, 1.0]);
+    }
+
+    #[test]
+    fn test_wgsl_param_sockets_derive_from_code_usage() {
+        // Every referenced pN gets a socket, in fixed order; the palette
+        // default ("return color;") offers none.
+        let kind = NodeKind::Wgsl { code: "let s = p2 * 0.5; return color * s + p0;".to_string() };
+        assert_eq!(kind.input_sockets(), vec!["color", "p0", "p2"]);
+
+        // Identifier boundaries: p10 must not light up p1, and p-nested
+        // names (xparam1, a_p2) are identifiers, not our params.
+        let tricky = NodeKind::Wgsl { code: "let q = p10 + xparam1 + a_p2; return color * q;".to_string() };
+        assert_eq!(tricky.input_sockets(), vec!["color"]);
+
+        // A pN exactly at the code edges still counts.
+        let edges = NodeKind::Wgsl { code: "p3 * color".to_string() };
+        assert_eq!(edges.input_sockets(), vec!["color", "p3"]);
     }
 }

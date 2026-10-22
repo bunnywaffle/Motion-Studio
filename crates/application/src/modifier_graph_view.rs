@@ -17,6 +17,20 @@ use crate::state::EditorState;
 /// (the toolbar row can wrap, growing the header).
 pub const HEADER_HEIGHT: f32 = 77.0;
 
+/// Display label for a socket: Blend's `a`/`b` read as background/foreground
+/// (wire names stay a/b/weight so old saved graphs load untouched).
+fn socket_display_label(kind: Option<&NodeKind>, socket: &'static str) -> &'static str {
+    if matches!(kind, Some(NodeKind::Blend { .. })) {
+        match socket {
+            "a" => "background",
+            "b" => "foreground",
+            _ => socket,
+        }
+    } else {
+        socket
+    }
+}
+
 /// Map window-space cursor coordinates to header-relative coordinates
 /// (no pan, no measured header growth). Kept for delta-only reads.
 #[inline]
@@ -1331,6 +1345,11 @@ impl ModifierGraphView {
         let sname_down = sname.clone();
         let sname_rclick = sname.clone();
 
+        let label = socket_display_label(
+            self.graph.get_node(node_id).map(|n| &n.kind),
+            socket_name,
+        );
+
         h_flex()
             .gap_1p5()
             .items_center()
@@ -1411,7 +1430,7 @@ impl ModifierGraphView {
                 div()
                     .text_xs()
                     .text_color(if is_target_hover { rgb(0x38bdf8) } else { rgb(0x9ca3af) })
-                    .child(socket_name),
+                    .child(label),
             )
     }
 
@@ -1443,6 +1462,11 @@ impl ModifierGraphView {
         let nid_rclick = nid.clone();
         let sname_down = sname.clone();
         let sname_rclick = sname.clone();
+
+        let out_label = socket_display_label(
+            self.graph.get_node(node_id).map(|n| &n.kind),
+            socket_name,
+        );
 
         h_flex()
             .gap_1p5()
@@ -1488,7 +1512,7 @@ impl ModifierGraphView {
                 div()
                     .text_xs()
                     .text_color(if is_target_hover { rgb(0x34d399) } else { rgb(0x9ca3af) })
-                    .child(socket_name),
+                    .child(out_label),
             )
             .child(
                 div()
@@ -1670,6 +1694,33 @@ impl ModifierGraphView {
                     .child(self.param_scrub_input(nid, "steps", st, rgb(0x4ade80), ent, cx))
             }
 
+            NodeKind::Blend { mode, default_b } => {
+                let m = *mode;
+                let def_b = *default_b;
+                let mut pills = h_flex().w_full().gap_1().flex_wrap();
+                for bm in GraphBlendMode::ALL {
+                    pills = pills.child(
+                        self.blend_mode_btn(bm.label(), m == bm, ent.clone(), nid.clone(), bm, cx),
+                    );
+                }
+                v_flex()
+                    .w_full()
+                    .px_2()
+                    .py_1p5()
+                    .gap_1()
+                    .border_t_1()
+                    .border_color(rgb(0x2e303e))
+                    .child(pills)
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .justify_between()
+                            .items_center()
+                            .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Default fg:"))
+                            .child(self.param_scrub_input(nid, "default_b", def_b, rgb(0xc084fc), ent, cx)),
+                    )
+            }
+
             NodeKind::Wgsl { code } => self.render_wgsl_params(&nid, code, entity, cx),
 
             NodeKind::DriverLink { driver_layer_id, driver_prop_path } => {
@@ -1737,6 +1788,48 @@ impl ModifierGraphView {
                 });
             })
             .child(symbol)
+    }
+
+    /// Blend mode pill (Linear/Mix default, Screen, Multiply, ...).
+    fn blend_mode_btn(
+        &self,
+        label: &'static str,
+        active: bool,
+        entity: Entity<Self>,
+        node_id: String,
+        target_mode: GraphBlendMode,
+        _cx: &App,
+    ) -> AnyElement {
+        div()
+            .id(SharedString::from(format!(
+                "mg_blend_mode_{}_{}",
+                node_id.replace('-', "_"),
+                label.to_lowercase()
+            )))
+            .test_support()
+            .px_1p5()
+            .py_0p5()
+            .rounded_sm()
+            .bg(if active { rgb(0x4338ca) } else { rgb(0x232430) })
+            .hover(|s| s.bg(rgb(0x4f46e5)).text_color(rgb(0xffffff)))
+            .cursor_pointer()
+            .text_xs()
+            .font_medium()
+            .text_color(if active { rgb(0xffffff) } else { rgb(0x9ca3af) })
+            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                cx.stop_propagation();
+                let nid = node_id.clone();
+                entity.update(cx, |this, cx| {
+                    if let Some(n) = this.graph.get_node_mut(&nid) {
+                        if let NodeKind::Blend { mode, .. } = &mut n.kind {
+                            *mode = target_mode;
+                            this.sync_to_state(cx);
+                        }
+                    }
+                });
+            })
+            .child(label)
+            .into_any_element()
     }
 
     /// Wgsl node body: click-to-edit code pill + the shader signature hint.
