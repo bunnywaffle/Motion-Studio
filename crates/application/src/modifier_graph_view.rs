@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex, IndexPath, StyledExt, TestSupportExt};
 use gpui_kit::component::combobox::{Combobox, ComboboxEvent, ComboboxState};
+use gpui_kit::component::collapsible::Collapsible;
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use gpui_kit::component::searchable_list::SearchableVec;
 use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
@@ -131,6 +132,9 @@ pub struct ModifierGraphView {
     blend_combos: HashMap<String, Entity<ComboboxState<SearchableVec<String>>>>,
     /// Confirm subscriptions for the retained blend Comboboxes.
     blend_combo_subs: HashMap<String, Subscription>,
+    /// Node palette sidebar section open/closed (Value/Color/Space/Bus/Driver).
+    /// Sections start collapsed: the sidebar is a clean list of categories.
+    palette_open: [bool; 5],
 }
 
 impl ModifierGraphView {
@@ -172,6 +176,7 @@ impl ModifierGraphView {
             param_editor_sub: None,
             blend_combos: HashMap::new(),
             blend_combo_subs: HashMap::new(),
+            palette_open: [false; 5],
         }
     }
 
@@ -455,8 +460,9 @@ impl Render for ModifierGraphView {
         // 1. Top Header & Toolbar
         let header = self.render_header(factor, base_val, evaluated_out, is_driven, &entity, cx);
 
-        // 2. Node Canvas Area
+        // 2. Node palette sidebar + canvas
         let canvas = self.render_canvas(&entity, cx);
+        let palette = self.render_node_palette(&entity, cx);
 
         let ent_key = entity.clone();
         v_flex()
@@ -476,7 +482,15 @@ impl Render for ModifierGraphView {
                 }
             })
             .child(header)
-            .child(canvas)
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .items_stretch()
+                    .overflow_hidden()
+                    .child(palette)
+                    .child(div().flex_1().child(canvas)),
+            )
     }
 }
 
@@ -490,30 +504,6 @@ impl ModifierGraphView {
         entity: &Entity<Self>,
         cx: &mut Context<Self>,
     ) -> Div {
-        let ent_math = entity.clone();
-        let ent_lerp = entity.clone();
-        let ent_clamp = entity.clone();
-        let ent_remap = entity.clone();
-        let ent_smooth = entity.clone();
-        let ent_noise = entity.clone();
-        let ent_wave = entity.clone();
-        let ent_step = entity.clone();
-        let ent_const = entity.clone();
-        let ent_blend = entity.clone();
-        let ent_posterize = entity.clone();
-        let ent_threshold = entity.clone();
-        let ent_wgsl = entity.clone();
-        let ent_transform = entity.clone();
-        let ent_tile = entity.clone();
-        let ent_glow = entity.clone();
-        let ent_bloom = entity.clone();
-        let ent_make2d = entity.clone();
-        let ent_make3d = entity.clone();
-        let ent_mkcolor = entity.clone();
-        let ent_brk2d = entity.clone();
-        let ent_brk3d = entity.clone();
-        let ent_brkcolor = entity.clone();
-        let ent_driver = entity.clone();
         let ent_paste_link = entity.clone();
         let ent_reset = entity.clone();
         let this_copied_link = self.editor_state.read(cx).copied_property_link.clone();
@@ -647,192 +637,15 @@ impl ModifierGraphView {
                     ),
             )
             .child(
-                // Row 2: Node Addition Toolbar
+                // Row 2: graph actions (node palette lives in the sidebar).
                 h_flex()
                     .w_full()
-                    .min_h(px(34.))
-                    .flex_wrap()
+                    .h(px(30.))
                     .px_3()
                     .gap_1p5()
                     .items_center()
                     .bg(cx.theme().muted)
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_semibold()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("+ Add Node:"),
-                    )
-                    .child(self.palette_cat("Value", cx))
-                    .child(self.toolbar_btn("Math", ent_math, move |this, cx| {
-                        this.add_node(
-                            NodeKind::Math {
-                                op: MathOp::Multiply,
-                                default_b: 1.0,
-                            },
-                            cx,
-                        );
-                    }, cx))
-                    .child(self.toolbar_btn("Lerp", ent_lerp, move |this, cx| {
-                        this.add_node(
-                            NodeKind::Lerp {
-                                default_a: 0.0,
-                                default_b: 1.0,
-                            },
-                            cx,
-                        );
-                    }, cx))
-                    .child(self.toolbar_btn("Clamp", ent_clamp, move |this, cx| {
-                        this.add_node(NodeKind::Clamp { min: 0.0, max: 1.0 }, cx);
-                    }, cx))
-                    .child(self.toolbar_btn("Remap", ent_remap, move |this, cx| {
-                        this.add_node(
-                            NodeKind::Remap {
-                                in_min: 0.0,
-                                in_max: 1.0,
-                                out_min: 0.0,
-                                out_max: 100.0,
-                            },
-                            cx,
-                        );
-                    }, cx))
-                    .child(self.toolbar_btn("Smoothstep", ent_smooth, move |this, cx| {
-                        this.add_node(NodeKind::Smoothstep { edge0: 0.0, edge1: 1.0 }, cx);
-                    }, cx))
-                    .child(self.toolbar_btn("Noise", ent_noise, move |this, cx| {
-                        this.add_node(
-                            NodeKind::Noise {
-                                frequency: 2.0,
-                                amplitude: 50.0,
-                            },
-                            cx,
-                        );
-                    }, cx))
-                    .child(self.toolbar_btn("Wave", ent_wave, move |this, cx| {
-                        this.add_node(
-                            NodeKind::Wave {
-                                wave_type: WaveType::Sine,
-                                frequency: 1.0,
-                                amplitude: 50.0,
-                                offset: 0.0,
-                            },
-                            cx,
-                        );
-                    }, cx))
-                    .child(self.toolbar_btn("Stepped", ent_step, move |this, cx| {
-                        this.add_node(NodeKind::Stepped { steps: 5.0 }, cx);
-                    }, cx))
-                    .child(Self::palette_div(cx))
-                    .child(self.palette_cat("Color", cx))
-                    .child(self.toolbar_btn("Constant", ent_const, move |this, cx| {
-                        this.add_node(NodeKind::Constant { mode: ConstantMode::Float, value: 1.0, g: 0.0, b: 0.0, a: 1.0 }, cx);
-                    }, cx))
-                    .child(self.toolbar_btn("Blend", ent_blend, move |this, cx| {
-                        this.add_node(NodeKind::Blend { mode: GraphBlendMode::default(), default_b: 0.0 }, cx);
-                    }, cx))
-                    .child(self.toolbar_btn("Posterize", ent_posterize, move |this, cx| {
-                        this.add_node(
-                            NodeKind::StockOp {
-                                plugin: StockPlugin::Posterize,
-                                params: vec![2.0],
-                            },
-                            cx,
-                        );
-                    }, cx))
-                    .child(self.toolbar_btn("Threshold", ent_threshold, move |this, cx| {
-                        this.add_node(
-                            NodeKind::StockOp {
-                                plugin: StockPlugin::Threshold,
-                                params: vec![50.0, 30.0],
-                            },
-                            cx,
-                        );
-                    }, cx))
-                    .child(self.toolbar_btn("Wgsl", ent_wgsl, move |this, cx| {
-                        this.add_node(
-                            NodeKind::Wgsl {
-                                code: "return color;".to_string(),
-                            },
-                            cx,
-                        );
-                    }, cx))
-                    .child(Self::palette_div(cx))
-                    .child(self.palette_cat("Space", cx))
-                    .child(self.toolbar_btn("Transform", ent_transform, move |this, cx| {
-                        this.add_node(
-                            NodeKind::Transform {
-                                x: 0.0,
-                                y: 0.0,
-                                scale: 1.0,
-                                rotation: 0.0,
-                            },
-                            cx,
-                        );
-                    }, cx))
-                    .child(self.toolbar_btn("Tile", ent_tile, move |this, cx| {
-                        this.add_node(
-                            NodeKind::Tile {
-                                repeat_x: 2.0,
-                                repeat_y: 2.0,
-                            },
-                            cx,
-                        );
-                    }, cx))
-                    .child(self.toolbar_btn("Glow", ent_glow, move |this, cx| {
-                        this.add_node(
-                            NodeKind::Glow {
-                                radius: 0.05,
-                                intensity: 1.0,
-                            },
-                            cx,
-                        );
-                    }, cx))
-                    .child(self.toolbar_btn("Bloom", ent_bloom, move |this, cx| {
-                        this.add_node(
-                            NodeKind::Bloom {
-                                threshold: 0.7,
-                                radius: 0.05,
-                                intensity: 1.0,
-                            },
-                            cx,
-                        );
-                    }, cx))
-                    .child(Self::palette_div(cx))
-                    .child(self.palette_cat("Bus", cx))
-                    .child(self.toolbar_btn("Mk 2D", ent_make2d, move |this, cx| {
-                        this.add_node(NodeKind::MakeVector { dims: 2 }, cx);
-                    }, cx))
-                    .child(self.toolbar_btn("Mk 3D", ent_make3d, move |this, cx| {
-                        this.add_node(NodeKind::MakeVector { dims: 3 }, cx);
-                    }, cx))
-                    .child(self.toolbar_btn("Mk Color", ent_mkcolor, move |this, cx| {
-                        this.add_node(NodeKind::MakeColor, cx);
-                    }, cx))
-                    .child(self.toolbar_btn("Brk 2D", ent_brk2d, move |this, cx| {
-                        this.add_node(NodeKind::BreakVector { dims: 2 }, cx);
-                    }, cx))
-                    .child(self.toolbar_btn("Brk 3D", ent_brk3d, move |this, cx| {
-                        this.add_node(NodeKind::BreakVector { dims: 3 }, cx);
-                    }, cx))
-                    .child(self.toolbar_btn("Brk Color", ent_brkcolor, move |this, cx| {
-                        this.add_node(NodeKind::BreakColor, cx);
-                    }, cx))
-                    .child(Self::palette_div(cx))
-                    .child(self.palette_cat("Driver", cx))
-                    .child(self.toolbar_btn("Driver Link", ent_driver, move |this, cx| {
-                        let copied = this.editor_state.read(cx).copied_property_link.clone();
-                        let (driver_layer_id, driver_prop_path) = match copied {
-                            Some((l, p)) => (l, p),
-                            None => (this.layer_id.clone(), "transform.rotation".to_string()),
-                        };
-                        this.add_node(
-                            NodeKind::DriverLink {
-                                driver_layer_id,
-                                driver_prop_path,
-                            },
-                            cx,
-                        );
-                    }, cx))
+                    .child(div().flex_grow(1.0))
                     .child({
                         let has_copied = this_copied_link.is_some();
                         let ent_pl = ent_paste_link.clone();
@@ -857,7 +670,6 @@ impl ModifierGraphView {
                             })
                             .child("Paste Property Link")
                     })
-                    .child(div().flex_grow(1.0))
                     .child(
                         div()
                             .id("reset_graph_btn")
@@ -882,18 +694,145 @@ impl ModifierGraphView {
             )
     }
 
-    /// Category heading + divider for the grouped node palette.
-    fn palette_cat(&self, label: &'static str, cx: &App) -> Div {
-        div()
-            .text_xs()
-            .font_semibold()
-            .text_color(cx.theme().muted_foreground)
-            .pl_2()
-            .child(label)
+    /// Sidebar palette sections: (category, [(button label, kind ctor)]).
+    /// Each ctor builds the node's default wiring-free kind.
+    type PaletteEntry = (&'static str, &'static [(&'static str, fn() -> NodeKind)]);
+    const PALETTE_SECTIONS: &'static [PaletteEntry] = &[
+        (
+            "Value",
+            &[
+                ("Math", || NodeKind::Math { op: MathOp::Multiply, default_b: 1.0 }),
+                ("Lerp", || NodeKind::Lerp { default_a: 0.0, default_b: 1.0 }),
+                ("Clamp", || NodeKind::Clamp { min: 0.0, max: 1.0 }),
+                ("Remap", || NodeKind::Remap { in_min: 0.0, in_max: 1.0, out_min: 0.0, out_max: 100.0 }),
+                ("Smoothstep", || NodeKind::Smoothstep { edge0: 0.0, edge1: 1.0 }),
+                ("Noise", || NodeKind::Noise { frequency: 2.0, amplitude: 50.0 }),
+                ("Wave", || NodeKind::Wave { wave_type: WaveType::Sine, frequency: 1.0, amplitude: 50.0, offset: 0.0 }),
+                ("Stepped", || NodeKind::Stepped { steps: 5.0 }),
+            ],
+        ),
+        (
+            "Color",
+            &[
+                ("Constant", || NodeKind::Constant { mode: ConstantMode::Float, value: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
+                ("Blend", || NodeKind::Blend { mode: GraphBlendMode::default(), default_b: 0.0 }),
+                ("Posterize", || NodeKind::StockOp { plugin: StockPlugin::Posterize, params: vec![2.0] }),
+                ("Threshold", || NodeKind::StockOp { plugin: StockPlugin::Threshold, params: vec![50.0, 30.0] }),
+                ("Wgsl", || NodeKind::Wgsl { code: "return color;".to_string() }),
+            ],
+        ),
+        (
+            "Space",
+            &[
+                ("Transform", || NodeKind::Transform { x: 0.0, y: 0.0, scale: 1.0, rotation: 0.0 }),
+                ("Tile", || NodeKind::Tile { repeat_x: 2.0, repeat_y: 2.0 }),
+                ("Glow", || NodeKind::Glow { radius: 0.05, intensity: 1.0 }),
+                ("Bloom", || NodeKind::Bloom { threshold: 0.7, radius: 0.05, intensity: 1.0 }),
+            ],
+        ),
+        (
+            "Bus",
+            &[
+                ("Mk 2D", || NodeKind::MakeVector { dims: 2 }),
+                ("Mk 3D", || NodeKind::MakeVector { dims: 3 }),
+                ("Mk Color", || NodeKind::MakeColor),
+                ("Brk 2D", || NodeKind::BreakVector { dims: 2 }),
+                ("Brk 3D", || NodeKind::BreakVector { dims: 3 }),
+                ("Brk Color", || NodeKind::BreakColor),
+            ],
+        ),
+        ("Driver", &[]),
+    ];
+
+    /// Vertical accordion sidebar with one collapsible section per node
+    /// category. Sections start collapsed (a clean category list); a
+    /// header click toggles its section open/closed.
+    fn render_node_palette(&self, entity: &Entity<Self>, cx: &App) -> impl IntoElement {
+        let mut sections: Vec<AnyElement> = Vec::new();
+        for (i, (cat, btns)) in Self::PALETTE_SECTIONS.iter().enumerate() {
+            let mut body = v_flex().px_2().py_1().gap_1p5();
+            for (label, ctor) in btns.iter() {
+                let ent_btn = entity.clone();
+                let ctor = *ctor;
+                body = body.child(self.toolbar_btn(label, ent_btn, move |this, cx| {
+                    this.add_node(ctor(), cx);
+                }, cx));
+            }
+            if *cat == "Driver" {
+                let ent_drv = entity.clone();
+                body = body.child(self.toolbar_btn("Driver Link", ent_drv, move |this, cx| {
+                    this.add_driver_node(cx);
+                }, cx));
+            }
+            let open = self.palette_open[i];
+            let ent_hdr = entity.clone();
+            let hdr = h_flex()
+                .id(SharedString::from(format!("mg_pal_{i}_hdr")))
+                .test_support()
+                .w_full()
+                .px_2()
+                .py_1()
+                .gap_1p5()
+                .items_center()
+                .cursor_pointer()
+                .rounded_sm()
+                .font_semibold()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .hover(|s| s.bg(cx.theme().accent))
+                .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                    ent_hdr.update(cx, |this, cx| {
+                        this.palette_open[i] = !this.palette_open[i];
+                        cx.notify();
+                    });
+                })
+                .child(div().w(px(10.)).child(if open { "▾" } else { "▸" }))
+                .child(cat.to_uppercase());
+            let content = if open {
+                body.into_any_element()
+            } else {
+                div().into_any_element()
+            };
+            let section = v_flex()
+                .rounded_sm()
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .child(hdr)
+                .into_any_element();
+            sections.push(
+                Collapsible::new()
+                    .open(open)
+                    .child(section)
+                    .content(content)
+                    .into_any_element(),
+            );
+        }
+        v_flex()
+            .id("node_palette_sidebar")
+            .w(px(150.))
+            .h_full()
+            .flex_shrink_0()
+            .pt_1()
+            .bg(cx.theme().muted)
+            .border_r_1()
+            .border_color(cx.theme().border)
+            .overflow_y_scroll()
+            .children(sections)
     }
 
-    fn palette_div(cx: &App) -> Div {
-        div().w(px(2.)).h(px(18.)).rounded_full().bg(cx.theme().border)
+    fn add_driver_node(&mut self, cx: &mut Context<Self>) {
+        let copied = self.editor_state.read(cx).copied_property_link.clone();
+        let (driver_layer_id, driver_prop_path) = match copied {
+            Some((l, p)) => (l, p),
+            None => (self.layer_id.clone(), "transform.rotation".to_string()),
+        };
+        self.add_node(
+            NodeKind::DriverLink {
+                driver_layer_id,
+                driver_prop_path,
+            },
+            cx,
+        );
     }
 
     fn toolbar_btn<F>(&self, label: &'static str, entity: Entity<Self>, on_click: F, cx: &App) -> AnyElement

@@ -13954,10 +13954,24 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             assert!(has_kind(this, &project::modifier::NodeKind::BreakColor));
         });
 
-        // The visible toolbar exposes all six buttons; clicking "Make Color"
-        // through the UI adds one more node.
+        // The palette sidebar lists five category sections collapsed by
+        // default; expanding "Bus" reveals its six buttons and clicking
+        // "Make Color" through the UI adds one more node.
         use gpui_kit::test::TestWindowExt;
         cx.update_window(root_handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            for idx in 0..5 {
+                let id = format!("mg_pal_{idx}_hdr");
+                assert!(window.find(SharedString::from(id.clone())).visible(), "category header {idx} should be visible");
+            }
+            assert!(
+                !window
+                    .try_find(SharedString::from("mg_add_mk_2d"))
+                    .map(|s| s.visible())
+                    .unwrap_or(false),
+                "Bus buttons must be hidden while the section is collapsed",
+            );
+            window.click("mg_pal_3_hdr", cx);
             window.render_frame(cx);
             for (idx, id) in [
                 "mg_add_mk_2d",
