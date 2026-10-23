@@ -22,6 +22,9 @@ pub const HEADER_HEIGHT: f32 = 77.0;
 
 /// Display label for a socket: Blend's `a`/`b` read as background/foreground
 /// (wire names stay a/b/weight so old saved graphs load untouched).
+/// Sidebar palette section row: (category, [(button label, kind ctor)]).
+type PaletteEntry = (&'static str, &'static [(&'static str, fn() -> NodeKind)]);
+
 fn socket_display_label(kind: Option<&NodeKind>, socket: &'static str) -> &'static str {
     if matches!(kind, Some(NodeKind::Blend { .. })) {
         match socket {
@@ -696,7 +699,6 @@ impl ModifierGraphView {
 
     /// Sidebar palette sections: (category, [(button label, kind ctor)]).
     /// Each ctor builds the node's default wiring-free kind.
-    type PaletteEntry = (&'static str, &'static [(&'static str, fn() -> NodeKind)]);
     const PALETTE_SECTIONS: &'static [PaletteEntry] = &[
         (
             "Value",
