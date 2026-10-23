@@ -79,12 +79,44 @@ struct FxUniforms {
 pub fn graph_key_of(graph: &project::ModifierGraph) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    format!("{:?}", graph).hash(&mut h);
+    graph.hash(&mut h);
     h.finish()
 }
 
-pub fn fx_fragment_src(effect_body: &str, uv_calls: &[&str], main_call: &str) -> String {
-    let mut src = String::from(FX_BINDINGS_WGSL);
+/// 8-tap ring average of the source around `uv` (Glow halo).
+pub const FX_RING_WGSL: &str = r#"fn fx_ring(uv: vec2<f32>, r: f32) -> vec4<f32> {
+    var s = vec4<f32>(0.0);
+    s = s + textureSample(src_tex, src_sampler, uv + vec2<f32>(r, 0.0));
+    s = s + textureSample(src_tex, src_sampler, uv - vec2<f32>(r, 0.0));
+    s = s + textureSample(src_tex, src_sampler, uv + vec2<f32>(0.0, r));
+    s = s + textureSample(src_tex, src_sampler, uv - vec2<f32>(0.0, r));
+    let d = r * 0.7071;
+    s = s + textureSample(src_tex, src_sampler, uv + vec2<f32>(d, d));
+    s = s + textureSample(src_tex, src_sampler, uv + vec2<f32>(-d, d));
+    s = s + textureSample(src_tex, src_sampler, uv + vec2<f32>(d, -d));
+    s = s + textureSample(src_tex, src_sampler, uv - vec2<f32>(d, d));
+    return s * 0.125;
+}
+"#;
+
+/// 8-tap ring of the bright pass (Bloom halo): taps gated at `th`.
+pub const FX_BRIGHT_RING_WGSL: &str = r#"fn fx_bright_ring(uv: vec2<f32>, r: f32, th: f32) -> vec4<f32> {
+    var s = vec4<f32>(0.0);
+    let t0 = vec4<f32>(th);
+    let d = r * 0.7071;
+    s = s + max(vec4<f32>(0.0), textureSample(src_tex, src_sampler, uv + vec2<f32>(r, 0.0)) - t0);
+    s = s + max(vec4<f32>(0.0), textureSample(src_tex, src_sampler, uv - vec2<f32>(r, 0.0)) - t0);
+    s = s + max(vec4<f32>(0.0), textureSample(src_tex, src_sampler, uv + vec2<f32>(0.0, r)) - t0);
+    s = s + max(vec4<f32>(0.0), textureSample(src_tex, src_sampler, uv - vec2<f32>(0.0, r)) - t0);
+    s = s + max(vec4<f32>(0.0), textureSample(src_tex, src_sampler, uv + vec2<f32>(d, d)) - t0);
+    s = s + max(vec4<f32>(0.0), textureSample(src_tex, src_sampler, uv + vec2<f32>(-d, d)) - t0);
+    s = s + max(vec4<f32>(0.0), textureSample(src_tex, src_sampler, uv + vec2<f32>(d, -d)) - t0);
+    s = s + max(vec4<f32>(0.0), textureSample(src_tex, src_sampler, uv - vec2<f32>(d, d)) - t0);
+    return s * 0.125;
+}
+"#;
+
+pub fn fx_fragment_src(effect_body: &str, uv_calls: &[&str], main_call: &str) -> String {    let mut src = String::from(FX_BINDINGS_WGSL);
     src.push_str(effect_body);
     src.push_str(
         r#"
@@ -863,6 +895,40 @@ impl FxPass {
                         let p3 = self.wire(node_id, "p3")?.unwrap_or_else(|| "0.0".to_string());
                         format!("{}(color, uv, vec4<f32>({}, {}, {}, {}))", name, p0, p1, p2, p3)
                     }
+                    NodeKind::Transform { x, y, scale, rotation } => {
+                        let sc = if *scale == 0.0 { 1.0 } else { *scale };
+                        format!(
+                            "textureSample(src_tex, src_sampler, (mat2x2<f32>(cos({:.9}), sin({:.9}), -sin({:.9}), cos({:.9})) * ((uv - vec2<f32>(0.5)) / vec2<f32>({sc:.9}))) + vec2<f32>(0.5) - vec2<f32>({:.9}, {:.9}))",
+                            rotation, rotation, rotation, rotation, x, y
+                        )
+                    }
+                    NodeKind::Tile { repeat_x, repeat_y } => {
+                        format!(
+                            "textureSample(src_tex, src_sampler, fract(uv * vec2<f32>({:.9}, {:.9})))",
+                            repeat_x, repeat_y
+                        )
+                    }
+                    NodeKind::Glow { radius, intensity } => {
+                        if !self.bodies.contains(&FX_RING_WGSL) {
+                            self.bodies.push(FX_RING_WGSL);
+                        }
+                        let c = self
+                            .wire(node_id, "color")?
+                            .unwrap_or_else(|| "color".to_string());
+                        format!("(({c}) + fx_ring(uv, {:.9}) * {:.9})", radius, intensity)
+                    }
+                    NodeKind::Bloom { threshold, radius, intensity } => {
+                        if !self.bodies.contains(&FX_BRIGHT_RING_WGSL) {
+                            self.bodies.push(FX_BRIGHT_RING_WGSL);
+                        }
+                        let c = self
+                            .wire(node_id, "color")?
+                            .unwrap_or_else(|| "color".to_string());
+                        format!(
+                            "(({c}) + fx_bright_ring(uv, {:.9}, {:.9}) * {:.9})",
+                            radius, threshold, intensity
+                        )
+                    }
                     _ => return Err(format!("graph node not twinable: {:?}", kind)),
                 })
             }
@@ -1624,6 +1690,59 @@ mod tests {
         );
         let full = format!("{FX_VERT}\n{src}");
         naga::front::wgsl::parse_str(&full).expect("composed fx pass parses");
+    }
+
+    /// The four spatial node kinds must emit valid WGSL (ring helpers,
+    /// fract wrap, rotation matrix). Skips where no wgpu device exists.
+    #[test]
+    fn spatial_graph_twins_compile() {
+        use project::modifier::{ModifierGraph, ModifierNode, NodeConnection, NodeKind};
+        let Ok(gpu) = GpuContext::new_headless() else { return };
+        let cases: Vec<ModifierGraph> = vec![
+            // Transform/Tile: source-only graphs (no color input).
+            ModifierGraph {
+                nodes: vec![
+                    ModifierNode::new("fx", 0.0, 0.0, NodeKind::Transform { x: 0.1, y: -0.2, scale: 1.5, rotation: 30.0 }),
+                    ModifierNode::new("out", 200.0, 0.0, NodeKind::Output),
+                ],
+                connections: vec![NodeConnection::new("fx", "value", "out", "result")],
+            },
+            ModifierGraph {
+                nodes: vec![
+                    ModifierNode::new("fx", 0.0, 0.0, NodeKind::Tile { repeat_x: 3.0, repeat_y: 2.0 }),
+                    ModifierNode::new("out", 200.0, 0.0, NodeKind::Output),
+                ],
+                connections: vec![NodeConnection::new("fx", "value", "out", "result")],
+            },
+            // Glow/Bloom: color-wired graphs (ring helpers must parse).
+            ModifierGraph {
+                nodes: vec![
+                    ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
+                    ModifierNode::new("fx", 120.0, 0.0, NodeKind::Glow { radius: 0.05, intensity: 1.5 }),
+                    ModifierNode::new("out", 300.0, 0.0, NodeKind::Output),
+                ],
+                connections: vec![
+                    NodeConnection::new("in", "value", "fx", "color"),
+                    NodeConnection::new("fx", "value", "out", "result"),
+                ],
+            },
+            ModifierGraph {
+                nodes: vec![
+                    ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
+                    ModifierNode::new("fx", 120.0, 0.0, NodeKind::Bloom { threshold: 0.6, radius: 0.08, intensity: 2.0 }),
+                    ModifierNode::new("out", 300.0, 0.0, NodeKind::Output),
+                ],
+                connections: vec![
+                    NodeConnection::new("in", "value", "fx", "color"),
+                    NodeConnection::new("fx", "value", "out", "result"),
+                ],
+            },
+        ];
+        for graph in cases {
+            let kind = graph.nodes.iter().find(|n| n.id == "fx").unwrap().kind.title();
+            FxPass::for_graph(&gpu, &graph, wgpu::TextureFormat::Rgba8Unorm)
+                .unwrap_or_else(|e| panic!("{kind} graph must compile: {e}"));
+        }
     }
 
     /// Every `for_stock` arm must compile to a real pipeline (arity slips

@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use crate::StockPlugin;
 
 /// Value type of a Constant node (drives its scalar/vector/color storage).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ConstantMode {
     #[default]
@@ -16,7 +16,7 @@ pub enum ConstantMode {
 }
 
 /// Mathematical operations supported by the Math node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MathOp {
     Add,
@@ -57,7 +57,7 @@ impl MathOp {
 }
 
 /// Waveform types supported by the Wave node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WaveType {
     Sine,
@@ -80,7 +80,7 @@ impl WaveType {
 /// Pointwise blend modes of the Node Graph's Blend node. Applied per
 /// channel; a `weight` input (wired or default) mixes the mode result back
 /// toward side A, so unwired weight (factor 0 in effect graphs) keeps A.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum GraphBlendMode {
     #[default]
@@ -255,8 +255,168 @@ pub enum NodeKind {
         code: String,
     },
 
+    /// Spatial: sample the source image at a transformed UV (offset,
+    /// scale, rotation). GPU-only — the CPU eval passes the color bus
+    /// through (documented divergence, same as Wgsl).
+    Transform {
+        #[serde(default)]
+        x: f32,
+        #[serde(default)]
+        y: f32,
+        #[serde(default = "one")]
+        scale: f32,
+        #[serde(default)]
+        rotation: f32,
+    },
+
+    /// Spatial: repeat/tile the source image (fract wrap). GPU-only.
+    Tile {
+        #[serde(default = "one")]
+        repeat_x: f32,
+        #[serde(default = "one")]
+        repeat_y: f32,
+    },
+
+    /// Spatial: additive halo from a ring sample of the source around the
+    /// pixel. `color` unwired = the source pixel. GPU-only.
+    Glow {
+        #[serde(default = "half")]
+        radius: f32,
+        #[serde(default = "one")]
+        intensity: f32,
+    },
+
+    /// Spatial: thresholded bright-pass blur added over the pixel.
+    /// `color` unwired = the source pixel. GPU-only.
+    Bloom {
+        #[serde(default = "seven_tenths")]
+        threshold: f32,
+        #[serde(default = "half")]
+        radius: f32,
+        #[serde(default = "one")]
+        intensity: f32,
+    },
+
     /// Terminal node that outputs the final value to the property.
     Output,
+}
+
+fn one() -> f32 {
+    1.0
+}
+fn half() -> f32 {
+    0.05
+}
+fn seven_tenths() -> f32 {
+    0.7
+}
+
+/// Semantic hash for GPU-pass caching: covers exactly what a compiled
+/// shader depends on (kinds, params, connectivity) — f32s via `to_bits`.
+/// Positions/titles are excluded on purpose so dragging a node never
+/// invalidates a compiled pass.
+impl std::hash::Hash for NodeKind {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        let f = |state: &mut H, v: f32| state.write_u32(v.to_bits());
+        match self {
+            Self::GetLayerFactor
+            | Self::BaseValueIn
+            | Self::MakeColor
+            | Self::BreakColor
+            | Self::Output => {}
+            Self::Constant { mode, value, g, b, a } => {
+                mode.hash(state);
+                f(state, *value);
+                f(state, *g);
+                f(state, *b);
+                f(state, *a);
+            }
+            Self::Math { op, default_b } => {
+                op.hash(state);
+                f(state, *default_b);
+            }
+            Self::Lerp { default_a, default_b } => {
+                f(state, *default_a);
+                f(state, *default_b);
+            }
+            Self::Clamp { min, max } => {
+                f(state, *min);
+                f(state, *max);
+            }
+            Self::Remap { in_min, in_max, out_min, out_max } => {
+                f(state, *in_min);
+                f(state, *in_max);
+                f(state, *out_min);
+                f(state, *out_max);
+            }
+            Self::Smoothstep { edge0, edge1 } => {
+                f(state, *edge0);
+                f(state, *edge1);
+            }
+            Self::Noise { frequency, amplitude } => {
+                f(state, *frequency);
+                f(state, *amplitude);
+            }
+            Self::Wave { wave_type, frequency, amplitude, offset } => {
+                wave_type.hash(state);
+                f(state, *frequency);
+                f(state, *amplitude);
+                f(state, *offset);
+            }
+            Self::Stepped { steps } => f(state, *steps),
+            Self::DriverLink { driver_layer_id, driver_prop_path } => {
+                driver_layer_id.hash(state);
+                driver_prop_path.hash(state);
+            }
+            Self::MakeVector { dims } | Self::BreakVector { dims } => dims.hash(state),
+            Self::Blend { mode, default_b } => {
+                mode.hash(state);
+                f(state, *default_b);
+            }
+            Self::StockOp { plugin, params } => {
+                plugin.hash(state);
+                params.len().hash(state);
+                for p in params {
+                    f(state, *p);
+                }
+            }
+            Self::Wgsl { code } => code.hash(state),
+            Self::Transform { x, y, scale, rotation } => {
+                f(state, *x);
+                f(state, *y);
+                f(state, *scale);
+                f(state, *rotation);
+            }
+            Self::Tile { repeat_x, repeat_y } => {
+                f(state, *repeat_x);
+                f(state, *repeat_y);
+            }
+            Self::Glow { radius, intensity } => {
+                f(state, *radius);
+                f(state, *intensity);
+            }
+            Self::Bloom { threshold, radius, intensity } => {
+                f(state, *threshold);
+                f(state, *radius);
+                f(state, *intensity);
+            }
+        }
+    }
+}
+
+impl std::hash::Hash for ModifierNode {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+        self.kind.hash(state);
+    }
+}
+
+impl std::hash::Hash for ModifierGraph {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.nodes.hash(state);
+        self.connections.hash(state);
+    }
 }
 
 impl NodeKind {
@@ -286,6 +446,10 @@ impl NodeKind {
             Self::Blend { .. } => "Blend",
             Self::StockOp { plugin, .. } => plugin.descriptor().label,
             Self::Wgsl { .. } => "Wgsl",
+            Self::Transform { .. } => "Transform",
+            Self::Tile { .. } => "Tile",
+            Self::Glow { .. } => "Glow",
+            Self::Bloom { .. } => "Bloom",
             Self::Output => "Output",
         }
     }
@@ -320,6 +484,8 @@ impl NodeKind {
             Self::Blend { .. } => &["a", "b", "weight"],
             Self::StockOp { .. } => &["in"],
             Self::Wgsl { .. } => &["color", "p0", "p1", "p2", "p3"],
+            Self::Transform { .. } | Self::Tile { .. } => &[],
+            Self::Glow { .. } | Self::Bloom { .. } => &["color"],
             Self::Output => &["result"],
         }
     }
@@ -344,6 +510,9 @@ impl NodeKind {
             Self::BreakColor => &["r", "g", "b", "a"],
             Self::Blend { .. } | Self::StockOp { .. } => &["value"],
             Self::Wgsl { .. } => &["value"],
+            Self::Transform { .. } | Self::Tile { .. } | Self::Glow { .. } | Self::Bloom { .. } => {
+                &["value"]
+            }
             Self::Output => &[],
         }
     }
@@ -706,6 +875,11 @@ impl ModifierGraph {
                 NodeKind::StockOp { plugin, .. } => plugin.is_pointwise(),
                 // User WGSL is pure per-pixel math — color-clean by design.
                 NodeKind::Wgsl { .. } => true,
+                // Spatial nodes sample src_tex directly in the twin pass.
+                NodeKind::Transform { .. }
+                | NodeKind::Tile { .. }
+                | NodeKind::Glow { .. }
+                | NodeKind::Bloom { .. } => true,
                 _ => false,
             };
             if !ok {
@@ -776,6 +950,10 @@ impl ModifierGraph {
             // through; unwired p sockets default to 0.0.
             NodeKind::Wgsl { .. } if socket == "color" => Some(ctx.comp.comp_value(ctx.channel)),
             NodeKind::Wgsl { .. } if socket.starts_with('p') => Some(0.0),
+            // Spatial nodes: unwired color passes the base component through.
+            NodeKind::Glow { .. } | NodeKind::Bloom { .. } if socket == "color" => {
+                Some(ctx.comp.comp_value(ctx.channel))
+            }
             // Make nodes: unwired channels pass the matching base component
             // through (gathers stay identity when nothing is rewired).
             NodeKind::MakeVector { .. } | NodeKind::MakeColor => match socket {
@@ -1070,6 +1248,37 @@ impl ModifierGraph {
                 // `for_graph`). CPU eval passes the color bus through
                 // byte-for-byte; running WGSL on CPU needs a naga-based
                 // interpreter. add when CPU-exact Wgsl export matters.
+                let chan = if socket == "value" { ctx.channel } else { socket };
+                let mut src = [0.0f32; 4];
+                for (i, ch) in ["r", "g", "b", "a"].iter().enumerate() {
+                    let ch = *ch;
+                    let sub = EvalCtx {
+                        base: ctx.comp.comp_value(ch),
+                        comp: ctx.comp,
+                        factor: ctx.factor,
+                        resolver: ctx.resolver,
+                        channel: ch,
+                    };
+                    let mut sub_memo = HashMap::new();
+                    let mut sub_stack = HashSet::new();
+                    src[i] = self
+                        .resolve_input(node_id, "color", &sub, &mut sub_memo, &mut sub_stack)
+                        .unwrap_or(sub.base);
+                }
+                match chan {
+                    "r" => src[0],
+                    "g" => src[1],
+                    "b" => src[2],
+                    _ => src[3],
+                }
+            }
+            NodeKind::Transform { .. }
+            | NodeKind::Tile { .. }
+            | NodeKind::Glow { .. }
+            | NodeKind::Bloom { .. } => {
+                // Same GPU-only contract as Wgsl: sampling the source
+                // texture needs the raster pass; the CPU eval passes the
+                // color bus through (documented CPU/GPU divergence).
                 let chan = if socket == "value" { ctx.channel } else { socket };
                 let mut src = [0.0f32; 4];
                 for (i, ch) in ["r", "g", "b", "a"].iter().enumerate() {
@@ -1831,5 +2040,77 @@ mod tests {
         // A pN exactly at the code edges still counts.
         let edges = NodeKind::Wgsl { code: "p3 * color".to_string() };
         assert_eq!(edges.input_sockets(), vec!["color", "p3"]);
+    }
+
+    #[test]
+    fn test_graph_hash_covers_semantics_not_positions() {
+        use std::hash::{Hash, Hasher};
+        fn key(g: &ModifierGraph) -> u64 {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            g.hash(&mut h);
+            h.finish()
+        }
+        let mk = |code: &str, x: f32| ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("wg", x, 0.0, NodeKind::Wgsl { code: code.to_string() }),
+                ModifierNode::new("out", 300.0, 0.0, NodeKind::Output),
+            ],
+            connections: vec![NodeConnection::new("wg", "value", "out", "result")],
+        };
+        // Same semantics, different positions (node drag) -> same key.
+        assert_eq!(key(&mk("return color;", 0.0)), key(&mk("return color;", 999.0)));
+        // Different shader code or connectivity -> different key.
+        assert_ne!(key(&mk("return color;", 0.0)), key(&mk("return color * 0.5;", 0.0)));
+        let mut changed = mk("return color;", 0.0);
+        changed.connections.clear();
+        assert_ne!(key(&mk("return color;", 0.0)), key(&changed));
+    }
+
+    #[test]
+    fn test_spatial_nodes_sockets_clean_and_cpu_passthrough() {
+        fn resolver(_: &str, _: &str) -> f32 {
+            0.0
+        }
+        // Sockets + titles.
+        assert_eq!(NodeKind::Transform { x: 0.0, y: 0.0, scale: 1.0, rotation: 0.0 }.title(), "Transform");
+        assert_eq!(NodeKind::Transform { x: 0.0, y: 0.0, scale: 1.0, rotation: 0.0 }.input_sockets(), Vec::<&str>::new());
+        assert_eq!(NodeKind::Tile { repeat_x: 2.0, repeat_y: 2.0 }.input_sockets(), Vec::<&str>::new());
+        assert_eq!(NodeKind::Glow { radius: 0.05, intensity: 1.0 }.input_sockets(), vec!["color"]);
+        assert_eq!(NodeKind::Bloom { threshold: 0.7, radius: 0.05, intensity: 1.0 }.input_sockets(), vec!["color"]);
+        // GPU-twinable (color-clean) and CPU passes the bus through
+        // (documented GPU-only divergence, same as Wgsl).
+        let graph = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
+                ModifierNode::new("glow", 120.0, 0.0, NodeKind::Glow { radius: 0.05, intensity: 2.0 }),
+                ModifierNode::new("tile", 240.0, 0.0, NodeKind::Tile { repeat_x: 3.0, repeat_y: 3.0 }),
+                ModifierNode::new("out", 360.0, 0.0, NodeKind::Output),
+            ],
+            connections: vec![
+                NodeConnection::new("in", "value", "glow", "color"),
+                NodeConnection::new("glow", "value", "out", "result"),
+            ],
+        };
+        assert!(graph.is_color_clean());
+        let out = graph.evaluate_color(0.25, 0.5, 0.75, 1.0, 0.5, &resolver);
+        assert_eq!(out, [0.25, 0.5, 0.75, 1.0]);
+        // Serde defaults: legacy graphs (and JSON) get scale/repeats of 1
+        // and Glow/Bloom defaults.
+        let json = r#"{"nodes":[{"id":"t","title":"Transform","pos_x":0,"pos_y":0,"kind":{"type":"transform"}},{"id":"o","title":"Output","pos_x":0,"pos_y":0,"kind":{"type":"output"}}],"connections":[]}"#;
+        let back: ModifierGraph = serde_json::from_str(json).unwrap();
+        match &back.get_node("t").unwrap().kind {
+            NodeKind::Transform { x, y, scale, rotation } => {
+                assert_eq!((*x, *y, *scale, *rotation), (0.0, 0.0, 1.0, 0.0));
+            }
+            other => panic!("wrong kind: {other:?}"),
+        }
+        let json = r#"{"nodes":[{"id":"g","title":"Glow","pos_x":0,"pos_y":0,"kind":{"type":"glow"}},{"id":"o","title":"Output","pos_x":0,"pos_y":0,"kind":{"type":"output"}}],"connections":[]}"#;
+        let back: ModifierGraph = serde_json::from_str(json).unwrap();
+        match &back.get_node("g").unwrap().kind {
+            NodeKind::Glow { radius, intensity } => {
+                assert_eq!((*radius, *intensity), (0.05, 1.0));
+            }
+            other => panic!("wrong kind: {other:?}"),
+        }
     }
 }

@@ -61,6 +61,9 @@ pub struct GpuEffectEngine {
     builtin_pass_cache: std::collections::HashMap<&'static str, FxPass>,
     merge_pass_cache: std::collections::HashMap<&'static str, FxMergePass>,
     graph_pass_cache: std::collections::HashMap<u64, FxPass>,
+    /// Graph keys whose compile failed (invalid user WGSL): decline
+    /// instantly instead of re-running naga every frame.
+    graph_fail_cache: std::collections::HashSet<u64>,
     bright_pass: Option<FxPass>,
     blit_pass: Option<FxPass>,
     /// Long-shadow march stage pass for the multi-stage stock path
@@ -123,6 +126,7 @@ impl GpuEffectEngine {
             builtin_pass_cache: std::collections::HashMap::new(),
             merge_pass_cache: std::collections::HashMap::new(),
             graph_pass_cache: std::collections::HashMap::new(),
+            graph_fail_cache: std::collections::HashSet::new(),
             bright_pass: None,
             blit_pass: None,
             march_pass: None,
@@ -187,17 +191,27 @@ impl GpuEffectEngine {
     }
 
     /// Get or create the WGSL twin pass for a color-clean Node Graph,
-    /// keyed by graph content (`# ponytail:` Debug-format hash — graphs
-    /// are small and cache pressure is negligible).
+    /// keyed by the graph's semantic hash (kinds/params/connectivity —
+    /// positions excluded; see the `Hash` impl on `ModifierGraph`).
     fn get_or_create_graph_pass(
         &mut self,
         graph: &project::ModifierGraph,
     ) -> Result<&FxPass, GpuError> {
         let key = crate::fx_pass::graph_key_of(graph);
+        if self.graph_fail_cache.contains(&key) {
+            return Err(GpuError::ShaderCompilation(format!(
+                "graph pass {key:#x} previously failed to compile"
+            )));
+        }
         if !self.graph_pass_cache.contains_key(&key) {
             let format = wgpu::TextureFormat::Rgba8Unorm;
-            let pass = FxPass::for_graph(&self.gpu, graph, format)
-                .map_err(GpuError::ShaderCompilation)?;
+            let pass = match FxPass::for_graph(&self.gpu, graph, format) {
+                Ok(p) => p,
+                Err(e) => {
+                    self.graph_fail_cache.insert(key);
+                    return Err(GpuError::ShaderCompilation(e));
+                }
+            };
             self.graph_pass_cache.insert(key, pass);
         }
         Ok(&self.graph_pass_cache[&key])

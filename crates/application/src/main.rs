@@ -14370,8 +14370,8 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
 
     #[gpui_kit::test]
     fn test_modifier_graph_blend_mode_pill_switches_mode(cx: &mut TestAppContext) {
-        // Blend nodes render a row of mode pills (Linear = mix default);
-        // clicking Screen through the real window swaps the node's mode.
+        // Blend nodes render a mode Combobox (Linear/mix default); picking
+        // Screen through the real window (down + enter) swaps the mode.
         use gpui_kit::test::TestWindowExt;
 
         cx.update(gpui_kit::init);
@@ -14408,10 +14408,13 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
                 .id
                 .clone()
         });
-        let pill = SharedString::from(format!("mg_blend_mode_{}_screen", blend_id.replace('-', "_")));
+        let combo = SharedString::from(format!("mg_blend_combo_{}", blend_id.replace('-', "_")));
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            window.click(pill.clone(), cx);
+            assert!(window.find(combo.clone()).visible());
+            window.click(combo.clone(), cx);
+            window.press("down", cx);
+            window.press("enter", cx);
             window.render_frame(cx);
         })
         .expect("update_window failed");
@@ -14419,7 +14422,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             let n = v.graph.get_node(&blend_id).unwrap();
             assert!(
                 matches!(n.kind, project::modifier::NodeKind::Blend { mode: project::modifier::GraphBlendMode::Screen, .. }),
-                "clicking the Screen pill must switch the blend mode"
+                "picking Screen in the combobox must switch the blend mode"
             );
         });
     }

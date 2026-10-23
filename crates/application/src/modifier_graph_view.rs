@@ -1,8 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use gpui_kit::assets::IconName;
-use gpui_kit::base::{h_flex, v_flex, StyledExt, TestSupportExt};
+use gpui_kit::base::{h_flex, v_flex, IndexPath, StyledExt, TestSupportExt};
+use gpui_kit::component::combobox::{Combobox, ComboboxEvent, ComboboxState};
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
+use gpui_kit::component::searchable_list::SearchableVec;
 use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
 use gpui_kit::*;
 use project::modifier::{
@@ -125,6 +127,10 @@ pub struct ModifierGraphView {
     pub(crate) param_editor: Option<Entity<InputState>>,
     /// Subscription for the retained editor.
     param_editor_sub: Option<Subscription>,
+    /// Retained Blend-mode Combobox states, keyed by blend node id.
+    blend_combos: HashMap<String, Entity<ComboboxState<SearchableVec<String>>>>,
+    /// Confirm subscriptions for the retained blend Comboboxes.
+    blend_combo_subs: HashMap<String, Subscription>,
 }
 
 impl ModifierGraphView {
@@ -164,6 +170,8 @@ impl ModifierGraphView {
             editing_param: None,
             param_editor: None,
             param_editor_sub: None,
+            blend_combos: HashMap::new(),
+            blend_combo_subs: HashMap::new(),
         }
     }
 
@@ -192,9 +200,75 @@ impl ModifierGraphView {
         cx.notify();
     }
 
+    /// Ensure a retained Blend-mode Combobox exists per live blend node
+    /// (created on first render; dropped when the node is deleted).
+    fn ensure_blend_combos(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let live: HashSet<String> = self
+            .graph
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.kind, NodeKind::Blend { .. }))
+            .map(|n| n.id.clone())
+            .collect();
+        self.blend_combos.retain(|k, _| live.contains(k));
+        self.blend_combo_subs.retain(|k, _| live.contains(k));
+        for id in &live {
+            if self.blend_combos.contains_key(id) {
+                continue;
+            }
+            let labels: Vec<String> = GraphBlendMode::ALL
+                .iter()
+                .map(|m| m.label().to_string())
+                .collect();
+            let idx = self
+                .graph
+                .get_node(id)
+                .and_then(|n| match n.kind {
+                    NodeKind::Blend { mode, .. } => Some(mode.index()),
+                    _ => None,
+                })
+                .unwrap_or(0);
+            let st = cx.new(|cx| {
+                ComboboxState::new(SearchableVec::new(labels), vec![IndexPath::new(idx)], window, cx)
+            });
+            let view = cx.entity().clone();
+            let nid = id.clone();
+            let sub = cx.subscribe(
+                &st,
+                move |_, _, event: &ComboboxEvent<SearchableVec<String>>, cx| {
+                    let vals = match event {
+                        ComboboxEvent::Confirm(v) => v,
+                        ComboboxEvent::Change(v) => v,
+                    };
+                    let Some(v) = vals.first() else {
+                        return;
+                    };
+                    let Some(mode) = GraphBlendMode::from_label(v) else {
+                        return;
+                    };
+                    // Deferred: the menu click/Enter fires while this view
+                    // is mid-update (event dispatch runs inside it).
+                    let view = view.clone();
+                    let nid = nid.clone();
+                    cx.defer(move |cx| {
+                        view.update(cx, |this, cx| {
+                            if let Some(n) = this.graph.get_node_mut(&nid) {
+                                if let NodeKind::Blend { mode: m, .. } = &mut n.kind {
+                                    *m = mode;
+                                    this.sync_to_state(cx);
+                                }
+                            }
+                        });
+                    });
+                },
+            );
+            self.blend_combos.insert(id.clone(), st);
+            self.blend_combo_subs.insert(id.clone(), sub);
+        }
+    }
+
     /// Add a new node of the given kind at a convenient position.
-    pub fn add_node(&mut self, kind: NodeKind, cx: &mut Context<Self>) {
-        let count = self.graph.nodes.len() + 1;
+    pub fn add_node(&mut self, kind: NodeKind, cx: &mut Context<Self>) {        let count = self.graph.nodes.len() + 1;
         let id = format!("node_{}_{}", kind.title().to_lowercase().replace(' ', "_"), count);
         // Position staggered in canvas view
         let offset_x = 220.0 + ((self.graph.nodes.len() as f32 % 5.0) * 40.0) - self.pan_offset.0;
@@ -363,7 +437,8 @@ impl Focusable for ModifierGraphView {
 }
 
 impl Render for ModifierGraphView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_blend_combos(window, cx);
         let (factor, base_val, evaluated_out, is_driven) = {
             let s = self.editor_state.read(cx);
             let factor = s.get_layer_progression_factor(&self.layer_id);
@@ -428,6 +503,10 @@ impl ModifierGraphView {
         let ent_posterize = entity.clone();
         let ent_threshold = entity.clone();
         let ent_wgsl = entity.clone();
+        let ent_transform = entity.clone();
+        let ent_tile = entity.clone();
+        let ent_glow = entity.clone();
+        let ent_bloom = entity.clone();
         let ent_make2d = entity.clone();
         let ent_make3d = entity.clone();
         let ent_mkcolor = entity.clone();
@@ -670,6 +749,45 @@ impl ModifierGraphView {
                         this.add_node(
                             NodeKind::Wgsl {
                                 code: "return color;".to_string(),
+                            },
+                            cx,
+                        );
+                    }, cx))
+                    .child(self.toolbar_btn("Transform", ent_transform, move |this, cx| {
+                        this.add_node(
+                            NodeKind::Transform {
+                                x: 0.0,
+                                y: 0.0,
+                                scale: 1.0,
+                                rotation: 0.0,
+                            },
+                            cx,
+                        );
+                    }, cx))
+                    .child(self.toolbar_btn("Tile", ent_tile, move |this, cx| {
+                        this.add_node(
+                            NodeKind::Tile {
+                                repeat_x: 2.0,
+                                repeat_y: 2.0,
+                            },
+                            cx,
+                        );
+                    }, cx))
+                    .child(self.toolbar_btn("Glow", ent_glow, move |this, cx| {
+                        this.add_node(
+                            NodeKind::Glow {
+                                radius: 0.05,
+                                intensity: 1.0,
+                            },
+                            cx,
+                        );
+                    }, cx))
+                    .child(self.toolbar_btn("Bloom", ent_bloom, move |this, cx| {
+                        this.add_node(
+                            NodeKind::Bloom {
+                                threshold: 0.7,
+                                radius: 0.05,
+                                intensity: 1.0,
                             },
                             cx,
                         );
@@ -1162,6 +1280,12 @@ impl ModifierGraphView {
             }
             NodeKind::Wgsl { .. } => {
                 (rgb(0x312e81), rgb(0xa5b4fc)) // Indigo-slate for shader nodes
+            }
+            NodeKind::Transform { .. } | NodeKind::Tile { .. } => {
+                (rgb(0x134e4a), rgb(0x5eead4)) // Teal for spatial layout nodes
+            }
+            NodeKind::Glow { .. } | NodeKind::Bloom { .. } => {
+                (rgb(0x713f12), rgb(0xfde047)) // Amber for light nodes
             }
             NodeKind::DriverLink { .. } => {
                 (rgb(0x7f1d1d), rgb(0xfca5a5)) // Deep red for driver links
@@ -1697,12 +1821,7 @@ impl ModifierGraphView {
             NodeKind::Blend { mode, default_b } => {
                 let m = *mode;
                 let def_b = *default_b;
-                let mut pills = h_flex().w_full().gap_1().flex_wrap();
-                for bm in GraphBlendMode::ALL {
-                    pills = pills.child(
-                        self.blend_mode_btn(bm.label(), m == bm, ent.clone(), nid.clone(), bm, cx),
-                    );
-                }
+                let combo_id = nid.replace('-', "_");
                 v_flex()
                     .w_full()
                     .px_2()
@@ -1710,7 +1829,22 @@ impl ModifierGraphView {
                     .gap_1()
                     .border_t_1()
                     .border_color(rgb(0x2e303e))
-                    .child(pills)
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("mg_blend_combo_{combo_id}")))
+                            .test_support()
+                            .w_full()
+                            .child(match self.blend_combos.get(&nid) {
+                                Some(cb) => Combobox::new(cb)
+                                    .menu_width(px(150.))
+                                    .into_any_element(),
+                                None => div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(m.label())
+                                    .into_any_element(),
+                            }),
+                    )
                     .child(
                         h_flex()
                             .w_full()
@@ -1722,6 +1856,46 @@ impl ModifierGraphView {
             }
 
             NodeKind::Wgsl { code } => self.render_wgsl_params(&nid, code, entity, cx),
+
+            NodeKind::Transform { x, y, scale, rotation } => self.spatial_rows(
+                vec![
+                    ("X:", "x", *x, 0x38bdf8),
+                    ("Y:", "y", *y, 0x4ade80),
+                    ("Scale:", "scale", *scale, 0xfbbf24),
+                    ("Rotation:", "rotation", *rotation, 0xf87171),
+                ],
+                nid,
+                ent,
+                cx,
+            ),
+            NodeKind::Tile { repeat_x, repeat_y } => self.spatial_rows(
+                vec![
+                    ("Repeat X:", "repeat_x", *repeat_x, 0x38bdf8),
+                    ("Repeat Y:", "repeat_y", *repeat_y, 0x4ade80),
+                ],
+                nid,
+                ent,
+                cx,
+            ),
+            NodeKind::Glow { radius, intensity } => self.spatial_rows(
+                vec![
+                    ("Radius:", "radius", *radius, 0xfbbf24),
+                    ("Intensity:", "intensity", *intensity, 0xf87171),
+                ],
+                nid,
+                ent,
+                cx,
+            ),
+            NodeKind::Bloom { threshold, radius, intensity } => self.spatial_rows(
+                vec![
+                    ("Threshold:", "threshold", *threshold, 0xe5e7eb),
+                    ("Radius:", "radius", *radius, 0xfbbf24),
+                    ("Intensity:", "intensity", *intensity, 0xf87171),
+                ],
+                nid,
+                ent,
+                cx,
+            ),
 
             NodeKind::DriverLink { driver_layer_id, driver_prop_path } => {
                 let dl = driver_layer_id.clone();
@@ -1790,46 +1964,33 @@ impl ModifierGraphView {
             .child(symbol)
     }
 
-    /// Blend mode pill (Linear/Mix default, Screen, Multiply, ...).
-    fn blend_mode_btn(
+    /// Shared scrub-row stack for the spatial nodes (Transform/Tile/Glow/
+    /// Bloom): label + param pill per row.
+    fn spatial_rows(
         &self,
-        label: &'static str,
-        active: bool,
-        entity: Entity<Self>,
-        node_id: String,
-        target_mode: GraphBlendMode,
-        _cx: &App,
-    ) -> AnyElement {
-        div()
-            .id(SharedString::from(format!(
-                "mg_blend_mode_{}_{}",
-                node_id.replace('-', "_"),
-                label.to_lowercase()
-            )))
-            .test_support()
-            .px_1p5()
-            .py_0p5()
-            .rounded_sm()
-            .bg(if active { rgb(0x4338ca) } else { rgb(0x232430) })
-            .hover(|s| s.bg(rgb(0x4f46e5)).text_color(rgb(0xffffff)))
-            .cursor_pointer()
-            .text_xs()
-            .font_medium()
-            .text_color(if active { rgb(0xffffff) } else { rgb(0x9ca3af) })
-            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                cx.stop_propagation();
-                let nid = node_id.clone();
-                entity.update(cx, |this, cx| {
-                    if let Some(n) = this.graph.get_node_mut(&nid) {
-                        if let NodeKind::Blend { mode, .. } = &mut n.kind {
-                            *mode = target_mode;
-                            this.sync_to_state(cx);
-                        }
-                    }
-                });
-            })
-            .child(label)
-            .into_any_element()
+        rows: Vec<(&'static str, &'static str, f32, u32)>,
+        nid: String,
+        ent: Entity<Self>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let mut col = v_flex()
+            .w_full()
+            .px_2()
+            .py_1p5()
+            .gap_1()
+            .border_t_1()
+            .border_color(rgb(0x2e303e));
+        for (label, pname, val, tint) in rows {
+            col = col.child(
+                h_flex()
+                    .w_full()
+                    .gap_1p5()
+                    .items_center()
+                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child(label))
+                    .child(self.param_scrub_input(nid.clone(), pname, val, rgb(tint), ent.clone(), cx)),
+            );
+        }
+        col
     }
 
     /// Wgsl node body: click-to-edit code pill + the shader signature hint.
@@ -2249,6 +2410,17 @@ impl ModifierGraphView {
                 (NodeKind::Stepped { steps }, "steps") => {
                     *steps = value.round().max(1.0);
                 }
+                (NodeKind::Transform { x, .. }, "x") => *x = value,
+                (NodeKind::Transform { y, .. }, "y") => *y = value,
+                (NodeKind::Transform { scale, .. }, "scale") => *scale = value.max(0.01),
+                (NodeKind::Transform { rotation, .. }, "rotation") => *rotation = value,
+                (NodeKind::Tile { repeat_x, .. }, "repeat_x") => *repeat_x = value.max(0.1),
+                (NodeKind::Tile { repeat_y, .. }, "repeat_y") => *repeat_y = value.max(0.1),
+                (NodeKind::Glow { radius, .. }, "radius") => *radius = value.max(0.0),
+                (NodeKind::Glow { intensity, .. }, "intensity") => *intensity = value.max(0.0),
+                (NodeKind::Bloom { threshold, .. }, "threshold") => *threshold = value.clamp(0.0, 1.0),
+                (NodeKind::Bloom { radius, .. }, "radius") => *radius = value.max(0.0),
+                (NodeKind::Bloom { intensity, .. }, "intensity") => *intensity = value.max(0.0),
                 _ => return,
             }
             self.sync_to_state(cx);
@@ -2278,6 +2450,33 @@ impl ModifierGraphView {
                 }
                 (NodeKind::Stepped { steps }, "steps") => {
                     *steps = (*steps + delta * 0.2).round().max(1.0);
+                }
+                (NodeKind::Transform { x, .. }, "x") => *x += delta,
+                (NodeKind::Transform { y, .. }, "y") => *y += delta,
+                (NodeKind::Transform { scale, .. }, "scale") => {
+                    *scale = (*scale + delta * 0.05).max(0.01);
+                }
+                (NodeKind::Transform { rotation, .. }, "rotation") => *rotation += delta,
+                (NodeKind::Tile { repeat_x, .. }, "repeat_x") => {
+                    *repeat_x = (*repeat_x + delta * 0.05).max(0.1);
+                }
+                (NodeKind::Tile { repeat_y, .. }, "repeat_y") => {
+                    *repeat_y = (*repeat_y + delta * 0.05).max(0.1);
+                }
+                (NodeKind::Glow { radius, .. }, "radius") => {
+                    *radius = (*radius + delta * 0.002).max(0.0);
+                }
+                (NodeKind::Glow { intensity, .. }, "intensity") => {
+                    *intensity = (*intensity + delta * 0.02).max(0.0);
+                }
+                (NodeKind::Bloom { threshold, .. }, "threshold") => {
+                    *threshold = (*threshold + delta * 0.01).clamp(0.0, 1.0);
+                }
+                (NodeKind::Bloom { radius, .. }, "radius") => {
+                    *radius = (*radius + delta * 0.002).max(0.0);
+                }
+                (NodeKind::Bloom { intensity, .. }, "intensity") => {
+                    *intensity = (*intensity + delta * 0.02).max(0.0);
                 }
                 _ => {}
             }
