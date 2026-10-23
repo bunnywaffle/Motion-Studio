@@ -880,6 +880,21 @@ impl ModifierGraph {
                 | NodeKind::Tile { .. }
                 | NodeKind::Glow { .. }
                 | NodeKind::Bloom { .. } => true,
+                // Scalar bus families: pointwise vec expressions in the
+                // twin (fx_pass for_graph arms mirror the CPU fns).
+                NodeKind::Math { .. }
+                | NodeKind::Lerp { .. }
+                | NodeKind::Clamp { .. }
+                | NodeKind::Remap { .. }
+                | NodeKind::Smoothstep { .. }
+                | NodeKind::Noise { .. }
+                | NodeKind::Wave { .. }
+                | NodeKind::Stepped { .. }
+                | NodeKind::MakeVector { .. }
+                | NodeKind::MakeColor
+                | NodeKind::BreakVector { .. }
+                | NodeKind::BreakColor
+                | NodeKind::GetLayerFactor => true,
                 _ => false,
             };
             if !ok {
@@ -1899,7 +1914,8 @@ mod tests {
         };
         assert!(stock.is_color_clean());
 
-        // Math wired into a Blend weight makes the twin invalid.
+        // Math wired into a Blend weight is now twinable too — the whole
+        // scalar bus family has GPU emission arms.
         let mixed = ModifierGraph {
             nodes: vec![
                 ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
@@ -1913,7 +1929,7 @@ mod tests {
                 NodeConnection::new("mix", "result", "out", "result"),
             ],
         };
-        assert!(!mixed.is_color_clean());
+        assert!(mixed.is_color_clean());
 
         // Spatial stock (box blur) is never a GPU node.
         let blurred = ModifierGraph {
@@ -1929,16 +1945,18 @@ mod tests {
         };
         assert!(!blurred.is_color_clean());
 
-        // Noise node reached through any fan-in disqualifies.
-        let noisy = ModifierGraph {
+        // A DriverLink (its value mutates per frame through the live
+        // resolver) is the one family without a GPU twin — it still
+        // disqualifies the whole chain.
+        let driven = ModifierGraph {
             nodes: vec![
                 ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
-                ModifierNode::new("n", 60.0, 90.0, NodeKind::Noise { frequency: 1.0, amplitude: 1.0 }),
+                ModifierNode::new("dl", 60.0, 90.0, NodeKind::DriverLink { driver_layer_id: "L1".to_string(), driver_prop_path: "pos.y".to_string() }),
                 ModifierNode::new("out", 240.0, 0.0, NodeKind::Output),
             ],
-            connections: vec![NodeConnection::new("n", "result", "out", "result")],
+            connections: vec![NodeConnection::new("dl", "result", "out", "result")],
         };
-        assert!(!noisy.is_color_clean());
+        assert!(!driven.is_color_clean());
     }
 
     #[test]

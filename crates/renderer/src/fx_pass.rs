@@ -116,7 +116,34 @@ pub const FX_BRIGHT_RING_WGSL: &str = r#"fn fx_bright_ring(uv: vec2<f32>, r: f32
 }
 "#;
 
-pub fn fx_fragment_src(effect_body: &str, uv_calls: &[&str], main_call: &str) -> String {    let mut src = String::from(FX_BINDINGS_WGSL);
+/// Vectorized value noise for the Noise graph node (per-lane hash +
+/// smoothstep interpolation, mirroring the CPU `hash11` shape). `ponytail:`
+/// the GPU hash is a 32-bit variant — the CPU's 64-bit trick has no f64
+/// mirror in WGSL, so noise *values* differ from the CPU path (shape
+/// matches). Same documented CPU/GPU divergence class as Wgsl.
+pub const FX_NOISE_WGSL: &str = r#"fn fx_hash11(x: vec4<f32>) -> vec4<f32> {
+    var n = bitcast<vec4<u32>>(vec4<i32>(floor(x)));
+    n = n ^ (n >> vec4<u32>(16u));
+    n = n * vec4<u32>(0x9e3779b9u);
+    n = n ^ (n >> vec4<u32>(13u));
+    n = n * vec4<u32>(0x85ebca6bu);
+    n = n ^ (n >> vec4<u32>(16u));
+    let h = vec4<f32>(n) / 4294967295.0;
+    return h * 2.0 - 1.0;
+}
+fn fx_noise(p: vec4<f32>, freq: vec4<f32>, amp: vec4<f32>) -> vec4<f32> {
+    let x = p * freq;
+    let i0 = floor(x);
+    let fr = x - i0;
+    let sm = fr * fr * (vec4<f32>(3.0) - fr * 2.0);
+    let h0 = fx_hash11(i0);
+    let h1 = fx_hash11(i0 + vec4<f32>(1.0));
+    return (h0 + (h1 - h0) * sm) * amp;
+}
+"#;
+
+pub fn fx_fragment_src(effect_body: &str, uv_calls: &[&str], main_call: &str) -> String {
+    let mut src = String::from(FX_BINDINGS_WGSL);
     src.push_str(effect_body);
     src.push_str(
         r#"
@@ -808,7 +835,7 @@ impl FxPass {
             }
 
             fn node_kind(&mut self, node_id: &str, kind: &project::NodeKind) -> Result<String, String> {
-                use project::modifier::GraphBlendMode;
+                use project::modifier::{GraphBlendMode, MathOp, WaveType};
                 Ok(match kind {
                     NodeKind::BaseValueIn => "color".to_string(),
                     NodeKind::Constant { mode, value, g, b, a } => {
@@ -827,7 +854,7 @@ impl FxPass {
                         // walk folds to elementwise vector math here.
                         let a = self.wire(node_id, "a")?.unwrap_or_else(|| "color".to_string());
                         let b = self.wire(node_id, "b")?.unwrap_or_else(|| "vec4<f32>(0.0)".to_string());
-                        let w = self.wire(node_id, "weight")?.unwrap_or_else(|| "0.0".to_string());
+                        let w = self.wire(node_id, "weight")?.unwrap_or_else(|| "u.misc.x".to_string());
                         let mix = match mode {
                             GraphBlendMode::Linear => b.clone(),
                             GraphBlendMode::Screen => {
@@ -929,6 +956,137 @@ impl FxPass {
                             radius, threshold, intensity
                         )
                     }
+                    NodeKind::Math { op, default_b } => {
+                        let a = self.wire(node_id, "a")?.unwrap_or_else(|| "color".to_string());
+                        let b = self
+                            .wire(node_id, "b")?
+                            .unwrap_or_else(|| format!("vec4<f32>({:.9})", default_b));
+                        match op {
+                            MathOp::Add => format!("({a} + {b})"),
+                            MathOp::Subtract => format!("({a} - {b})"),
+                            MathOp::Multiply => format!("({a} * {b})"),
+                            // CPU guard: |b| < 1e-6 passes `a` through.
+                            MathOp::Divide => format!(
+                                "(select({a} / vec4<f32>({b}), {a}, abs(vec4<f32>({b})) < vec4<f32>(1e-6)))"
+                            ),
+                            MathOp::Power => format!("(pow({a}, vec4<f32>({b})))"),
+                        }
+                    }
+                    NodeKind::Lerp { default_a, default_b } => {
+                        let a = self
+                            .wire(node_id, "a")?
+                            .unwrap_or_else(|| format!("vec4<f32>({:.9})", default_a));
+                        let b = self
+                            .wire(node_id, "b")?
+                            .unwrap_or_else(|| format!("vec4<f32>({:.9})", default_b));
+                        let w = self.wire(node_id, "weight")?.unwrap_or_else(|| "u.misc.x".to_string());
+                        format!("(({a}) + (({b}) - ({a})) * ({w}))")
+                    }
+                    NodeKind::Clamp { min, max } => {
+                        let v = self.wire(node_id, "val")?.unwrap_or_else(|| "color".to_string());
+                        let mn = self
+                            .wire(node_id, "min")?
+                            .unwrap_or_else(|| format!("vec4<f32>({:.9})", min));
+                        let mx = self
+                            .wire(node_id, "max")?
+                            .unwrap_or_else(|| format!("vec4<f32>({:.9})", max));
+                        format!("(clamp(({v}), min(({mn}), ({mx})), max(({mn}), ({mx}))))")
+                    }
+                    NodeKind::Remap { in_min, in_max, out_min, out_max } => {
+                        let v = self.wire(node_id, "val")?.unwrap_or_else(|| "u.misc.x".to_string());
+                        let imin = self
+                            .wire(node_id, "in_min")?
+                            .unwrap_or_else(|| format!("vec4<f32>({:.9})", in_min));
+                        let imax = self
+                            .wire(node_id, "in_max")?
+                            .unwrap_or_else(|| format!("vec4<f32>({:.9})", in_max));
+                        let omin = self
+                            .wire(node_id, "out_min")?
+                            .unwrap_or_else(|| format!("vec4<f32>({:.9})", out_min));
+                        let omax = self
+                            .wire(node_id, "out_max")?
+                            .unwrap_or_else(|| format!("vec4<f32>({:.9})", out_max));
+                        format!(
+                            "(({omin}) + clamp((({v}) - ({imin})) / max(abs(({imax}) - ({imin})), vec4<f32>(1e-6)), vec4<f32>(0.0), vec4<f32>(1.0)) * (({omax}) - ({omin})))"
+                        )
+                    }
+                    NodeKind::Smoothstep { edge0, edge1 } => {
+                        let v = self.wire(node_id, "val")?.unwrap_or_else(|| "u.misc.x".to_string());
+                        let e0 = self
+                            .wire(node_id, "edge0")?
+                            .unwrap_or_else(|| format!("vec4<f32>({:.9})", edge0));
+                        let e1 = self
+                            .wire(node_id, "edge1")?
+                            .unwrap_or_else(|| format!("vec4<f32>({:.9})", edge1));
+                        let t = format!(
+                            "clamp((({v}) - ({e0})) / max(abs(({e1}) - ({e0})), vec4<f32>(1e-6)), vec4<f32>(0.0), vec4<f32>(1.0))"
+                        );
+                        format!("(({t}) * ({t}) * (3.0 - 2.0 * ({t})))")
+                    }
+                    NodeKind::Noise { frequency, amplitude } => {
+                        if !self.bodies.contains(&FX_NOISE_WGSL) {
+                            self.bodies.push(FX_NOISE_WGSL);
+                        }
+                        let f = self.wire(node_id, "factor")?.unwrap_or_else(|| "u.misc.x".to_string());
+                        let freq = self
+                            .wire(node_id, "freq")?
+                            .unwrap_or_else(|| format!("{:.9}", frequency));
+                        let amp = self
+                            .wire(node_id, "amp")?
+                            .unwrap_or_else(|| format!("{:.9}", amplitude));
+                        format!("fx_noise(vec4<f32>({f}), vec4<f32>({freq}), vec4<f32>({amp}))")
+                    }
+                    NodeKind::Wave { wave_type, frequency, amplitude, offset } => {
+                        let f = self.wire(node_id, "factor")?.unwrap_or_else(|| "u.misc.x".to_string());
+                        let freq = self
+                            .wire(node_id, "freq")?
+                            .unwrap_or_else(|| format!("{:.9}", frequency));
+                        let amp = self
+                            .wire(node_id, "amp")?
+                            .unwrap_or_else(|| format!("{:.9}", amplitude));
+                        let phase = format!("vec4<f32>({f}) * vec4<f32>({freq}) + vec4<f32>({offset:.9})");
+                        match wave_type {
+                            WaveType::Sine => format!(
+                                "(sin(({phase}) * vec4<f32>(6.283185307)) * vec4<f32>({amp}))"
+                            ),
+                            WaveType::Triangle => {
+                                let t = format!("fract({phase})");
+                                format!(
+                                    "(select((({t}) * 4.0 - 1.0), (3.0 - ({t}) * 4.0), ({t}) < vec4<f32>(0.5)) * vec4<f32>({amp}))"
+                                )
+                            }
+                            WaveType::Square => format!(
+                                "(select(vec4<f32>(-1.0), vec4<f32>(1.0), fract({phase}) < vec4<f32>(0.5)) * vec4<f32>({amp}))"
+                            ),
+                        }
+                    }
+                    NodeKind::Stepped { steps } => {
+                        let v = self.wire(node_id, "val")?.unwrap_or_else(|| "u.misc.x".to_string());
+                        let s = self.wire(node_id, "steps")?.unwrap_or_else(|| format!("{:.9}", steps));
+                        format!(
+                            "((floor(vec4<f32>({v}) * max(vec4<f32>({s}), vec4<f32>(1.0)))) / max(vec4<f32>({s}), vec4<f32>(1.0)))"
+                        )
+                    }
+                    NodeKind::MakeVector { .. } | NodeKind::MakeColor => {
+                        // Per-channel gather; each slot reads its matching
+                        // component of the wired bus, unwired slots echo the
+                        // base color component (CPU comp pass-through).
+                        let slot = |wire: Option<String>, comp: &str| {
+                            wire.map_or_else(|| format!("(color).{comp}"), |e| format!("(vec4<f32>({e})).{comp}"))
+                        };
+                        let r = slot(self.wire(node_id, "x")?.or(self.wire(node_id, "r")?), "r");
+                        let g = slot(self.wire(node_id, "y")?.or(self.wire(node_id, "g")?), "g");
+                        let b = slot(self.wire(node_id, "z")?.or(self.wire(node_id, "b")?), "b");
+                        let a = slot(self.wire(node_id, "a")?.or(self.wire(node_id, "w")?), "a");
+                        format!("vec4<f32>({r}, {g}, {b}, {a})")
+                    }
+                    NodeKind::BreakVector { .. } | NodeKind::BreakColor => {
+                        // Per-component fan-out; scalar sources splat through
+                        // the vec4 constructor, exactly the CPU replication.
+                        let bus = self.wire(node_id, "in")?.unwrap_or_else(|| "color".to_string());
+                        format!("vec4<f32>({bus})")
+                    }
+                    NodeKind::GetLayerFactor => "u.misc.x".to_string(),
                     _ => return Err(format!("graph node not twinable: {:?}", kind)),
                 })
             }
@@ -1694,6 +1852,67 @@ mod tests {
 
     /// The four spatial node kinds must emit valid WGSL (ring helpers,
     /// fract wrap, rotation matrix). Skips where no wgpu device exists.
+    /// The scalar/vertex families (Math/Lerp/Clamp/Remap/Smoothstep/Noise/
+    /// Wave/Stepped/Make/Break/GetLayerFactor) must emit valid WGSL with
+    /// every bus coercion path (scalar .r reads feeding vec positions and
+    /// vec buses feeding scalar slots). Skips without a wgpu device.
+    #[test]
+    fn scalar_graph_twins_compile() {
+        use project::modifier::{ModifierGraph, ModifierNode, NodeConnection, NodeKind, MathOp, WaveType};
+        let Ok(gpu) = GpuContext::new_headless() else { return };
+        let nodes = vec![
+            ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
+            ModifierNode::new("wave", 0.0, 0.0, NodeKind::Wave { wave_type: WaveType::Sine, frequency: 2.0, amplitude: 0.5, offset: 0.0 }),
+            ModifierNode::new("math", 0.0, 0.0, NodeKind::Math { op: MathOp::Multiply, default_b: 2.0 }),
+            ModifierNode::new("lerp", 0.0, 0.0, NodeKind::Lerp { default_a: 0.0, default_b: 1.0 }),
+            ModifierNode::new("clamp", 0.0, 0.0, NodeKind::Clamp { min: 0.0, max: 1.0 }),
+            ModifierNode::new("remap", 0.0, 0.0, NodeKind::Remap { in_min: 0.0, in_max: 1.0, out_min: 0.0, out_max: 100.0 }),
+            ModifierNode::new("smooth", 0.0, 0.0, NodeKind::Smoothstep { edge0: 0.0, edge1: 1.0 }),
+            ModifierNode::new("noise", 0.0, 0.0, NodeKind::Noise { frequency: 1.0, amplitude: 1.0 }),
+            ModifierNode::new("step", 0.0, 0.0, NodeKind::Stepped { steps: 8.0 }),
+            ModifierNode::new("mk", 0.0, 0.0, NodeKind::MakeVector { dims: 2 }),
+            ModifierNode::new("brk", 0.0, 0.0, NodeKind::BreakVector { dims: 2 }),
+            ModifierNode::new("blend", 0.0, 0.0, NodeKind::Blend { mode: project::modifier::GraphBlendMode::Screen, default_b: 0.0 }),
+            ModifierNode::new("gfac", 0.0, 0.0, NodeKind::GetLayerFactor),
+            ModifierNode::new("mkcol", 0.0, 0.0, NodeKind::MakeColor),
+            ModifierNode::new("out", 0.0, 0.0, NodeKind::Output),
+        ];
+        let conns = |pairs: &[(&str, &str, &str, &str)]| {
+            pairs.iter().map(|(a, sa, b, sb)| NodeConnection::new(*a, *sa, *b, *sb)).collect()
+        };
+        let mut graph = ModifierGraph { nodes, connections: vec![] };
+        graph.connections = conns(&[
+            ("in", "value", "wave", "factor"),      // vec bus into scalar slot
+            ("wave", "value", "math", "b"),         // scalar-shaped default path? no — bus into vec slot
+            ("in", "value", "lerp", "a"),
+            ("math", "value", "lerp", "weight"),    // vec4 bus into weight
+            ("lerp", "value", "clamp", "val"),
+            ("clamp", "value", "remap", "val"),
+            ("remap", "value", "smooth", "val"),
+            ("smooth", "value", "noise", "factor"),
+            ("noise", "value", "step", "val"),
+            ("step", "value", "mk", "x"),
+            ("mk", "value", "brk", "in"),
+            ("brk", "value", "blend", "b"),
+            ("in", "value", "blend", "a"),
+            ("wave", "value", "blend", "weight"),
+            ("blend", "value", "out", "result"),
+        ]);
+        assert!(graph.is_color_clean(), "scalar chain must be color-clean");
+        FxPass::for_graph(&gpu, &graph, wgpu::TextureFormat::Rgba8Unorm)
+            .expect("scalar graph with chained wires must compile");
+
+        // Second case: GetLayerFactor + MakeColor slots reading channels.
+        graph.connections = conns(&[
+            ("gfac", "value", "mkcol", "r"),
+            ("in", "value", "mkcol", "g"),
+            ("mkcol", "value", "out", "result"),
+        ]);
+        assert!(graph.is_color_clean(), "make-color chain must be color-clean");
+        FxPass::for_graph(&gpu, &graph, wgpu::TextureFormat::Rgba8Unorm)
+            .expect("make/break graph must compile");
+    }
+
     #[test]
     fn spatial_graph_twins_compile() {
         use project::modifier::{ModifierGraph, ModifierNode, NodeConnection, NodeKind};

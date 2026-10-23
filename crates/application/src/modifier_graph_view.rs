@@ -663,6 +663,7 @@ impl ModifierGraphView {
                             .text_color(cx.theme().muted_foreground)
                             .child("+ Add Node:"),
                     )
+                    .child(self.palette_cat("Value", cx))
                     .child(self.toolbar_btn("Math", ent_math, move |this, cx| {
                         this.add_node(
                             NodeKind::Math {
@@ -721,6 +722,8 @@ impl ModifierGraphView {
                     .child(self.toolbar_btn("Stepped", ent_step, move |this, cx| {
                         this.add_node(NodeKind::Stepped { steps: 5.0 }, cx);
                     }, cx))
+                    .child(Self::palette_div(cx))
+                    .child(self.palette_cat("Color", cx))
                     .child(self.toolbar_btn("Constant", ent_const, move |this, cx| {
                         this.add_node(NodeKind::Constant { mode: ConstantMode::Float, value: 1.0, g: 0.0, b: 0.0, a: 1.0 }, cx);
                     }, cx))
@@ -753,6 +756,8 @@ impl ModifierGraphView {
                             cx,
                         );
                     }, cx))
+                    .child(Self::palette_div(cx))
+                    .child(self.palette_cat("Space", cx))
                     .child(self.toolbar_btn("Transform", ent_transform, move |this, cx| {
                         this.add_node(
                             NodeKind::Transform {
@@ -792,6 +797,8 @@ impl ModifierGraphView {
                             cx,
                         );
                     }, cx))
+                    .child(Self::palette_div(cx))
+                    .child(self.palette_cat("Bus", cx))
                     .child(self.toolbar_btn("Mk 2D", ent_make2d, move |this, cx| {
                         this.add_node(NodeKind::MakeVector { dims: 2 }, cx);
                     }, cx))
@@ -810,6 +817,8 @@ impl ModifierGraphView {
                     .child(self.toolbar_btn("Brk Color", ent_brkcolor, move |this, cx| {
                         this.add_node(NodeKind::BreakColor, cx);
                     }, cx))
+                    .child(Self::palette_div(cx))
+                    .child(self.palette_cat("Driver", cx))
                     .child(self.toolbar_btn("Driver Link", ent_driver, move |this, cx| {
                         let copied = this.editor_state.read(cx).copied_property_link.clone();
                         let (driver_layer_id, driver_prop_path) = match copied {
@@ -871,6 +880,20 @@ impl ModifierGraphView {
                             .child("Reset Graph"),
                     ),
             )
+    }
+
+    /// Category heading + divider for the grouped node palette.
+    fn palette_cat(&self, label: &'static str, cx: &App) -> Div {
+        div()
+            .text_xs()
+            .font_semibold()
+            .text_color(cx.theme().muted_foreground)
+            .pl_2()
+            .child(label)
+    }
+
+    fn palette_div(cx: &App) -> Div {
+        div().w(px(2.)).h(px(18.)).rounded_full().bg(cx.theme().border)
     }
 
     fn toolbar_btn<F>(&self, label: &'static str, entity: Entity<Self>, on_click: F, cx: &App) -> AnyElement
