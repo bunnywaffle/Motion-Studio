@@ -14001,6 +14001,65 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         });
     }
 
+    /// The palette's Effects section is built from the stock registry, so
+    /// every plug-in in the suite is reachable as a graph node.
+    #[gpui_kit::test]
+    fn test_modifier_graph_effect_palette_lists_registry(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            Theme::change(ThemeMode::Dark, None, cx);
+        });
+
+        let state = cx.new(|_cx| EditorState::new());
+        let mut mg_view = None;
+        let root_handle = cx.open_window(size(px(1080.), px(720.)), |window, cx| {
+            window.activate_window();
+            Theme::change(ThemeMode::Dark, Some(window), cx);
+            let view = cx.new(|cx| {
+                crate::modifier_graph_view::ModifierGraphView::new(
+                    state.clone(),
+                    "layer_accent".to_string(),
+                    "transform.position".to_string(),
+                    window,
+                    cx,
+                )
+            });
+            mg_view = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+
+        let view_entity = mg_view.expect("view created");
+        use gpui_kit::test::TestWindowExt;
+        cx.update_window(root_handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("mg_pal_eff_hdr").visible(), "Effects header visible");
+            window.click("mg_pal_eff_hdr", cx);
+            window.render_frame(cx);
+            // Early registry entries (Color group) sit inside the viewport.
+            for id in ["mg_add_fx_curves", "mg_add_fx_posterize"] {
+                assert!(window.find(SharedString::from(id)).visible(), "{id} visible");
+            }
+            window.click("mg_add_fx_curves", cx);
+            window.click("mg_add_fx_posterize", cx);
+        })
+        .expect("update_window failed");
+        cx.run_until_parked();
+
+        view_entity.read_with(cx, |this, _cx| {
+            let stock: Vec<project::StockPlugin> = this
+                .graph
+                .nodes
+                .iter()
+                .filter_map(|n| match n.kind {
+                    project::modifier::NodeKind::StockOp { plugin, .. } => Some(plugin),
+                    _ => None,
+                })
+                .collect();
+            assert!(stock.contains(&project::StockPlugin::Curves), "Curves node added: {stock:?}");
+            assert!(stock.contains(&project::StockPlugin::Posterize), "Posterize node added: {stock:?}");
+        });
+    }
+
     /// Constant nodes carry a mode (Float/Int/Color/2D/3D): switching the
     /// mode keeps the value and re-renders the channel fields.
     #[gpui_kit::test]

@@ -12,6 +12,7 @@ use project::modifier::{
     ConstantMode, GraphBlendMode, MathOp, ModifierGraph, ModifierNode, NodeKind, WaveType,
 };
 use project::StockPlugin;
+use project::ofx::{OfxCategory, ofx_lookup};
 
 use crate::state::EditorState;
 
@@ -20,11 +21,11 @@ use crate::state::EditorState;
 /// (the toolbar row can wrap, growing the header).
 pub const HEADER_HEIGHT: f32 = 77.0;
 
-/// Display label for a socket: Blend's `a`/`b` read as background/foreground
-/// (wire names stay a/b/weight so old saved graphs load untouched).
 /// Sidebar palette section row: (category, [(button label, kind ctor)]).
 type PaletteEntry = (&'static str, &'static [(&'static str, fn() -> NodeKind)]);
 
+/// Display label for a socket: Blend's `a`/`b` read as background/foreground
+/// (wire names stay a/b/weight so old saved graphs load untouched).
 fn socket_display_label(kind: Option<&NodeKind>, socket: &'static str) -> &'static str {
     if matches!(kind, Some(NodeKind::Blend { .. })) {
         match socket {
@@ -138,6 +139,8 @@ pub struct ModifierGraphView {
     /// Node palette sidebar section open/closed (Value/Color/Space/Bus/Driver).
     /// Sections start collapsed: the sidebar is a clean list of categories.
     palette_open: [bool; 5],
+    /// Effects sidebar section (dynamic, from the stock plugin registry).
+    effects_open: bool,
 }
 
 impl ModifierGraphView {
@@ -180,6 +183,7 @@ impl ModifierGraphView {
             blend_combos: HashMap::new(),
             blend_combo_subs: HashMap::new(),
             palette_open: [false; 5],
+            effects_open: false,
         }
     }
 
@@ -756,13 +760,13 @@ impl ModifierGraphView {
             for (label, ctor) in btns.iter() {
                 let ent_btn = entity.clone();
                 let ctor = *ctor;
-                body = body.child(self.toolbar_btn(label, ent_btn, move |this, cx| {
+                body = body.child(self.toolbar_btn("", label, ent_btn, move |this, cx| {
                     this.add_node(ctor(), cx);
                 }, cx));
             }
             if *cat == "Driver" {
                 let ent_drv = entity.clone();
-                body = body.child(self.toolbar_btn("Driver Link", ent_drv, move |this, cx| {
+                body = body.child(self.toolbar_btn("", "Driver Link", ent_drv, move |this, cx| {
                     this.add_driver_node(cx);
                 }, cx));
             }
@@ -809,6 +813,66 @@ impl ModifierGraphView {
                     .into_any_element(),
             );
         }
+
+        // Dynamic "Effects" section: every stock plug-in in the registry is
+        // one add-node button, grouped by its OFX panel category.
+        let mut eff_body = v_flex().px_2().py_1().gap_1p5();
+        let mut last_cat: Option<OfxCategory> = None;
+        for plugin in StockPlugin::all() {
+            let desc = ofx_lookup(plugin.plugin_id()).expect("stock descriptor registered");
+            if last_cat != Some(desc.category) {
+                last_cat = Some(desc.category);
+                eff_body = eff_body.child(
+                    div()
+                        .pt_1()
+                        .text_xs()
+                        .font_semibold()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(desc.category.label()),
+                );
+            }
+            let ent_btn = entity.clone();
+            let plugin = *plugin;
+            eff_body = eff_body.child(self.toolbar_btn("fx_", desc.label, ent_btn, move |this, cx| {
+                let params = desc.params.iter().map(|p| p.default).collect();
+                this.add_node(NodeKind::StockOp { plugin, params }, cx);
+            }, cx));
+        }
+        let ent_eff = entity.clone();
+        let eff_hdr = h_flex()
+            .id(SharedString::from("mg_pal_eff_hdr"))
+            .test_support()
+            .w_full()
+            .px_2()
+            .py_1()
+            .gap_1p5()
+            .items_center()
+            .cursor_pointer()
+            .rounded_sm()
+            .font_semibold()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .hover(|s| s.bg(cx.theme().accent))
+            .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                ent_eff.update(cx, |this, cx| {
+                    this.effects_open = !this.effects_open;
+                    cx.notify();
+                });
+            })
+            .child(div().w(px(10.)).child(if self.effects_open { "▾" } else { "▸" }))
+            .child("EFFECTS");
+        let eff_content = if self.effects_open {
+            eff_body.into_any_element()
+        } else {
+            div().into_any_element()
+        };
+        sections.push(
+            Collapsible::new()
+                .open(self.effects_open)
+                .child(v_flex().rounded_sm().border_b_1().border_color(cx.theme().border).child(eff_hdr))
+                .content(eff_content)
+                .into_any_element(),
+        );
         v_flex()
             .id("node_palette_sidebar")
             .w(px(150.))
@@ -837,12 +901,24 @@ impl ModifierGraphView {
         );
     }
 
-    fn toolbar_btn<F>(&self, label: &'static str, entity: Entity<Self>, on_click: F, cx: &App) -> AnyElement
+    /// Palette button. `id_prefix` keeps registry effect buttons unique when
+    /// a static category exposes the same label (e.g. Posterize).
+    fn toolbar_btn<F>(
+        &self,
+        id_prefix: &str,
+        label: &'static str,
+        entity: Entity<Self>,
+        on_click: F,
+        cx: &App,
+    ) -> AnyElement
     where
         F: Fn(&mut Self, &mut Context<Self>) + 'static,
     {
         div()
-            .id(SharedString::from(format!("mg_add_{}", label.replace(' ', "_").to_lowercase())))
+            .id(SharedString::from(format!(
+                "mg_add_{id_prefix}{}",
+                label.replace(' ', "_").to_lowercase()
+            )))
             .test_support()
             .px_2()
             .py_0p5()
