@@ -14001,8 +14001,9 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         });
     }
 
-    /// The palette's Effects section is built from the stock registry, so
-    /// every plug-in in the suite is reachable as a graph node.
+    /// The palette's Effects section is built from the stock registry: every
+    /// per-pixel plug-in is reachable as a graph node, new effect nodes land
+    /// straight in the live chain, and their descriptor params edit in place.
     #[gpui_kit::test]
     fn test_modifier_graph_effect_palette_lists_registry(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
@@ -14030,7 +14031,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
 
         let view_entity = mg_view.expect("view created");
         use gpui_kit::test::TestWindowExt;
-        cx.update_window(root_handle.into(), |_, window, cx| {
+        cx.update_window(root_handle.clone().into(), |_, window, cx| {
             window.render_frame(cx);
             assert!(window.find("mg_pal_eff_hdr").visible(), "Effects header visible");
             window.click("mg_pal_eff_hdr", cx);
@@ -14039,25 +14040,81 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             for id in ["mg_add_fx_curves", "mg_add_fx_posterize"] {
                 assert!(window.find(SharedString::from(id)).visible(), "{id} visible");
             }
+            // Spatial plug-ins are not graph nodes (they need neighbours).
+            assert!(
+                window.try_find(SharedString::from("mg_add_fx_box_blur")).is_none(),
+                "spatial effects must not be offered as graph nodes",
+            );
             window.click("mg_add_fx_curves", cx);
             window.click("mg_add_fx_posterize", cx);
         })
         .expect("update_window failed");
         cx.run_until_parked();
 
-        view_entity.read_with(cx, |this, _cx| {
+        let mut curves_id = String::new();
+        let mut curves_param = None;
+        view_entity.update(cx, |this, cx| {
+            use project::modifier::NodeKind;
             let stock: Vec<project::StockPlugin> = this
                 .graph
                 .nodes
                 .iter()
                 .filter_map(|n| match n.kind {
-                    project::modifier::NodeKind::StockOp { plugin, .. } => Some(plugin),
+                    NodeKind::StockOp { plugin, .. } => Some(plugin),
                     _ => None,
                 })
                 .collect();
             assert!(stock.contains(&project::StockPlugin::Curves), "Curves node added: {stock:?}");
             assert!(stock.contains(&project::StockPlugin::Posterize), "Posterize node added: {stock:?}");
+
+            // A new effect splices into the chain: it feeds Output directly.
+            let out_id = this
+                .graph
+                .nodes
+                .iter()
+                .find(|n| matches!(n.kind, NodeKind::Output))
+                .map(|n| n.id.clone())
+                .expect("output node");
+            let tail = this
+                .graph
+                .connections
+                .iter()
+                .find(|c| c.to_node == out_id && c.to_socket == "result")
+                .expect("output wired")
+                .from_node
+                .clone();
+            assert!(
+                this.graph.nodes.iter().any(|n| n.id == tail && matches!(n.kind, NodeKind::StockOp { .. })),
+                "last added effect must feed Output",
+            );
+
+            // Descriptor params edit in place (clamped).
+            curves_id = this
+                .graph
+                .nodes
+                .iter()
+                .find(|n| matches!(n.kind, NodeKind::StockOp { plugin: project::StockPlugin::Curves, .. }))
+                .expect("curves node")
+                .id
+                .clone();
+            let p = project::StockPlugin::Curves.descriptor().params[0];
+            this.apply_param_value(&curves_id, p.name, p.max + 1.0, cx);
+            let node = this.graph.get_node(&curves_id).expect("curves node");
+            assert!(
+                matches!(&node.kind, NodeKind::StockOp { params, .. } if params[0] == p.max),
+                "param edit must clamp to the descriptor range",
+            );
+            curves_param = Some(p.name);
         });
+
+        // The card renders one scrub row per descriptor param.
+        let curves_param = curves_param.expect("param name");
+        cx.update_window(root_handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let id = format!("mg_param_{curves_id}_{curves_param}");
+            assert!(window.find(SharedString::from(id)).visible(), "stock param row rendered");
+        })
+        .expect("update_window failed");
     }
 
     /// Constant nodes carry a mode (Float/Int/Color/2D/3D): switching the

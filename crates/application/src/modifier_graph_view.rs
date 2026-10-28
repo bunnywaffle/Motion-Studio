@@ -280,14 +280,45 @@ impl ModifierGraphView {
     }
 
     /// Add a new node of the given kind at a convenient position.
-    pub fn add_node(&mut self, kind: NodeKind, cx: &mut Context<Self>) {        let count = self.graph.nodes.len() + 1;
+    /// Color-bus effects are spliced into the live chain (previous source →
+    /// new node → Output) so adding one changes the image immediately
+    /// instead of landing as an unconnected card.
+    pub fn add_node(&mut self, kind: NodeKind, cx: &mut Context<Self>) {
+        let splice_in = match kind {
+            NodeKind::StockOp { .. } => Some("in"),
+            NodeKind::Blend { .. } => Some("a"),
+            NodeKind::Wgsl { .. } | NodeKind::Glow { .. } | NodeKind::Bloom { .. } => Some("color"),
+            _ => None,
+        };
+        let count = self.graph.nodes.len() + 1;
         let id = format!("node_{}_{}", kind.title().to_lowercase().replace(' ', "_"), count);
         // Position staggered in canvas view
         let offset_x = 220.0 + ((self.graph.nodes.len() as f32 % 5.0) * 40.0) - self.pan_offset.0;
         let offset_y = 120.0 + ((self.graph.nodes.len() as f32 % 5.0) * 35.0) - self.pan_offset.1;
 
-        let node = ModifierNode::new(id, offset_x, offset_y, kind);
+        let node = ModifierNode::new(id.clone(), offset_x, offset_y, kind);
         self.graph.add_node(node);
+
+        if let Some(in_socket) = splice_in {
+            if let Some(out_id) = self
+                .graph
+                .nodes
+                .iter()
+                .find(|n| matches!(n.kind, NodeKind::Output))
+                .map(|n| n.id.clone())
+            {
+                let prev = self
+                    .graph
+                    .connections
+                    .iter()
+                    .find(|c| c.to_node == out_id && c.to_socket == "result")
+                    .map(|c| (c.from_node.clone(), c.from_socket.clone()));
+                if let Some((from_node, from_socket)) = prev {
+                    self.graph.connect(from_node, from_socket, id.clone(), in_socket);
+                }
+                self.graph.connect(id, "value", out_id, "result");
+            }
+        }
         self.sync_to_state(cx);
     }
 
@@ -814,11 +845,19 @@ impl ModifierGraphView {
             );
         }
 
-        // Dynamic "Effects" section: every stock plug-in in the registry is
-        // one add-node button, grouped by its OFX panel category.
-        let mut eff_body = v_flex().px_2().py_1().gap_1p5();
+        // Dynamic "Effects" section: every per-pixel stock plug-in in the
+        // registry is one add-node button, grouped by its OFX panel
+        // category. Spatial plug-ins (blur/light/distort/stylize) need
+        // neighbours and stay in the layer effect stack — as graph nodes
+        // they would be silent no-ops.
+        let mut eff_body = v_flex().px_2().py_1().gap_1p5().child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child("Per-pixel effects"),
+        );
         let mut last_cat: Option<OfxCategory> = None;
-        for plugin in StockPlugin::all() {
+        for plugin in StockPlugin::all().iter().filter(|p| p.is_pointwise()) {
             let desc = ofx_lookup(plugin.plugin_id()).expect("stock descriptor registered");
             if last_cat != Some(desc.category) {
                 last_cat = Some(desc.category);
@@ -1895,6 +1934,29 @@ impl ModifierGraphView {
                     )
             }
 
+            NodeKind::StockOp { plugin, params } => {
+                let desc = plugin.descriptor();
+                let mut col = v_flex()
+                    .w_full()
+                    .px_2()
+                    .py_1p5()
+                    .gap_1()
+                    .border_t_1()
+                    .border_color(rgb(0x2e303e));
+                for (i, p) in desc.params.iter().enumerate() {
+                    let val = params.get(i).copied().unwrap_or(p.default);
+                    col = col.child(
+                        h_flex()
+                            .w_full()
+                            .gap_1p5()
+                            .items_center()
+                            .child(div().text_xs().text_color(cx.theme().muted_foreground).child(p.label))
+                            .child(self.param_scrub_input(nid.clone(), p.name, val, rgb(0x60a5fa), ent.clone(), cx)),
+                    );
+                }
+                col
+            }
+
             NodeKind::Wgsl { code } => self.render_wgsl_params(&nid, code, entity, cx),
 
             NodeKind::Transform { x, y, scale, rotation } => self.spatial_rows(
@@ -2303,6 +2365,14 @@ impl ModifierGraphView {
                 (NodeKind::Math { default_b, .. }, "default_b") => *default_b,
                 (NodeKind::Wave { frequency, .. }, "frequency") => *frequency,
                 (NodeKind::Stepped { steps }, "steps") => *steps,
+                (NodeKind::StockOp { plugin, params }, name) => {
+                    let desc = plugin.descriptor();
+                    desc.params
+                        .iter()
+                        .position(|p| p.name == name)
+                        .map(|i| params.get(i).copied().unwrap_or(desc.params[i].default))
+                        .unwrap_or(0.0)
+                }
                 _ => 0.0,
             })
             .unwrap_or(0.0);
@@ -2417,7 +2487,7 @@ impl ModifierGraphView {
 
     /// Set a node param to an absolute value (typed entry). Mirrors the
     /// per-param clamps in [`Self::apply_param_scrub`].
-    fn apply_param_value(
+    pub(crate) fn apply_param_value(
         &mut self,
         node_id: &str,
         param_name: &str,
@@ -2461,6 +2531,17 @@ impl ModifierGraphView {
                 (NodeKind::Bloom { threshold, .. }, "threshold") => *threshold = value.clamp(0.0, 1.0),
                 (NodeKind::Bloom { radius, .. }, "radius") => *radius = value.max(0.0),
                 (NodeKind::Bloom { intensity, .. }, "intensity") => *intensity = value.max(0.0),
+                (NodeKind::StockOp { plugin, params }, name) => {
+                    let desc = plugin.descriptor();
+                    let Some(idx) = desc.params.iter().position(|p| p.name == name) else {
+                        return;
+                    };
+                    let p = &desc.params[idx];
+                    while params.len() <= idx {
+                        params.push(p.default);
+                    }
+                    params[idx] = value.clamp(p.min, p.max);
+                }
                 _ => return,
             }
             self.sync_to_state(cx);
@@ -2517,6 +2598,17 @@ impl ModifierGraphView {
                 }
                 (NodeKind::Bloom { intensity, .. }, "intensity") => {
                     *intensity = (*intensity + delta * 0.02).max(0.0);
+                }
+                (NodeKind::StockOp { plugin, params }, name) => {
+                    let desc = plugin.descriptor();
+                    if let Some(idx) = desc.params.iter().position(|p| p.name == name) {
+                        let p = &desc.params[idx];
+                        while params.len() <= idx {
+                            params.push(p.default);
+                        }
+                        let step = ((p.max - p.min) / 200.0).max(0.001);
+                        params[idx] = (params[idx] + delta * step).clamp(p.min, p.max);
+                    }
                 }
                 _ => {}
             }
