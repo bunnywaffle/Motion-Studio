@@ -27,14 +27,19 @@ type PaletteEntry = (&'static str, &'static [(&'static str, fn() -> NodeKind)]);
 /// Display label for a socket: Blend's `a`/`b` read as background/foreground
 /// (wire names stay a/b/weight so old saved graphs load untouched).
 fn socket_display_label(kind: Option<&NodeKind>, socket: &'static str) -> &'static str {
-    if matches!(kind, Some(NodeKind::Blend { .. })) {
-        match socket {
+    match kind {
+        Some(NodeKind::Blend { .. }) => match socket {
             "a" => "background",
             "b" => "foreground",
             _ => socket,
-        }
-    } else {
-        socket
+        },
+        // StockOp param sockets show the OFX label of the slot they drive.
+        Some(NodeKind::StockOp { plugin, .. }) => socket
+            .strip_prefix('p')
+            .and_then(|i| i.parse::<usize>().ok())
+            .and_then(|i| plugin.descriptor().params.get(i))
+            .map_or(socket, |p| p.label),
+        _ => socket,
     }
 }
 
@@ -1946,13 +1951,19 @@ impl ModifierGraphView {
                     .border_color(rgb(0x2e303e));
                 for (i, p) in desc.params.iter().enumerate() {
                     let val = params.get(i).copied().unwrap_or(p.default);
+                    let socket = format!("p{i}");
+                    let control = if self.is_socket_wired(&nid, &socket) {
+                        div().text_xs().text_color(rgb(0x38bdf8)).child("driven").into_any_element()
+                    } else {
+                        self.param_scrub_input(nid.clone(), p.name, val, rgb(0x60a5fa), ent.clone(), cx)
+                    };
                     col = col.child(
                         h_flex()
                             .w_full()
                             .gap_1p5()
                             .items_center()
                             .child(div().text_xs().text_color(cx.theme().muted_foreground).child(p.label))
-                            .child(self.param_scrub_input(nid.clone(), p.name, val, rgb(0x60a5fa), ent.clone(), cx)),
+                            .child(control),
                     );
                 }
                 col
@@ -2084,16 +2095,30 @@ impl ModifierGraphView {
             .border_t_1()
             .border_color(rgb(0x2e303e));
         for (label, pname, val, tint) in rows {
+            let control = if self.is_socket_wired(&nid, pname) {
+                div().text_xs().text_color(rgb(0x38bdf8)).child("driven").into_any_element()
+            } else {
+                self.param_scrub_input(nid.clone(), pname, val, rgb(tint), ent.clone(), cx)
+            };
             col = col.child(
                 h_flex()
                     .w_full()
                     .gap_1p5()
                     .items_center()
                     .child(div().text_xs().text_color(cx.theme().muted_foreground).child(label))
-                    .child(self.param_scrub_input(nid.clone(), pname, val, rgb(tint), ent.clone(), cx)),
+                    .child(control),
             );
         }
         col
+    }
+
+    /// True when another node's output feeds this input socket (the stored
+    /// param value is then overridden).
+    fn is_socket_wired(&self, node_id: &str, socket: &str) -> bool {
+        self.graph
+            .connections
+            .iter()
+            .any(|c| c.to_node == node_id && c.to_socket == socket)
     }
 
     /// Wgsl node body: click-to-edit code pill + the shader signature hint.

@@ -3,6 +3,12 @@ use std::collections::{HashMap, HashSet};
 
 use crate::StockPlugin;
 
+/// Input sockets of a StockOp node: the colour bus followed by one
+/// drivable socket per parameter slot (`p0..pN`, descriptor order).
+static STOCK_INPUT_SOCKETS: [&str; crate::stock::STOCK_MAX_PARAMS + 1] = [
+    "in", "p0", "p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8", "p9", "p10", "p11",
+];
+
 /// Value type of a Constant node (drives its scalar/vector/color storage).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -468,6 +474,12 @@ impl NodeKind {
     fn static_input_sockets(&self) -> &'static [&'static str] {
         match self {
             Self::GetLayerFactor | Self::BaseValueIn | Self::Constant { .. } | Self::DriverLink { .. } => &[],
+            // Colour bus plus one drivable socket per OFX parameter slot
+            // (`p0..pN`, in descriptor order). A wired socket overrides the
+            // card's stored value for that parameter.
+            Self::StockOp { plugin, .. } => {
+                &STOCK_INPUT_SOCKETS[..1 + plugin.descriptor().params.len().min(crate::stock::STOCK_MAX_PARAMS)]
+            }
             Self::Math { .. } => &["a", "b"],
             Self::Lerp { .. } => &["a", "b", "weight"],
             Self::Clamp { .. } => &["val", "min", "max"],
@@ -482,10 +494,11 @@ impl NodeKind {
             Self::MakeColor => &["r", "g", "b", "a"],
             Self::BreakColor => &["in"],
             Self::Blend { .. } => &["a", "b", "weight"],
-            Self::StockOp { .. } => &["in"],
             Self::Wgsl { .. } => &["color", "p0", "p1", "p2", "p3"],
-            Self::Transform { .. } | Self::Tile { .. } => &[],
-            Self::Glow { .. } | Self::Bloom { .. } => &["color"],
+            Self::Transform { .. } => &["x", "y", "scale", "rotation"],
+            Self::Tile { .. } => &["repeat_x", "repeat_y"],
+            Self::Glow { .. } => &["color", "radius", "intensity"],
+            Self::Bloom { .. } => &["color", "threshold", "radius", "intensity"],
             Self::Output => &["result"],
         }
     }
@@ -1246,9 +1259,34 @@ impl ModifierGraph {
                         .resolve_input(node_id, "in", &sub, &mut sub_memo, &mut sub_stack)
                         .unwrap_or(sub.base);
                 }
-                let out = crate::stock::process_color_stock(
+                let mut resolved = crate::stock::stock_params_resolved(*plugin, params);
+                // Wired parameter sockets override the card's stored values.
+                // Params are scalars: resolve them on the red channel so a
+                // colour-bus source broadcasts like the GPU twin's `.r`.
+                let pctx = EvalCtx {
+                    base: ctx.base,
+                    comp: ctx.comp,
+                    factor: ctx.factor,
+                    resolver: ctx.resolver,
+                    channel: "r",
+                };
+                for c in &self.connections {
+                    if c.to_node != node_id {
+                        continue;
+                    }
+                    let Some(i) = c.to_socket.strip_prefix('p').and_then(|s| s.parse::<usize>().ok()) else {
+                        continue;
+                    };
+                    let mut pm = HashMap::new();
+                    let mut ps = HashSet::new();
+                    let v = self.evaluate_node_output(&c.from_node, &c.from_socket, &pctx, &mut pm, &mut ps);
+                    if i < resolved.len() {
+                        resolved[i] = v;
+                    }
+                }
+                let out = crate::stock::process_color_stock_resolved(
                     *plugin,
-                    params,
+                    &resolved,
                     crate::Color::rgba(src[0], src[1], src[2], src[3]),
                 );
                 match chan {
@@ -2085,16 +2123,70 @@ mod tests {
     }
 
     #[test]
+    fn stock_op_params_accept_wires() {
+        fn resolver(_: &str, _: &str) -> f32 {
+            0.0
+        }
+        // Threshold stores 90 (black) but p0 is driven by a Constant 10
+        // (white) — the wire must win over the card value.
+        let graph = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
+                ModifierNode::new(
+                    "k",
+                    0.0,
+                    80.0,
+                    NodeKind::Constant { mode: ConstantMode::Float, value: 10.0, g: 0.0, b: 0.0, a: 1.0 },
+                ),
+                ModifierNode::new(
+                    "th",
+                    120.0,
+                    0.0,
+                    NodeKind::StockOp { plugin: StockPlugin::Threshold, params: vec![90.0, 10.0] },
+                ),
+                ModifierNode::new("out", 240.0, 0.0, NodeKind::Output),
+            ],
+            connections: vec![
+                NodeConnection::new("in", "value", "th", "in"),
+                NodeConnection::new("k", "value", "th", "p0"),
+                NodeConnection::new("th", "value", "out", "result"),
+            ],
+        };
+        assert!(graph.is_color_clean());
+        assert_eq!(
+            graph.evaluate_color(0.5, 0.5, 0.5, 1.0, 0.0, &resolver),
+            [1.0, 1.0, 1.0, 1.0]
+        );
+        // `in` plus one drivable socket per descriptor param.
+        assert_eq!(
+            graph.get_node("th").unwrap().kind.input_sockets(),
+            vec!["in", "p0", "p1"]
+        );
+    }
+
+    #[test]
     fn test_spatial_nodes_sockets_clean_and_cpu_passthrough() {
         fn resolver(_: &str, _: &str) -> f32 {
             0.0
         }
-        // Sockets + titles.
+        // Sockets + titles. Every numeric field is also a drivable input.
         assert_eq!(NodeKind::Transform { x: 0.0, y: 0.0, scale: 1.0, rotation: 0.0 }.title(), "Transform");
-        assert_eq!(NodeKind::Transform { x: 0.0, y: 0.0, scale: 1.0, rotation: 0.0 }.input_sockets(), Vec::<&str>::new());
-        assert_eq!(NodeKind::Tile { repeat_x: 2.0, repeat_y: 2.0 }.input_sockets(), Vec::<&str>::new());
-        assert_eq!(NodeKind::Glow { radius: 0.05, intensity: 1.0 }.input_sockets(), vec!["color"]);
-        assert_eq!(NodeKind::Bloom { threshold: 0.7, radius: 0.05, intensity: 1.0 }.input_sockets(), vec!["color"]);
+        assert_eq!(
+            NodeKind::Transform { x: 0.0, y: 0.0, scale: 1.0, rotation: 0.0 }.input_sockets(),
+            vec!["x", "y", "scale", "rotation"]
+        );
+        assert_eq!(
+            NodeKind::Tile { repeat_x: 2.0, repeat_y: 2.0 }.input_sockets(),
+            vec!["repeat_x", "repeat_y"]
+        );
+        assert_eq!(
+            NodeKind::Glow { radius: 0.05, intensity: 1.0 }.input_sockets(),
+            vec!["color", "radius", "intensity"]
+        );
+        assert_eq!(
+            NodeKind::Bloom { threshold: 0.7, radius: 0.05, intensity: 1.0 }.input_sockets(),
+            vec!["color", "threshold", "radius", "intensity"]
+        );
         // GPU-twinable (color-clean) and CPU passes the bus through
         // (documented GPU-only divergence, same as Wgsl).
         let graph = ModifierGraph {

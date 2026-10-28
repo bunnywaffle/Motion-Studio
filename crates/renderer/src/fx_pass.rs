@@ -715,6 +715,75 @@ impl FxPass {
         s
     }
 
+    /// Scalar view of any wire expression: channel sockets are already
+    /// scalars, buses are vec4 — force vec4 first so `.r` is always legal.
+    fn scalar_of(expr: &str) -> String {
+        format!("(vec4<f32>({expr})).r")
+    }
+
+    /// Replace the float slots a wire feeds in a shifted stock call
+    /// template (`u.params[slot + k].<c>` → `({expr}).r`). Unwired slots
+    /// keep their reference. Run after [`Self::param_shift`] so wire
+    /// expressions (which may carry their own `u.params` refs) are never
+    /// rescanned.
+    fn subst_param_wires(call: &str, slot: usize, wired: &[Option<String>]) -> String {
+        let mut out = String::with_capacity(call.len());
+        let mut rest = call;
+        while let Some(at) = rest.find("u.params[") {
+            out.push_str(&rest[..at]);
+            let after = &rest[at + "u.params[".len()..];
+            let Some(end) = after.find(']') else {
+                out.push_str(&rest[at..]);
+                return out;
+            };
+            let Ok(idx) = after[..end].parse::<usize>() else {
+                out.push_str(&rest[at..at + "u.params[".len()]);
+                rest = after;
+                continue;
+            };
+            let mut consumed = "u.params[".len() + end + 1;
+            let mask: String = rest[at + consumed..]
+                .strip_prefix('.')
+                .map(|m| m.chars().take_while(|c| "xyzw".contains(*c)).collect())
+                .unwrap_or_default();
+            if !mask.is_empty() {
+                consumed += 1 + mask.len();
+            }
+            let comps: Vec<(char, usize)> = if mask.is_empty() {
+                vec![('x', 0), ('y', 1), ('z', 2), ('w', 3)]
+            } else {
+                mask.chars()
+                    .filter_map(|c| "xyzw".find(c).map(|i| (c, i)))
+                    .collect()
+            };
+            let base = idx.saturating_sub(slot) * 4;
+            let mut pieces = Vec::with_capacity(comps.len());
+            let mut any = false;
+            for (c, ci) in comps.iter() {
+                match wired.get(base + ci).and_then(|w| w.as_ref()) {
+                    Some(expr) => {
+                        any = true;
+                        pieces.push(FxPass::scalar_of(expr));
+                    }
+                    None => pieces.push(format!("u.params[{idx}].{c}")),
+                }
+            }
+            if any {
+                out.push_str(&match comps.len() {
+                    1 => pieces.remove(0),
+                    2 => format!("vec2<f32>({})", pieces.join(", ")),
+                    3 => format!("vec3<f32>({})", pieces.join(", ")),
+                    _ => format!("vec4<f32>({})", pieces.join(", ")),
+                });
+            } else {
+                out.push_str(&rest[at..at + consumed]);
+            }
+            rest = &rest[at + consumed..];
+        }
+        out.push_str(rest);
+        out
+    }
+
     /// Compile a pass reproducing a color-clean Node Graph exactly: walk
     /// backwards from Output, emit one vec4 WGSL expression per node.
     /// Content (BaseValueIn) is the source pixel, Blend modes are inline
@@ -764,6 +833,20 @@ impl FxPass {
                     Some((from, from_socket)) => Ok(Some(self.select(&from, &from_socket)?)),
                     None => Ok(None),
                 }
+            }
+
+            /// Scalar parameter expression: a wired socket broadcasts its
+            /// red component, an unwired one bakes the literal.
+            fn scalar_param(
+                &mut self,
+                node_id: &str,
+                socket: &str,
+                default: f32,
+            ) -> Result<String, String> {
+                Ok(match self.wire(node_id, socket)? {
+                    Some(e) => FxPass::scalar_of(&e),
+                    None => format!("{default:.9}"),
+                })
             }
 
             /// Expression for one node output socket. Clean graphs only
@@ -864,10 +947,15 @@ impl FxPass {
                             .wire(node_id, "in")?
                             .unwrap_or_else(|| "color".to_string());
                         self.preamble.push_str(&format!("    var {var} = {input};\n"));
-                        let templ = FxPass::param_shift(call, slot)
+                        // Wired parameter sockets override their slot.
+                        let mut wired: Vec<Option<String>> = Vec::with_capacity(used);
+                        for i in 0..used {
+                            wired.push(self.wire(node_id, &format!("p{i}"))?);
+                        }
+                        let shifted = FxPass::param_shift(call, slot);
+                        FxPass::subst_param_wires(&shifted, slot, &wired)
                             .replace("(uv, color,", &format!("(uv, {var},"))
-                            .replace("RES", "vec2<f32>(u.misc.y, u.misc.z)");
-                        templ
+                            .replace("RES", "vec2<f32>(u.misc.y, u.misc.z)")
                     }
                     NodeKind::Output => self.wire(node_id, "result")?.unwrap_or_else(|| "color".to_string()),
                     NodeKind::Wgsl { code } => {
@@ -896,16 +984,21 @@ impl FxPass {
                         format!("{}(color, uv, vec4<f32>({}, {}, {}, {}))", name, p0, p1, p2, p3)
                     }
                     NodeKind::Transform { x, y, scale, rotation } => {
-                        let sc = if *scale == 0.0 { 1.0 } else { *scale };
+                        let sx = self.scalar_param(node_id, "x", *x)?;
+                        let sy = self.scalar_param(node_id, "y", *y)?;
+                        let ss = self.scalar_param(node_id, "scale", *scale)?;
+                        let sr = self.scalar_param(node_id, "rotation", *rotation)?;
+                        // CPU guards a zero scale to 1.0.
+                        let sc = format!("select(({ss}), 1.0, abs(({ss})) < 1e-6)");
                         format!(
-                            "textureSample(src_tex, src_sampler, (mat2x2<f32>(cos({:.9}), sin({:.9}), -sin({:.9}), cos({:.9})) * ((uv - vec2<f32>(0.5)) / vec2<f32>({sc:.9}))) + vec2<f32>(0.5) - vec2<f32>({:.9}, {:.9}))",
-                            rotation, rotation, rotation, rotation, x, y
+                            "textureSample(src_tex, src_sampler, (mat2x2<f32>(cos(({sr})), sin(({sr})), -sin(({sr})), cos(({sr}))) * ((uv - vec2<f32>(0.5)) / vec2<f32>({sc}))) + vec2<f32>(0.5) - vec2<f32>(({sx}), ({sy})))"
                         )
                     }
                     NodeKind::Tile { repeat_x, repeat_y } => {
+                        let rx = self.scalar_param(node_id, "repeat_x", *repeat_x)?;
+                        let ry = self.scalar_param(node_id, "repeat_y", *repeat_y)?;
                         format!(
-                            "textureSample(src_tex, src_sampler, fract(uv * vec2<f32>({:.9}, {:.9})))",
-                            repeat_x, repeat_y
+                            "textureSample(src_tex, src_sampler, fract(uv * vec2<f32>(({rx}), ({ry}))))"
                         )
                     }
                     NodeKind::Glow { radius, intensity } => {
@@ -915,7 +1008,9 @@ impl FxPass {
                         let c = self
                             .wire(node_id, "color")?
                             .unwrap_or_else(|| "color".to_string());
-                        format!("(({c}) + fx_ring(uv, {:.9}) * {:.9})", radius, intensity)
+                        let r = self.scalar_param(node_id, "radius", *radius)?;
+                        let i = self.scalar_param(node_id, "intensity", *intensity)?;
+                        format!("(({c}) + fx_ring(uv, {r}) * {i})")
                     }
                     NodeKind::Bloom { threshold, radius, intensity } => {
                         if !self.bodies.contains(&FX_BRIGHT_RING_WGSL) {
@@ -924,10 +1019,10 @@ impl FxPass {
                         let c = self
                             .wire(node_id, "color")?
                             .unwrap_or_else(|| "color".to_string());
-                        format!(
-                            "(({c}) + fx_bright_ring(uv, {:.9}, {:.9}) * {:.9})",
-                            radius, threshold, intensity
-                        )
+                        let th = self.scalar_param(node_id, "threshold", *threshold)?;
+                        let r = self.scalar_param(node_id, "radius", *radius)?;
+                        let i = self.scalar_param(node_id, "intensity", *intensity)?;
+                        format!("(({c}) + fx_bright_ring(uv, {r}, {th}) * {i})")
                     }
                     NodeKind::Math { op, default_b } => {
                         let a = self.wire(node_id, "a")?.unwrap_or_else(|| "color".to_string());
@@ -1833,23 +1928,34 @@ mod tests {
 
     /// Spatial stock ops (twirl / directional blur) must emit valid graph
     /// WGSL, including two resampling kernels in one shader (the shared
-    /// helper is prepended once). Skips without a wgpu device.
+    /// helper is prepended once), plus parameter sockets wired from a
+    /// Constant. Skips without a wgpu device.
     #[test]
     fn spatial_stock_graph_twins_compile() {
         use project::modifier::{ModifierGraph, ModifierNode, NodeConnection, NodeKind};
+        use project::ConstantMode;
         let Ok(gpu) = GpuContext::new_headless() else { return };
         let graph = ModifierGraph {
             nodes: vec![
                 ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
+                ModifierNode::new(
+                    "k",
+                    0.0,
+                    80.0,
+                    NodeKind::Constant { mode: ConstantMode::Float, value: 45.0, g: 0.0, b: 0.0, a: 1.0 },
+                ),
                 ModifierNode::new("tw", 80.0, 0.0, NodeKind::StockOp { plugin: StockPlugin::Twirl, params: vec![45.0, 50.0] }),
                 ModifierNode::new("db", 160.0, 0.0, NodeKind::StockOp { plugin: StockPlugin::DirectionalBlur, params: vec![30.0, 45.0] }),
+                ModifierNode::new("xf", 200.0, 100.0, NodeKind::Transform { x: 0.0, y: 0.0, scale: 1.0, rotation: 0.0 }),
                 ModifierNode::new("cu", 240.0, 0.0, NodeKind::StockOp { plugin: StockPlugin::Curves, params: vec![10.0, 0.0, 0.0, 0.0, 0.0] }),
                 ModifierNode::new("out", 400.0, 0.0, NodeKind::Output),
             ],
             connections: vec![
                 NodeConnection::new("in", "value", "tw", "in"),
+                NodeConnection::new("k", "value", "tw", "p0"),
                 NodeConnection::new("tw", "value", "db", "in"),
-                NodeConnection::new("db", "value", "cu", "in"),
+                NodeConnection::new("k", "value", "xf", "rotation"),
+                NodeConnection::new("xf", "value", "cu", "in"),
                 NodeConnection::new("cu", "value", "out", "result"),
             ],
         };
@@ -1869,6 +1975,28 @@ mod tests {
         assert_eq!(FxPass::params_used("fx(u.params[0])"), 4);
         assert_eq!(FxPass::params_used("fx(u.params[0].x, u.params[1].y)"), 6);
         assert_eq!(FxPass::params_used("fx(u.misc.x)"), 0);
+    }
+
+    /// Wired stock params replace exactly their own float slot; wire
+    /// expressions that carry their own `u.params` refs are never
+    /// rescanned by the slot shift.
+    #[test]
+    fn param_wires_replace_only_their_own_slot() {
+        let wired = vec![Some("drv".to_string()), None];
+        let call = "fx(uv, color, u.params[0].x, u.params[0].y, u.params[1].z)";
+        assert_eq!(
+            FxPass::subst_param_wires(&FxPass::param_shift(call, 2), 2, &wired),
+            "fx(uv, color, (vec4<f32>(drv)).r, u.params[2].y, u.params[3].z)"
+        );
+        let nested = vec![Some("f(u.params[0].x)".to_string())];
+        assert_eq!(
+            FxPass::subst_param_wires(
+                &FxPass::param_shift("fx(uv, color, u.params[0])", 1),
+                1,
+                &nested
+            ),
+            "fx(uv, color, vec4<f32>((vec4<f32>(f(u.params[0].x))).r, u.params[1].y, u.params[1].z, u.params[1].w))"
+        );
     }
 
     #[test]
