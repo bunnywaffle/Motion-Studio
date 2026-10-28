@@ -872,7 +872,7 @@ impl ModifierGraph {
             };
             let ok = match &node.kind {
                 NodeKind::Output | NodeKind::BaseValueIn | NodeKind::Constant { .. } | NodeKind::Blend { .. } => true,
-                NodeKind::StockOp { plugin, .. } => plugin.is_pointwise(),
+                NodeKind::StockOp { plugin, .. } => plugin.graph_capable(),
                 // User WGSL is pure per-pixel math — color-clean by design.
                 NodeKind::Wgsl { .. } => true,
                 // Spatial nodes sample src_tex directly in the twin pass.

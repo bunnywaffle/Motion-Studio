@@ -304,6 +304,58 @@ impl StockPlugin {
     pub fn is_pointwise(self) -> bool {
         !self.descriptor().spatial
     }
+
+    /// True when the Node Graph can evaluate this plug-in on the GPU as a
+    /// single-pass WGSL twin: kernels that may resample neighbours but read
+    /// float params only (no colour slots, no separate compute pass).
+    /// Mirrors the twin table in `renderer::fx_pass` — a renderer test keeps
+    /// the two in sync.
+    pub fn graph_capable(self) -> bool {
+        use StockPlugin as S;
+        matches!(
+            self,
+            S::Posterize
+                | S::Threshold
+                | S::FilmGrain
+                | S::Scanlines
+                | S::Crop
+                | S::TemperatureTint
+                | S::SpillSuppress
+                | S::DifferenceKey
+                | S::Wave
+                | S::Ripple
+                | S::Twirl
+                | S::Bulge
+                | S::Spherize
+                | S::LensDistortion
+                | S::Mirror
+                | S::Repeat
+                | S::Offset
+                | S::Pixelate
+                | S::Mosaic
+                | S::ChromaticAberration
+                | S::RgbSplit
+                | S::Emboss
+                | S::EdgeDetect
+                | S::Cartoon
+                | S::Halftone
+                | S::Card3d
+                | S::CornerPin
+                | S::Reframe
+                | S::Liquify
+                | S::Halo
+                | S::Streaks
+                | S::Curves
+                | S::ColorBalance
+                | S::ColorWheels
+                | S::LightLeak
+                | S::DirectionalBlur
+                | S::MotionBlur
+                | S::RadialBlur
+                | S::ZoomBlur
+                | S::Bilateral
+        )
+    }
 }
 
 fn lum(r: f32, g: f32, b: f32) -> f32 {

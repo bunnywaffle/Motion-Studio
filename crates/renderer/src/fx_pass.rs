@@ -17,7 +17,7 @@ use project::StockPlugin;
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 pub struct FxUniforms {
-    pub params: [[f32; 4]; 4],
+    pub params: [[f32; 4]; 16],
     pub colors: [[f32; 4]; 4],
     pub misc: [f32; 4],
 }
@@ -25,8 +25,8 @@ pub struct FxUniforms {
 impl FxUniforms {
     /// Pack evaluated scalar params + color slots + frame context.
     pub fn pack(params: &[f32], colors: &[[f32; 4]], time_s: f32, w: f32, h: f32, seed: f32) -> Self {
-        let mut p = [[0.0f32; 4]; 4];
-        for (i, v) in params.iter().take(16).enumerate() {
+        let mut p = [[0.0f32; 4]; 16];
+        for (i, v) in params.iter().take(64).enumerate() {
             p[i / 4][i % 4] = *v;
         }
         let mut c = [[0.0f32; 4]; 4];
@@ -61,7 +61,7 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
 /// Bindings shared by every pass: texture(0), sampler(1), uniforms(2).
 pub const FX_BINDINGS_WGSL: &str = r#"
 struct FxUniforms {
-    params: array<vec4<f32>, 4>,
+    params: array<vec4<f32>, 16>,
     colors: array<vec4<f32>, 4>,
     misc: vec4<f32>,
 };
@@ -272,14 +272,12 @@ impl FxPass {
         Ok(Self { pipeline, bind_group_layout, sampler, graph_params: Vec::new() })
     }
 
-    /// Compile a pass for a supported stock plugin.
-    pub fn for_stock(
-        gpu: &GpuContext,
-        plugin: StockPlugin,
-        target_format: wgpu::TextureFormat,
-    ) -> Result<Self, String> {
+    /// WGSL twin for one stock plug-in: (kernel body, call template, needs
+    /// the shared resampling prelude). Templates read `u.params` / `u.colors`
+    /// slots and the `RES` placeholder; callers substitute them. One table
+    /// serves both the per-effect pass and the node-graph twins.
+    fn stock_twin(plugin: StockPlugin) -> Option<(&'static str, &'static str, bool)> {
         use crate::effect_filters as ef;
-        let res = "vec2<f32>(u.misc.y, u.misc.z)";
         let (body, call, resample): (&str, &str, bool) = match plugin {
             StockPlugin::Posterize => (
                 ef::stock_posterize().wgsl,
@@ -516,9 +514,20 @@ impl FxPass {
                 "fx_stock_bilateral_c(uv, color, u.params[0].x, u.params[0].y, RES)",
                 true,
             ),
-            _ => {
-                return Err(format!("No native WGSL pass implemented for stock plugin {:?}", plugin));
-            }
+            _ => return None,
+        };
+        Some((body, call, resample))
+    }
+
+    /// Compile a pass for a supported stock plugin.
+    pub fn for_stock(
+        gpu: &GpuContext,
+        plugin: StockPlugin,
+        target_format: wgpu::TextureFormat,
+    ) -> Result<Self, String> {
+        let res = "vec2<f32>(u.misc.y, u.misc.z)";
+        let Some((body, call, resample)) = Self::stock_twin(plugin) else {
+            return Err(format!("No native WGSL pass implemented for stock plugin {:?}", plugin));
         };
         let label = format!("FxPass_{:?}", plugin);
         let call = call.replace("RES", res);
@@ -659,89 +668,49 @@ impl FxPass {
         Self::compile_resample(gpu, &format!("FxPass_builtin_{id}"), target_format, body, call, resample)
     }
 
-    /// Pointwise twin for one StockOp node in a Node Graph: (kernel body,
-    /// call template, floats consumed). Only pure per-pixel kernels, and
-    /// only twins that read no `u.colors` slots (StockOp nodes carry
-    /// float params only). Mirrors the pointwise arms of `for_stock`.
-    fn graph_stock_twin(plugin: StockPlugin) -> Option<(&'static str, &'static str, usize)> {
-        use crate::effect_filters as ef;
-        let (body, call, used): (&str, &str, usize) = match plugin {
-            StockPlugin::Posterize => (
-                ef::stock_posterize().wgsl,
-                "fx_stock_posterize(uv, color, u.params[0].x)",
-                1,
-            ),
-            StockPlugin::Threshold => (
-                ef::stock_threshold().wgsl,
-                "fx_stock_threshold(uv, color, u.params[0].x, u.params[0].y)",
-                2,
-            ),
-            StockPlugin::FilmGrain => (
-                ef::stock_film_grain().wgsl,
-                "fx_stock_film_grain(uv, color, u.params[0].x, u.misc.x, u.params[0].y)",
-                2,
-            ),
-            StockPlugin::Scanlines => (
-                ef::stock_scanlines().wgsl,
-                "fx_stock_scanlines(uv, color, u.params[0].x, u.params[0].y, u.misc.z)",
-                2,
-            ),
-            StockPlugin::Crop => (
-                ef::stock_crop().wgsl,
-                "fx_stock_crop(uv, color, u.params[0], vec2<f32>(u.misc.y, u.misc.z))",
-                4,
-            ),
-            StockPlugin::TemperatureTint => (
-                ef::stock_temperature_tint().wgsl,
-                "fx_stock_temperature_tint(uv, color, u.params[0].xy)",
-                2,
-            ),
-            StockPlugin::SpillSuppress => (
-                ef::stock_spill_suppress().wgsl,
-                "fx_stock_spill_suppress(uv, color, u.params[0].x)",
-                1,
-            ),
-            StockPlugin::DifferenceKey => (
-                ef::stock_difference_key().wgsl,
-                "fx_stock_difference_key(uv, color, u.params[0].x, u.params[0].y, u.params[0].z)",
-                3,
-            ),
-            StockPlugin::Curves => (
-                ef::stock_curves().wgsl,
-                "fx_stock_curves(uv, color, u.params[0].xyzw, u.params[1].x)",
-                5,
-            ),
-            StockPlugin::ColorBalance => (
-                ef::stock_color_balance().wgsl,
-                "fx_stock_color_balance(uv, color, vec3<f32>(u.params[0].x, u.params[0].y, u.params[0].z), vec3<f32>(u.params[0].w, u.params[1].x, u.params[1].y), vec3<f32>(u.params[1].z, u.params[1].w, u.params[2].x))",
-                9,
-            ),
-            StockPlugin::ColorWheels => (
-                ef::stock_color_wheels().wgsl,
-                "fx_stock_color_wheels(uv, color, u.params[0].xyz)",
-                3,
-            ),
-            StockPlugin::LightLeak => (
-                ef::stock_light_leak().wgsl,
-                "fx_stock_light_leak(uv, color, u.params[0].x, u.params[0].y, u.params[0].z, RES)",
-                3,
-            ),
-            StockPlugin::Halo => (
-                ef::stock_halo().wgsl,
-                "fx_stock_halo(uv, color, u.params[0].x, u.params[0].y, u.params[0].z, RES)",
-                3,
-            ),
-            _ => return None,
-        };
-        Some((body, call, used))
+    /// Twin for one StockOp node in a Node Graph: (kernel body, call
+    /// template, floats consumed, needs resample prelude). Every stock
+    /// plug-in with a single-pass fragment twin qualifies except the
+    /// generators/keyers whose kernel reads `u.colors` (StockOp nodes carry
+    /// float params only).
+    fn graph_stock_twin(plugin: StockPlugin) -> Option<(&'static str, &'static str, usize, bool)> {
+        let (body, call, resample) = Self::stock_twin(plugin)?;
+        if call.contains("u.colors") {
+            return None;
+        }
+        Some((body, call, Self::params_used(call), resample))
+    }
+
+    /// Floats consumed by a call template: highest `u.params[i]` index plus
+    /// its component count (a bare `u.params[i]` takes all four).
+    fn params_used(call: &str) -> usize {
+        let mut used = 0;
+        for (at, _) in call.match_indices("u.params[") {
+            let rest = &call[at + "u.params[".len()..];
+            let Some(end) = rest.find(']') else { continue };
+            let Ok(slot) = rest[..end].parse::<usize>() else { continue };
+            let after = &rest[end + 1..];
+            // `.y` needs two floats, not one: take the last component index.
+            let comps = if let Some(mask) = after.strip_prefix('.') {
+                mask.chars()
+                    .take_while(|c| "xyzw".contains(*c))
+                    .filter_map(|c| "xyzw".find(c))
+                    .max()
+                    .map_or(4, |m| m + 1)
+            } else {
+                4
+            };
+            used = used.max(slot * 4 + comps);
+        }
+        used
     }
 
     /// Shift every `u.params[i]` index in a stock call template forward by
     /// `ofs` vec4 slots (the graph packs each StockOp's floats vec4-aligned).
     fn param_shift(call: &str, ofs: usize) -> String {
         let mut s = call.to_string();
-        for i in (0..4).rev() {
-            s = s.replace(&format!("u.params[{i}]"), &format!("u.params[{ofs}]"));
+        for i in (0..16).rev() {
+            s = s.replace(&format!("u.params[{i}]"), &format!("u.params[{}]", ofs + i));
         }
         s
     }
@@ -871,9 +840,13 @@ impl FxPass {
                         format!("(({a}) + ({mix} - ({a})) * ({w}))")
                     }
                     NodeKind::StockOp { plugin, params } => {
-                        let Some((body, call, used)) = FxPass::graph_stock_twin(*plugin) else {
+                        let Some((body, call, used, resample)) = FxPass::graph_stock_twin(*plugin) else {
                             return Err(format!("no graph WGSL twin for {:?}", plugin));
                         };
+                        let helper = crate::effect_filters::FX_RESAMPLE_WGSL;
+                        if resample && !self.bodies.contains(&helper) {
+                            self.bodies.push(helper);
+                        }
                         if !self.bodies.contains(&body) {
                             self.bodies.push(body);
                         }
@@ -881,7 +854,7 @@ impl FxPass {
                         // descriptor defaults exactly like the CPU.
                         let resolved = project::stock::stock_params_resolved(*plugin, params);
                         let slot = self.params.len().div_ceil(4);
-                        self.params.extend_from_slice(&resolved[..used]);
+                        self.params.extend_from_slice(&resolved[..used.min(resolved.len())]);
                         while !self.params.len().is_multiple_of(4) {
                             self.params.push(0.0);
                         }
@@ -1107,8 +1080,8 @@ impl FxPass {
         let expr = gs.select(&out_id, "result")?;
         // FxUniforms packs 16 float params (4x vec4); anything wider
         // declines to the CPU path.
-        if gs.params.len() > 16 {
-            return Err(format!("graph params need {} floats > 16 budget", gs.params.len()));
+        if gs.params.len() > 64 {
+            return Err(format!("graph params need {} floats > 64 budget", gs.params.len()));
         }
         let mut body = String::new();
         for b in &gs.bodies {
@@ -1371,7 +1344,7 @@ impl FxMergePass {
     ) -> Result<Self, String> {
         const BINDINGS: &str = r#"
 struct FxUniforms {
-    params: array<vec4<f32>, 4>,
+    params: array<vec4<f32>, 16>,
     colors: array<vec4<f32>, 4>,
     misc: vec4<f32>,
 };
@@ -1815,7 +1788,7 @@ mod tests {
         assert_eq!(u.colors[0], [1.0, 0.0, 0.0, 1.0]);
         assert_eq!(u.colors[3], [0.0, 0.0, 0.0, 0.0]);
         assert_eq!(u.misc, [0.5, 1920.0, 1080.0, 7.0]);
-        assert_eq!(std::mem::size_of::<FxUniforms>(), 144);
+        assert_eq!(std::mem::size_of::<FxUniforms>(), 336);
     }
 
     #[test]
@@ -1837,6 +1810,65 @@ mod tests {
                 plugin.plugin_id()
             );
         }
+    }
+
+    /// The project's `graph_capable` list and the renderer's twin table must
+    /// agree, and every graph twin must be float-param only.
+    #[test]
+    fn graph_capable_matches_twin_table() {
+        for plugin in StockPlugin::all() {
+            let twin = FxPass::graph_stock_twin(*plugin);
+            assert_eq!(
+                twin.is_some(),
+                plugin.graph_capable(),
+                "graph_capable/twin mismatch for {:?}",
+                plugin
+            );
+            if let Some((_, call, used, _)) = twin {
+                assert!(!call.contains("u.colors"), "{plugin:?} reads colour slots");
+                assert!(used > 0, "no floats detected in call for {plugin:?}");
+            }
+        }
+    }
+
+    /// Spatial stock ops (twirl / directional blur) must emit valid graph
+    /// WGSL, including two resampling kernels in one shader (the shared
+    /// helper is prepended once). Skips without a wgpu device.
+    #[test]
+    fn spatial_stock_graph_twins_compile() {
+        use project::modifier::{ModifierGraph, ModifierNode, NodeConnection, NodeKind};
+        let Ok(gpu) = GpuContext::new_headless() else { return };
+        let graph = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
+                ModifierNode::new("tw", 80.0, 0.0, NodeKind::StockOp { plugin: StockPlugin::Twirl, params: vec![45.0, 50.0] }),
+                ModifierNode::new("db", 160.0, 0.0, NodeKind::StockOp { plugin: StockPlugin::DirectionalBlur, params: vec![30.0, 45.0] }),
+                ModifierNode::new("cu", 240.0, 0.0, NodeKind::StockOp { plugin: StockPlugin::Curves, params: vec![10.0, 0.0, 0.0, 0.0, 0.0] }),
+                ModifierNode::new("out", 400.0, 0.0, NodeKind::Output),
+            ],
+            connections: vec![
+                NodeConnection::new("in", "value", "tw", "in"),
+                NodeConnection::new("tw", "value", "db", "in"),
+                NodeConnection::new("db", "value", "cu", "in"),
+                NodeConnection::new("cu", "value", "out", "result"),
+            ],
+        };
+        assert!(graph.is_color_clean(), "spatial stock ops must be graph-clean");
+        FxPass::for_graph(&gpu, &graph, wgpu::TextureFormat::Rgba8Unorm)
+            .expect("spatial stock graph compiles");
+    }
+
+    /// Float budget for a call template: a component mask extends to its
+    /// last used component, a bare slot takes all four.
+    #[test]
+    fn params_used_counts_components() {
+        assert_eq!(FxPass::params_used("fx(u.params[0].x)"), 1);
+        assert_eq!(FxPass::params_used("fx(u.params[0].y)"), 2);
+        assert_eq!(FxPass::params_used("fx(u.params[0].xy)"), 2);
+        assert_eq!(FxPass::params_used("fx(u.params[1].w)"), 8);
+        assert_eq!(FxPass::params_used("fx(u.params[0])"), 4);
+        assert_eq!(FxPass::params_used("fx(u.params[0].x, u.params[1].y)"), 6);
+        assert_eq!(FxPass::params_used("fx(u.misc.x)"), 0);
     }
 
     #[test]

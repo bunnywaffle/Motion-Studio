@@ -14031,7 +14031,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
 
         let view_entity = mg_view.expect("view created");
         use gpui_kit::test::TestWindowExt;
-        cx.update_window(root_handle.clone().into(), |_, window, cx| {
+        cx.update_window(root_handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert!(window.find("mg_pal_eff_hdr").visible(), "Effects header visible");
             window.click("mg_pal_eff_hdr", cx);
@@ -14040,10 +14040,10 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             for id in ["mg_add_fx_curves", "mg_add_fx_posterize"] {
                 assert!(window.find(SharedString::from(id)).visible(), "{id} visible");
             }
-            // Spatial plug-ins are not graph nodes (they need neighbours).
+            // Multi-pass plug-ins are not graph nodes (no single-pass twin).
             assert!(
                 window.try_find(SharedString::from("mg_add_fx_box_blur")).is_none(),
-                "spatial effects must not be offered as graph nodes",
+                "multi-pass effects must not be offered as graph nodes",
             );
             window.click("mg_add_fx_curves", cx);
             window.click("mg_add_fx_posterize", cx);

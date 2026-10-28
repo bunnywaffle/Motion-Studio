@@ -845,19 +845,20 @@ impl ModifierGraphView {
             );
         }
 
-        // Dynamic "Effects" section: every per-pixel stock plug-in in the
-        // registry is one add-node button, grouped by its OFX panel
-        // category. Spatial plug-ins (blur/light/distort/stylize) need
-        // neighbours and stay in the layer effect stack — as graph nodes
-        // they would be silent no-ops.
+        // Dynamic "Effects" section: every stock plug-in the graph can
+        // evaluate on the GPU (single-pass WGSL twin, float params only) is
+        // one add-node button, grouped by its OFX panel category. Multi-pass
+        // kernels (box blur/defocus, procedural generators, cleanup) stay in
+        // the layer effect stack — as graph nodes they would be silent
+        // no-ops.
         let mut eff_body = v_flex().px_2().py_1().gap_1p5().child(
             div()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
-                .child("Per-pixel effects"),
+                .child("Effects (GPU)"),
         );
         let mut last_cat: Option<OfxCategory> = None;
-        for plugin in StockPlugin::all().iter().filter(|p| p.is_pointwise()) {
+        for plugin in StockPlugin::all().iter().filter(|p| p.graph_capable()) {
             let desc = ofx_lookup(plugin.plugin_id()).expect("stock descriptor registered");
             if last_cat != Some(desc.category) {
                 last_cat = Some(desc.category);
