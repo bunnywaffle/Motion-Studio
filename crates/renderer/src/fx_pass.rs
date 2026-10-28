@@ -901,11 +901,13 @@ impl FxPass {
                         };
                         format!("vec4<f32>({:.9}, {:.9}, {:.9}, {:.9})", v[0], v[1], v[2], v[3])
                     }
-                    NodeKind::Blend { mode, .. } => {
+                    NodeKind::Blend { mode, default_b } => {
                         // a + (mode.mix(a,b) - a) * w — the CPU per-channel
                         // walk folds to elementwise vector math here.
                         let a = self.wire(node_id, "a")?.unwrap_or_else(|| "color".to_string());
-                        let b = self.wire(node_id, "b")?.unwrap_or_else(|| "vec4<f32>(0.0)".to_string());
+                        let b = self
+                            .wire(node_id, "b")?
+                            .unwrap_or_else(|| format!("vec4<f32>({:.9})", default_b));
                         let w = self.wire(node_id, "weight")?.unwrap_or_else(|| "u.misc.x".to_string());
                         let mix = match mode {
                             GraphBlendMode::Linear => b.clone(),

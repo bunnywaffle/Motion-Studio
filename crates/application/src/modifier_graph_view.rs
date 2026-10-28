@@ -26,21 +26,38 @@ type PaletteEntry = (&'static str, &'static [(&'static str, fn() -> NodeKind)]);
 
 /// Display label for a socket: Blend's `a`/`b` read as background/foreground
 /// (wire names stay a/b/weight so old saved graphs load untouched).
-fn socket_display_label(kind: Option<&NodeKind>, socket: &'static str) -> &'static str {
+fn socket_display_label(kind: Option<&NodeKind>, socket: &str) -> String {
     match kind {
         Some(NodeKind::Blend { .. }) => match socket {
-            "a" => "background",
-            "b" => "foreground",
-            _ => socket,
+            "a" => "Background".to_string(),
+            "b" => "Foreground".to_string(),
+            _ => titleize_socket(socket),
         },
         // StockOp param sockets show the OFX label of the slot they drive.
         Some(NodeKind::StockOp { plugin, .. }) => socket
             .strip_prefix('p')
             .and_then(|i| i.parse::<usize>().ok())
             .and_then(|i| plugin.descriptor().params.get(i))
-            .map_or(socket, |p| p.label),
-        _ => socket,
+            .map_or_else(|| titleize_socket(socket), |p| p.label.to_string()),
+        _ => titleize_socket(socket),
     }
+}
+
+/// `in_min` → "In Min", `edge0` → "Edge0": socket names are identifiers,
+/// the card wants words.
+fn titleize_socket(socket: &str) -> String {
+    let mut out = String::new();
+    for (i, word) in socket.split('_').enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        let mut chars = word.chars();
+        if let Some(first) = chars.next() {
+            out.extend(first.to_uppercase());
+            out.push_str(chars.as_str());
+        }
+    }
+    out
 }
 
 /// Map window-space cursor coordinates to header-relative coordinates
@@ -417,9 +434,11 @@ impl ModifierGraphView {
 
             if !wire.is_from_input {
                 // Dragging from OUTPUT socket -> seeking an INPUT socket
+                // (input rows sit below the output rows).
+                let out_len = node.kind.output_sockets().len();
                 for (idx, in_name) in node.kind.input_sockets().iter().enumerate() {
                     let sx = nx + 14.0;
-                    let sy = ny + 41.0 + (idx as f32 * 26.0);
+                    let sy = ny + 41.0 + ((out_len + idx) as f32 * 26.0);
                     let dx = target_canvas_x - sx;
                     let dy = target_canvas_y - sy;
                     let dist = (dx * dx + dy * dy).sqrt();
@@ -1000,16 +1019,18 @@ impl ModifierGraphView {
         for node in &self.graph.nodes {
             let (nx, ny) = (node.pos_x + pan_x, node.pos_y + pan_y);
             let in_sockets = node.kind.input_sockets();
-            for (idx, in_name) in in_sockets.iter().enumerate() {
-                let sx = nx + 14.0;
-                let sy = ny + 41.0 + (idx as f32 * 26.0);
-                socket_coords.insert((node.id.clone(), (*in_name).to_string(), true), (sx, sy));
-            }
             let out_sockets = node.kind.output_sockets();
+            // Outputs render first, inputs below them (Blender order).
+            let in_offset = out_sockets.len() as f32 * 26.0;
             for (idx, out_name) in out_sockets.iter().enumerate() {
                 let sx = nx + 186.0;
                 let sy = ny + 41.0 + (idx as f32 * 26.0);
                 socket_coords.insert((node.id.clone(), (*out_name).to_string(), false), (sx, sy));
+            }
+            for (idx, in_name) in in_sockets.iter().enumerate() {
+                let sx = nx + 14.0;
+                let sy = ny + 41.0 + in_offset + (idx as f32 * 26.0);
+                socket_coords.insert((node.id.clone(), (*in_name).to_string(), true), (sx, sy));
             }
         }
 
@@ -1480,45 +1501,67 @@ impl ModifierGraphView {
 
         card = card.child(header);
 
-        // 2. Sockets Area (Input on left, Output on right)
+        // 2. Sockets and parameters in one row layout, Blender-style:
+        // outputs first (dot on the right), then inputs whose row doubles as
+        // the parameter field (dot on the left, value pill on the right).
         let in_sockets = node.kind.input_sockets();
         let out_sockets = node.kind.output_sockets();
 
-        let max_sockets = in_sockets.len().max(out_sockets.len());
-        if max_sockets > 0 {
-            let mut sockets_col = v_flex().w_full().py_1().px_2().gap_1();
+        let row_count = in_sockets.len() + out_sockets.len();
+        if row_count > 0 {
+            let mut rows = v_flex().w_full().py_1().px_2().gap_1();
 
-            for i in 0..max_sockets {
-                let in_opt = in_sockets.get(i);
-                let out_opt = out_sockets.get(i);
-
-                let in_widget = if let Some(in_name) = in_opt {
-                    self.render_input_socket(&node_id, in_name, entity, cx)
-                } else {
-                    div()
-                };
-
-                let out_widget = if let Some(out_name) = out_opt {
-                    self.render_output_socket(&node_id, out_name, entity, cx)
-                } else {
-                    div()
-                };
-
-                sockets_col = sockets_col.child(
+            for out_name in out_sockets.iter() {
+                rows = rows.child(
                     h_flex()
                         .w_full()
                         .h(px(22.0))
-                        .justify_between()
+                        .justify_end()
                         .items_center()
-                        .child(in_widget)
-                        .child(out_widget),
+                        .child(self.render_output_socket(&node_id, out_name, entity, cx)),
                 );
             }
 
-            card = card.child(sockets_col);
+            for in_name in in_sockets.iter() {
+                let field = match self.socket_param(&node.kind, in_name) {
+                    Some((key, val, tint)) => {
+                        if self.is_socket_wired(&node_id, in_name) {
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x38bdf8))
+                                .child("driven")
+                                .into_any_element()
+                        } else {
+                            self.param_scrub_input(
+                                node_id.clone(),
+                                key,
+                                val,
+                                rgb(tint),
+                                entity.clone(),
+                                cx,
+                            )
+                        }
+                    }
+                    None => div().into_any_element(),
+                };
+                rows = rows.child(
+                    h_flex()
+                        .w_full()
+                        .h(px(22.0))
+                        .gap_1p5()
+                        .items_center()
+                        .child(
+                            self.render_input_socket(&node_id, in_name, entity, cx)
+                                .flex_1(),
+                        )
+                        .child(field),
+                );
+            }
+
+            card = card.child(rows);
         }
 
-        // 3. Inline Parameter Controls for this node kind
+        // 3. Non-socket controls (mode pickers, op pills, Wgsl code…).
         let params_widget = self.render_node_params(node, entity, cx);
         card = card.child(params_widget);
 
@@ -1811,9 +1854,8 @@ impl ModifierGraphView {
                 col
             }
 
-            NodeKind::Math { op, default_b } => {
+            NodeKind::Math { op, .. } => {
                 let current_op = *op;
-                let def_b = *default_b;
 
                 v_flex()
                     .w_full()
@@ -1834,21 +1876,10 @@ impl ModifierGraphView {
                             .child(self.op_btn("÷", current_op == MathOp::Divide, ent.clone(), nid.clone(), MathOp::Divide, cx))
                             .child(self.op_btn("^", current_op == MathOp::Power, ent.clone(), nid.clone(), MathOp::Power, cx)),
                     )
-                    .child(
-                        // Fallback B value
-                        h_flex()
-                            .w_full()
-                            .justify_between()
-                            .items_center()
-                            .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Default B:"))
-                            .child(self.param_scrub_input(nid, "default_b", def_b, rgb(0xc084fc), ent, cx)),
-                    )
             }
 
-            NodeKind::Wave { wave_type, frequency, amplitude, .. } => {
+            NodeKind::Wave { wave_type, .. } => {
                 let wt = *wave_type;
-                let freq = *frequency;
-                let amp = *amplitude;
                 let nid_wt1 = nid.clone();
                 let nid_wt2 = nid.clone();
                 let nid_wt3 = nid.clone();
@@ -1872,40 +1903,10 @@ impl ModifierGraphView {
                             .child(self.wave_btn("Tri", wt == WaveType::Triangle, ent_wt2, nid_wt2, WaveType::Triangle, cx))
                             .child(self.wave_btn("Sqr", wt == WaveType::Square, ent_wt3, nid_wt3, WaveType::Square, cx)),
                     )
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .justify_between()
-                            .items_center()
-                            .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Freq:"))
-                            .child(self.param_scrub_input(nid, "frequency", freq, rgb(0x4ade80), ent, cx)),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!("Amp: {amp:.1}")),
-                    )
             }
 
-            NodeKind::Stepped { steps } => {
-                let st = *steps;
-
-                h_flex()
-                    .w_full()
-                    .px_2()
-                    .py_1p5()
-                    .border_t_1()
-                    .border_color(rgb(0x2e303e))
-                    .justify_between()
-                    .items_center()
-                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Steps:"))
-                    .child(self.param_scrub_input(nid, "steps", st, rgb(0x4ade80), ent, cx))
-            }
-
-            NodeKind::Blend { mode, default_b } => {
+            NodeKind::Blend { mode, .. } => {
                 let m = *mode;
-                let def_b = *default_b;
                 let combo_id = nid.replace('-', "_");
                 v_flex()
                     .w_full()
@@ -1930,86 +1931,9 @@ impl ModifierGraphView {
                                     .into_any_element(),
                             }),
                     )
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .justify_between()
-                            .items_center()
-                            .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Default fg:"))
-                            .child(self.param_scrub_input(nid, "default_b", def_b, rgb(0xc084fc), ent, cx)),
-                    )
-            }
-
-            NodeKind::StockOp { plugin, params } => {
-                let desc = plugin.descriptor();
-                let mut col = v_flex()
-                    .w_full()
-                    .px_2()
-                    .py_1p5()
-                    .gap_1()
-                    .border_t_1()
-                    .border_color(rgb(0x2e303e));
-                for (i, p) in desc.params.iter().enumerate() {
-                    let val = params.get(i).copied().unwrap_or(p.default);
-                    let socket = format!("p{i}");
-                    let control = if self.is_socket_wired(&nid, &socket) {
-                        div().text_xs().text_color(rgb(0x38bdf8)).child("driven").into_any_element()
-                    } else {
-                        self.param_scrub_input(nid.clone(), p.name, val, rgb(0x60a5fa), ent.clone(), cx)
-                    };
-                    col = col.child(
-                        h_flex()
-                            .w_full()
-                            .gap_1p5()
-                            .items_center()
-                            .child(div().text_xs().text_color(cx.theme().muted_foreground).child(p.label))
-                            .child(control),
-                    );
-                }
-                col
             }
 
             NodeKind::Wgsl { code } => self.render_wgsl_params(&nid, code, entity, cx),
-
-            NodeKind::Transform { x, y, scale, rotation } => self.spatial_rows(
-                vec![
-                    ("X:", "x", *x, 0x38bdf8),
-                    ("Y:", "y", *y, 0x4ade80),
-                    ("Scale:", "scale", *scale, 0xfbbf24),
-                    ("Rotation:", "rotation", *rotation, 0xf87171),
-                ],
-                nid,
-                ent,
-                cx,
-            ),
-            NodeKind::Tile { repeat_x, repeat_y } => self.spatial_rows(
-                vec![
-                    ("Repeat X:", "repeat_x", *repeat_x, 0x38bdf8),
-                    ("Repeat Y:", "repeat_y", *repeat_y, 0x4ade80),
-                ],
-                nid,
-                ent,
-                cx,
-            ),
-            NodeKind::Glow { radius, intensity } => self.spatial_rows(
-                vec![
-                    ("Radius:", "radius", *radius, 0xfbbf24),
-                    ("Intensity:", "intensity", *intensity, 0xf87171),
-                ],
-                nid,
-                ent,
-                cx,
-            ),
-            NodeKind::Bloom { threshold, radius, intensity } => self.spatial_rows(
-                vec![
-                    ("Threshold:", "threshold", *threshold, 0xe5e7eb),
-                    ("Radius:", "radius", *radius, 0xfbbf24),
-                    ("Intensity:", "intensity", *intensity, 0xf87171),
-                ],
-                nid,
-                ent,
-                cx,
-            ),
 
             NodeKind::DriverLink { driver_layer_id, driver_prop_path } => {
                 let dl = driver_layer_id.clone();
@@ -2080,36 +2004,53 @@ impl ModifierGraphView {
 
     /// Shared scrub-row stack for the spatial nodes (Transform/Tile/Glow/
     /// Bloom): label + param pill per row.
-    fn spatial_rows(
+    /// Inline value editor for an input socket: (stored param key, value,
+    /// tint). `None` for pure data inputs (colour buses, vectors, Wgsl p0..).
+    fn socket_param(
         &self,
-        rows: Vec<(&'static str, &'static str, f32, u32)>,
-        nid: String,
-        ent: Entity<Self>,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let mut col = v_flex()
-            .w_full()
-            .px_2()
-            .py_1p5()
-            .gap_1()
-            .border_t_1()
-            .border_color(rgb(0x2e303e));
-        for (label, pname, val, tint) in rows {
-            let control = if self.is_socket_wired(&nid, pname) {
-                div().text_xs().text_color(rgb(0x38bdf8)).child("driven").into_any_element()
-            } else {
-                self.param_scrub_input(nid.clone(), pname, val, rgb(tint), ent.clone(), cx)
-            };
-            col = col.child(
-                h_flex()
-                    .w_full()
-                    .gap_1p5()
-                    .items_center()
-                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child(label))
-                    .child(control),
-            );
-        }
-        col
+        kind: &NodeKind,
+        socket: &str,
+    ) -> Option<(&'static str, f32, u32)> {
+        Some(match (kind, socket) {
+            (NodeKind::Math { default_b, .. }, "b") => ("default_b", *default_b, 0xc084fc),
+            (NodeKind::Lerp { default_a, .. }, "a") => ("default_a", *default_a, 0x38bdf8),
+            (NodeKind::Lerp { default_b, .. }, "b") => ("default_b", *default_b, 0x4ade80),
+            (NodeKind::Clamp { min, .. }, "min") => ("min", *min, 0x4ade80),
+            (NodeKind::Clamp { max, .. }, "max") => ("max", *max, 0x60a5fa),
+            (NodeKind::Remap { in_min, .. }, "in_min") => ("in_min", *in_min, 0x38bdf8),
+            (NodeKind::Remap { in_max, .. }, "in_max") => ("in_max", *in_max, 0x4ade80),
+            (NodeKind::Remap { out_min, .. }, "out_min") => ("out_min", *out_min, 0xfbbf24),
+            (NodeKind::Remap { out_max, .. }, "out_max") => ("out_max", *out_max, 0xf87171),
+            (NodeKind::Smoothstep { edge0, .. }, "edge0") => ("edge0", *edge0, 0x4ade80),
+            (NodeKind::Smoothstep { edge1, .. }, "edge1") => ("edge1", *edge1, 0x60a5fa),
+            (NodeKind::Noise { frequency, .. }, "freq") => ("frequency", *frequency, 0x4ade80),
+            (NodeKind::Noise { amplitude, .. }, "amp") => ("amplitude", *amplitude, 0x38bdf8),
+            (NodeKind::Wave { frequency, .. }, "freq") => ("frequency", *frequency, 0x4ade80),
+            (NodeKind::Wave { amplitude, .. }, "amp") => ("amplitude", *amplitude, 0x38bdf8),
+            (NodeKind::Stepped { steps }, "steps") => ("steps", *steps, 0x4ade80),
+            (NodeKind::Blend { default_b, .. }, "b") => ("default_b", *default_b, 0xc084fc),
+            (NodeKind::StockOp { plugin, params }, sock) => {
+                let i = sock.strip_prefix('p')?.parse::<usize>().ok()?;
+                let p = plugin.descriptor().params.get(i)?;
+                (p.name, params.get(i).copied().unwrap_or(p.default), 0x60a5fa)
+            }
+            (NodeKind::Transform { x, .. }, "x") => ("x", *x, 0x38bdf8),
+            (NodeKind::Transform { y, .. }, "y") => ("y", *y, 0x4ade80),
+            (NodeKind::Transform { scale, .. }, "scale") => ("scale", *scale, 0xfbbf24),
+            (NodeKind::Transform { rotation, .. }, "rotation") => ("rotation", *rotation, 0xf87171),
+            (NodeKind::Tile { repeat_x, .. }, "repeat_x") => ("repeat_x", *repeat_x, 0x38bdf8),
+            (NodeKind::Tile { repeat_y, .. }, "repeat_y") => ("repeat_y", *repeat_y, 0x4ade80),
+            (NodeKind::Glow { radius, .. }, "radius") => ("radius", *radius, 0xfbbf24),
+            (NodeKind::Glow { intensity, .. }, "intensity") => ("intensity", *intensity, 0xf87171),
+            (NodeKind::Bloom { threshold, .. }, "threshold") => {
+                ("threshold", *threshold, 0xe5e7eb)
+            }
+            (NodeKind::Bloom { radius, .. }, "radius") => ("radius", *radius, 0xfbbf24),
+            (NodeKind::Bloom { intensity, .. }, "intensity") => {
+                ("intensity", *intensity, 0xf87171)
+            }
+            _ => return None,
+        })
     }
 
     /// True when another node's output feeds this input socket (the stored
@@ -2389,7 +2330,21 @@ impl ModifierGraphView {
                 (NodeKind::Constant { b, .. }, "b") => *b,
                 (NodeKind::Constant { a, .. }, "a") => *a,
                 (NodeKind::Math { default_b, .. }, "default_b") => *default_b,
+                (NodeKind::Lerp { default_a, .. }, "default_a") => *default_a,
+                (NodeKind::Lerp { default_b, .. }, "default_b") => *default_b,
+                (NodeKind::Clamp { min, .. }, "min") => *min,
+                (NodeKind::Clamp { max, .. }, "max") => *max,
+                (NodeKind::Remap { in_min, .. }, "in_min") => *in_min,
+                (NodeKind::Remap { in_max, .. }, "in_max") => *in_max,
+                (NodeKind::Remap { out_min, .. }, "out_min") => *out_min,
+                (NodeKind::Remap { out_max, .. }, "out_max") => *out_max,
+                (NodeKind::Smoothstep { edge0, .. }, "edge0") => *edge0,
+                (NodeKind::Smoothstep { edge1, .. }, "edge1") => *edge1,
+                (NodeKind::Noise { frequency, .. }, "frequency") => *frequency,
+                (NodeKind::Noise { amplitude, .. }, "amplitude") => *amplitude,
                 (NodeKind::Wave { frequency, .. }, "frequency") => *frequency,
+                (NodeKind::Wave { amplitude, .. }, "amplitude") => *amplitude,
+                (NodeKind::Blend { default_b, .. }, "default_b") => *default_b,
                 (NodeKind::Stepped { steps }, "steps") => *steps,
                 (NodeKind::StockOp { plugin, params }, name) => {
                     let desc = plugin.descriptor();
@@ -2540,9 +2495,25 @@ impl ModifierGraphView {
                 (NodeKind::Math { default_b, .. }, "default_b") => {
                     *default_b = value;
                 }
+                (NodeKind::Lerp { default_a, .. }, "default_a") => *default_a = value,
+                (NodeKind::Lerp { default_b, .. }, "default_b") => *default_b = value,
+                (NodeKind::Clamp { min, .. }, "min") => *min = value,
+                (NodeKind::Clamp { max, .. }, "max") => *max = value,
+                (NodeKind::Remap { in_min, .. }, "in_min") => *in_min = value,
+                (NodeKind::Remap { in_max, .. }, "in_max") => *in_max = value,
+                (NodeKind::Remap { out_min, .. }, "out_min") => *out_min = value,
+                (NodeKind::Remap { out_max, .. }, "out_max") => *out_max = value,
+                (NodeKind::Smoothstep { edge0, .. }, "edge0") => *edge0 = value,
+                (NodeKind::Smoothstep { edge1, .. }, "edge1") => *edge1 = value,
+                (NodeKind::Noise { frequency, .. }, "frequency") => {
+                    *frequency = value.max(0.01);
+                }
+                (NodeKind::Noise { amplitude, .. }, "amplitude") => *amplitude = value,
                 (NodeKind::Wave { frequency, .. }, "frequency") => {
                     *frequency = value.max(0.01);
                 }
+                (NodeKind::Wave { amplitude, .. }, "amplitude") => *amplitude = value,
+                (NodeKind::Blend { default_b, .. }, "default_b") => *default_b = value,
                 (NodeKind::Stepped { steps }, "steps") => {
                     *steps = value.round().max(1.0);
                 }
@@ -2592,6 +2563,22 @@ impl ModifierGraphView {
                 (NodeKind::Math { default_b, .. }, "default_b") => {
                     *default_b += delta;
                 }
+                (NodeKind::Lerp { default_a, .. }, "default_a") => *default_a += delta * 0.01,
+                (NodeKind::Lerp { default_b, .. }, "default_b") => *default_b += delta * 0.01,
+                (NodeKind::Clamp { min, .. }, "min") => *min += delta * 0.01,
+                (NodeKind::Clamp { max, .. }, "max") => *max += delta * 0.01,
+                (NodeKind::Remap { in_min, .. }, "in_min") => *in_min += delta * 0.01,
+                (NodeKind::Remap { in_max, .. }, "in_max") => *in_max += delta * 0.01,
+                (NodeKind::Remap { out_min, .. }, "out_min") => *out_min += delta * 0.01,
+                (NodeKind::Remap { out_max, .. }, "out_max") => *out_max += delta * 0.01,
+                (NodeKind::Smoothstep { edge0, .. }, "edge0") => *edge0 += delta * 0.01,
+                (NodeKind::Smoothstep { edge1, .. }, "edge1") => *edge1 += delta * 0.01,
+                (NodeKind::Noise { frequency, .. }, "frequency") => {
+                    *frequency = (*frequency + delta * 0.1).max(0.01);
+                }
+                (NodeKind::Noise { amplitude, .. }, "amplitude") => *amplitude += delta * 0.1,
+                (NodeKind::Wave { amplitude, .. }, "amplitude") => *amplitude += delta * 0.1,
+                (NodeKind::Blend { default_b, .. }, "default_b") => *default_b += delta * 0.01,
                 (NodeKind::Wave { frequency, .. }, "frequency") => {
                     *frequency = (*frequency + delta * 0.1).max(0.01);
                 }

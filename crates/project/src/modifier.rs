@@ -1224,13 +1224,13 @@ impl ModifierGraph {
                     .max(1.0);
                 (val * s).floor() / s
             }
-            NodeKind::Blend { mode, .. } => {
+            NodeKind::Blend { mode, default_b } => {
                 let a = self
                     .resolve_input(node_id, "a", ctx, memo, call_stack,)
                     .unwrap_or(base_value);
                 let b = self
                     .resolve_input(node_id, "b", ctx, memo, call_stack,)
-                    .unwrap_or(0.0);
+                    .unwrap_or(*default_b);
                 let w = self
                     .resolve_input(node_id, "weight", ctx, memo, call_stack,)
                     .unwrap_or(factor);

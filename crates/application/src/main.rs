@@ -14112,7 +14112,18 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         cx.update_window(root_handle.into(), |_, window, cx| {
             window.render_frame(cx);
             let id = format!("mg_param_{curves_id}_{curves_param}");
-            assert!(window.find(SharedString::from(id)).visible(), "stock param row rendered");
+            let pill = window.find(SharedString::from(id));
+            assert!(pill.visible(), "stock param row rendered");
+            // Blender-style layout: the parameter field shares its row with
+            // the input socket that drives it, socket on the left.
+            let sock = window.find(SharedString::from(format!("in_{curves_id}_p0")));
+            assert!(sock.visible(), "param socket rendered in the same row");
+            let (pb, sb) = (pill.bounds(), sock.bounds());
+            assert!(sb.right() < pb.left(), "socket sits left of its field");
+            assert!(
+                (pb.center().y - sb.center().y).abs() <= px(2.0),
+                "field and socket are on the same row"
+            );
         })
         .expect("update_window failed");
     }
