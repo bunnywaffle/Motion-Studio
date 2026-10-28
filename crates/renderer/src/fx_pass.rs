@@ -853,6 +853,19 @@ impl FxPass {
             /// wire `value`/`result`/channel names: a vec4 bus or a `.c`
             /// component read (which broadcasts through WGSL scalar math).
             fn select(&mut self, node_id: &str, socket: &str) -> Result<String, String> {
+                // GetLayerFactor's outputs are scalars: splat them into the
+                // vec4 bus so `(u.misc.x).a` component reads and bus
+                // consumers stay valid WGSL (a bare scalar accessor fails
+                // validation and drops the graph to the CPU pixel path).
+                if matches!(
+                    self.graph.get_node(node_id).map(|n| &n.kind),
+                    Some(NodeKind::GetLayerFactor)
+                ) {
+                    return Ok(match socket {
+                        "invert" => "vec4<f32>(1.0 - u.misc.x)".to_string(),
+                        _ => "vec4<f32>(u.misc.x)".to_string(),
+                    });
+                }
                 let bus = self.node(node_id)?;
                 Ok(match socket {
                     "value" | "result" | "" => bus,
@@ -979,10 +992,13 @@ impl FxPass {
                                 n
                             }
                         };
-                        let p0 = self.wire(node_id, "p0")?.unwrap_or_else(|| "0.0".to_string());
-                        let p1 = self.wire(node_id, "p1")?.unwrap_or_else(|| "0.0".to_string());
-                        let p2 = self.wire(node_id, "p2")?.unwrap_or_else(|| "0.0".to_string());
-                        let p3 = self.wire(node_id, "p3")?.unwrap_or_else(|| "0.0".to_string());
+                        let scalar_wire = |g: &mut Self, sock: &str| -> Result<Option<String>, String> {
+                            Ok(g.wire(node_id, sock)?.map(|e| FxPass::scalar_of(&e)))
+                        };
+                        let p0 = scalar_wire(self, "p0")?.unwrap_or_else(|| "0.0".to_string());
+                        let p1 = scalar_wire(self, "p1")?.unwrap_or_else(|| "0.0".to_string());
+                        let p2 = scalar_wire(self, "p2")?.unwrap_or_else(|| "0.0".to_string());
+                        let p3 = scalar_wire(self, "p3")?.unwrap_or_else(|| "0.0".to_string());
                         format!("{}(color, uv, vec4<f32>({}, {}, {}, {}))", name, p0, p1, p2, p3)
                     }
                     NodeKind::Transform { x, y, scale, rotation } => {
@@ -1156,7 +1172,7 @@ impl FxPass {
                         let bus = self.wire(node_id, "in")?.unwrap_or_else(|| "color".to_string());
                         format!("vec4<f32>({bus})")
                     }
-                    NodeKind::GetLayerFactor => "u.misc.x".to_string(),
+                    NodeKind::GetLayerFactor => "vec4<f32>(u.misc.x)".to_string(),
                     _ => return Err(format!("graph node not twinable: {:?}", kind)),
                 })
             }
@@ -1926,6 +1942,62 @@ mod tests {
                 assert!(used > 0, "no floats detected in call for {plugin:?}");
             }
         }
+    }
+
+    /// GetLayerFactor's `factor`/`invert` outputs are scalars splatted to a
+    /// vec4 bus: wiring either into any node parameter must still emit valid
+    /// WGSL (a bare `(u.misc.x).a` fails validation and dropped the whole
+    /// graph to the per-pixel CPU path). Skips without a wgpu device.
+    #[test]
+    fn factor_output_wires_compile() {
+        use project::modifier::{ModifierGraph, ModifierNode, NodeConnection, NodeKind};
+        let Ok(gpu) = GpuContext::new_headless() else { return };
+        for from_socket in ["factor", "invert"] {
+            let graph = ModifierGraph {
+                nodes: vec![
+                    ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
+                    ModifierNode::new("fac", 0.0, 80.0, NodeKind::GetLayerFactor),
+                    ModifierNode::new(
+                        "curves",
+                        120.0,
+                        0.0,
+                        NodeKind::StockOp { plugin: StockPlugin::Curves, params: vec![10.0] },
+                    ),
+                    ModifierNode::new("out", 240.0, 0.0, NodeKind::Output),
+                ],
+                connections: vec![
+                    NodeConnection::new("in", "value", "curves", "in"),
+                    NodeConnection::new("fac", from_socket, "curves", "p0"),
+                    NodeConnection::new("curves", "value", "out", "result"),
+                ],
+            };
+            assert!(graph.is_color_clean());
+            FxPass::for_graph(&gpu, &graph, wgpu::TextureFormat::Rgba8Unorm)
+                .unwrap_or_else(|e| panic!("factor.{from_socket} wire must compile: {e}"));
+        }
+        // A vec4 bus into a Wgsl scalar parameter must broadcast, not nest
+        // a vec4 inside the 4-component `p` constructor.
+        let graph = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
+                ModifierNode::new("fac", 0.0, 80.0, NodeKind::GetLayerFactor),
+                ModifierNode::new(
+                    "wg",
+                    120.0,
+                    0.0,
+                    NodeKind::Wgsl { code: "return color * p;".to_string() },
+                ),
+                ModifierNode::new("out", 240.0, 0.0, NodeKind::Output),
+            ],
+            connections: vec![
+                NodeConnection::new("in", "value", "wg", "color"),
+                NodeConnection::new("fac", "factor", "wg", "p0"),
+                NodeConnection::new("wg", "value", "out", "result"),
+            ],
+        };
+        assert!(graph.is_color_clean());
+        FxPass::for_graph(&gpu, &graph, wgpu::TextureFormat::Rgba8Unorm)
+            .expect("factor wire into a Wgsl parameter must compile");
     }
 
     /// Spatial stock ops (twirl / directional blur) must emit valid graph
