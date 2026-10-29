@@ -1,7 +1,8 @@
 use compositor::{AffineTransform2D, EvaluatedStack, LayerStackEvaluator, SceneGraph};
+use gpui_kit::component::dock::DockArea;
 use gpui_kit::component::input::InputState;
 use gpui_kit::component::ThemeMode;
-use gpui_kit::{Entity, Subscription};
+use gpui_kit::{Entity, Subscription, WeakEntity};
 use project::{
     Asset, AutoTraceOptions, BlendMode, Color, Composition, Effect, EffectType, FillGradient,
     GradientType, Keyframe, KeyframeInterpolation, KeyframeTangent, Layer, LayerSource,
@@ -10,6 +11,8 @@ use project::{
 };
 use std::path::{Path as StdPath, PathBuf};
 use std::time::Duration;
+
+use crate::modifier_graph_view::ModifierGraphView;
 
 /// Active editing tool mimicking After Effects tools palette.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -302,6 +305,28 @@ pub struct EditorState {
     pub ofx_bundles: Vec<project::plugin::OfxBundle>,
     /// Bumped on install/enable/remove/scan so panels repaint.
     pub plugins_rev: u64,
+    /// Workspace dock and the single retargetable node-graph panel, both weak:
+    /// the view tree owns them and the editor only borrows. Set by `AppView`.
+    dock_area: Option<WeakEntity<DockArea>>,
+    graph_view: Option<WeakEntity<ModifierGraphView>>,
+}
+
+impl EditorState {
+    pub fn dock_area(&self) -> Option<WeakEntity<DockArea>> {
+        self.dock_area.clone()
+    }
+
+    pub fn set_dock_area(&mut self, dock: &Entity<DockArea>) {
+        self.dock_area = Some(dock.downgrade());
+    }
+
+    pub fn graph_view(&self) -> Option<WeakEntity<ModifierGraphView>> {
+        self.graph_view.clone()
+    }
+
+    pub fn set_graph_view(&mut self, view: &Entity<ModifierGraphView>) {
+        self.graph_view = Some(view.downgrade());
+    }
 }
 
 /// One animatable track captured inside a [`UserAnimationPreset`]. The
@@ -1137,6 +1162,8 @@ impl EditorState {
             installed_effects,
             ofx_bundles,
             plugins_rev: 0,
+            dock_area: None,
+            graph_view: None,
         }
     }
 

@@ -4,9 +4,10 @@ use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex, IndexPath, StyledExt, TestSupportExt};
 use gpui_kit::component::combobox::{Combobox, ComboboxEvent, ComboboxState};
 use gpui_kit::component::collapsible::Collapsible;
+use gpui_kit::component::dock::{BasePanel, DockPlacement, Panel, PanelEvent, PanelId};
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use gpui_kit::component::searchable_list::SearchableVec;
-use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
+use gpui_kit::component::ActiveTheme;
 use gpui_kit::*;
 use project::modifier::{
     ConstantMode, GraphBlendMode, MathOp, ModifierGraph, ModifierNode, NodeKind, WaveType,
@@ -67,40 +68,75 @@ pub fn event_to_canvas_pos(pos: Point<Pixels>) -> (f32, f32) {
     (pos.x / px(1.0), (pos.y / px(1.0)) - HEADER_HEIGHT)
 }
 
-/// Open a dedicated modifier graph editor window for a property on a layer.
+/// Show the node graph for a property on a layer, docked in the workspace.
+///
+/// One retargetable panel serves every property: if it is already docked (in
+/// any region, including the Timeline's bottom dock) it is retargeted and
+/// selected there; otherwise it is added to the bottom dock. Panels are
+/// created lazily and owned by the dock, so closing the tab drops the view.
 pub fn open_modifier_graph_window(
     editor_state: Entity<EditorState>,
     layer_id: String,
     prop_path: String,
+    window: &mut Window,
     cx: &mut App,
 ) {
-    let bounds = Bounds::centered(None, size(px(1080.), px(720.)), cx);
-    let title = if prop_path.starts_with("graph:") {
-        format!(
-            "Effect Node Graph — Effect {} (Layer {})",
-            prop_path.trim_start_matches("graph:"),
-            layer_id
-        )
-    } else {
-        format!("Modifier Graph — {} (Layer {})", prop_path, layer_id)
+    let (Some(dock), existing) = (
+        editor_state
+            .read(cx)
+            .dock_area()
+            .and_then(|weak| weak.upgrade()),
+        editor_state.read(cx).graph_view(),
+    ) else {
+        return;
     };
-    let es = editor_state.clone();
-    let lid = layer_id.clone();
-    let ppath = prop_path.clone();
 
-    let _ = cx.open_window(
-        WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            ..Default::default()
-        },
-        |window, cx| {
-            window.activate_window();
-            window.set_window_title(&title);
-            Theme::change(ThemeMode::Dark, Some(window), cx);
-            let view = cx.new(|cx| ModifierGraphView::new(es, lid, ppath, window, cx));
-            cx.new(|cx| Root::new(view, window, cx).bg(cx.theme().background))
-        },
-    );
+    let view = match existing.and_then(|weak| weak.upgrade()) {
+        Some(view) => {
+            view.update(cx, |view, cx| view.set_target(&layer_id, &prop_path, cx));
+            view
+        }
+        None => {
+            let view = cx.new(|cx| {
+                ModifierGraphView::new(
+                    editor_state.clone(),
+                    layer_id.clone(),
+                    prop_path.clone(),
+                    window,
+                    cx,
+                )
+            });
+            editor_state.update(cx, |state, _| state.set_graph_view(&view));
+            view
+        }
+    };
+
+    let id = PanelId::from(view.entity_id());
+    let docked = [
+        DockPlacement::Left,
+        DockPlacement::Center,
+        DockPlacement::Right,
+        DockPlacement::Bottom,
+    ]
+    .into_iter()
+    .find(|placement| {
+        dock.read(cx)
+            .layout(*placement)
+            .and_then(|tree| tree.find_panel_node(id))
+            .is_some()
+    });
+    dock.update(cx, |dock, cx| {
+        if docked.is_none() {
+            dock.add_panel(
+                view.clone(),
+                DockPlacement::Bottom,
+                Some(px(320.)),
+                window,
+                cx,
+            );
+        }
+        dock.select_panel(id, window, cx);
+    });
 }
 
 /// Active wire connection drag state.
@@ -207,6 +243,33 @@ impl ModifierGraphView {
             palette_open: [false; 5],
             effects_open: false,
         }
+    }
+
+    /// Point this panel at another property's graph.
+    pub fn set_target(&mut self, layer_id: &str, prop_path: &str, cx: &mut Context<Self>) {
+        self.layer_id = layer_id.to_string();
+        self.prop_path = prop_path.to_string();
+        self.is_effect_graph = prop_path.starts_with("graph:");
+        self.graph = self
+            .editor_state
+            .update(cx, |s, _| s.ensure_layer_modifier_graph(layer_id, prop_path));
+        // Per-target editor state cannot survive the swap: node ids, wires
+        // and the in-flight param editor all belong to the old graph.
+        self.selected_node = None;
+        self.connecting_wire = None;
+        self.editing_param = None;
+        self.param_editor = None;
+        self.param_editor_sub = None;
+        self.blend_combos.clear();
+        self.blend_combo_subs.clear();
+        self.pan_offset = (0.0, 0.0);
+        self.scrubbing_param = None;
+        cx.notify();
+    }
+
+    /// Property this panel is currently showing.
+    pub fn target(&self) -> (&str, &str) {
+        (&self.layer_id, &self.prop_path)
     }
 
     /// Window-space cursor → canvas space (pre-pan). Use for drag deltas only.
@@ -500,6 +563,28 @@ impl ModifierGraphView {
 impl Focusable for ModifierGraphView {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+impl EventEmitter<PanelEvent> for ModifierGraphView {}
+
+impl BasePanel for ModifierGraphView {
+    fn panel_name(&self) -> &'static str {
+        "modifier_graph"
+    }
+}
+
+impl Panel for ModifierGraphView {
+    fn tab_name(&self, _cx: &App) -> Option<SharedString> {
+        Some(if self.is_effect_graph { "Effect Graph" } else { "Node Graph" }.into())
+    }
+
+    fn title(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        "Node Graph"
+    }
+
+    fn inner_padding(&self, _cx: &App) -> bool {
+        false
     }
 }
 

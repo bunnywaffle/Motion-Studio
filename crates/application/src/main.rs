@@ -44,8 +44,8 @@ pub struct AppView {
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
     _playback_task: Option<Task<()>>,
-    /// Last window size the dock layout was fitted to (responsive docks).
-    docks_sized_for: Option<(i32, i32)>,
+    /// Last spline-editor state the bottom dock height was fitted to.
+    bottom_sized_for_spline: Option<bool>,
     /// Open top-level menu (File / Edit / About), if any.
     open_menu: Option<TopMenu>,
     /// About dialog visibility.
@@ -138,15 +138,28 @@ impl AppView {
             .panel_view(panel_handle(panels.presets.clone()), cx)
             .panel_view(panel_handle(panels.plugins.clone()), cx);
 
+        // The three columns are splits inside the center tree, not Left/Right
+        // dock rails, so the bottom dock (Timeline + node graph) spans the
+        // full window width instead of only the center column. Panels still
+        // drag between all four tab groups. Split handles eat ~20px per sized
+        // child, so 300/330 render as roughly the old 280/300 rails.
+        let workspace = DockLayout::h_split()
+            .child(left_layout, Some(px(300.)))
+            .child(center_layout, None)
+            .child(right_layout, Some(px(330.)));
+
+        // Bottom dock: Timeline. The dockable node graph opens here too, in
+        // its own tab, and either tab can be dragged to another region.
+        let bottom_layout = DockLayout::tabs().panel_view(panel_handle(panels.timeline.clone()), cx);
+
         dock_area.update(cx, |dock, cx| {
-            dock.set_dock(DockPlacement::Left, left_layout, window, cx);
-            dock.set_dock_size(DockPlacement::Left, px(280.), window, cx);
+            dock.set_center(workspace, window, cx);
 
-            dock.set_center(center_layout, window, cx);
-
-            dock.set_dock(DockPlacement::Right, right_layout, window, cx);
-            dock.set_dock_size(DockPlacement::Right, px(300.), window, cx);
+            dock.set_dock(DockPlacement::Bottom, bottom_layout, window, cx);
+            dock.set_dock_size(DockPlacement::Bottom, px(260.), window, cx);
         });
+
+        state.update(cx, |state, _| state.set_dock_area(&dock_area));
 
         let focus_handle = cx.focus_handle();
 
@@ -160,7 +173,7 @@ impl AppView {
             focus_handle,
             _subscriptions: Vec::new(),
             _playback_task: Some(playback_task),
-            docks_sized_for: None,
+            bottom_sized_for_spline: None,
             open_menu: None,
             show_about: false,
             show_new_project: false,
@@ -2135,28 +2148,21 @@ impl Render for AppView {
         let toolbar = render_toolbar(&self.state, cx);
         let menubar = render_menubar(&cx.entity(), self.open_menu, self.menu_note.clone(), &self.state, cx);
 
-        // Responsive docks: refit fixed dock rails when the window size
-        // changes so panels never push UI beyond the screen. User dock
-        // resizes are preserved (only window changes re-fit).
+        // Responsive workspace: side columns are fixed-pixel splits inside the
+        // center tree (the Bottom dock below them spans the full width).
         let vw = (window.bounds().size.width / px(1.0)).round() as i32;
         let vh = (window.bounds().size.height / px(1.0)).round() as i32;
-        if self.docks_sized_for != Some((vw, vh)) {
-            self.docks_sized_for = Some((vw, vh));
-            let vw_f = vw as f32;
-            let _vh_f = vh as f32;
-            let left = px(vw_f * 0.22).max(px(200.)).min(px(320.));
-            let right = px(vw_f * 0.23).max(px(220.)).min(px(340.));
-            self.dock_area.update(cx, |dock, cx| {
-                dock.set_dock_size(DockPlacement::Left, left, &mut *window, cx);
-                dock.set_dock_size(DockPlacement::Right, right, &mut *window, cx);
-            });
-        }
 
-        // Timeline is rendered as a full-width strip outside the dock area (see main_workspace below).
-        // Always keep the bottom dock closed to avoid double-rendering.
-        if self.dock_area.read(cx).is_dock_open(DockPlacement::Bottom) {
+        // The spline/graph editor needs headroom its chrome (header +
+        // legend + ruler + 180px plot + easing row) doesn't fit in the
+        // 260px timeline dock, so grow the bottom dock while it is open.
+        // Only on change, so a user's manual dock resize is preserved.
+        let spline_open = self.state.read(cx).spline_editor_open;
+        if self.bottom_sized_for_spline != Some(spline_open) {
+            self.bottom_sized_for_spline = Some(spline_open);
+            let h = if spline_open { px(440.) } else { px(260.) };
             self.dock_area.update(cx, |dock, cx| {
-                dock.toggle_dock(DockPlacement::Bottom, window, cx);
+                dock.set_dock_size(DockPlacement::Bottom, h, &mut *window, cx);
             });
         }
 
@@ -3424,27 +3430,11 @@ impl Render for AppView {
                 .into_any_element(),
             );
         }
-        // The spline/graph editor needs headroom its chrome (header +
-        // legend + ruler + 180px plot + easing row) doesn't fit in the
-        // 260px lanes strip, so it gets a taller strip instead of clipping.
-        let strip_h = if self.state.read(cx).spline_editor_open {
-            px(400.)
-        } else {
-            px(260.)
-        };
         let main_workspace = v_flex()
             .flex_1()
             .size_full()
             .overflow_hidden()
             .child(div().flex_1().size_full().child(self.dock_area.clone()))
-            .child(
-                div()
-                    .w_full()
-                    .h(strip_h)
-                    .border_t_1()
-                    .border_color(cx.theme().border)
-                    .child(self.panels.timeline.clone()),
-            )
             .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                 // Clicking the workspace dismisses open menus.
                 close_key.update(cx, |this, cx| {
@@ -3868,36 +3858,34 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
 
         app_view.read_with(cx, |view, cx| {
             let dock_entity = view.dock_area();
+            let panels = view.panels();
+            let project_id = PanelId::from(panels.project.entity_id());
+            let comp_id = PanelId::from(panels.composition.entity_id());
+            let properties_id = PanelId::from(panels.properties.entity_id());
             dock_entity.read_with(cx, |dock, cx| {
-                // Left/Center/Right docks exist; the timeline is a
-                // full-width strip below the dock area, so no Bottom dock.
-                assert!(dock.has_dock(DockPlacement::Left));
-                assert!(dock.has_dock(DockPlacement::Right));
-                assert!(!dock.has_dock(DockPlacement::Bottom));
+                // The three workspace columns are splits inside the Center
+                // tree; the Bottom dock holds the Timeline (and the dockable
+                // node graph) across the full window width.
+                assert!(!dock.has_dock(DockPlacement::Left));
+                assert!(!dock.has_dock(DockPlacement::Right));
+                assert!(dock.has_dock(DockPlacement::Bottom));
 
-                // Verify the dock trees are present
-                assert!(dock.layout(DockPlacement::Left).is_some());
-                assert!(dock.layout(DockPlacement::Center).is_some());
-                assert!(dock.layout(DockPlacement::Right).is_some());
-                assert!(dock.layout(DockPlacement::Bottom).is_none());
+                let center = dock.layout(DockPlacement::Center).expect("center tree");
+                for id in [project_id, comp_id, properties_id] {
+                    assert!(center.find_panel_node(id).is_some(), "center column {id:?}");
+                }
+                assert!(dock.layout(DockPlacement::Bottom).is_some());
 
                 // Verify docks are open
-                assert!(dock.is_dock_open(DockPlacement::Left));
-                assert!(dock.is_dock_open(DockPlacement::Right));
-                assert!(!dock.is_dock_open(DockPlacement::Bottom));
+                assert!(dock.is_dock_open(DockPlacement::Bottom));
 
                 // Verify docks are non-empty
-                assert!(!dock.is_empty(DockPlacement::Left, cx));
                 assert!(!dock.is_empty(DockPlacement::Center, cx));
-                assert!(!dock.is_empty(DockPlacement::Right, cx));
+                assert!(!dock.is_empty(DockPlacement::Bottom, cx));
 
-                // Verify configured dock sizes (responsive: fitted to the
-                // window within sane rails, not fixed px).
-                let left = dock.dock_size(DockPlacement::Left).expect("left size");
-                let right = dock.dock_size(DockPlacement::Right).expect("right size");
-                assert!(dock.dock_size(DockPlacement::Bottom).is_none());
-                assert!((200.0..=320.0).contains(&(left / px(1.0))), "left {left:?}");
-                assert!((220.0..=340.0).contains(&(right / px(1.0))), "right {right:?}");
+                // Bottom dock keeps its 260px height; the side columns are
+                // fixed-pixel splits inside the center tree.
+                assert_eq!(dock.dock_size(DockPlacement::Bottom), Some(px(260.)));
             });
         });
     }
@@ -3918,31 +3906,123 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             let timeline_id = PanelId::from(panels.timeline.entity_id());
 
             dock_entity.read_with(cx, |dock, cx| {
-                // 1. Project panel attached to Left dock
-                let project_view = dock.panel(project_id).expect("project panel attached");
-                assert_eq!(project_view.panel_name(cx), "project");
+                let center = dock.layout(DockPlacement::Center).expect("center tree");
+                // 1-4. Project, Composition, Properties and Effects are the
+                // three center columns (left / middle / right tab group).
+                for (id, name) in [
+                    (project_id, "project"),
+                    (comp_id, "composition"),
+                    (properties_id, "properties"),
+                    (effects_id, "effects"),
+                ] {
+                    let view = dock.panel(id).expect("panel attached");
+                    assert_eq!(view.panel_name(cx), name);
+                    assert!(center.find_panel_node(id).is_some(), "{name} column");
+                }
 
-                // 2. Composition panel attached to Center dock
-                let comp_view = dock.panel(comp_id).expect("composition panel attached");
-                assert_eq!(comp_view.panel_name(cx), "composition");
-
-                // 3. Properties panel attached to Right dock tab group
-                let properties_view = dock
-                    .panel(properties_id)
-                    .expect("properties panel attached");
-                assert_eq!(properties_view.panel_name(cx), "properties");
-
-                // 4. Effects panel attached to Right dock tab group
-                let effects_view = dock.panel(effects_id).expect("effects panel attached");
-                assert_eq!(effects_view.panel_name(cx), "effects");
-
-                // 5. Timeline panel lives outside the dock area (full-width
-                // strip below it), so it is not attached to any dock...
-                assert!(dock.panel(timeline_id).is_none());
-                // ...but the panel entity is still owned by the view.
-                let _ = view.panels().timeline.clone();
+                // 5. Timeline panel is the Bottom dock's default tab (the
+                // node graph opens beside it and can be dragged anywhere).
+                let timeline_view = dock.panel(timeline_id).expect("timeline panel attached");
+                assert_eq!(timeline_view.panel_name(cx), "timeline");
+                assert!(dock
+                    .layout(DockPlacement::Bottom)
+                    .and_then(|tree| tree.find_panel_node(timeline_id))
+                    .is_some());
             });
         });
+    }
+
+    #[gpui_kit::test]
+    fn test_modifier_graph_opens_docked_and_retargets(cx: &mut TestAppContext) {
+        use gpui_kit::component::dock::InsertTarget;
+
+        cx.update(gpui_kit::init);
+        cx.update(|cx| Theme::change(ThemeMode::Dark, None, cx));
+
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            let state = app_view.read(cx).state().clone();
+            let dock = app_view.read(cx).dock_area().clone();
+            let open = |layer: &str, prop: &str, window: &mut gpui_kit::Window, cx: &mut gpui_kit::App| {
+                crate::modifier_graph_view::open_modifier_graph_window(
+                    state.clone(),
+                    layer.to_string(),
+                    prop.to_string(),
+                    window,
+                    cx,
+                );
+            };
+            let docked_in = |placement: DockPlacement, id: PanelId, cx: &gpui_kit::App| {
+                app_view
+                    .read(cx)
+                    .dock_area()
+                    .read(cx)
+                    .layout(placement)
+                    .and_then(|tree| tree.find_panel_node(id))
+                    .is_some()
+            };
+
+            open("layer_1", "opacity", window, cx);
+
+            let view = state
+                .read(cx)
+                .graph_view()
+                .and_then(|weak| weak.upgrade())
+                .expect("graph panel created");
+            let graph_id = PanelId::from(view.entity_id());
+            assert_eq!(view.read(cx).target(), ("layer_1", "opacity"));
+            assert!(docked_in(DockPlacement::Bottom, graph_id, cx));
+
+            // Reopening for another property retargets the same docked panel
+            // instead of creating a second one.
+            open("layer_2", "transform.rotation", window, cx);
+            let again = state
+                .read(cx)
+                .graph_view()
+                .and_then(|weak| weak.upgrade())
+                .expect("graph panel still alive");
+            assert_eq!(again.entity_id(), view.entity_id());
+            assert_eq!(again.read(cx).target(), ("layer_2", "transform.rotation"));
+
+            // Drag the tab into the Properties column; later opens must
+            // follow it there rather than yanking it back to the bottom.
+            let right_group = app_view
+                .read(cx)
+                .dock_area()
+                .read(cx)
+                .layout(DockPlacement::Center)
+                .and_then(|tree| tree.find_panel_node(PanelId::from(
+                    app_view.read(cx).panels().properties.entity_id(),
+                )))
+                .expect("properties tab group");
+            dock.update(cx, |dock, cx| {
+                dock.move_panel(
+                    graph_id,
+                    InsertTarget::Tabs { node: right_group, ix: None, activate: true },
+                    window,
+                    cx,
+                );
+            });
+            assert!(docked_in(DockPlacement::Center, graph_id, cx));
+            assert!(!docked_in(DockPlacement::Bottom, graph_id, cx));
+
+            open("layer_3", "scale_x", window, cx);
+            assert!(docked_in(DockPlacement::Center, graph_id, cx));
+            assert!(!docked_in(DockPlacement::Bottom, graph_id, cx));
+            assert_eq!(
+                again.read(cx).target(),
+                ("layer_3", "scale_x")
+            );
+        })
+        .expect("update_window failed");
     }
 
     #[gpui_kit::test]
@@ -4020,14 +4100,15 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         cx.update(|window, cx| {
             let dock_area = app_view.read(cx).dock_area().clone();
             dock_area.update(cx, |dock, cx| {
-                dock.set_dock_size(DockPlacement::Left, px(320.), window, cx);
-                assert_eq!(dock.dock_size(DockPlacement::Left), Some(px(320.)));
+                // The Bottom dock is the movable/collapsible one now.
+                dock.set_dock_size(DockPlacement::Bottom, px(320.), window, cx);
+                assert_eq!(dock.dock_size(DockPlacement::Bottom), Some(px(320.)));
 
-                dock.toggle_dock(DockPlacement::Left, window, cx);
-                assert!(!dock.is_dock_open(DockPlacement::Left));
+                dock.toggle_dock(DockPlacement::Bottom, window, cx);
+                assert!(!dock.is_dock_open(DockPlacement::Bottom));
 
-                dock.toggle_dock(DockPlacement::Left, window, cx);
-                assert!(dock.is_dock_open(DockPlacement::Left));
+                dock.toggle_dock(DockPlacement::Bottom, window, cx);
+                assert!(dock.is_dock_open(DockPlacement::Bottom));
             });
         });
     }

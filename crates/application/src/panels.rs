@@ -5423,6 +5423,7 @@ impl Render for CompositionViewerPanel {
             .test_support()
             .track_focus(&self.focus_handle)
             .size_full()
+            .min_w_0()
             .flex()
             .flex_col()
             .overflow_hidden()
@@ -7606,12 +7607,13 @@ where
                                     .text_color(rgb(0x9a9aa2))
                                     .cursor_pointer()
                                     .hover(|s| s.opacity(0.8))
-                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                    .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                                         if let Some(ref lid) = mg_lid {
                                             crate::modifier_graph_view::open_modifier_graph_window(
                                                 mg_state.clone(),
                                                 lid.clone(),
                                                 mg_path.clone(),
+                                                window,
                                                 cx,
                                             );
                                         }
@@ -7842,12 +7844,13 @@ where
                                     .text_color(rgb(0x9a9aa2))
                                     .cursor_pointer()
                                     .hover(|s| s.opacity(0.8))
-                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                    .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                                         if let Some(ref lid) = mg_lid {
                                             crate::modifier_graph_view::open_modifier_graph_window(
                                                 mg_state.clone(),
                                                 lid.clone(),
                                                 mg_path.clone(),
+                                                window,
                                                 cx,
                                             );
                                         }
@@ -8640,11 +8643,12 @@ fn property_keyframe_controls(
                 .rounded_sm()
                 .text_color(rgb(0x9a9aa2))
                 .hover(|s| s.bg(rgba(0x9a9aa220)))
-                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                     crate::modifier_graph_view::open_modifier_graph_window(
                         s_mg.clone(),
                         lid_mg.clone(),
                         p_mg.clone(),
+                        window,
                         cx,
                     );
                 })
@@ -8805,11 +8809,12 @@ pub(crate) fn effect_param_keyframe_controls(
                 .rounded_sm()
                 .text_color(rgb(0x9a9aa2))
                 .hover(|s| s.bg(rgba(0x9a9aa220)))
-                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                     crate::modifier_graph_view::open_modifier_graph_window(
                         s_mg.clone(),
                         lid_mg.clone(),
                         p_mg.clone(),
+                        window,
                         cx,
                     );
                 })
@@ -8930,11 +8935,12 @@ pub(crate) fn fx_color_modify_pill(
             .text_color(if has_modifier { cx.theme().accent_foreground } else { cx.theme().muted_foreground })
             .hover(|s| s.bg(cx.theme().muted))
             .child(icon_box(if has_modifier { IconName::Workflow } else { IconName::Plus }))
-            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+            .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                 crate::modifier_graph_view::open_modifier_graph_window(
                     st_mg.clone(),
                     lid_mg.clone(),
                     mg_path.clone(),
+                    window,
                     cx,
                 );
             })
@@ -12400,11 +12406,12 @@ fn render_applied_effects(
                             .bg(cx.theme().accent)
                             .text_color(cx.theme().accent_foreground)
                             .hover(|h| h.opacity(0.85))
-                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                                 crate::modifier_graph_view::open_modifier_graph_window(
                                     st.clone(),
                                     lid.clone(),
                                     format!("graph:{eid}"),
+                                    window,
                                     cx,
                                 );
                             })
@@ -15974,11 +15981,12 @@ impl Render for PropertiesPanel {
                     .rounded_sm()
                     .text_xs()
                     .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                         crate::modifier_graph_view::open_modifier_graph_window(
                             s_mod.clone(),
                             l_mod.clone(),
                             pt_mod.clone(),
+                            window,
                             cx,
                         );
                         p_mod.update(cx, |this, cx| {
@@ -18394,11 +18402,12 @@ fn timeline_scrub(
                                     .text_color(rgb(0x9a9aa2))
                                     .cursor_pointer()
                                     .hover(|s| s.opacity(0.8))
-                                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                    .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                                         crate::modifier_graph_view::open_modifier_graph_window(
                                             mg_state.clone(),
                                             mg_lid.clone(),
                                             mg_path.clone(),
+                                            window,
                                             cx,
                                         );
                                     })
@@ -19067,13 +19076,13 @@ fn render_graph_view(
             .text_xs()
             .child(label.to_string())
     };
-    // Single compact toolbar row (AE graph bar): tabs, fit, readout,
-    // grid/keys. No wrap, no title label — the legend below names the
-    // graphed series.
+    // Compact toolbar row (AE graph bar): tabs, fit, readout, grid/keys.
+    // Wraps rather than clipping controls when the dock is narrow.
     let header = h_flex()
         .px_2()
         .py_1()
         .gap_2()
+        .flex_wrap()
         .items_center()
         .border_b_1()
         .border_color(ae::border())
@@ -19182,6 +19191,8 @@ fn render_graph_view(
         )
         .child(
             h_flex()
+                .flex_1()
+                .min_w_0()
                 .gap_1p5()
                 .items_center()
                 .child(div().text_color(ae::dim()).child("X:"))
@@ -23089,6 +23100,7 @@ impl Render for TimelinePanel {
                     .bg(ae::panel())
                     .items_center()
                     .justify_between()
+                    .flex_wrap()
                     // Timecode display
                     .child(
                         h_flex()
@@ -24503,11 +24515,12 @@ impl Render for TimelinePanel {
                             .rounded_sm()
                             .text_xs()
                             .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                                 crate::modifier_graph_view::open_modifier_graph_window(
                                     s3.clone(),
                                     l3.clone(),
                                     path.to_string(),
+                                    window,
                                     cx,
                                 );
                                 p3.update(cx, |this, cx| {
@@ -24540,11 +24553,12 @@ impl Render for TimelinePanel {
                                 .rounded_sm()
                                 .text_xs()
                                 .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                                     crate::modifier_graph_view::open_modifier_graph_window(
                                         s_b.clone(),
                                         l_b.clone(),
                                         whole_path.clone(),
+                                        window,
                                         cx,
                                     );
                                     p_b.update(cx, |this, cx| {
@@ -24570,11 +24584,12 @@ impl Render for TimelinePanel {
                                 .rounded_sm()
                                 .text_xs()
                                 .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                                     crate::modifier_graph_view::open_modifier_graph_window(
                                         s_x.clone(),
                                         l_x.clone(),
                                         path_x.clone(),
+                                        window,
                                         cx,
                                     );
                                     p_x.update(cx, |this, cx| {
@@ -24598,11 +24613,12 @@ impl Render for TimelinePanel {
                                 .rounded_sm()
                                 .text_xs()
                                 .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
-                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                                     crate::modifier_graph_view::open_modifier_graph_window(
                                         s_y.clone(),
                                         l_y.clone(),
                                         path_y.clone(),
+                                        window,
                                         cx,
                                     );
                                     p_y.update(cx, |this, cx| {
@@ -25408,6 +25424,10 @@ impl Panel for TimelinePanel {
 
     fn title(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         "Timeline"
+    }
+
+    fn inner_padding(&self, _cx: &App) -> bool {
+        false
     }
 }
 
