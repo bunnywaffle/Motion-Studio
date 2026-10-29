@@ -931,7 +931,6 @@ impl ModifierGraph {
         memo: &mut HashMap<(String, String), f32>,
         call_stack: &mut HashSet<String>,
     ) -> Option<f32> {
-        let base_value = ctx.base;
         let factor = ctx.factor;
         if let Some(conn) = self
             .connections
@@ -949,7 +948,13 @@ impl ModifierGraph {
         let node = self.get_node(node_id)?;
         match &node.kind {
             NodeKind::Math { default_b, .. } if socket == "b" => Some(*default_b),
-            NodeKind::Math { .. } if socket == "a" => Some(base_value),
+            // Unwired value/colour buses never fall back to the layer
+            // content: only an explicit Content (BaseValueIn) node carries
+            // it, like Blender/Nuke. A dangling input is black (alpha 1 for
+            // MakeColor, whose alpha means opacity).
+            NodeKind::Math { .. } if socket == "a" => Some(ctx.base),
+            NodeKind::Output if socket == "result" => Some(0.0),
+            NodeKind::Clamp { .. } if socket == "val" => Some(ctx.base),
             NodeKind::Lerp { default_a, .. } if socket == "a" => Some(*default_a),
             NodeKind::Lerp { default_b, .. } if socket == "b" => Some(*default_b),
             NodeKind::Lerp { .. } if socket == "weight" => Some(factor),
@@ -971,25 +976,19 @@ impl ModifierGraph {
             NodeKind::Stepped { .. } if socket == "val" => Some(factor),
             NodeKind::Blend { default_b, .. } if socket == "b" => Some(*default_b),
             NodeKind::Blend { .. } if socket == "weight" => Some(factor),
-            // Unwired source color: pass the matching base component through
-            // (comp mirrors the session channel; "value" sessions fan).
-            NodeKind::StockOp { .. } if socket == "in" => Some(ctx.comp.comp_value(ctx.channel)),
-            // Wgsl node: unwired color passes the matching base component
-            // through; unwired p sockets default to 0.0.
-            NodeKind::Wgsl { .. } if socket == "color" => Some(ctx.comp.comp_value(ctx.channel)),
+            NodeKind::StockOp { .. } if socket == "in" => Some(0.0),
+            NodeKind::Wgsl { .. } if socket == "color" => Some(0.0),
             NodeKind::Wgsl { .. } if socket.starts_with('p') => Some(0.0),
-            // Spatial nodes: unwired color passes the base component through.
-            NodeKind::Glow { .. } | NodeKind::Bloom { .. } if socket == "color" => {
-                Some(ctx.comp.comp_value(ctx.channel))
-            }
-            // Make nodes: unwired channels pass the matching base component
-            // through (gathers stay identity when nothing is rewired).
+            NodeKind::Glow { .. } | NodeKind::Bloom { .. } if socket == "color" => Some(0.0),
+            // Make/Break gathers keep their identity behaviour: an unwired
+            // channel echoes the matching base component, so a 2D/3D/colour
+            // binding still re-packs a property graph unchanged.
             NodeKind::MakeVector { .. } | NodeKind::MakeColor => match socket {
                 "x" | "r" => Some(ctx.comp.x),
                 "y" | "g" => Some(ctx.comp.y),
                 "z" | "b" => Some(ctx.comp.z),
                 "a" => Some(ctx.comp.w),
-                _ => Some(base_value),
+                _ => Some(ctx.base),
             },
             _ => None,
         }
@@ -1063,6 +1062,8 @@ impl ModifierGraph {
                         _ => self.evaluate_node_output(&src, &conn.from_socket, ctx, memo, call_stack),
                     }
                 } else {
+                    // Break without a wire unpacks the base bus (identity
+                    // gather, same rule as Make).
                     base_value
                 }
             }
@@ -2161,6 +2162,46 @@ mod tests {
         assert_eq!(
             graph.get_node("th").unwrap().kind.input_sockets(),
             vec!["in", "p0", "p1"]
+        );
+    }
+
+    /// An unconnected image input is black, not the layer content: only an
+    /// explicit Content (BaseValueIn) node feeds the graph. This is the
+    /// Blender/Nuke rule, and it used to leak the content into every node.
+    #[test]
+    fn unwired_image_input_is_black() {
+        fn resolver(_: &str, _: &str) -> f32 {
+            0.0
+        }
+        let mut graph = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new(
+                    "po",
+                    0.0,
+                    0.0,
+                    NodeKind::StockOp { plugin: StockPlugin::Posterize, params: vec![3.0] },
+                ),
+                ModifierNode::new("out", 200.0, 0.0, NodeKind::Output),
+            ],
+            connections: vec![NodeConnection::new("po", "value", "out", "result")],
+        };
+        // White goes in; Posterize's dangling `in` is black, so it stays black.
+        assert_eq!(
+            graph.evaluate_color(1.0, 1.0, 1.0, 1.0, 0.0, &resolver),
+            [0.0, 0.0, 0.0, 0.0]
+        );
+        // Wire Content and the same white passes through.
+        graph.nodes.insert(0, ModifierNode::new("in", 0.0, 80.0, NodeKind::BaseValueIn));
+        graph.connections.push(NodeConnection::new("in", "value", "po", "in"));
+        assert_eq!(
+            graph.evaluate_color(1.0, 1.0, 1.0, 1.0, 0.0, &resolver),
+            [1.0, 1.0, 1.0, 1.0]
+        );
+        // An unconnected Output is black too.
+        graph.connections.clear();
+        assert_eq!(
+            graph.evaluate_color(1.0, 1.0, 1.0, 1.0, 0.0, &resolver),
+            [0.0, 0.0, 0.0, 0.0]
         );
     }
 

@@ -917,7 +917,7 @@ impl FxPass {
                     NodeKind::Blend { mode, default_b } => {
                         // a + (mode.mix(a,b) - a) * w — the CPU per-channel
                         // walk folds to elementwise vector math here.
-                        let a = self.wire(node_id, "a")?.unwrap_or_else(|| "color".to_string());
+                        let a = self.wire(node_id, "a")?.unwrap_or_else(|| "vec4<f32>(0.0)".to_string());
                         let b = self
                             .wire(node_id, "b")?
                             .unwrap_or_else(|| format!("vec4<f32>({:.9})", default_b));
@@ -960,7 +960,7 @@ impl FxPass {
                         self.stock_seq += 1;
                         let input = self
                             .wire(node_id, "in")?
-                            .unwrap_or_else(|| "color".to_string());
+                            .unwrap_or_else(|| "vec4<f32>(0.0)".to_string());
                         self.preamble.push_str(&format!("    var {var} = {input};\n"));
                         // Wired parameter sockets override their slot.
                         let mut wired: Vec<Option<String>> = Vec::with_capacity(used);
@@ -972,7 +972,9 @@ impl FxPass {
                             .replace("(uv, color,", &format!("(uv, {var},"))
                             .replace("RES", "vec2<f32>(u.misc.y, u.misc.z)")
                     }
-                    NodeKind::Output => self.wire(node_id, "result")?.unwrap_or_else(|| "color".to_string()),
+                    NodeKind::Output => self
+                        .wire(node_id, "result")?
+                        .unwrap_or_else(|| "vec4<f32>(0.0)".to_string()),
                     NodeKind::Wgsl { code } => {
                         if code.trim().is_empty() {
                             return Err("Wgsl node has no code".into());
@@ -995,11 +997,14 @@ impl FxPass {
                         let scalar_wire = |g: &mut Self, sock: &str| -> Result<Option<String>, String> {
                             Ok(g.wire(node_id, sock)?.map(|e| FxPass::scalar_of(&e)))
                         };
+                        let c = self
+                            .wire(node_id, "color")?
+                            .unwrap_or_else(|| "vec4<f32>(0.0)".to_string());
                         let p0 = scalar_wire(self, "p0")?.unwrap_or_else(|| "0.0".to_string());
                         let p1 = scalar_wire(self, "p1")?.unwrap_or_else(|| "0.0".to_string());
                         let p2 = scalar_wire(self, "p2")?.unwrap_or_else(|| "0.0".to_string());
                         let p3 = scalar_wire(self, "p3")?.unwrap_or_else(|| "0.0".to_string());
-                        format!("{}(color, uv, vec4<f32>({}, {}, {}, {}))", name, p0, p1, p2, p3)
+                        format!("{}({c}, uv, vec4<f32>({}, {}, {}, {}))", name, p0, p1, p2, p3)
                     }
                     NodeKind::Transform { x, y, scale, rotation } => {
                         let sx = self.scalar_param(node_id, "x", *x)?;
@@ -1025,7 +1030,7 @@ impl FxPass {
                         }
                         let c = self
                             .wire(node_id, "color")?
-                            .unwrap_or_else(|| "color".to_string());
+                            .unwrap_or_else(|| "vec4<f32>(0.0)".to_string());
                         let r = self.scalar_param(node_id, "radius", *radius)?;
                         let i = self.scalar_param(node_id, "intensity", *intensity)?;
                         format!("(({c}) + fx_ring(uv, {r}) * {i})")
@@ -1036,7 +1041,7 @@ impl FxPass {
                         }
                         let c = self
                             .wire(node_id, "color")?
-                            .unwrap_or_else(|| "color".to_string());
+                            .unwrap_or_else(|| "vec4<f32>(0.0)".to_string());
                         let th = self.scalar_param(node_id, "threshold", *threshold)?;
                         let r = self.scalar_param(node_id, "radius", *radius)?;
                         let i = self.scalar_param(node_id, "intensity", *intensity)?;

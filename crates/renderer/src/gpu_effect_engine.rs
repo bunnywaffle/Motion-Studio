@@ -1517,6 +1517,50 @@ mod tests {
         assert!(worst < 0.02, "graph twin parity, worst {worst:.4}");
     }
 
+    /// A dangling image input is black on the GPU too: the Content node only
+    /// feeds nodes it is wired to, so an unwired Posterize renders black
+    /// instead of quietly grading the layer content.
+    #[test]
+    fn node_graph_unwired_content_is_black() {
+        let Ok(gpu) = GpuContext::new_headless() else { return };
+        let Ok(mut engine) = GpuEffectEngine::new(gpu) else { return };
+        let graph = project::ModifierGraph {
+            nodes: vec![
+                project::ModifierNode::new("in", 0.0, 0.0, project::NodeKind::BaseValueIn),
+                project::ModifierNode::new(
+                    "po",
+                    120.0,
+                    0.0,
+                    project::NodeKind::StockOp {
+                        plugin: project::StockPlugin::Posterize,
+                        params: vec![3.0],
+                    },
+                ),
+                project::ModifierNode::new("out", 240.0, 0.0, project::NodeKind::Output),
+            ],
+            connections: vec![project::NodeConnection::new("po", "value", "out", "result")],
+        };
+        assert!(graph.is_color_clean());
+        let eff = EvaluatedEffect {
+            graph: Some(graph),
+            id: "ng".to_string(),
+            name: "Node Graph".to_string(),
+            enabled: true,
+            effect_type: EvaluatedEffectType::NodeGraph {},
+        };
+        assert!(engine.supports_fx_chain(std::slice::from_ref(&eff)));
+        let (w, h) = (16u32, 16u32);
+        let src = vec![200u8; (w * h * 4) as usize];
+        let out = engine
+            .process_rgba_frame(&src, w, h, std::slice::from_ref(&eff), 0.0)
+            .expect("process");
+        assert!(
+            out.iter().all(|b| *b == 0),
+            "unwired content must render black, got {:?}",
+            &out[..16]
+        );
+    }
+
     /// Blend-node twin parity: Screen/Overlay/Multiply/Add with a
     /// Constant B and a wired weight, exercised on a gradient (guards the
     /// elementwise select emission and the vec4 broadcast wiring).
