@@ -16214,6 +16214,8 @@ pub struct EffectsPanel {
     pub gpu_only: bool,
     /// Last applied plug-in id (selected-row highlight).
     pub last_applied_id: Option<String>,
+    /// Plug-in registry revision this panel last saw (installed effects).
+    last_plugins_rev: u64,
 }
 
 impl EffectsPanel {
@@ -16250,15 +16252,19 @@ impl EffectsPanel {
             search_query: String::new(),
             gpu_only: false,
             last_applied_id: None,
+            last_plugins_rev: 0,
         }
     }
 
     pub fn new_with_state(state: Entity<EditorState>, cx: &mut Context<Self>) -> Self {
         let last_selected_id = state.read(cx).selected_layer_id.clone();
+        let last_plugins_rev = state.read(cx).plugins_rev;
         let _subscription = cx.observe(&state, |this, state, cx| {
             let cur_sel = state.read(cx).selected_layer_id.clone();
-            if this.last_selected_id != cur_sel {
+            let rev = state.read(cx).plugins_rev;
+            if this.last_selected_id != cur_sel || this.last_plugins_rev != rev {
                 this.last_selected_id = cur_sel;
+                this.last_plugins_rev = rev;
                 cx.notify();
             }
         });
@@ -16271,6 +16277,7 @@ impl EffectsPanel {
             search_query: String::new(),
             gpu_only: false,
             last_applied_id: None,
+            last_plugins_rev,
         }
     }
 
@@ -16579,6 +16586,75 @@ pub(crate) fn effect_template_for(plugin_id: &str) -> Option<EffectType> {
     })
 }
 
+/// Installed effect package row: applies a Shader Lab effect named after the
+/// package. The package source is embedded in the project, so removing the
+/// package later keeps the effect working.
+fn installed_effect_item_row(
+    pkg: &project::plugin::InstalledEffect,
+    state: &Option<Entity<EditorState>>,
+    panel: &Entity<EffectsPanel>,
+    plugin_id: &str,
+    selected: bool,
+    cx: &App,
+) -> impl IntoElement {
+    let mut row = h_flex()
+        .id(SharedString::from(format!("installed_effect_item_{}", pkg.file)))
+        .test_support()
+        .px_3()
+        .py_1()
+        .rounded_sm()
+        .items_center()
+        .justify_between()
+        .cursor_pointer();
+    if selected {
+        row = row.bg(cx.theme().accent).text_color(cx.theme().accent_foreground);
+    } else {
+        row = row.hover(|s| s.bg(cx.theme().muted));
+    }
+    if let Some(state) = state {
+        let state = state.clone();
+        let panel = panel.clone();
+        let name = pkg.name.clone();
+        let source = pkg.source.clone();
+        let pid = plugin_id.to_string();
+        row = row.on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+            state.update(cx, |s, cx| {
+                let _ = s.add_installed_effect_to_selected_layer(&name, &source);
+                cx.notify();
+            });
+            panel.update(cx, |this, cx| {
+                this.last_applied_id = Some(pid.clone());
+                cx.notify();
+            });
+        });
+    }
+    row.child(
+        h_flex()
+            .gap_1p5()
+            .items_center()
+            .child(icon_box(IconName::Sparkles))
+            .child(div().text_xs().text_color(cx.theme().foreground).child(pkg.name.clone()))
+            .child(
+                div()
+                    .px_1()
+                    .rounded_sm()
+                    .bg(cx.theme().muted)
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(pkg.category.clone()),
+            ),
+    )
+    .child(
+        h_flex()
+            .gap_1()
+            .items_center()
+            .text_xs()
+            .text_color(cx.theme().primary)
+            .child(icon_box(IconName::Plus))
+            .child("Add"),
+    )
+}
+
 impl Render for EffectsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let panel = cx.entity().clone();
@@ -16610,6 +16686,23 @@ impl Render for EffectsPanel {
         };
         let gpu_only = self.gpu_only;
         let last_applied = self.last_applied_id.clone();
+        // Installed effect packages (enabled only) ride above the built-ins.
+        let state_entity = self.state.clone();
+        let installed: Vec<project::plugin::InstalledEffect> = state_entity
+            .as_ref()
+            .map(|s| {
+                s.read(cx)
+                    .installed_effects
+                    .iter()
+                    .filter(|e| e.enabled && matches_query(&e.name, &e.file))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        let installed_total = state_entity
+            .as_ref()
+            .map(|s| s.read(cx).installed_effects.iter().filter(|e| e.enabled).count())
+            .unwrap_or(0);
         const CATS: [project::OfxCategory; 12] = [
             project::OfxCategory::Blur,
             project::OfxCategory::Color,
@@ -16654,6 +16747,29 @@ impl Render for EffectsPanel {
             .overflow_y_scroll()
             .p_2()
             .gap_1();
+
+        if !installed.is_empty() {
+            cats = cats.child(category_header(
+                "installed_effects",
+                "Installed",
+                IconName::Sparkles,
+                installed.len(),
+                true,
+                &panel,
+                cx,
+            ));
+            for pkg in &installed {
+                let id = format!("installed:{}", pkg.file);
+                cats = cats.child(installed_effect_item_row(
+                    pkg,
+                    &state_entity,
+                    &panel,
+                    &id,
+                    last_applied.as_deref() == Some(id.as_str()),
+                    cx,
+                ));
+            }
+        }
 
         for cat in CATS {
             let key = ofx_category_key(cat);
@@ -16765,7 +16881,9 @@ impl Render for EffectsPanel {
                     .gap_1p5()
                     .items_center()
                     .child(icon_box(IconName::Sparkles))
-                    .child(format!("{total_count} built-in effects • click to apply")),
+                    .child(format!(
+                        "{total_count} built-in • {installed_total} installed • install more in Plugins"
+                    )),
             )
     }
 }
@@ -16783,6 +16901,472 @@ impl Panel for EffectsPanel {
 
     fn title(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         "Effects & Presets"
+    }
+}
+
+// --- Plug-ins Panel ---
+
+/// Install/manage effect packages and register OpenFX bundles.
+///
+/// Effect packages are portable Shader Lab sources; applying one embeds the
+/// source in the project, so deleting a package never breaks a saved project.
+/// OpenFX bundles are metadata-only here: this host has no OFX runtime yet,
+/// so every registered bundle is labelled unsupported.
+pub struct PluginsPanel {
+    focus_handle: FocusHandle,
+    state: Option<Entity<EditorState>>,
+    _subscription: Option<Subscription>,
+    last_plugins_rev: u64,
+}
+
+impl PluginsPanel {
+    pub fn new(state: Entity<EditorState>, cx: &mut Context<Self>) -> Self {
+        let last_plugins_rev = state.read(cx).plugins_rev;
+        let _subscription = cx.observe(&state, |this, state, cx| {
+            let rev = state.read(cx).plugins_rev;
+            if this.last_plugins_rev != rev {
+                this.last_plugins_rev = rev;
+                cx.notify();
+            }
+        });
+        Self {
+            focus_handle: cx.focus_handle(),
+            state: Some(state),
+            _subscription: Some(_subscription),
+            last_plugins_rev,
+        }
+    }
+}
+
+impl EventEmitter<PanelEvent> for PluginsPanel {}
+
+impl Focusable for PluginsPanel {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+fn plugin_action_button(
+    id: &'static str,
+    label: &'static str,
+    primary: bool,
+    cx: &App,
+    on_click: impl Fn(&mut App) + 'static,
+) -> impl IntoElement {
+    let mut button = div()
+        .id(id)
+        .test_support()
+        .px_3()
+        .py_1()
+        .rounded_sm()
+        .text_xs()
+        .font_semibold()
+        .cursor_pointer()
+        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| on_click(cx));
+    if primary {
+        button = button
+            .bg(cx.theme().primary)
+            .text_color(cx.theme().primary_foreground)
+            .hover(|s| s.opacity(0.9));
+    } else {
+        button = button
+            .bg(cx.theme().muted)
+            .text_color(cx.theme().foreground)
+            .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground));
+    }
+    button.child(label)
+}
+
+fn plugin_section_header(label: &str, count: usize, cx: &App) -> impl IntoElement {
+    h_flex()
+        .pt_2()
+        .pb_1()
+        .gap_1p5()
+        .items_center()
+        .border_b_1()
+        .border_color(cx.theme().border)
+        .child(
+            div()
+                .text_xs()
+                .font_semibold()
+                .text_color(cx.theme().foreground)
+                .child(label.to_string()),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(format!("{count}")),
+        )
+}
+
+fn installed_effect_manage_row(
+    pkg: &project::plugin::InstalledEffect,
+    state: &Entity<EditorState>,
+    cx: &App,
+) -> impl IntoElement {
+    let file_toggle = pkg.file.clone();
+    let enabled = pkg.enabled;
+    let s_toggle = state.clone();
+    let file_remove = pkg.file.clone();
+    let name_remove = pkg.name.clone();
+    let s_remove = state.clone();
+    let detail = if pkg.description.is_empty() {
+        pkg.file.clone()
+    } else {
+        pkg.description.clone()
+    };
+
+    h_flex()
+        .id(SharedString::from(format!("plugin_effect_row_{}", pkg.file)))
+        .test_support()
+        .gap_2()
+        .items_center()
+        .px_2()
+        .py_1()
+        .rounded_sm()
+        .hover(|s| s.bg(cx.theme().muted))
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_0p5()
+                .child(
+                    h_flex()
+                        .gap_1p5()
+                        .items_center()
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_semibold()
+                                .text_color(cx.theme().foreground)
+                                .truncate()
+                                .child(pkg.name.clone()),
+                        )
+                        .child(
+                            div()
+                                .px_1()
+                                .rounded_sm()
+                                .bg(cx.theme().muted)
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(pkg.category.clone()),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .truncate()
+                        .child(detail),
+                ),
+        )
+        .child(
+            Checkbox::new(SharedString::from(format!("plugin_effect_toggle_{}", pkg.file)))
+                .checked(enabled)
+                .label(if enabled { "On" } else { "Off" })
+                .tooltip("Show this effect in the Effects browser")
+                .on_click(move |checked: &bool, _window, cx| {
+                    s_toggle.update(cx, |s, cx| {
+                        if let Err(e) = s.set_installed_effect_enabled(&file_toggle, *checked) {
+                            s.property_link_toast = Some(e);
+                        }
+                        cx.notify();
+                    });
+                }),
+        )
+        .child(
+            div()
+                .id(SharedString::from(format!("plugin_effect_remove_{}", pkg.file)))
+                .test_support()
+                .cursor_pointer()
+                .px_1()
+                .text_color(cx.theme().muted_foreground)
+                .hover(|s| s.text_color(cx.theme().foreground))
+                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    s_remove.update(cx, |s, cx| {
+                        let note = match s.remove_installed_effect(&file_remove) {
+                            Ok(()) => format!("Removed effect '{name_remove}'"),
+                            Err(e) => e,
+                        };
+                        s.property_link_toast = Some(note);
+                        cx.notify();
+                    });
+                })
+                .child("×"),
+        )
+}
+
+fn ofx_bundle_row(
+    bundle: &project::plugin::OfxBundle,
+    state: &Entity<EditorState>,
+    cx: &App,
+) -> impl IntoElement {
+    let path_remove = bundle.path.clone();
+    let name_remove = bundle.name.clone();
+    let s_remove = state.clone();
+    h_flex()
+        .id(SharedString::from(format!("plugin_ofx_row_{}", bundle.identifier)))
+        .test_support()
+        .gap_2()
+        .items_center()
+        .px_2()
+        .py_1()
+        .rounded_sm()
+        .hover(|s| s.bg(cx.theme().muted))
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_0p5()
+                .child(
+                    h_flex()
+                        .gap_1p5()
+                        .items_center()
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_semibold()
+                                .text_color(cx.theme().foreground)
+                                .truncate()
+                                .child(bundle.name.clone()),
+                        )
+                        .child(
+                            div()
+                                .id("plugin_ofx_unsupported")
+                                .test_support()
+                                .px_1()
+                                .rounded_sm()
+                                .bg(rgb(0x6e6e76))
+                                .text_color(rgb(0x09090b))
+                                .text_xs()
+                                .child("Unsupported"),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .truncate()
+                        .child(format!("{} · {}", bundle.identifier, bundle.path)),
+                ),
+        )
+        .child(
+            div()
+                .id(SharedString::from(format!("plugin_ofx_remove_{}", bundle.identifier)))
+                .test_support()
+                .cursor_pointer()
+                .px_1()
+                .text_color(cx.theme().muted_foreground)
+                .hover(|s| s.text_color(cx.theme().foreground))
+                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    s_remove.update(cx, |s, cx| {
+                        let note = match s.remove_ofx_bundle(&path_remove) {
+                            Ok(()) => format!("Removed OpenFX bundle '{}'", name_remove),
+                            Err(e) => e,
+                        };
+                        s.property_link_toast = Some(note);
+                        cx.notify();
+                    });
+                })
+                .child("×"),
+        )
+}
+
+impl Render for PluginsPanel {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(state) = self.state.clone() else {
+            return v_flex()
+                .id("plugins_panel")
+                .test_support()
+                .size_full()
+                .p_3()
+                .child("No project");
+        };
+        let installed = state.read(cx).installed_effects.clone();
+        let bundles = state.read(cx).ofx_bundles.clone();
+
+        // Native dialog on a worker thread (same pattern as preset export).
+        let s_install = state.clone();
+        let install_button = plugin_action_button(
+            "plugins_install_effect",
+            "Install Effect…",
+            true,
+            cx,
+            move |cx| {
+                let s_install = s_install.clone();
+                cx.spawn(|cx: &mut AsyncApp| {
+                    let cx = cx.clone();
+                    async move {
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        let _ = std::thread::Builder::new()
+                            .name("file-dialog-worker".to_string())
+                            .stack_size(8 * 1024 * 1024)
+                            .spawn(move || {
+                                let file = rfd::FileDialog::new()
+                                    .set_title("Install Effect Package")
+                                    .add_filter(
+                                        "Effect Package",
+                                        project::plugin::EFFECT_EXTENSIONS,
+                                    )
+                                    .pick_file();
+                                let _ = tx.send(file);
+                            });
+                        if let Ok(Some(path)) = rx.recv() {
+                            cx.update(|cx| {
+                                s_install.update(cx, |s, cx| {
+                                    let note = match s.install_effect_package(&path) {
+                                        Ok(name) => format!("Installed effect '{name}'"),
+                                        Err(e) => format!("Install failed: {e}"),
+                                    };
+                                    s.property_link_toast = Some(note);
+                                    cx.notify();
+                                });
+                            });
+                        }
+                    }
+                })
+                .detach();
+            },
+        );
+
+        let s_scan = state.clone();
+        let scan_button = plugin_action_button(
+            "plugins_scan_ofx",
+            "Scan OpenFX Folder…",
+            false,
+            cx,
+            move |cx| {
+                let s_scan = s_scan.clone();
+                cx.spawn(|cx: &mut AsyncApp| {
+                    let cx = cx.clone();
+                    async move {
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        let _ = std::thread::Builder::new()
+                            .name("file-dialog-worker".to_string())
+                            .stack_size(8 * 1024 * 1024)
+                            .spawn(move || {
+                                let dir = rfd::FileDialog::new()
+                                    .set_title("Choose an OpenFX Plug-ins Folder")
+                                    .pick_folder();
+                                let _ = tx.send(dir);
+                            });
+                        if let Ok(Some(dir)) = rx.recv() {
+                            cx.update(|cx| {
+                                s_scan.update(cx, |s, cx| {
+                                    let note = match s.scan_ofx_folder(&dir) {
+                                        Ok(n) => format!(
+                                            "Registered {n} OpenFX bundle(s) — metadata only, unsupported by this host"
+                                        ),
+                                        Err(e) => format!("OpenFX scan failed: {e}"),
+                                    };
+                                    s.property_link_toast = Some(note);
+                                    cx.notify();
+                                });
+                            });
+                        }
+                    }
+                })
+                .detach();
+            },
+        );
+
+        let mut root = v_flex()
+            .id("plugins_panel")
+            .test_support()
+            .size_full()
+            .overflow_y_scroll()
+            .p_3()
+            .gap_1()
+            .child(
+                div()
+                    .text_sm()
+                    .font_semibold()
+                    .text_color(cx.theme().foreground)
+                    .child("Effects & Plug-ins"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(
+                        "Install an effect package to add it to the Effects browser, or register OpenFX bundles from a folder.",
+                    ),
+            )
+            .child(
+                h_flex()
+                    .pt_1()
+                    .gap_1p5()
+                    .items_center()
+                    .child(install_button)
+                    .child(scan_button),
+            )
+            .child(plugin_section_header(
+                "Installed Effects",
+                installed.len(),
+                cx,
+            ));
+
+        if installed.is_empty() {
+            root = root.child(
+                div()
+                    .id("plugins_effects_empty")
+                    .test_support()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(
+                        "No installed effects. Packages are .fx / .wgsl files with `// @meta name=\"...\"` and a `vec4 effect(vec2 uv, vec4 color)` function.",
+                    ),
+            );
+        }
+        for pkg in &installed {
+            root = root.child(installed_effect_manage_row(pkg, &state, cx));
+        }
+
+        root = root.child(plugin_section_header(
+            "OpenFX Plug-ins",
+            bundles.len(),
+            cx,
+        ));
+        root = root.child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(
+                    "These bundles are registered for reference. This build cannot execute third-party OpenFX binaries yet.",
+                ),
+        );
+        if bundles.is_empty() {
+            root = root.child(
+                div()
+                    .id("plugins_ofx_empty")
+                    .test_support()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("No OpenFX bundles registered."),
+            );
+        }
+        for bundle in &bundles {
+            root = root.child(ofx_bundle_row(bundle, &state, cx));
+        }
+
+        root
+    }
+}
+
+impl BasePanel for PluginsPanel {
+    fn panel_name(&self) -> &'static str {
+        "plugins"
+    }
+}
+
+impl Panel for PluginsPanel {
+    fn tab_name(&self, _cx: &App) -> Option<SharedString> {
+        Some("Plugins".into())
+    }
+
+    fn title(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        "Plug-ins"
     }
 }
 
@@ -24837,6 +25421,7 @@ pub struct AppPanels {
     pub properties: Entity<PropertiesPanel>,
     pub effects: Entity<EffectsPanel>,
     pub presets: Entity<PresetsPanel>,
+    pub plugins: Entity<PluginsPanel>,
     pub timeline: Entity<TimelinePanel>,
 }
 
@@ -24850,6 +25435,7 @@ impl AppPanels {
             properties: cx.new(|cx| PropertiesPanel::new(state.clone(), cx)),
             effects: cx.new(|cx| EffectsPanel::new_with_state(state.clone(), cx)),
             presets: cx.new(|cx| PresetsPanel::new(state.clone(), cx)),
+            plugins: cx.new(|cx| PluginsPanel::new(state.clone(), cx)),
             timeline: cx.new(|cx| TimelinePanel::new(state, cx)),
         }
     }

@@ -130,11 +130,13 @@ impl AppView {
         let center_layout =
             DockLayout::tabs().panel_view(panel_handle(panels.composition.clone()), cx);
 
-        // Right dock: Tab group containing Properties and Effects tabs (After Effects workspace layout)
+        // Right dock: Tab group containing Properties, Effects, Presets and
+        // Plugins tabs (After Effects workspace layout)
         let right_layout = DockLayout::tabs()
             .panel_view(panel_handle(panels.properties.clone()), cx)
             .panel_view(panel_handle(panels.effects.clone()), cx)
-            .panel_view(panel_handle(panels.presets.clone()), cx);
+            .panel_view(panel_handle(panels.presets.clone()), cx)
+            .panel_view(panel_handle(panels.plugins.clone()), cx);
 
         dock_area.update(cx, |dock, cx| {
             dock.set_dock(DockPlacement::Left, left_layout, window, cx);
@@ -4612,6 +4614,99 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             assert!(window.find("preset_export_0").visible());
             assert!(window.find("preset_delete_0").visible());
             assert!(window.try_find("presets_empty_hint").is_none());
+        })
+        .expect("update_window failed");
+    }
+
+    #[gpui_kit::test]
+    fn test_plugins_panel_lists_installed_and_ofx(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            Theme::change(ThemeMode::Dark, None, cx);
+        });
+
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
+            window.activate_window();
+            window.set_window_title("Motion Compositor");
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+
+            let panels = app_view.read(cx).panels().clone();
+            let plugins_id = PanelId::from(panels.plugins.entity_id());
+            let effects_id = PanelId::from(panels.effects.entity_id());
+            let dock_area = app_view.read(cx).dock_area().clone();
+            let state = app_view.read(cx).state().clone();
+            // Isolate from whatever the developer has installed locally.
+            state.update(cx, |s, cx| {
+                s.installed_effects.clear();
+                s.ofx_bundles.clear();
+                s.plugins_rev += 1;
+                cx.notify();
+            });
+            dock_area.update(cx, |dock, cx| {
+                assert!(dock.panel(plugins_id).is_some(), "plugins registered");
+                dock.select_panel(plugins_id, window, cx);
+            });
+            window.render_frame(cx);
+
+            // Empty states on a fresh registry.
+            assert!(window.find("plugins_panel").visible());
+            assert!(window.find("plugins_effects_empty").visible());
+            assert!(window.find("plugins_ofx_empty").visible());
+            assert!(window.find("plugins_install_effect").visible());
+            assert!(window.find("plugins_scan_ofx").visible());
+
+            state.update(cx, |s, cx| {
+                s.installed_effects.push(project::plugin::InstalledEffect {
+                    file: "test-glow.fx".to_string(),
+                    name: "Test Glow".to_string(),
+                    category: "Stylize".to_string(),
+                    description: "Unit test effect".to_string(),
+                    source: "// @meta name=\"Test Glow\"\nvec4 effect(vec2 uv, vec4 color) { return color; }"
+                        .to_string(),
+                    enabled: true,
+                });
+                s.ofx_bundles.push(project::plugin::OfxBundle {
+                    name: "Lens Flare".to_string(),
+                    identifier: "com.example.lensflare".to_string(),
+                    path: "C:/plugins/LensFlare.ofx".to_string(),
+                });
+                s.plugins_rev += 1;
+                cx.notify();
+            });
+            window.render_frame(cx);
+
+            assert!(window.find("plugin_effect_row_test-glow.fx").visible());
+            assert!(window.find("plugin_effect_remove_test-glow.fx").visible());
+            assert!(window.find("plugin_ofx_unsupported").visible());
+            assert!(window.try_find("plugins_effects_empty").is_none());
+
+            // The enabled package appears in the Effects browser and applies
+            // as a Shader Lab effect named after the package.
+            dock_area.update(cx, |dock, cx| dock.select_panel(effects_id, window, cx));
+            window.render_frame(cx);
+            assert!(window.find("installed_effect_item_test-glow.fx").visible());
+            window.click("installed_effect_item_test-glow.fx", cx);
+
+            let layer = state.read(cx).selected_layer().cloned().expect("selected layer");
+            let applied = layer
+                .effects
+                .iter()
+                .find(|e| e.name == "Test Glow")
+                .expect("installed effect applied");
+            assert!(matches!(
+                applied.effect_type,
+                project::EffectType::ShaderLab { .. }
+            ));
         })
         .expect("update_window failed");
     }

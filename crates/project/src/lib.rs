@@ -14,6 +14,7 @@ pub mod matte;
 pub mod modifier;
 pub mod ofx;
 pub mod path;
+pub mod plugin;
 pub mod project;
 pub mod property;
 pub mod shader;
@@ -49,6 +50,7 @@ pub use matte::TrackMatteMode;
 pub use modifier::{ConstantMode, MathOp, ModifierGraph, ModifierNode, NodeConnection, NodeKind, WaveType};
 pub use ofx::{ofx_in_category, ofx_lookup, OfxCategory, OfxEffectDescriptor, OfxParamDescriptor, OFX_SUITE};
 pub use path::{Path, PathBooleanOp, PathPoint, PathPointKind, ProfilePoint, sample_tone_curve, sample_width_profile};
+pub use plugin::{InstalledEffect, OfxBundle, PluginRegistry};
 pub use trace::{AutoTraceOptions, TraceChannel, TraceRange, TracedContour};
 pub use project::{Project, ProjectSettings, CURRENT_FORMAT_VERSION};
 pub use property::{

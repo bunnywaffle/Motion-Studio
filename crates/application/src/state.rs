@@ -296,6 +296,12 @@ pub struct EditorState {
     /// User-saved animation presets (captured from a layer's keyframes and
     /// persisted to disk so they survive restarts).
     pub user_animation_presets: Vec<UserAnimationPreset>,
+    /// Effect packages installed in the app config folder.
+    pub installed_effects: Vec<project::plugin::InstalledEffect>,
+    /// Registered OpenFX bundles (metadata only; this host has no runtime).
+    pub ofx_bundles: Vec<project::plugin::OfxBundle>,
+    /// Bumped on install/enable/remove/scan so panels repaint.
+    pub plugins_rev: u64,
 }
 
 /// One animatable track captured inside a [`UserAnimationPreset`]. The
@@ -379,6 +385,26 @@ fn app_config_dir() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from))
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
     Some(base.join("MotionStudio"))
+}
+
+/// Installed effect packages live here (`<config>/MotionStudio/effects`).
+fn effects_dir() -> Option<PathBuf> {
+    app_config_dir().map(|d| d.join("effects"))
+}
+
+/// Plug-in state file (disabled effects + registered OFX bundles).
+fn plugin_registry_file() -> Option<PathBuf> {
+    app_config_dir().map(|d| d.join("plugins.json"))
+}
+
+/// Load installed effects + OFX bundles, tolerating missing files.
+fn load_plugin_state() -> (Vec<project::plugin::InstalledEffect>, Vec<project::plugin::OfxBundle>) {
+    let Some(config) = app_config_dir() else {
+        return (Vec::new(), Vec::new());
+    };
+    let registry = project::plugin::load_registry(&config.join("plugins.json"));
+    let effects = project::plugin::load_installed_effects(&config.join("effects"), &registry);
+    (effects, registry.ofx_bundles)
 }
 
 /// Shape of `<config>/MotionStudio/settings.json` (missing fields default).
@@ -1066,6 +1092,7 @@ impl EditorState {
         let active_comp_id = "comp_main".to_string();
         let selected_layer_id = None;
         project.add_composition(comp).unwrap();
+        let (installed_effects, ofx_bundles) = load_plugin_state();
 
         Self {
             project,
@@ -1107,6 +1134,9 @@ impl EditorState {
             layer_clipboard: None,
             asset_clipboard: None,
             user_animation_presets: load_user_animation_presets(),
+            installed_effects,
+            ofx_bundles,
+            plugins_rev: 0,
         }
     }
 
@@ -2591,8 +2621,30 @@ impl EditorState {
         &mut self,
         effect_type: EffectType,
     ) -> Result<String, String> {
+        self.add_effect_to_selected_layer_named(effect_type, None)
+    }
+
+    /// Apply an installed effect package to the selected layer. The package
+    /// source is embedded in the project, so removing the package later keeps
+    /// this effect working.
+    pub fn add_installed_effect_to_selected_layer(
+        &mut self,
+        name: &str,
+        source: &str,
+    ) -> Result<String, String> {
+        self.add_effect_to_selected_layer_named(
+            EffectType::shader_lab(source),
+            Some(name.to_string()),
+        )
+    }
+
+    fn add_effect_to_selected_layer_named(
+        &mut self,
+        effect_type: EffectType,
+        name: Option<String>,
+    ) -> Result<String, String> {
         self.checkpoint();
-        let type_name = effect_type.type_name();
+        let display_name = name.unwrap_or_else(|| effect_type.type_name().to_string());
         let selected_id = self
             .selected_layer_id
             .clone()
@@ -2605,12 +2657,117 @@ impl EditorState {
             .get_layer_mut(&selected_id)
             .ok_or_else(|| format!("Layer {selected_id} not found"))?;
 
-        let slug = type_name.to_lowercase().replace([' ', '&'], "_");
+        let slug = display_name.to_lowercase().replace([' ', '&'], "_");
         let fx_id = format!("fx_{slug}_{}", layer.effects.len() + 1);
 
-        let effect = Effect::new(&fx_id, type_name, effect_type);
+        let effect = Effect::new(&fx_id, display_name, effect_type);
         let id = layer.add_effect(effect);
         Ok(id)
+    }
+
+    /// Re-read the plug-in registry + effects folder after an external change.
+    fn refresh_plugins(&mut self) {
+        let (installed_effects, ofx_bundles) = load_plugin_state();
+        self.installed_effects = installed_effects;
+        self.ofx_bundles = ofx_bundles;
+        self.plugins_rev = self.plugins_rev.wrapping_add(1);
+    }
+
+    fn plugin_registry(&self) -> project::plugin::PluginRegistry {
+        plugin_registry_file()
+            .map(|p| project::plugin::load_registry(&p))
+            .unwrap_or_default()
+    }
+
+    fn save_plugin_registry(
+        &self,
+        registry: &project::plugin::PluginRegistry,
+    ) -> Result<(), String> {
+        let path = plugin_registry_file()
+            .ok_or_else(|| "No config directory available".to_string())?;
+        project::plugin::save_registry(&path, registry)
+    }
+
+    /// Install (or reinstall) an effect package file. The shader is compiled
+    /// first, so a broken package is rejected instead of listed.
+    pub fn install_effect_package(&mut self, path: &StdPath) -> Result<String, String> {
+        let dir = effects_dir().ok_or_else(|| "No config directory available".to_string())?;
+        let source = std::fs::read_to_string(path)
+            .map_err(|e| format!("Read effect failed: {e}"))?;
+        renderer::shader_lab::compile_source(&source)
+            .map_err(|e| format!("Shader error: {e}"))?;
+        let installed = project::plugin::install_effect_source(&source, &dir)?;
+        let mut registry = self.plugin_registry();
+        registry.disabled_effects.remove(&installed.file);
+        self.save_plugin_registry(&registry)?;
+        self.refresh_plugins();
+        Ok(installed.name)
+    }
+
+    /// Enable or disable an installed effect (disabled effects are hidden
+    /// from the Effects browser but keep working in saved projects).
+    pub fn set_installed_effect_enabled(
+        &mut self,
+        file: &str,
+        enabled: bool,
+    ) -> Result<(), String> {
+        let mut registry = self.plugin_registry();
+        if enabled {
+            registry.disabled_effects.remove(file);
+        } else {
+            registry.disabled_effects.insert(file.to_string());
+        }
+        self.save_plugin_registry(&registry)?;
+        self.refresh_plugins();
+        Ok(())
+    }
+
+    /// Delete an installed effect package from the config folder.
+    pub fn remove_installed_effect(&mut self, file: &str) -> Result<(), String> {
+        let dir = effects_dir().ok_or_else(|| "No config directory available".to_string())?;
+        project::plugin::remove_effect_file(&dir, file)?;
+        let mut registry = self.plugin_registry();
+        registry.disabled_effects.remove(file);
+        self.save_plugin_registry(&registry)?;
+        self.refresh_plugins();
+        Ok(())
+    }
+
+    /// Register every `.ofx` bundle under `root`. Metadata only — the host
+    /// cannot execute third-party OFX binaries yet.
+    pub fn scan_ofx_folder(&mut self, root: &StdPath) -> Result<usize, String> {
+        let found = project::plugin::find_ofx_bundles(root);
+        if found.is_empty() {
+            return Err("No .ofx bundles found in that folder".to_string());
+        }
+        let mut registry = self.plugin_registry();
+        for bundle in found {
+            match registry
+                .ofx_bundles
+                .iter_mut()
+                .find(|b| b.path.eq_ignore_ascii_case(&bundle.path))
+            {
+                Some(existing) => *existing = bundle,
+                None => registry.ofx_bundles.push(bundle),
+            }
+        }
+        registry
+            .ofx_bundles
+            .sort_by_key(|b| b.name.to_lowercase());
+        self.save_plugin_registry(&registry)?;
+        self.refresh_plugins();
+        Ok(self.ofx_bundles.len())
+    }
+
+    /// Forget a registered OpenFX bundle (does not touch its files).
+    pub fn remove_ofx_bundle(&mut self, path: &str) -> Result<(), String> {
+        let mut registry = self.plugin_registry();
+        registry
+            .ofx_bundles
+            .retain(|b| !b.path.eq_ignore_ascii_case(path));
+        self.save_plugin_registry(&registry)?;
+        self.refresh_plugins();
+        Ok(())
     }
 
     /// Set a Match Color / Match Light effect's reference layer.
