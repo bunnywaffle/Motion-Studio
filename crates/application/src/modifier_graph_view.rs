@@ -25,6 +25,56 @@ pub const HEADER_HEIGHT: f32 = 77.0;
 /// Sidebar palette section row: (category, [(button label, kind ctor)]).
 type PaletteEntry = (&'static str, &'static [(&'static str, fn() -> NodeKind)]);
 
+/// Bounded scalar widget: draggable fill bar + unit readout.
+#[derive(Clone, Copy)]
+struct ParamRange {
+    min: f32,
+    max: f32,
+    unit: &'static str,
+    decimals: u8,
+}
+
+impl ParamRange {
+    /// Map an OFX descriptor param to its widget: percentages read `%`,
+    /// angle params `°`, wide ranges show whole numbers.
+    fn ofx(p: &project::ofx::OfxParamDescriptor) -> Self {
+        let unit = if p.name.contains("angle") || (p.min <= 0.0 && p.max == 360.0) {
+            "°"
+        } else if p.min >= 0.0 && p.max == 100.0 {
+            "%"
+        } else {
+            ""
+        };
+        Self {
+            min: p.min,
+            max: p.max,
+            unit,
+            decimals: if p.max - p.min <= 10.0 { 2 } else { 0 },
+        }
+    }
+
+    fn text(self, value: f32) -> String {
+        match self.decimals {
+            0 => format!("{value:.0}{}", self.unit),
+            _ => format!("{value:.2}{}", self.unit),
+        }
+    }
+
+    fn fill(self, value: f32) -> f32 {
+        ((value - self.min) / (self.max - self.min).max(1e-6)).clamp(0.0, 1.0)
+    }
+}
+
+/// Widget model for one input socket's stored value.
+#[derive(Clone, Copy)]
+struct SocketParam {
+    key: &'static str,
+    value: f32,
+    tint: u32,
+    /// `Some` for bounded params (slider); `None` keeps the plain pill.
+    range: Option<ParamRange>,
+}
+
 /// Display label for a socket: Blend's `a`/`b` read as background/foreground
 /// (wire names stay a/b/weight so old saved graphs load untouched).
 fn socket_display_label(kind: Option<&NodeKind>, socket: &str) -> String {
@@ -199,6 +249,10 @@ pub struct ModifierGraphView {
     palette_open: [bool; 5],
     /// Effects sidebar section (dynamic, from the stock plugin registry).
     effects_open: bool,
+    /// Constant node whose color widget channels are expanded.
+    expanded_color: Option<String>,
+    /// Curve widget drag: `(node_id, zone index, start_y, start_lift)`.
+    curve_scrub: Option<(String, usize, f32, f32)>,
 }
 
 impl ModifierGraphView {
@@ -242,6 +296,8 @@ impl ModifierGraphView {
             blend_combo_subs: HashMap::new(),
             palette_open: [false; 5],
             effects_open: false,
+            expanded_color: None,
+            curve_scrub: None,
         }
     }
 
@@ -264,6 +320,8 @@ impl ModifierGraphView {
         self.blend_combo_subs.clear();
         self.pan_offset = (0.0, 0.0);
         self.scrubbing_param = None;
+        self.expanded_color = None;
+        self.curve_scrub = None;
         cx.notify();
     }
 
@@ -862,8 +920,6 @@ impl ModifierGraphView {
             &[
                 ("Constant", || NodeKind::Constant { mode: ConstantMode::Float, value: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
                 ("Blend", || NodeKind::Blend { mode: GraphBlendMode::default(), default_b: 0.0 }),
-                ("Posterize", || NodeKind::StockOp { plugin: StockPlugin::Posterize, params: vec![2.0] }),
-                ("Threshold", || NodeKind::StockOp { plugin: StockPlugin::Threshold, params: vec![50.0, 30.0] }),
                 ("Wgsl", || NodeKind::Wgsl { code: "return color;".to_string() }),
             ],
         ),
@@ -954,74 +1010,78 @@ impl ModifierGraphView {
             );
         }
 
-        // Dynamic "Effects" section: every stock plug-in the graph can
-        // evaluate on the GPU (single-pass WGSL twin, float params only) is
-        // one add-node button, grouped by its OFX panel category. Multi-pass
-        // kernels (box blur/defocus, procedural generators, cleanup) stay in
-        // the layer effect stack — as graph nodes they would be silent
-        // no-ops.
-        let mut eff_body = v_flex().px_2().py_1().gap_1p5().child(
-            div()
+        // Dynamic "Effects" section: effect graphs only. A modifier graph
+        // modulates one property's value; stock pixel effects belong to the
+        // inline effect graph on an effect (where the Content socket is the
+        // layer image). Every stock plug-in the graph can evaluate on the GPU
+        // (single-pass WGSL twin, float params only) is one add-node button,
+        // grouped by its OFX panel category. Multi-pass kernels (box
+        // blur/defocus, procedural generators, cleanup) stay in the layer
+        // effect stack — as graph nodes they would be silent no-ops.
+        if self.is_effect_graph {
+            let mut eff_body = v_flex().px_2().py_1().gap_1p5().child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Effects (GPU)"),
+            );
+            let mut last_cat: Option<OfxCategory> = None;
+            for plugin in StockPlugin::all().iter().filter(|p| p.graph_capable()) {
+                let desc = ofx_lookup(plugin.plugin_id()).expect("stock descriptor registered");
+                if last_cat != Some(desc.category) {
+                    last_cat = Some(desc.category);
+                    eff_body = eff_body.child(
+                        div()
+                            .pt_1()
+                            .text_xs()
+                            .font_semibold()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(desc.category.label()),
+                    );
+                }
+                let ent_btn = entity.clone();
+                let plugin = *plugin;
+                eff_body = eff_body.child(self.toolbar_btn("fx_", desc.label, ent_btn, move |this, cx| {
+                    let params = desc.params.iter().map(|p| p.default).collect();
+                    this.add_node(NodeKind::StockOp { plugin, params }, cx);
+                }, cx));
+            }
+            let ent_eff = entity.clone();
+            let eff_hdr = h_flex()
+                .id(SharedString::from("mg_pal_eff_hdr"))
+                .test_support()
+                .w_full()
+                .px_2()
+                .py_1()
+                .gap_1p5()
+                .items_center()
+                .cursor_pointer()
+                .rounded_sm()
+                .font_semibold()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
-                .child("Effects (GPU)"),
-        );
-        let mut last_cat: Option<OfxCategory> = None;
-        for plugin in StockPlugin::all().iter().filter(|p| p.graph_capable()) {
-            let desc = ofx_lookup(plugin.plugin_id()).expect("stock descriptor registered");
-            if last_cat != Some(desc.category) {
-                last_cat = Some(desc.category);
-                eff_body = eff_body.child(
-                    div()
-                        .pt_1()
-                        .text_xs()
-                        .font_semibold()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(desc.category.label()),
-                );
-            }
-            let ent_btn = entity.clone();
-            let plugin = *plugin;
-            eff_body = eff_body.child(self.toolbar_btn("fx_", desc.label, ent_btn, move |this, cx| {
-                let params = desc.params.iter().map(|p| p.default).collect();
-                this.add_node(NodeKind::StockOp { plugin, params }, cx);
-            }, cx));
+                .hover(|s| s.bg(cx.theme().accent))
+                .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                    ent_eff.update(cx, |this, cx| {
+                        this.effects_open = !this.effects_open;
+                        cx.notify();
+                    });
+                })
+                .child(div().w(px(10.)).child(if self.effects_open { "▾" } else { "▸" }))
+                .child("EFFECTS");
+            let eff_content = if self.effects_open {
+                eff_body.into_any_element()
+            } else {
+                div().into_any_element()
+            };
+            sections.push(
+                Collapsible::new()
+                    .open(self.effects_open)
+                    .child(v_flex().rounded_sm().border_b_1().border_color(cx.theme().border).child(eff_hdr))
+                    .content(eff_content)
+                    .into_any_element(),
+            );
         }
-        let ent_eff = entity.clone();
-        let eff_hdr = h_flex()
-            .id(SharedString::from("mg_pal_eff_hdr"))
-            .test_support()
-            .w_full()
-            .px_2()
-            .py_1()
-            .gap_1p5()
-            .items_center()
-            .cursor_pointer()
-            .rounded_sm()
-            .font_semibold()
-            .text_xs()
-            .text_color(cx.theme().muted_foreground)
-            .hover(|s| s.bg(cx.theme().accent))
-            .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
-                ent_eff.update(cx, |this, cx| {
-                    this.effects_open = !this.effects_open;
-                    cx.notify();
-                });
-            })
-            .child(div().w(px(10.)).child(if self.effects_open { "▾" } else { "▸" }))
-            .child("EFFECTS");
-        let eff_content = if self.effects_open {
-            eff_body.into_any_element()
-        } else {
-            div().into_any_element()
-        };
-        sections.push(
-            Collapsible::new()
-                .open(self.effects_open)
-                .child(v_flex().rounded_sm().border_b_1().border_color(cx.theme().border).child(eff_hdr))
-                .content(eff_content)
-                .into_any_element(),
-        );
         v_flex()
             .id("node_palette_sidebar")
             .w(px(150.))
@@ -1609,7 +1669,7 @@ impl ModifierGraphView {
 
             for in_name in in_sockets.iter() {
                 let field = match self.socket_param(&node.kind, in_name) {
-                    Some((key, val, tint)) => {
+                    Some(param) => {
                         if self.is_socket_wired(&node_id, in_name) {
                             div()
                                 .text_xs()
@@ -1617,11 +1677,9 @@ impl ModifierGraphView {
                                 .child("driven")
                                 .into_any_element()
                         } else {
-                            self.param_scrub_input(
+                            self.param_widget(
                                 node_id.clone(),
-                                key,
-                                val,
-                                rgb(tint),
+                                &param,
                                 entity.clone(),
                                 cx,
                             )
@@ -1913,7 +1971,12 @@ impl ModifierGraphView {
                         .gap_1p5()
                         .items_center()
                         .child(div().text_xs().text_color(cx.theme().muted_foreground).child(label))
-                        .child(this.param_scrub_input(nid.clone(), pname, val, rgb(tint), ent.clone(), cx))
+                        .child(this.param_scrub_input(
+                            nid.clone(),
+                            SocketParam { key: pname, value: val, tint, range: None },
+                            ent.clone(),
+                            cx,
+                        ))
                 };
                 match m {
                     ConstantMode::Float | ConstantMode::Int => {
@@ -1929,11 +1992,62 @@ impl ModifierGraphView {
                         col = col.child(row(self, "Z:", "b", bv, 0xfbbf24));
                     }
                     ConstantMode::Color => {
-                        col = col
-                            .child(row(self, "R:", "value", v, 0xf87171))
-                            .child(row(self, "G:", "g", gv, 0x4ade80))
-                            .child(row(self, "B:", "b", bv, 0x60a5fa))
-                            .child(row(self, "A:", "a", av, 0xe5e7eb));
+                        // Color widget: live swatch + hex; the channel rows
+                        // expand under it so the card stays compact by default.
+                        let nid_sw = nid.clone();
+                        let ent_sw = ent.clone();
+                        let open = self.expanded_color.as_deref() == Some(nid.as_str());
+                        let hex = format!(
+                            "#{:02X}{:02X}{:02X}",
+                            (v.clamp(0.0, 1.0) * 255.0).round() as u8,
+                            (gv.clamp(0.0, 1.0) * 255.0).round() as u8,
+                            (bv.clamp(0.0, 1.0) * 255.0).round() as u8,
+                        );
+                        col = col.child(
+                            h_flex()
+                                .w_full()
+                                .gap_1p5()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!("mg_color_{nid}")))
+                                        .test_support()
+                                        .flex_1()
+                                        .h(px(18.))
+                                        .rounded_sm()
+                                        .border_1()
+                                        .border_color(rgb(0x3a3c4e))
+                                        .overflow_hidden()
+                                        .cursor_pointer()
+                                        .bg(Rgba { r: v, g: gv, b: bv, a: av.max(0.15) })
+                                        .on_mouse_down(MouseButton::Left, move |_e, _w, cx| {
+                                            cx.stop_propagation();
+                                            ent_sw.update(cx, |this, cx| {
+                                                this.expanded_color = if this.expanded_color.as_deref()
+                                                    == Some(nid_sw.as_str())
+                                                {
+                                                    None
+                                                } else {
+                                                    Some(nid_sw.clone())
+                                                };
+                                                cx.notify();
+                                            });
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(hex),
+                                ),
+                        );
+                        if open {
+                            col = col
+                                .child(row(self, "R:", "value", v, 0xf87171))
+                                .child(row(self, "G:", "g", gv, 0x4ade80))
+                                .child(row(self, "B:", "b", bv, 0x60a5fa))
+                                .child(row(self, "A:", "a", av, 0xe5e7eb));
+                        }
                     }
                 }
                 col
@@ -2018,6 +2132,10 @@ impl ModifierGraphView {
                     )
             }
 
+            NodeKind::StockOp { plugin: StockPlugin::Curves, params } => {
+                self.render_curves_widget(&nid, params, entity)
+            }
+
             NodeKind::Wgsl { code } => self.render_wgsl_params(&nid, code, entity, cx),
 
             NodeKind::DriverLink { driver_layer_id, driver_prop_path } => {
@@ -2051,6 +2169,140 @@ impl ModifierGraphView {
 
             _ => div(),
         }
+    }
+
+    /// Curves node widget: live tone-response plot with one drag handle per
+    /// zone lift. Renders only for the Curves stock plug-in, whose five
+    /// params are the zone gains the CPU/GPU kernels blend by.
+    fn render_curves_widget(
+        &self,
+        node_id: &str,
+        params: &[f32],
+        entity: &Entity<Self>,
+    ) -> Div {
+        const PLOT_H: f32 = 54.0;
+        const ZONES: [f32; 5] = [0.1, 0.3, 0.5, 0.7, 0.9];
+        let desc = StockPlugin::Curves.descriptor();
+        let lifts: [f32; 5] = std::array::from_fn(|i| {
+            params.get(i).copied().unwrap_or(desc.params[i].default)
+        });
+        let grade = move |x: f32| {
+            let mut y = x;
+            for (lift, z) in lifts.iter().zip(ZONES.iter()) {
+                let w = (1.0 - ((x - z).abs() / 0.35)).clamp(0.0, 1.0);
+                y += lift / 100.0 * w * 0.6;
+            }
+            y.clamp(0.0, 1.0)
+        };
+        let curves: Vec<(f32, f32)> = (0..=24)
+            .map(|i| {
+                let u = i as f32 / 24.0;
+                (u, grade(u))
+            })
+            .collect();
+
+        let ent_move = entity.clone();
+        let ent_up = entity.clone();
+        let nid_move = node_id.to_string();
+        let mut plot = div()
+            .id(SharedString::from(format!("mg_curve_{node_id}")))
+            .test_support()
+            .relative()
+            .w_full()
+            .h(px(PLOT_H))
+            .rounded_sm()
+            .overflow_hidden()
+            .bg(rgb(0x15161d))
+            .border_1()
+            .border_color(rgb(0x2e303e))
+            .cursor_grab()
+            .on_mouse_move(move |event, _w, cx| {
+                let y = event.position.y / px(1.0);
+                let nid = nid_move.clone();
+                ent_move.update(cx, |this, cx| {
+                    let Some((id, zone, start_y, start_lift)) = this.curve_scrub.clone() else {
+                        return;
+                    };
+                    if id != nid {
+                        return;
+                    }
+                    let lift =
+                        (start_lift - (y - start_y) * (100.0 / (0.6 * PLOT_H))).clamp(-100.0, 100.0);
+                    this.apply_param_value(&id, desc.params[zone].name, lift, cx);
+                });
+            })
+            .on_mouse_up(MouseButton::Left, move |_e, _w, cx| {
+                cx.stop_propagation();
+                ent_up.update(cx, |this, cx| {
+                    this.curve_scrub = None;
+                    cx.notify();
+                });
+            });
+        plot = plot.child(
+            gpui::canvas(
+                move |bounds: gpui::Bounds<gpui::Pixels>, _window, _cx| bounds,
+                move |_bounds, b: gpui::Bounds<gpui::Pixels>, window, _cx| {
+                    let w = (b.size.width / gpui::px(1.0)).max(1.0);
+                    let h = (b.size.height / gpui::px(1.0)).max(1.0);
+                    let ox = b.origin.x / gpui::px(1.0);
+                    let oy = b.origin.y / gpui::px(1.0);
+                    let to_px = |u: f32, v: f32| {
+                        gpui::point(gpui::px(ox + u * w), gpui::px(oy + (1.0 - v) * h))
+                    };
+                    let mut path = gpui::Path::new(to_px(curves[0].0, curves[0].1));
+                    for seg in curves.windows(2) {
+                        crate::panels::draw_line_segment(
+                            &mut path,
+                            to_px(seg[0].0, seg[0].1),
+                            to_px(seg[1].0, seg[1].1),
+                            1.5,
+                        );
+                    }
+                    window.paint_path(path, gpui::Rgba { r: 0.38, g: 0.74, b: 0.98, a: 0.95 });
+                },
+            )
+            .absolute()
+            .size_full(),
+        );
+        for (i, z) in ZONES.iter().enumerate() {
+            let ent_h = entity.clone();
+            let nid_h = node_id.to_string();
+            let lift = lifts[i];
+            let top = (1.0 - grade(*z)) * PLOT_H - 4.0;
+            plot = plot.child(
+                div()
+                    .id(SharedString::from(format!("mg_curve_pt_{node_id}_{i}")))
+                    .test_support()
+                    .absolute()
+                    .left(relative(*z))
+                    .top(px(top))
+                    .ml(px(-4.))
+                    .mt(px(-4.))
+                    .w(px(8.))
+                    .h(px(8.))
+                    .rounded_full()
+                    .bg(rgb(0x38bdf8))
+                    .border_1()
+                    .border_color(rgb(0xffffff))
+                    .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, move |event, _w, cx| {
+                        cx.stop_propagation();
+                        let start_y = event.position.y / px(1.0);
+                        ent_h.update(cx, |this, cx| {
+                            this.commit_open_param_edit(cx);
+                            this.curve_scrub = Some((nid_h.clone(), i, start_y, lift));
+                            cx.notify();
+                        });
+                    }),
+            );
+        }
+        v_flex()
+            .w_full()
+            .px_2()
+            .py_1p5()
+            .border_t_1()
+            .border_color(rgb(0x2e303e))
+            .child(plot)
     }
 
     fn op_btn(
@@ -2091,48 +2343,50 @@ impl ModifierGraphView {
     /// Bloom): label + param pill per row.
     /// Inline value editor for an input socket: (stored param key, value,
     /// tint). `None` for pure data inputs (colour buses, vectors, Wgsl p0..).
-    fn socket_param(
-        &self,
-        kind: &NodeKind,
-        socket: &str,
-    ) -> Option<(&'static str, f32, u32)> {
+    fn socket_param(&self, kind: &NodeKind, socket: &str) -> Option<SocketParam> {
+        let plain = |key, value, tint| SocketParam { key, value, tint, range: None };
         Some(match (kind, socket) {
-            (NodeKind::Math { default_b, .. }, "b") => ("default_b", *default_b, 0xc084fc),
-            (NodeKind::Lerp { default_a, .. }, "a") => ("default_a", *default_a, 0x38bdf8),
-            (NodeKind::Lerp { default_b, .. }, "b") => ("default_b", *default_b, 0x4ade80),
-            (NodeKind::Clamp { min, .. }, "min") => ("min", *min, 0x4ade80),
-            (NodeKind::Clamp { max, .. }, "max") => ("max", *max, 0x60a5fa),
-            (NodeKind::Remap { in_min, .. }, "in_min") => ("in_min", *in_min, 0x38bdf8),
-            (NodeKind::Remap { in_max, .. }, "in_max") => ("in_max", *in_max, 0x4ade80),
-            (NodeKind::Remap { out_min, .. }, "out_min") => ("out_min", *out_min, 0xfbbf24),
-            (NodeKind::Remap { out_max, .. }, "out_max") => ("out_max", *out_max, 0xf87171),
-            (NodeKind::Smoothstep { edge0, .. }, "edge0") => ("edge0", *edge0, 0x4ade80),
-            (NodeKind::Smoothstep { edge1, .. }, "edge1") => ("edge1", *edge1, 0x60a5fa),
-            (NodeKind::Noise { frequency, .. }, "freq") => ("frequency", *frequency, 0x4ade80),
-            (NodeKind::Noise { amplitude, .. }, "amp") => ("amplitude", *amplitude, 0x38bdf8),
-            (NodeKind::Wave { frequency, .. }, "freq") => ("frequency", *frequency, 0x4ade80),
-            (NodeKind::Wave { amplitude, .. }, "amp") => ("amplitude", *amplitude, 0x38bdf8),
-            (NodeKind::Stepped { steps }, "steps") => ("steps", *steps, 0x4ade80),
-            (NodeKind::Blend { default_b, .. }, "b") => ("default_b", *default_b, 0xc084fc),
+            (NodeKind::Math { default_b, .. }, "b") => plain("default_b", *default_b, 0xc084fc),
+            (NodeKind::Lerp { default_a, .. }, "a") => plain("default_a", *default_a, 0x38bdf8),
+            (NodeKind::Lerp { default_b, .. }, "b") => plain("default_b", *default_b, 0x4ade80),
+            (NodeKind::Clamp { min, .. }, "min") => plain("min", *min, 0x4ade80),
+            (NodeKind::Clamp { max, .. }, "max") => plain("max", *max, 0x60a5fa),
+            (NodeKind::Remap { in_min, .. }, "in_min") => plain("in_min", *in_min, 0x38bdf8),
+            (NodeKind::Remap { in_max, .. }, "in_max") => plain("in_max", *in_max, 0x4ade80),
+            (NodeKind::Remap { out_min, .. }, "out_min") => plain("out_min", *out_min, 0xfbbf24),
+            (NodeKind::Remap { out_max, .. }, "out_max") => plain("out_max", *out_max, 0xf87171),
+            (NodeKind::Smoothstep { edge0, .. }, "edge0") => plain("edge0", *edge0, 0x4ade80),
+            (NodeKind::Smoothstep { edge1, .. }, "edge1") => plain("edge1", *edge1, 0x60a5fa),
+            (NodeKind::Noise { frequency, .. }, "freq") => plain("frequency", *frequency, 0x4ade80),
+            (NodeKind::Noise { amplitude, .. }, "amp") => plain("amplitude", *amplitude, 0x38bdf8),
+            (NodeKind::Wave { frequency, .. }, "freq") => plain("frequency", *frequency, 0x4ade80),
+            (NodeKind::Wave { amplitude, .. }, "amp") => plain("amplitude", *amplitude, 0x38bdf8),
+            (NodeKind::Stepped { steps }, "steps") => plain("steps", *steps, 0x4ade80),
+            (NodeKind::Blend { default_b, .. }, "b") => plain("default_b", *default_b, 0xc084fc),
             (NodeKind::StockOp { plugin, params }, sock) => {
                 let i = sock.strip_prefix('p')?.parse::<usize>().ok()?;
                 let p = plugin.descriptor().params.get(i)?;
-                (p.name, params.get(i).copied().unwrap_or(p.default), 0x60a5fa)
+                SocketParam {
+                    key: p.name,
+                    value: params.get(i).copied().unwrap_or(p.default),
+                    tint: 0x60a5fa,
+                    range: Some(ParamRange::ofx(p)),
+                }
             }
-            (NodeKind::Transform { x, .. }, "x") => ("x", *x, 0x38bdf8),
-            (NodeKind::Transform { y, .. }, "y") => ("y", *y, 0x4ade80),
-            (NodeKind::Transform { scale, .. }, "scale") => ("scale", *scale, 0xfbbf24),
-            (NodeKind::Transform { rotation, .. }, "rotation") => ("rotation", *rotation, 0xf87171),
-            (NodeKind::Tile { repeat_x, .. }, "repeat_x") => ("repeat_x", *repeat_x, 0x38bdf8),
-            (NodeKind::Tile { repeat_y, .. }, "repeat_y") => ("repeat_y", *repeat_y, 0x4ade80),
-            (NodeKind::Glow { radius, .. }, "radius") => ("radius", *radius, 0xfbbf24),
-            (NodeKind::Glow { intensity, .. }, "intensity") => ("intensity", *intensity, 0xf87171),
+            (NodeKind::Transform { x, .. }, "x") => plain("x", *x, 0x38bdf8),
+            (NodeKind::Transform { y, .. }, "y") => plain("y", *y, 0x4ade80),
+            (NodeKind::Transform { scale, .. }, "scale") => plain("scale", *scale, 0xfbbf24),
+            (NodeKind::Transform { rotation, .. }, "rotation") => plain("rotation", *rotation, 0xf87171),
+            (NodeKind::Tile { repeat_x, .. }, "repeat_x") => plain("repeat_x", *repeat_x, 0x38bdf8),
+            (NodeKind::Tile { repeat_y, .. }, "repeat_y") => plain("repeat_y", *repeat_y, 0x4ade80),
+            (NodeKind::Glow { radius, .. }, "radius") => plain("radius", *radius, 0xfbbf24),
+            (NodeKind::Glow { intensity, .. }, "intensity") => plain("intensity", *intensity, 0xf87171),
             (NodeKind::Bloom { threshold, .. }, "threshold") => {
-                ("threshold", *threshold, 0xe5e7eb)
+                plain("threshold", *threshold, 0xe5e7eb)
             }
-            (NodeKind::Bloom { radius, .. }, "radius") => ("radius", *radius, 0xfbbf24),
+            (NodeKind::Bloom { radius, .. }, "radius") => plain("radius", *radius, 0xfbbf24),
             (NodeKind::Bloom { intensity, .. }, "intensity") => {
-                ("intensity", *intensity, 0xf87171)
+                plain("intensity", *intensity, 0xf87171)
             }
             _ => return None,
         })
@@ -2309,15 +2563,27 @@ impl ModifierGraphView {
             .child(label)
     }
 
-    fn param_scrub_input(
+    /// Render a socket param with the widget it declares: a bounded slider
+    /// for OFX float params, the plain scrub pill otherwise.
+    fn param_widget(
         &self,
         node_id: String,
-        param_name: &'static str,
-        value: f32,
-        val_color: Rgba,
+        param: &SocketParam,
         entity: Entity<Self>,
         cx: &App,
     ) -> AnyElement {
+        self.param_scrub_input(node_id, *param, entity, cx)
+    }
+
+    fn param_scrub_input(
+        &self,
+        node_id: String,
+        param: SocketParam,
+        entity: Entity<Self>,
+        cx: &App,
+    ) -> AnyElement {
+        let SocketParam { key: param_name, value, tint, range } = param;
+        let val_color = rgb(tint);
         let nid_scrub = node_id.clone();
         let pname_scrub = param_name.to_string();
         let ent_scrub = entity.clone();
@@ -2348,9 +2614,11 @@ impl ModifierGraphView {
             }
         }
 
-        div()
+        let mut pill = div()
             .id(SharedString::from(format!("mg_param_{node_id}_{param_name}")))
             .test_support()
+            .relative()
+            .overflow_hidden()
             .px_2()
             .py_0p5()
             .rounded_sm()
@@ -2361,8 +2629,20 @@ impl ModifierGraphView {
             .cursor_col_resize()
             .text_xs()
             .font_medium()
-            .text_color(val_color)
-            .child(format!("{value:.2}"))
+            .text_color(val_color);
+        if let Some(r) = range {
+            pill = pill.w(px(88.)).child(
+                div()
+                    .absolute()
+                    .left(px(0.))
+                    .top(px(0.))
+                    .bottom(px(0.))
+                    .w(relative(r.fill(value)))
+                    .bg(rgb(0x1e3a8a)),
+            );
+        }
+        let label = range.map_or_else(|| format!("{value:.2}"), |r| r.text(value));
+        pill.child(label)
             .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
                 cx.stop_propagation();
                 let curr_x = event.position.x / px(1.0);
@@ -2712,5 +2992,31 @@ impl ModifierGraphView {
             }
             self.sync_to_state(cx);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ParamRange;
+    use project::ofx::OfxParamDescriptor;
+
+    fn pd(name: &'static str, min: f32, max: f32) -> OfxParamDescriptor {
+        OfxParamDescriptor { name, label: name, min, max, default: min }
+    }
+
+    #[test]
+    fn ofx_param_widgets_pick_units_and_readouts() {
+        let pct = ParamRange::ofx(&pd("opacity", 0.0, 100.0));
+        assert_eq!((pct.unit, pct.decimals), ("%", 0));
+        assert_eq!(pct.text(50.0), "50%");
+        assert!((pct.fill(25.0) - 0.25).abs() < 1e-6);
+
+        let angle = ParamRange::ofx(&pd("angle", 0.0, 360.0));
+        assert_eq!(angle.unit, "°");
+        assert_eq!(angle.text(90.0), "90°");
+
+        let fine = ParamRange::ofx(&pd("mix", 0.0, 1.0));
+        assert_eq!((fine.unit, fine.decimals), ("", 2));
+        assert_eq!(fine.text(0.5), "0.50");
     }
 }

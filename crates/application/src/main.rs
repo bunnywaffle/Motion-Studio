@@ -14140,6 +14140,12 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
                 let id = format!("mg_pal_{idx}_hdr");
                 assert!(window.find(SharedString::from(id.clone())).visible(), "category header {idx} should be visible");
             }
+            // Effects belong to the inline effect graph; a modifier graph
+            // modulates one property and must not offer the effect palette.
+            assert!(
+                window.try_find("mg_pal_eff_hdr").is_none(),
+                "modifier graph must not show the Effects palette",
+            );
             assert!(
                 !window
                     .try_find(SharedString::from("mg_add_mk_2d"))
@@ -14177,9 +14183,10 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         });
     }
 
-    /// The palette's Effects section is built from the stock registry: every
-    /// per-pixel plug-in is reachable as a graph node, new effect nodes land
-    /// straight in the live chain, and their descriptor params edit in place.
+    /// An effect graph's palette Effects section is built from the stock
+    /// registry: every per-pixel plug-in is reachable as a graph node, new
+    /// effect nodes land straight in the live chain, and their descriptor
+    /// params edit in place as bounded sliders.
     #[gpui_kit::test]
     fn test_modifier_graph_effect_palette_lists_registry(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
@@ -14196,7 +14203,7 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
                 crate::modifier_graph_view::ModifierGraphView::new(
                     state.clone(),
                     "layer_accent".to_string(),
-                    "transform.position".to_string(),
+                    "graph:fx_test".to_string(),
                     window,
                     cx,
                 )
@@ -14290,6 +14297,19 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             let id = format!("mg_param_{curves_id}_{curves_param}");
             let pill = window.find(SharedString::from(id));
             assert!(pill.visible(), "stock param row rendered");
+            // Curves gets the tone-curve widget (plot + one handle per zone).
+            assert!(
+                window.find(SharedString::from(format!("mg_curve_{curves_id}"))).visible(),
+                "curves node must render its curve widget",
+            );
+            for i in 0..5 {
+                assert!(
+                    window
+                        .find(SharedString::from(format!("mg_curve_pt_{curves_id}_{i}")))
+                        .visible(),
+                    "curves widget handle {i} visible",
+                );
+            }
             // Blender-style layout: the parameter field shares its row with
             // the input socket that drives it, socket on the left.
             let sock = window.find(SharedString::from(format!("in_{curves_id}_p0")));
@@ -14373,6 +14393,27 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
                 _ => panic!("kind not a constant"),
             }
         });
+
+        // Color widget: compact swatch by default, clicking it reveals the
+        // channel fields beneath.
+        cx.update_window(root_handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.find(SharedString::from(format!("mg_color_{const_id}"))).visible(),
+                "color swatch widget rendered",
+            );
+            assert!(
+                window.try_find(SharedString::from(format!("mg_param_{const_id}_value"))).is_none(),
+                "channel rows stay collapsed until the swatch is clicked",
+            );
+            window.click(SharedString::from(format!("mg_color_{const_id}")), cx);
+            window.render_frame(cx);
+            assert!(
+                window.find(SharedString::from(format!("mg_param_{const_id}_value"))).visible(),
+                "swatch click expands the channel rows",
+            );
+        })
+        .expect("update_window failed");
     }
 
     #[gpui_kit::test]
