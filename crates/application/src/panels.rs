@@ -13835,12 +13835,14 @@ impl Render for PropertiesPanel {
                     .p_3()
                     .gap_3()
                     .children(if let Some(layer) = selected_layer {
-                        // Local transform values at the playhead (cheap
-                        // property reads). The full scene eval is the
-                        // viewer's job — doing it here too doubled
-                        // evaluation cost on every frame.
+                        // Local transform values at the playhead, folded
+                        // through modifier graphs/links so the inspector
+                        // matches what the viewer draws.
                         let current_tc = state.clock.timecode();
-                        let (anchor, pos, sc, rot) = layer.transform.evaluate_at(&current_tc);
+                        let anchor = state.get_layer_live_vec2(&layer.id, "transform.anchor_point");
+                        let pos = state.get_layer_live_vec2(&layer.id, "transform.position");
+                        let sc = state.get_layer_live_vec2(&layer.id, "transform.scale");
+                        let rot = state.get_layer_property_live_value(&layer.id, "transform.rotation");
                         let op = layer.opacity.evaluate_at(&current_tc).clamp(0.0, 100.0);
 
                         let s_anchor_mx = self.state.clone();

@@ -111,6 +111,67 @@ fn titleize_socket(socket: &str) -> String {
     out
 }
 
+/// Value flavour a socket or wire carries; drives the colour language.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SocketValueType {
+    Scalar,
+    Vec2,
+    Vec3,
+    Color,
+    Dynamic,
+}
+
+impl SocketValueType {
+    fn color(self) -> Rgba {
+        match self {
+            Self::Scalar => rgb(0x4ade80),
+            Self::Vec2 => rgb(0x38bdf8),
+            Self::Vec3 => rgb(0xa78bfa),
+            Self::Color => rgb(0xfbbf24),
+            Self::Dynamic => rgb(0x9ca3af),
+        }
+    }
+}
+
+/// Value an output socket carries (and therefore every wire leaving it).
+fn socket_value_type(kind: Option<&NodeKind>, _socket: &str) -> SocketValueType {
+    match kind {
+        Some(NodeKind::Constant { mode, .. }) => match mode {
+            ConstantMode::Vec2 => SocketValueType::Vec2,
+            ConstantMode::Vec3 => SocketValueType::Vec3,
+            ConstantMode::Color => SocketValueType::Color,
+            ConstantMode::Float | ConstantMode::Int => SocketValueType::Scalar,
+        },
+        Some(NodeKind::MakeVector { dims: 3 }) => SocketValueType::Vec3,
+        Some(NodeKind::MakeVector { .. }) => SocketValueType::Vec2,
+        Some(NodeKind::MakeColor) => SocketValueType::Color,
+        // Break outputs are per-channel scalars (x/y/z, r/g/b/a).
+        Some(NodeKind::BreakVector { .. }) | Some(NodeKind::BreakColor) => SocketValueType::Scalar,
+        // Image buses: effects, shader nodes and spatial nodes move colour.
+        Some(NodeKind::StockOp { .. })
+        | Some(NodeKind::Wgsl { .. })
+        | Some(NodeKind::Transform { .. })
+        | Some(NodeKind::Tile { .. })
+        | Some(NodeKind::Glow { .. })
+        | Some(NodeKind::Bloom { .. }) => SocketValueType::Color,
+        // Base content and blends inherit whatever the binding asks for.
+        Some(NodeKind::BaseValueIn)
+        | Some(NodeKind::Blend { .. })
+        | Some(NodeKind::Output)
+        | None => SocketValueType::Dynamic,
+        Some(_) => SocketValueType::Scalar,
+    }
+}
+
+/// Type an unconnected input expects: Make's channel sockets take scalars,
+/// everything else depends on the binding.
+fn input_socket_type(kind: Option<&NodeKind>) -> SocketValueType {
+    match kind {
+        Some(NodeKind::MakeVector { .. }) | Some(NodeKind::MakeColor) => SocketValueType::Scalar,
+        _ => SocketValueType::Dynamic,
+    }
+}
+
 /// Map window-space cursor coordinates to header-relative coordinates
 /// (no pan, no measured header growth). Kept for delta-only reads.
 #[inline]
@@ -1333,10 +1394,17 @@ impl ModifierGraphView {
                 socket_coords.get(&(conn.from_node.clone(), conn.from_socket.clone(), false)),
                 socket_coords.get(&(conn.to_node.clone(), conn.to_socket.clone(), true)),
             ) {
+                // Wire colour = the value type the source socket carries.
+                let wire_type = self
+                    .graph
+                    .get_node(&conn.from_node)
+                    .map_or(SocketValueType::Dynamic, |n| {
+                        socket_value_type(Some(&n.kind), &conn.from_socket)
+                    });
                 let wire_els = self.build_bezier_wire(
                     (x1, y1),
                     (x2, y2),
-                    rgb(0x38bdf8),
+                    wire_type.color(),
                     Some((conn.to_node.clone(), conn.to_socket.clone())),
                     entity,
                 );
@@ -1722,11 +1790,21 @@ impl ModifierGraphView {
         let nid = node_id.to_string();
         let sname = socket_name.to_string();
 
-        let is_connected = self
+        // Connected input shows the incoming value's type; unwired shows the
+        // type the socket expects.
+        let type_hint = match self
             .graph
             .connections
             .iter()
-            .any(|c| c.to_node == nid && c.to_socket == sname);
+            .find(|c| c.to_node == nid && c.to_socket == sname)
+        {
+            Some(conn) => self.graph.get_node(&conn.from_node).map_or(
+                SocketValueType::Dynamic,
+                |n| socket_value_type(Some(&n.kind), &conn.from_socket),
+            ),
+            None => input_socket_type(self.graph.get_node(node_id).map(|n| &n.kind)),
+        };
+        let type_color = type_hint.color();
 
         let is_target_hover = self.connecting_wire.as_ref().is_some_and(|w| {
             !w.is_from_input && w.node_id != nid
@@ -1806,16 +1884,14 @@ impl ModifierGraphView {
                     .w(px(12.0))
                     .h(px(12.0))
                     .rounded_full()
-                    .bg(if is_connected {
-                        rgb(0x38bdf8)
-                    } else if is_target_hover {
+                    .bg(if is_target_hover {
                         rgb(0x0284c7)
                     } else {
-                        rgb(0x4b5563)
+                        type_color
                     })
                     .border_1()
                     .border_color(if is_target_hover {
-                        rgb(0x38bdf8)
+                        type_color
                     } else {
                         rgb(0x9ca3af)
                     })
@@ -1840,11 +1916,9 @@ impl ModifierGraphView {
         let nid = node_id.to_string();
         let sname = socket_name.to_string();
 
-        let is_connected = self
-            .graph
-            .connections
-            .iter()
-            .any(|c| c.from_node == nid && c.from_socket == sname);
+        // Output sockets wear the type colour their wires carry.
+        let type_color = socket_value_type(self.graph.get_node(node_id).map(|n| &n.kind), socket_name)
+            .color();
 
         let is_target_hover = self.connecting_wire.as_ref().is_some_and(|w| {
             w.is_from_input && w.node_id != nid
@@ -1916,12 +1990,10 @@ impl ModifierGraphView {
                     .w(px(12.0))
                     .h(px(12.0))
                     .rounded_full()
-                    .bg(if is_connected {
-                        rgb(0x10b981)
-                    } else if is_target_hover {
+                    .bg(if is_target_hover {
                         rgb(0x059669)
                     } else {
-                        rgb(0x4b5563)
+                        type_color
                     })
                     .border_1()
                     .border_color(if is_target_hover {
@@ -2997,11 +3069,52 @@ impl ModifierGraphView {
 
 #[cfg(test)]
 mod tests {
-    use super::ParamRange;
+    use super::{socket_value_type, ConstantMode, NodeKind, ParamRange, SocketValueType};
     use project::ofx::OfxParamDescriptor;
 
     fn pd(name: &'static str, min: f32, max: f32) -> OfxParamDescriptor {
         OfxParamDescriptor { name, label: name, min, max, default: min }
+    }
+
+    #[test]
+    fn sockets_colour_by_value_type() {
+        assert_eq!(
+            socket_value_type(Some(&NodeKind::MakeVector { dims: 2 }), "value"),
+            SocketValueType::Vec2
+        );
+        assert_eq!(
+            socket_value_type(Some(&NodeKind::MakeVector { dims: 3 }), "value"),
+            SocketValueType::Vec3
+        );
+        assert_eq!(
+            socket_value_type(Some(&NodeKind::MakeColor), "value"),
+            SocketValueType::Color
+        );
+        // Base content and blends are binding-dependent.
+        assert_eq!(
+            socket_value_type(Some(&NodeKind::BaseValueIn), "value"),
+            SocketValueType::Dynamic
+        );
+        // Scalar families stay floats; Break exposes per-channel floats.
+        assert_eq!(
+            socket_value_type(
+                Some(&NodeKind::Math { op: project::modifier::MathOp::Add, default_b: 0.0 }),
+                "result"
+            ),
+            SocketValueType::Scalar
+        );
+        assert_eq!(
+            socket_value_type(Some(&NodeKind::BreakVector { dims: 2 }), "x"),
+            SocketValueType::Scalar
+        );
+        let color = NodeKind::Constant {
+            mode: ConstantMode::Color,
+            value: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        assert_eq!(socket_value_type(Some(&color), "value"), SocketValueType::Color);
     }
 
     #[test]

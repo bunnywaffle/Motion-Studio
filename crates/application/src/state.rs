@@ -709,6 +709,25 @@ pub struct GraphSeries {
     pub keys: Vec<GraphKey>,
 }
 
+/// True for the whole 2D transform paths themselves (`transform.position`),
+/// as opposed to their per-axis forms.
+fn is_whole_transform_path(prop_path: &str) -> bool {
+    matches!(
+        prop_path,
+        "transform.anchor_point" | "transform.position" | "transform.scale"
+    )
+}
+
+/// Whole-value transform path behind a per-axis path, if any.
+fn whole_transform_path(prop_path: &str) -> Option<&'static str> {
+    match prop_path {
+        "transform.anchor_point.x" | "transform.anchor_point.y" => Some("transform.anchor_point"),
+        "transform.position.x" | "transform.position.y" => Some("transform.position"),
+        "transform.scale.x" | "transform.scale.y" => Some("transform.scale"),
+        _ => None,
+    }
+}
+
 /// Resolve a graph path to a mutable scalar (`f32`) property on a layer.
 ///
 /// Vec2-backed paths (`transform.position.x`, ...) return `None` here:
@@ -8871,8 +8890,51 @@ impl EditorState {
 
     /// Read the live value of a layer's property, resolving property links recursively (with cycle detection) if linked.
     pub fn get_layer_property_live_value(&self, layer_id: &str, prop_path: &str) -> f32 {
+        // Whole 2D paths (inspector rows, graph footer) surface their X
+        // channel; both axes fold through their graphs in `get_layer_live_vec2`.
+        if is_whole_transform_path(prop_path) {
+            return self.get_layer_live_vec2(layer_id, prop_path).x;
+        }
         let mut visited = std::collections::HashSet::new();
         self.resolve_layer_property_live_value_recursive(layer_id, prop_path, &mut visited)
+    }
+
+    /// Live 2D transform value at the playhead: whole-path graph fans both
+    /// axes, then per-axis graphs override their channel (compositor order).
+    pub fn get_layer_live_vec2(&self, layer_id: &str, prop_path: &str) -> Vec2 {
+        let axis = |suffix: &str| {
+            self.get_layer_property_live_value(layer_id, &format!("{prop_path}{suffix}"))
+        };
+        Vec2::new(axis(".x"), axis(".y"))
+    }
+
+    /// Fold the whole-path 2D graph (`transform.position`, ...) over both
+    /// axes so per-axis readers see what the compositor applies first.
+    fn fold_whole_path_graph(
+        &self,
+        layer_id: &str,
+        whole_path: &str,
+        base: Vec2,
+        visited: &std::collections::HashSet<(String, String)>,
+    ) -> Vec2 {
+        let tc = self.clock.timecode();
+        let Some(layer) = self.active_composition().and_then(|c| c.get_layer(layer_id)) else {
+            return base;
+        };
+        let Some(mg) = layer.get_modifier_graph(whole_path) else {
+            return base;
+        };
+        let factor = layer.progression_factor(&tc);
+        let visited_cell = std::cell::RefCell::new(visited.clone());
+        let resolver = |drv_layer: &str, drv_prop: &str| -> f32 {
+            self.resolve_layer_property_live_value_recursive(
+                drv_layer,
+                drv_prop,
+                &mut visited_cell.borrow_mut(),
+            )
+        };
+        let (x, y) = mg.evaluate_vec2(base.x, base.y, factor, &resolver);
+        Vec2::new(x, y)
     }
 
     fn resolve_layer_property_live_value_recursive(
@@ -8892,6 +8954,19 @@ impl EditorState {
                 &link.driver_prop_path,
                 visited,
             )
+        } else if let Some(whole) = whole_transform_path(prop_path) {
+            let tc = self.clock.timecode();
+            let raw = self
+                .active_composition()
+                .and_then(|c| c.get_layer(layer_id))
+                .map(|l| match whole {
+                    "transform.anchor_point" => l.transform.anchor_point.evaluate_at(&tc),
+                    "transform.scale" => l.transform.scale.evaluate_at(&tc),
+                    _ => l.transform.position.evaluate_at(&tc),
+                })
+                .unwrap_or(Vec2::ZERO);
+            let v = self.fold_whole_path_graph(layer_id, whole, raw, visited);
+            if prop_path.ends_with(".x") { v.x } else { v.y }
         } else {
             self.get_layer_property_base_value(layer_id, prop_path)
         };

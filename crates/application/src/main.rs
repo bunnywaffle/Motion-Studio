@@ -14816,6 +14816,56 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         assert_eq!(s.get_layer_property_base_value("layer_accent", "effect:missing:radius"), 0.0);
     }
 
+    /// Whole-path 2D graphs (`transform.position` via the inspector "+") must
+    /// fan into every live readout, not just the viewer: per-axis inspector /
+    /// timeline values fold the whole-path graph first, then their own graph.
+    #[test]
+    fn test_whole_path_position_graph_folds_into_live_values() {
+        use crate::state::EditorState;
+        use project::modifier::{MathOp, ModifierGraph, ModifierNode, NodeConnection, NodeKind};
+
+        let whole = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new(
+                    "add",
+                    0.0,
+                    0.0,
+                    NodeKind::Math { op: MathOp::Add, default_b: 25.0 },
+                ),
+                ModifierNode::new("out", 200.0, 0.0, NodeKind::Output),
+            ],
+            connections: vec![NodeConnection::new("add", "result", "out", "result")],
+        };
+        let axis = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new(
+                    "mul",
+                    0.0,
+                    0.0,
+                    NodeKind::Math { op: MathOp::Multiply, default_b: 2.0 },
+                ),
+                ModifierNode::new("out", 200.0, 0.0, NodeKind::Output),
+            ],
+            connections: vec![NodeConnection::new("mul", "result", "out", "result")],
+        };
+
+        let mut s = EditorState::new();
+        let bx = s.get_layer_property_base_value("layer_accent", "transform.position.x");
+        let by = s.get_layer_property_base_value("layer_accent", "transform.position.y");
+        s.set_layer_modifier_graph("layer_accent", "transform.position", whole);
+
+        // Whole graph alone: both axes shift by +25.
+        let v = s.get_layer_live_vec2("layer_accent", "transform.position");
+        assert!((v.x - (bx + 25.0)).abs() < 1e-4, "x live {} (base {bx})", v.x);
+        assert!((v.y - (by + 25.0)).abs() < 1e-4, "y live {} (base {by})", v.y);
+
+        // A per-axis graph layers on top of the whole-path result.
+        s.set_layer_modifier_graph("layer_accent", "transform.position.y", axis);
+        let v = s.get_layer_live_vec2("layer_accent", "transform.position");
+        assert!((v.x - (bx + 25.0)).abs() < 1e-4, "x untouched {}", v.x);
+        assert!((v.y - (by + 25.0) * 2.0).abs() < 1e-4, "y doubled {}", v.y);
+    }
+
     #[gpui_kit::test]
     fn test_timeline_context_menu_has_modifier_graph_option(cx: &mut TestAppContext) {
         let (root, app_view) = setup_test_window(cx);

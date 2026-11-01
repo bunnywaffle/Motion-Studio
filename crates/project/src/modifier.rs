@@ -1681,6 +1681,36 @@ mod tests {
         assert!((y - 200.0).abs() < 1e-5, "y got {y}");
     }
 
+    /// Whole-path 2D graph shaped like the reported setup: Break 2D, scale
+    /// each axis by the layer factor, Make 2D, Output.
+    #[test]
+    fn test_break_math_make_vector_uses_layer_factor() {
+        let graph = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
+                ModifierNode::new("brk", 60.0, 0.0, NodeKind::BreakVector { dims: 2 }),
+                ModifierNode::new("fac", 60.0, 120.0, NodeKind::GetLayerFactor),
+                ModifierNode::new("mx", 130.0, 0.0, NodeKind::Math { op: MathOp::Multiply, default_b: 1.0 }),
+                ModifierNode::new("my", 130.0, 60.0, NodeKind::Math { op: MathOp::Multiply, default_b: 1.0 }),
+                ModifierNode::new("mkp", 210.0, 30.0, NodeKind::MakeVector { dims: 2 }),
+                ModifierNode::new("out", 290.0, 30.0, NodeKind::Output),
+            ],
+            connections: vec![
+                NodeConnection::new("in", "value", "brk", "in"),
+                NodeConnection::new("brk", "x", "mx", "a"),
+                NodeConnection::new("fac", "factor", "mx", "b"),
+                NodeConnection::new("brk", "y", "my", "a"),
+                NodeConnection::new("fac", "factor", "my", "b"),
+                NodeConnection::new("mx", "result", "mkp", "x"),
+                NodeConnection::new("my", "result", "mkp", "y"),
+                NodeConnection::new("mkp", "value", "out", "result"),
+            ],
+        };
+        let (x, y) = graph.evaluate_vec2(100.0, 200.0, 0.25, &|_, _| 0.0);
+        assert!((x - 25.0).abs() < 1e-5, "x got {x}");
+        assert!((y - 50.0).abs() < 1e-5, "y got {y}");
+    }
+
     /// Make Color drives channels independently (classic black +50 red),
     /// delivered to the Output through its single combined socket.
     #[test]
