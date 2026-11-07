@@ -1061,6 +1061,28 @@ impl FxPass {
                                 "(select({a} / vec4<f32>({b}), {a}, abs(vec4<f32>({b})) < vec4<f32>(1e-6)))"
                             ),
                             MathOp::Power => format!("(pow({a}, vec4<f32>({b})))"),
+                            // B is unused: sqrt is unary; negative inputs clamp to 0.
+                            MathOp::Sqrt => {
+                                format!("(sqrt(max(vec4<f32>({a}), vec4<f32>(0.0))))")
+                            }
+                            MathOp::Quantize => format!(
+                                "(select(vec4<f32>({a}), (round(({a}) / ({b}))) * ({b}), abs(vec4<f32>({b})) >= vec4<f32>(1e-6)))"
+                            ),
+                            MathOp::Modulo => format!(
+                                "(select(vec4<f32>({a}), ({a}) - floor(({a}) / ({b})) * ({b}), abs(vec4<f32>({b})) >= vec4<f32>(1e-6)))"
+                            ),
+                            MathOp::DotProduct => {
+                                format!("(vec4<f32>(dot(vec3<f32>(({a}).xyz), vec3<f32>(({b}).xyz))))")
+                            }
+                            MathOp::LessThan => {
+                                format!("(select(vec4<f32>(0.0), vec4<f32>(1.0), ({a}) < ({b})))")
+                            }
+                            MathOp::GreaterThan => {
+                                format!("(select(vec4<f32>(0.0), vec4<f32>(1.0), ({a}) > ({b})))")
+                            }
+                            MathOp::Equal => format!(
+                                "(select(vec4<f32>(0.0), vec4<f32>(1.0), abs(({a}) - ({b})) < vec4<f32>(1e-6)))"
+                            ),
                         }
                     }
                     NodeKind::Lerp { default_a, default_b } => {

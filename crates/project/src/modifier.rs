@@ -30,15 +30,29 @@ pub enum MathOp {
     Multiply,
     Divide,
     Power,
+    Sqrt,
+    Quantize,
+    Modulo,
+    DotProduct,
+    LessThan,
+    GreaterThan,
+    Equal,
 }
 
 impl MathOp {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 12] = [
         Self::Add,
         Self::Subtract,
         Self::Multiply,
         Self::Divide,
         Self::Power,
+        Self::Sqrt,
+        Self::Quantize,
+        Self::Modulo,
+        Self::DotProduct,
+        Self::LessThan,
+        Self::GreaterThan,
+        Self::Equal,
     ];
 
     pub const fn symbol(self) -> &'static str {
@@ -48,6 +62,13 @@ impl MathOp {
             Self::Multiply => "×",
             Self::Divide => "÷",
             Self::Power => "^",
+            Self::Sqrt => "√",
+            Self::Quantize => "Q",
+            Self::Modulo => "%",
+            Self::DotProduct => "·",
+            Self::LessThan => "<",
+            Self::GreaterThan => ">",
+            Self::Equal => "=",
         }
     }
 
@@ -58,7 +79,22 @@ impl MathOp {
             Self::Multiply => "Multiply (×)",
             Self::Divide => "Divide (÷)",
             Self::Power => "Power (^)",
+            Self::Sqrt => "Square Root (√)",
+            Self::Quantize => "Quantize (round to B)",
+            Self::Modulo => "Modulo (%)",
+            Self::DotProduct => "Dot Product (a·b)",
+            Self::LessThan => "Less Than (<)",
+            Self::GreaterThan => "Greater Than (>)",
+            Self::Equal => "Equal (=)",
         }
+    }
+
+    pub fn index(self) -> usize {
+        Self::ALL.iter().position(|m| *m == self).unwrap_or(0)
+    }
+
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.label() == label)
     }
 }
 
@@ -558,6 +594,15 @@ pub fn wgsl_param_sockets(code: &str) -> Vec<&'static str> {
     out
 }
 
+/// Normalize the session channel for legacy scalar sessions ("value" fans
+/// across every channel); vector sessions already carry a real component.
+fn norm_channel(ch: &str) -> &str {
+    match ch {
+        "value" => "x",
+        c => c,
+    }
+}
+
 /// A node in the modifier graph.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModifierNode {
@@ -764,7 +809,7 @@ impl ModifierGraph {
 
         let comp = BaseComponents::fan(base_value);
         let ctx = EvalCtx { base: base_value, comp: &comp, factor, resolver, channel: "value" };
-        let mut memo: HashMap<(String, String), f32> = HashMap::new();
+        let mut memo: HashMap<(String, String, String), f32> = HashMap::new();
         let mut call_stack: HashSet<String> = HashSet::new();
 
         self.resolve_input(
@@ -796,7 +841,7 @@ impl ModifierGraph {
         resolver: &dyn Fn(&str, &str) -> f32,
     ) -> f32 {
         let ctx = EvalCtx { base, comp, factor, resolver, channel: query };
-        let mut memo: HashMap<(String, String), f32> = HashMap::new();
+        let mut memo: HashMap<(String, String, String), f32> = HashMap::new();
         let mut call_stack: HashSet<String> = HashSet::new();
         self.resolve_input(out_id, "result", &ctx, &mut memo, &mut call_stack)
             .unwrap_or(base)
@@ -928,7 +973,7 @@ impl ModifierGraph {
         node_id: &str,
         socket: &str,
         ctx: &EvalCtx,
-        memo: &mut HashMap<(String, String), f32>,
+        memo: &mut HashMap<(String, String, String), f32>,
         call_stack: &mut HashSet<String>,
     ) -> Option<f32> {
         let factor = ctx.factor;
@@ -1000,13 +1045,17 @@ impl ModifierGraph {
         node_id: &str,
         socket: &str,
         ctx: &EvalCtx,
-        memo: &mut HashMap<(String, String), f32>,
+        memo: &mut HashMap<(String, String, String), f32>,
         call_stack: &mut HashSet<String>,
     ) -> f32 {
         let base_value = ctx.base;
         let factor = ctx.factor;
         let resolver = ctx.resolver;
-        let key = (node_id.to_string(), socket.to_string());
+        let key = (
+            node_id.to_string(),
+            socket.to_string(),
+            ctx.channel.to_string(),
+        );
         if let Some(&val) = memo.get(&key) {
             return val;
         }
@@ -1035,10 +1084,16 @@ impl ModifierGraph {
             NodeKind::BaseValueIn => base_value,
             NodeKind::MakeVector { .. } | NodeKind::MakeColor => {
                 // Single combined output: the make echoes the input channel
-                // the session is currently querying ("value" -> ctx.base).
-                let chan = if socket == "value" { ctx.channel } else { socket };
+                // the session is currently querying; legacy scalar sessions
+                // ("value") take the first channel, like a scalar consumer
+                // of a vector take its red/x.
+                let chan = if socket == "value" {
+                    norm_channel(ctx.channel)
+                } else {
+                    socket
+                };
                 self.resolve_input(node_id, chan, ctx, memo, call_stack)
-                    .unwrap_or(if chan == "value" { base_value } else { ctx.comp.comp_value(chan) })
+                    .unwrap_or(ctx.comp.comp_value(chan))
             }
             NodeKind::BreakVector { .. } | NodeKind::BreakColor => {
                 // Follow the incoming wire: a make source is asked for the
@@ -1051,7 +1106,22 @@ impl ModifierGraph {
                 {
                     let src = conn.from_node.clone();
                     let src_kind = self.get_node(&src).map(|n| n.kind.clone());
-                    let query = if socket == "value" { ctx.channel } else { socket };
+                    let query: &'static str = if socket == "value" {
+                        ctx.channel
+                    } else {
+                        // Socket names are compile-time literals at every
+                        // call site (break outputs x/y/z/r/g/b/a).
+                        match socket {
+                            "x" => "x",
+                            "y" => "y",
+                            "z" => "z",
+                            "r" => "r",
+                            "g" => "g",
+                            "b" => "b",
+                            "a" => "a",
+                            _ => "x",
+                        }
+                    };
                     match &src_kind {
                         Some(NodeKind::MakeVector { .. }) | Some(NodeKind::MakeColor) => {
                             self.evaluate_node_output(&src, query, ctx, memo, call_stack)
@@ -1059,7 +1129,19 @@ impl ModifierGraph {
                         Some(k) if k.output_sockets().contains(&query) => {
                             self.evaluate_node_output(&src, query, ctx, memo, call_stack)
                         }
-                        _ => self.evaluate_node_output(&src, &conn.from_socket, ctx, memo, call_stack),
+                        _ => {
+                            // Scalar-bus source: its combined socket carries
+                            // the whole bus, so ask it for the component's own
+                            // channel — not the current session channel.
+                            let sub = EvalCtx {
+                                base: ctx.comp.comp_value(query),
+                                comp: ctx.comp,
+                                factor,
+                                resolver,
+                                channel: query,
+                            };
+                            self.evaluate_node_output(&src, &conn.from_socket, &sub, memo, call_stack)
+                        }
                     }
                 } else {
                     // Break without a wire unpacks the base bus (identity
@@ -1093,6 +1175,58 @@ impl ModifierGraph {
                         }
                     }
                     MathOp::Power => a.powf(b),
+                    MathOp::Sqrt => {
+                        if a <= 0.0 {
+                            0.0
+                        } else {
+                            a.sqrt()
+                        }
+                    }
+                    MathOp::Quantize => {
+                        // Round to the nearest multiple of B.
+                        if b.abs() < 1e-6 {
+                            a
+                        } else {
+                            (a / b).round() * b
+                        }
+                    }
+                    MathOp::Modulo => {
+                        if b.abs() < 1e-6 {
+                            a
+                        } else {
+                            a - (a / b).floor() * b
+                        }
+                    }
+                    MathOp::DotProduct => {
+                        // Whole-vector op: independent of the session channel.
+                        let mut sum = 0.0;
+                        for ch in ["x", "y", "z"] {
+                            let sub = EvalCtx {
+                                base: ctx.comp.comp_value(ch),
+                                comp: ctx.comp,
+                                factor,
+                                resolver,
+                                channel: ch,
+                            };
+                            let sa = self
+                                .resolve_input(node_id, "a", &sub, memo, call_stack)
+                                .unwrap_or(ctx.comp.comp_value(ch));
+                            let sb = self
+                                .resolve_input(node_id, "b", &sub, memo, call_stack)
+                                .unwrap_or(*default_b);
+                            sum += sa * sb;
+                        }
+                        sum
+                    }
+                    MathOp::LessThan => {
+                        if a < b { 1.0 } else { 0.0 }
+                    }
+                    MathOp::GreaterThan => {
+                        if a > b { 1.0 } else { 0.0 }
+                    }
+                    MathOp::Equal => {
+                        if (a - b).abs() < 1e-6 { 1.0 } else { 0.0 }
+                    }
                 }
             }
             NodeKind::Lerp {
@@ -1709,6 +1843,110 @@ mod tests {
         let (x, y) = graph.evaluate_vec2(100.0, 200.0, 0.25, &|_, _| 0.0);
         assert!((x - 25.0).abs() < 1e-5, "x got {x}");
         assert!((y - 50.0).abs() < 1e-5, "y got {y}");
+    }
+
+    /// Legacy scalar (per-axis) sessions must not collapse a Make/Break
+    /// graph back to its base value — the x gather path feeds both scalar
+    /// consumers and 2D vector bindings.
+    #[test]
+    fn test_scalar_session_applies_make_break_graph() {
+        let graph = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("in", 0.0, 0.0, NodeKind::BaseValueIn),
+                ModifierNode::new("brk", 40.0, 0.0, NodeKind::BreakVector { dims: 2 }),
+                ModifierNode::new(
+                    "mul",
+                    120.0,
+                    0.0,
+                    NodeKind::Math { op: MathOp::Multiply, default_b: 2.0 },
+                ),
+                ModifierNode::new("mkp", 210.0, 0.0, NodeKind::MakeVector { dims: 2 }),
+                ModifierNode::new("out", 290.0, 0.0, NodeKind::Output),
+            ],
+            connections: vec![
+                NodeConnection::new("in", "value", "brk", "in"),
+                NodeConnection::new("brk", "x", "mul", "a"),
+                NodeConnection::new("mul", "result", "mkp", "x"),
+                NodeConnection::new("mkp", "value", "out", "result"),
+            ],
+        };
+        // Scalar session (a per-axis binding): the x branch applies.
+        assert_eq!(graph.evaluate(40.0, 0.0), 80.0);
+        // Vector session: x branch doubles, unwired y gathers the base.
+        let (x, y) = graph.evaluate_vec2(100.0, 200.0, 0.0, &|_, _| 0.0);
+        assert_eq!(x, 200.0);
+        assert_eq!(y, 200.0);
+    }
+
+    #[test]
+    fn test_math_ops_extended() {
+        let graph = |op: MathOp, b: f32| ModifierGraph {
+            nodes: vec![
+                ModifierNode::new("m", 0.0, 0.0, NodeKind::Math { op, default_b: b }),
+                ModifierNode::new("out", 100.0, 0.0, NodeKind::Output),
+            ],
+            connections: vec![NodeConnection::new("m", "result", "out", "result")],
+        };
+        assert_eq!(graph(MathOp::Sqrt, 0.0).evaluate(16.0, 0.0), 4.0);
+        assert_eq!(graph(MathOp::Sqrt, 0.0).evaluate(-4.0, 0.0), 0.0);
+        assert_eq!(graph(MathOp::Quantize, 4.0).evaluate(11.0, 0.0), 12.0);
+        assert_eq!(graph(MathOp::Modulo, 3.0).evaluate(10.0, 0.0), 1.0);
+        // Divide-by-zero style B is passed through untouched.
+        assert_eq!(graph(MathOp::Modulo, 0.0).evaluate(10.0, 0.0), 10.0);
+        assert_eq!(graph(MathOp::Quantize, 0.0).evaluate(10.0, 0.0), 10.0);
+        assert_eq!(graph(MathOp::LessThan, 5.0).evaluate(3.0, 0.0), 1.0);
+        assert_eq!(graph(MathOp::GreaterThan, 5.0).evaluate(7.0, 0.0), 1.0);
+        assert_eq!(graph(MathOp::Equal, 5.0).evaluate(5.0, 0.0), 1.0);
+        assert_eq!(graph(MathOp::Equal, 5.0).evaluate(5.1, 0.0), 0.0);
+
+        // Dot product is a whole-vector op: (1,2) . (3,4) = 11, and it
+        // fans to every channel of the binding.
+        let dot_graph = ModifierGraph {
+            nodes: vec![
+                ModifierNode::new(
+                    "a",
+                    0.0,
+                    0.0,
+                    NodeKind::Constant {
+                        mode: ConstantMode::Vec2,
+                        value: 1.0,
+                        g: 2.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                ),
+                ModifierNode::new(
+                    "b",
+                    0.0,
+                    60.0,
+                    NodeKind::Constant {
+                        mode: ConstantMode::Vec2,
+                        value: 3.0,
+                        g: 4.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                ),
+                ModifierNode::new(
+                    "d",
+                    80.0,
+                    0.0,
+                    NodeKind::Math {
+                        op: MathOp::DotProduct,
+                        default_b: 1.0,
+                    },
+                ),
+                ModifierNode::new("out", 160.0, 0.0, NodeKind::Output),
+            ],
+            connections: vec![
+                NodeConnection::new("a", "value", "d", "a"),
+                NodeConnection::new("b", "value", "d", "b"),
+                NodeConnection::new("d", "result", "out", "result"),
+            ],
+        };
+        let (x, y) = dot_graph.evaluate_vec2(0.0, 0.0, 0.0, &|_, _| 0.0);
+        assert_eq!(x, 11.0);
+        assert_eq!(y, 11.0);
     }
 
     /// Make Color drives channels independently (classic black +50 red),

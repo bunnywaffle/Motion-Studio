@@ -305,6 +305,10 @@ pub struct ModifierGraphView {
     blend_combos: HashMap<String, Entity<ComboboxState<SearchableVec<String>>>>,
     /// Confirm subscriptions for the retained blend Comboboxes.
     blend_combo_subs: HashMap<String, Subscription>,
+    /// Retained Math-op Combobox states, keyed by math node id.
+    math_combos: HashMap<String, Entity<ComboboxState<SearchableVec<String>>>>,
+    /// Confirm subscriptions for the retained math Comboboxes.
+    math_combo_subs: HashMap<String, Subscription>,
     /// Node palette sidebar section open/closed (Value/Color/Space/Bus/Driver).
     /// Sections start collapsed: the sidebar is a clean list of categories.
     palette_open: [bool; 5],
@@ -355,6 +359,8 @@ impl ModifierGraphView {
             param_editor_sub: None,
             blend_combos: HashMap::new(),
             blend_combo_subs: HashMap::new(),
+            math_combos: HashMap::new(),
+            math_combo_subs: HashMap::new(),
             palette_open: [false; 5],
             effects_open: false,
             expanded_color: None,
@@ -379,6 +385,8 @@ impl ModifierGraphView {
         self.param_editor_sub = None;
         self.blend_combos.clear();
         self.blend_combo_subs.clear();
+        self.math_combos.clear();
+        self.math_combo_subs.clear();
         self.pan_offset = (0.0, 0.0);
         self.scrubbing_param = None;
         self.expanded_color = None;
@@ -414,6 +422,71 @@ impl ModifierGraphView {
             cx.notify();
         });
         cx.notify();
+    }
+
+    /// Ensure a retained Math-op Combobox exists per live math node
+    /// (created on first render; dropped when the node is deleted).
+    fn ensure_math_combos(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let live: HashSet<String> = self
+            .graph
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.kind, NodeKind::Math { .. }))
+            .map(|n| n.id.clone())
+            .collect();
+        self.math_combos.retain(|k, _| live.contains(k));
+        self.math_combo_subs.retain(|k, _| live.contains(k));
+        for id in &live {
+            if self.math_combos.contains_key(id) {
+                continue;
+            }
+            let labels: Vec<String> =
+                MathOp::ALL.iter().map(|m| m.label().to_string()).collect();
+            let idx = self
+                .graph
+                .get_node(id)
+                .and_then(|n| match n.kind {
+                    NodeKind::Math { op, .. } => Some(op.index()),
+                    _ => None,
+                })
+                .unwrap_or(0);
+            let st = cx.new(|cx| {
+                ComboboxState::new(SearchableVec::new(labels), vec![IndexPath::new(idx)], window, cx)
+            });
+            let view = cx.entity().clone();
+            let nid = id.clone();
+            let sub = cx.subscribe(
+                &st,
+                move |_, _, event: &ComboboxEvent<SearchableVec<String>>, cx| {
+                    let vals = match event {
+                        ComboboxEvent::Confirm(v) => v,
+                        ComboboxEvent::Change(v) => v,
+                    };
+                    let Some(v) = vals.first() else {
+                        return;
+                    };
+                    let Some(op) = MathOp::from_label(v) else {
+                        return;
+                    };
+                    // Deferred: the menu click/Enter fires while this view
+                    // is mid-update (event dispatch runs inside it).
+                    let view = view.clone();
+                    let nid = nid.clone();
+                    cx.defer(move |cx| {
+                        view.update(cx, |this, cx| {
+                            if let Some(n) = this.graph.get_node_mut(&nid) {
+                                if let NodeKind::Math { op: o, .. } = &mut n.kind {
+                                    *o = op;
+                                    this.sync_to_state(cx);
+                                }
+                            }
+                        });
+                    });
+                },
+            );
+            self.math_combos.insert(id.clone(), st);
+            self.math_combo_subs.insert(id.clone(), sub);
+        }
     }
 
     /// Ensure a retained Blend-mode Combobox exists per live blend node
@@ -710,6 +783,7 @@ impl Panel for ModifierGraphView {
 impl Render for ModifierGraphView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_blend_combos(window, cx);
+        self.ensure_math_combos(window, cx);
         let (factor, base_val, evaluated_out, is_driven) = {
             let s = self.editor_state.read(cx);
             let factor = s.get_layer_progression_factor(&self.layer_id);
@@ -2127,7 +2201,9 @@ impl ModifierGraphView {
 
             NodeKind::Math { op, .. } => {
                 let current_op = *op;
-
+                let combo_id = nid.replace('-', "_");
+                // Searchable op picker (retained per node, like the Blend mode
+                // dropdown): one row instead of a button strip that overflows.
                 v_flex()
                     .w_full()
                     .px_2()
@@ -2136,16 +2212,20 @@ impl ModifierGraphView {
                     .border_t_1()
                     .border_color(rgb(0x2e303e))
                     .child(
-                        // Operation picker buttons
-                        h_flex()
+                        div()
+                            .id(SharedString::from(format!("mg_math_combo_{combo_id}")))
+                            .test_support()
                             .w_full()
-                            .gap_1()
-                            .justify_between()
-                            .child(self.op_btn("+", current_op == MathOp::Add, ent.clone(), nid.clone(), MathOp::Add, cx))
-                            .child(self.op_btn("−", current_op == MathOp::Subtract, ent.clone(), nid.clone(), MathOp::Subtract, cx))
-                            .child(self.op_btn("×", current_op == MathOp::Multiply, ent.clone(), nid.clone(), MathOp::Multiply, cx))
-                            .child(self.op_btn("÷", current_op == MathOp::Divide, ent.clone(), nid.clone(), MathOp::Divide, cx))
-                            .child(self.op_btn("^", current_op == MathOp::Power, ent.clone(), nid.clone(), MathOp::Power, cx)),
+                            .child(match self.math_combos.get(&nid) {
+                                Some(cb) => Combobox::new(cb)
+                                    .menu_width(px(190.))
+                                    .into_any_element(),
+                                None => div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(current_op.label())
+                                    .into_any_element(),
+                            }),
                     )
             }
 
@@ -2375,40 +2455,6 @@ impl ModifierGraphView {
             .border_t_1()
             .border_color(rgb(0x2e303e))
             .child(plot)
-    }
-
-    fn op_btn(
-        &self,
-        symbol: &'static str,
-        active: bool,
-        entity: Entity<Self>,
-        node_id: String,
-        target_op: MathOp,
-        _cx: &App,
-    ) -> Div {
-        div()
-            .px_1p5()
-            .py_0p5()
-            .rounded_sm()
-            .bg(if active { rgb(0x7e22ce) } else { rgb(0x232430) })
-            .hover(|s| s.bg(rgb(0x9333ea)).text_color(rgb(0xffffff)))
-            .cursor_pointer()
-            .text_xs()
-            .font_bold()
-            .text_color(if active { rgb(0xffffff) } else { rgb(0x9ca3af) })
-            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                cx.stop_propagation();
-                let nid = node_id.clone();
-                entity.update(cx, |this, cx| {
-                    if let Some(n) = this.graph.get_node_mut(&nid) {
-                        if let NodeKind::Math { op, .. } = &mut n.kind {
-                            *op = target_op;
-                            this.sync_to_state(cx);
-                        }
-                    }
-                });
-            })
-            .child(symbol)
     }
 
     /// Shared scrub-row stack for the spatial nodes (Transform/Tile/Glow/
