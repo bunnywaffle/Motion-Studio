@@ -18,6 +18,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::shader::parse_shader_meta;
 
+/// Bundle layouts the scan understands (platform-dependent suffixes).
+const OFX_BUNDLE_SUFFIXES: &[&str] = &[".ofx", ".ofx.bundle", ".ofx.so", ".ofx.dylib"];
+
 /// Extensions accepted by "Install Effect…" and scanned in the effects folder.
 pub const EFFECT_EXTENSIONS: &[&str] = &["fx", "wgsl", "glsl", "txt"];
 
@@ -217,7 +220,13 @@ fn collect_ofx(dir: &Path, depth: usize, out: &mut Vec<OfxBundle>) {
     for entry in entries.flatten() {
         let path = entry.path();
         let file_name = entry.file_name().to_string_lossy().to_string();
-        if file_name.to_ascii_lowercase().ends_with(".ofx") {
+        let lower = file_name.to_ascii_lowercase();
+        // Windows/Linux ship `Foo.ofx` DLLs; macOS ships `Foo.ofx.bundle`
+        // directories; some hosts use `Foo.ofx.so` / `Foo.ofx.dylib`.
+        if OFX_BUNDLE_SUFFIXES
+            .iter()
+            .any(|suffix| lower.ends_with(suffix))
+        {
             out.push(ofx_bundle(&path, &file_name));
             continue;
         }
@@ -365,6 +374,31 @@ vec4 effect(vec2 uv, vec4 color) { return color + vec4(amount * 0.1); }
         let bare = found.iter().find(|b| b.name == "Bare").unwrap();
         assert_eq!(bare.identifier, "local.bare");
         assert!(find_ofx_bundles(&root.join("missing")).is_empty());
+
+        // macOS-style bundle directories and unix-style .ofx.so files are
+        // found too; the bundle's `Contents` is not descended into.
+        std::fs::create_dir_all(root.join("Panel.ofx.bundle").join("Contents")).unwrap();
+        std::fs::write(
+            root.join("Panel.ofx.bundle").join("Contents").join("Info.plist"),
+            "<plist><dict><key>CFBundleIdentifier</key><string>com.example.panel</string>\
+             <key>CFBundleName</key><string>Panel</string></dict></plist>",
+        )
+        .unwrap();
+        std::fs::write(root.join("linux.ofx.so"), b"\x7fELF").unwrap();
+        let found = find_ofx_bundles(&root);
+        assert_eq!(found.len(), 4);
+        assert!(found.iter().any(|b| b.name == "Panel"));
+        // file_stem keeps "linux.ofx" from "linux.ofx.so"; name is a
+        // folder-name fallback either way — what matters is it is found.
+        assert!(found.iter().any(|b| b.name.starts_with("linux")));
+        assert_eq!(
+            found
+                .iter()
+                .filter(|b| b.identifier.starts_with("com.example.panel"))
+                .count(),
+            1,
+            "bundle contents must not produce phantom entries"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

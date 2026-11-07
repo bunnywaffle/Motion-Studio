@@ -14485,6 +14485,88 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         .expect("update_window failed");
     }
 
+    /// Right-clicking a node card must offer Duplicate and Delete; duplicating
+    /// makes an offset, wire-free copy that becomes the selection, and the
+    /// Output node refuses both operations.
+    #[gpui_kit::test]
+    fn test_node_graph_context_menu_duplicate_and_delete(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let state = cx.new(|_| EditorState::new());
+        let mut mg_view = None;
+        let handle = cx.open_window(size(px(1080.), px(720.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| {
+                crate::modifier_graph_view::ModifierGraphView::new(
+                    state.clone(),
+                    "layer_accent".to_string(),
+                    "transform.position.x".to_string(),
+                    window,
+                    cx,
+                )
+            });
+            mg_view = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let view = mg_view.expect("graph view created");
+        let math_id = view.update(cx, |this, cx| {
+            this.add_node(
+                project::modifier::NodeKind::Math {
+                    op: project::modifier::MathOp::Multiply,
+                    default_b: 2.0,
+                },
+                cx,
+            );
+            this.graph
+                .nodes
+                .iter()
+                .find(|n| matches!(n.kind, project::modifier::NodeKind::Math { .. }))
+                .unwrap()
+                .id
+                .clone()
+        });
+        // Open the node menu (what the card's right-click does).
+        view.update(cx, |this, cx| {
+            this.open_context_menu(Some(math_id.clone()), gpui::point(px(30.), px(40.)), cx);
+        });
+        let _ = cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("graph_ctx_menu").is_some(), "menu must render");
+            assert!(window.try_find("graph_ctx_duplicate").is_some());
+            assert!(window.try_find("graph_ctx_delete").is_some());
+        });
+        view.update(cx, |this, cx| {
+            let count_before = this.graph.nodes.len();
+            let dup_id = this.duplicate_node(&math_id, cx).expect("math duplicates");
+            assert_ne!(dup_id, math_id);
+            assert_eq!(this.graph.nodes.len(), count_before + 1);
+            let dup_x = this.graph.get_node(&dup_id).unwrap().pos_x;
+            let src_x = this.graph.get_node(&math_id).unwrap().pos_x;
+            assert!((dup_x - src_x - 40.0).abs() < 1e-4);
+            assert!(
+                this.graph
+                    .connections
+                    .iter()
+                    .all(|c| c.from_node != dup_id && c.to_node != dup_id),
+                "duplicate must be wire-free"
+            );
+            this.remove_node(&dup_id, cx);
+            assert_eq!(this.graph.nodes.len(), count_before);
+            let out_id = this
+                .graph
+                .nodes
+                .iter()
+                .find(|n| matches!(n.kind, project::modifier::NodeKind::Output))
+                .unwrap()
+                .id
+                .clone();
+            assert!(this.duplicate_node(&out_id, cx).is_none());
+            this.remove_node(&out_id, cx);
+            assert!(this.graph.get_node(&out_id).is_some(), "output survives delete");
+        });
+    }
+
     /// Wire finishing must work when the canvas is panned: the socket drag
     /// start/finish map cursor coordinates through the pan offset (cards and
     /// sockets are drawn panned). Pre-fix the finish target was offset by the

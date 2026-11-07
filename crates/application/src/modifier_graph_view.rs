@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use gpui_kit::assets::IconName;
-use gpui_kit::base::{h_flex, v_flex, IndexPath, StyledExt, TestSupportExt};
+use gpui_kit::base::{h_flex, v_flex, IndexPath, Positioner, StyledExt, TestSupportExt};
 use gpui_kit::component::combobox::{Combobox, ComboboxEvent, ComboboxState};
 use gpui_kit::component::collapsible::Collapsible;
 use gpui_kit::component::dock::{BasePanel, DockPlacement, Panel, PanelEvent, PanelId};
@@ -318,6 +318,17 @@ pub struct ModifierGraphView {
     expanded_color: Option<String>,
     /// Curve widget drag: `(node_id, zone index, start_y, start_lift)`.
     curve_scrub: Option<(String, usize, f32, f32)>,
+    /// Right-click context menu (a node card, or the empty canvas).
+    context_menu: Option<GraphNodeMenu>,
+}
+
+/// Right-click context menu state for the graph canvas.
+#[derive(Clone)]
+pub(crate) struct GraphNodeMenu {
+    /// Node the menu acts on; `None` for the empty-canvas menu.
+    pub node_id: Option<String>,
+    /// Window-space anchor (the click position).
+    pub pos: Point<Pixels>,
 }
 
 impl ModifierGraphView {
@@ -365,6 +376,7 @@ impl ModifierGraphView {
             effects_open: false,
             expanded_color: None,
             curve_scrub: None,
+            context_menu: None,
         }
     }
 
@@ -391,6 +403,7 @@ impl ModifierGraphView {
         self.scrubbing_param = None;
         self.expanded_color = None;
         self.curve_scrub = None;
+        self.context_menu = None;
         cx.notify();
     }
 
@@ -658,6 +671,52 @@ impl ModifierGraphView {
         self.sync_to_state(cx);
     }
 
+    /// Duplicate a node (offset copy, no wires). Output cannot be
+    /// duplicated. Returns the new node's id.
+    pub fn duplicate_node(&mut self, node_id: &str, cx: &mut Context<Self>) -> Option<String> {
+        let src = self.graph.get_node(node_id)?.clone();
+        if matches!(src.kind, NodeKind::Output) {
+            return None;
+        }
+        let base = src.kind.title().to_lowercase().replace(' ', "_");
+        let mut n = self.graph.nodes.len() + 1;
+        let id = loop {
+            let candidate = format!("node_{base}_{n}");
+            if self.graph.get_node(&candidate).is_none() {
+                break candidate;
+            }
+            n += 1;
+        };
+        self.graph.add_node(ModifierNode::new(
+            id.clone(),
+            src.pos_x + 40.0,
+            src.pos_y + 40.0,
+            src.kind,
+        ));
+        self.selected_node = Some(id.clone());
+        self.sync_to_state(cx);
+        Some(id)
+    }
+
+    /// Close the node context menu.
+    pub fn close_context_menu(&mut self) {
+        self.context_menu = None;
+    }
+
+    /// Open the node context menu (a node, or `None` for the canvas).
+    pub(crate) fn open_context_menu(
+        &mut self,
+        node_id: Option<String>,
+        pos: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.context_menu = Some(GraphNodeMenu { node_id, pos });
+        if let Some(nid) = self.context_menu.as_ref().and_then(|m| m.node_id.as_ref()) {
+            self.selected_node = Some(nid.clone());
+        }
+        cx.notify();
+    }
+
     /// Attempt to complete a wire connection to a target position.
     /// Returns true if a connection was made.
     pub fn try_finish_wire_connection(
@@ -804,8 +863,9 @@ impl Render for ModifierGraphView {
         let canvas = self.render_canvas(&entity, cx);
         let palette = self.render_node_palette(&entity, cx);
 
+        // 3. Right-click context menu (nodes / empty canvas), cursor-anchored
         let ent_key = entity.clone();
-        v_flex()
+        let mut root = v_flex()
             .id("modifier_graph_root")
             .test_support()
             .size_full()
@@ -830,7 +890,131 @@ impl Render for ModifierGraphView {
                     .overflow_hidden()
                     .child(palette)
                     .child(div().flex_1().child(canvas)),
-            )
+            );
+
+        if let Some(menu) = self.context_menu.clone() {
+            // Full-window click-catcher that closes the menu.
+            let p_dismiss_l = entity.clone();
+            let p_dismiss_r = entity.clone();
+            root = root.child(deferred(
+                Positioner::corner(Anchor::TopLeft, point(px(0.), px(0.)))
+                    .margin(px(0.))
+                    .child(
+                        div()
+                            .id("graph_ctx_backdrop")
+                            .test_support()
+                            .size_full()
+                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                p_dismiss_l.update(cx, |this, _| this.close_context_menu());
+                            })
+                            .on_mouse_down(MouseButton::Right, move |_event, _window, cx| {
+                                p_dismiss_r.update(cx, |this, _| this.close_context_menu());
+                            }),
+                    ),
+            ));
+
+            let is_output = menu
+                .node_id
+                .as_deref()
+                .and_then(|nid| self.graph.get_node(nid))
+                .is_some_and(|n| matches!(n.kind, NodeKind::Output));
+
+            let menu_box = {
+                let row = |id: &'static str, label: &'static str, entity: Entity<Self>, action: Box<dyn Fn(&mut Self, &mut Context<Self>)>| {
+                    let ent = entity;
+                    div()
+                        .id(id)
+                        .test_support()
+                        .cursor_pointer()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .text_xs()
+                        .text_color(cx.theme().foreground)
+                        .hover(|s| s.bg(cx.theme().accent).text_color(cx.theme().accent_foreground))
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            ent.update(cx, |this, cx| {
+                                action(this, cx);
+                                this.close_context_menu();
+                                cx.notify();
+                            });
+                        })
+                        .child(label)
+                };
+                let header_row = div()
+                    .px_2()
+                    .py_1()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(if menu.node_id.is_some() { "Node" } else { "Canvas" });
+                let mut box_ = v_flex()
+                    .id("graph_ctx_menu")
+                    .test_support()
+                    .w(px(190.))
+                    .p_1()
+                    .bg(cx.theme().background)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded_md()
+                    .shadow_lg()
+                    .on_mouse_down_out({
+                        let p_dismiss_out = entity.clone();
+                        move |_event, _window, cx| {
+                            p_dismiss_out.update(cx, |this, _| this.close_context_menu());
+                        }
+                    })
+                    .child(header_row);
+                if let Some(nid) = menu.node_id.clone() {
+                    if is_output {
+                        box_ = box_.child(
+                            div()
+                                .px_2()
+                                .py_1()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Output node is fixed"),
+                        );
+                    } else {
+                        let nid_dup = nid.clone();
+                        box_ = box_.child(row(
+                            "graph_ctx_duplicate",
+                            "Duplicate",
+                            entity.clone(),
+                            Box::new(move |this, cx| {
+                                this.duplicate_node(&nid_dup, cx);
+                            }),
+                        ));
+                        let nid_del = nid.clone();
+                        box_ = box_.child(row(
+                            "graph_ctx_delete",
+                            "Delete",
+                            entity.clone(),
+                            Box::new(move |this, cx| {
+                                this.remove_node(&nid_del, cx);
+                            }),
+                        ));
+                    }
+                } else {
+                    box_ = box_.child(row(
+                        "graph_ctx_reset_view",
+                        "Reset View",
+                        entity.clone(),
+                        Box::new(|this, _cx| {
+                            this.pan_offset = (0.0, 0.0);
+                        }),
+                    ));
+                }
+                box_
+            };
+            root = root.child(deferred(
+                Positioner::corner(Anchor::TopLeft, menu.pos)
+                    .margin(px(8.))
+                    .occlude()
+                    .child(menu_box),
+            ));
+        }
+
+        root
     }
 }
 
@@ -1428,14 +1612,19 @@ impl ModifierGraphView {
                     cx.notify();
                 });
             })
-            // Right-button release ends canvas panning (without this the
-            // canvas stays stuck to the cursor after a right-drag pan).
-            .on_mouse_up(MouseButton::Right, move |_event, _window, cx| {
+            // Right-button release ends canvas panning. A right-click (no
+            // drag) on empty canvas opens a small utility menu instead.
+            .on_mouse_up(MouseButton::Right, move |event, _window, cx| {
+                let (ex, ey) = event_to_canvas_pos(event.position);
                 ent_pan_up.update(cx, |this, cx| {
-                    if this.panning_canvas.is_some() {
-                        this.panning_canvas = None;
-                        cx.notify();
+                    if let Some((sx, sy, _, _)) = this.panning_canvas.take() {
+                        let moved = ((ex - sx).powi(2) + (ey - sy).powi(2)).sqrt();
+                        if moved < 6.0 {
+                            this.open_context_menu(None, event.position, cx);
+                        }
                     }
+                    this.panning_canvas = None;
+                    cx.notify();
                 });
             })
             .on_mouse_up_out(MouseButton::Right, move |_event, _window, cx| {
@@ -1692,9 +1881,11 @@ impl ModifierGraphView {
         let ent_del = entity.clone();
         let ent_card_click = entity.clone();
         let ent_card_up = entity.clone();
+        let ent_ctx_down = entity.clone();
         let nid_drag = node_id.clone();
         let nid_del = node_id.clone();
         let nid_card = node_id.clone();
+        let nid_ctx = node_id.clone();
         let npos_x = node.pos_x;
         let npos_y = node.pos_y;
 
@@ -1728,6 +1919,14 @@ impl ModifierGraphView {
                         let (pan_x, pan_y) = this.pan_offset;
                         this.try_finish_wire_connection(curr_x, curr_y, pan_x, pan_y, cx);
                     }
+                });
+            })
+            // Right-click on a node opens its context menu (right-drag on
+            // the empty canvas still pans).
+            .on_mouse_down(MouseButton::Right, move |event, _window, cx| {
+                cx.stop_propagation();
+                ent_ctx_down.update(cx, |this, cx| {
+                    this.open_context_menu(Some(nid_ctx.clone()), event.position, cx);
                 });
             });
 
