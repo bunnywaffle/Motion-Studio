@@ -3234,6 +3234,12 @@ pub struct CompositionViewerPanel {
     pub img_cache: HashMap<(String, u64), std::sync::Arc<gpui::RenderImage>>,
     /// Decoded image asset cache (asset id -> RGBA).
     pub asset_cache: HashMap<String, Arc<image::RgbaImage>>,
+    /// Probe metadata per video asset (path probe is expensive; once).
+    pub video_info: HashMap<String, crate::video::VideoInfo>,
+    /// Decoded video frames, keyed (asset id, frame). A small FIFO ring so
+    /// scrubbing back lands on already-decoded frames.
+    pub video_frames: HashMap<(String, i64), Arc<image::RgbaImage>>,
+    pub video_frames_order: std::collections::VecDeque<(String, i64)>,
     /// Decoded image dimensions cache (asset id -> w/h). `image_dimensions`
     /// hits the disk, so without this every viewport render re-reads every
     /// image file — visible as gizmo/effect lag.
@@ -3408,6 +3414,9 @@ impl CompositionViewerPanel {
             raster_cache: HashMap::new(),
             img_cache: HashMap::new(),
             asset_cache: HashMap::new(),
+            video_info: HashMap::new(),
+            video_frames: HashMap::new(),
+            video_frames_order: std::collections::VecDeque::new(),
             img_dims: HashMap::new(),
             canvas_px: None,
             last_frame_ms: 0.0,
@@ -3419,6 +3428,62 @@ impl CompositionViewerPanel {
             overlays_enabled: true,
             shape_drag: None,
         }
+    }
+
+    /// Decode the video frame for `layer` at the playhead into the shared
+    /// asset cache (and the small FIFO ring). Returns true on success
+    /// (false → caller keeps the slate placeholder).
+    fn decode_video_layer_frame(
+        &mut self,
+        layer: &compositor::EvaluatedLayer,
+        asset_id: &str,
+        path: &std::path::Path,
+        comp_fps: f32,
+    ) -> bool {
+        let info = *self
+            .video_info
+            .entry(asset_id.to_string())
+            .or_insert_with(|| {
+                crate::video::probe_video(path).unwrap_or(crate::video::VideoInfo {
+                    width: 1920,
+                    height: 1080,
+                    fps: comp_fps.max(1.0),
+                    frames: 0,
+                })
+            });
+        // Source frame from time since the layer's in-point, mapped through
+        // the footage's own rate; negative scrubs pin to frame 0.
+        let secs = layer.time_offset_seconds.max(0.0);
+        let vframe = (secs * info.fps.max(1e-3) as f64).floor() as i64;
+        let vframe = if info.frames > 0 {
+            vframe.clamp(0, info.frames - 1)
+        } else {
+            vframe.max(0)
+        };
+        let arc = match self.video_frames.get(&(asset_id.to_string(), vframe)) {
+            Some(hit) => hit.clone(),
+            None => match crate::video::decode_video_frame_at(path, vframe, &info) {
+                Some(img) => {
+                    let arc = std::sync::Arc::new(img);
+                    self.video_frames
+                        .insert((asset_id.to_string(), vframe), arc.clone());
+                    self.video_frames_order
+                        .push_back((asset_id.to_string(), vframe));
+                    while self.video_frames.len() > 16 {
+                        match self.video_frames_order.pop_front() {
+                            Some(oldest) => {
+                                self.video_frames.remove(&oldest);
+                            }
+                            None => break,
+                        }
+                    }
+                    arc
+                }
+                None => return false,
+            },
+        };
+        self.asset_cache.insert(asset_id.to_string(), arc);
+        true
     }
 
     pub fn open_context_menu(&mut self, target: ViewerContextMenuTarget, pos: Point<Pixels>) {
@@ -3647,7 +3712,29 @@ impl Render for CompositionViewerPanel {
                                 (400.0, 300.0)
                             }
                         }
-                        LayerSource::Video { .. } => (1920.0, 1080.0),
+                        LayerSource::Video { asset_id, .. } => {
+                            match state.project.get_asset(asset_id) {
+                                Some(asset) => {
+                                    let path = asset.path.clone();
+                                    let info = *self
+                                        .video_info
+                                        .entry(asset_id.clone())
+                                        .or_insert_with(|| {
+                                            crate::video::probe_video(&path).unwrap_or(
+                                                crate::video::VideoInfo {
+                                                    width: 1920,
+                                                    height: 1080,
+                                                    fps: 30.0, // unknown: dims don't need it
+                                                    frames: 0,
+                                                },
+                                            )
+                                        });
+                                    let (w, h) = crate::video::scaled_video_dims(&info);
+                                    (w as f32, h as f32)
+                                }
+                                None => (1920.0, 1080.0),
+                            }
+                        }
                         LayerSource::Text { font_size, text, text_path, .. } => {
                             if let Some(path) = text_path {
                                 if let Some((mn, mx)) = path.bounds() {
@@ -3976,12 +4063,22 @@ impl Render for CompositionViewerPanel {
                         ((l_w / qdiv as f32).ceil().max(1.0) as u32).min(2048),
                         ((l_h / qdiv as f32).ceil().max(1.0) as u32).min(2048),
                     );
-                    // Decode image and video footage assets into the shared cache.
-                    if let LayerSource::Image { asset_id } | LayerSource::Video { asset_id, .. } = &layer.source {
-                        if let Some(asset) = state.project.get_asset(asset_id) {
-                            let path = asset.path.clone();
-                            crate::raster::decoded_asset(&mut self.asset_cache, asset_id, &path);
+                    // Decode footage into the shared cache. Images are static;
+                    // video frames depend on the playhead position.
+                    match &layer.source {
+                        LayerSource::Image { asset_id } => {
+                            if let Some(asset) = state.project.get_asset(asset_id) {
+                                let path = asset.path.clone();
+                                crate::raster::decoded_asset(&mut self.asset_cache, asset_id, &path);
+                            }
                         }
+                        LayerSource::Video { asset_id, .. } => {
+                            if let Some(asset) = state.project.get_asset(asset_id) {
+                                let path = asset.path.clone();
+                                self.decode_video_layer_frame(layer, asset_id, &path, comp_fps);
+                            }
+                        }
+                        _ => {}
                     }
                     let backdrop_hash = if is_adjustment || layer.blend_mode != BlendMode::Normal {
                         h_underlying.finish()

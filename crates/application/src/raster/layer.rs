@@ -513,6 +513,7 @@ pub fn layer_cache_key(
     // the old `format!("{:?}")` whose AST dumps cost milliseconds per
     // layer per tick during drags.
     let time_varying = is_adjustment
+        || matches!(&layer.source, LayerSource::Video { .. })
         || layer.effects.iter().any(|e| {
             e.enabled && matches!(&e.effect_type, EvaluatedEffectType::ShaderLab { .. })
         });
@@ -2036,7 +2037,14 @@ pub(crate) fn layer_base_dims(
                 (1920.0, 1080.0)
             }
         }
-        LayerSource::Video { .. } => (1920.0, 1080.0),
+        LayerSource::Video { asset_id, .. } => {
+            // Prefer the decoded frame's size; fall back before first decode.
+            if let Some(img) = assets.get(asset_id) {
+                (img.width() as f32, img.height() as f32)
+            } else {
+                (1920.0, 1080.0)
+            }
+        }
         LayerSource::Text { text, font_size, text_path, stroke_width, .. } => {
             // Stroke reach (native width, or outline override width+offset)
             // so wide outlines fit the estimate box instead of clipping.

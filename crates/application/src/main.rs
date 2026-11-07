@@ -1,6 +1,7 @@
 pub(crate) mod modifier_graph_view;
 pub(crate) mod panels;
 pub(crate) mod color_editor;
+pub(crate) mod video;
 pub mod raster;
 pub mod state;
 pub mod widgets;

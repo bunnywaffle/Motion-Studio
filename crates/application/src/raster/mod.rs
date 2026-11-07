@@ -7,7 +7,8 @@
 //!
 //! - base content: solids, shapes (rect/ellipse/pen polyline), cosmic-text
 //!   glyphs (weight, italic, tracking, leading, align, caps, stroke,
-//!   baseline, box wrap, bevel emboss), decoded images, video slate;
+//!   baseline, box wrap, bevel emboss), decoded images, decoded video
+//!   frames (slate on failure);
 //! - per-pixel effects with real uv/position: checkerboard, gradient,
 //!   tiler, warp, perspective, noise, blur, bloom, drop shadow, plus the
 //!   whole non-spatial stack through `process_color` (tint, exposure,

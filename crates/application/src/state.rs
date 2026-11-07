@@ -2349,6 +2349,30 @@ impl EditorState {
             .evaluate_with_project(&graph, proj, &time)
             .map_err(|e| format!("{e:?}"))?;
         let mut assets = std::collections::HashMap::new();
+        // Decode the video frame each video layer needs at this timecode so
+        // exports match the preview (ffprobe/ffmpeg are the same machine-local
+        // tools the preview path uses; unprobeable files stay a slate).
+        for layer in &stack.evaluated_layers {
+            if let LayerSource::Video { asset_id, .. } = &layer.source {
+                let Some(asset) = proj.get_asset(asset_id) else {
+                    continue;
+                };
+                let path = asset.path.clone();
+                let Some(info) = crate::video::probe_video(&path) else {
+                    continue;
+                };
+                let secs = layer.time_offset_seconds.max(0.0);
+                let vframe = (secs * info.fps.max(1e-3) as f64).floor() as i64;
+                let vframe = if info.frames > 0 {
+                    vframe.clamp(0, info.frames - 1)
+                } else {
+                    vframe.max(0)
+                };
+                if let Some(img) = crate::video::decode_video_frame_at(&path, vframe, &info) {
+                    assets.insert(asset_id.clone(), std::sync::Arc::new(img));
+                }
+            }
+        }
         let buffer = crate::raster::comp::rasterize_comp(
             &stack,
             comp.width as f32,
