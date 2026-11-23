@@ -8679,6 +8679,95 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         assert_eq!(n, 0);
     }
 
+    /// Every color menu must reach the full picker: the tool-default palettes
+    /// and effect color rows (including Outer Glow, which used to be missed
+    /// by the wheel map).
+    #[gpui_kit::test]
+    fn test_every_color_menu_has_picker(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let app_view = app_view_entity.expect("AppView created");
+
+        // Tool settings are shown with no layer selected.
+        app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, cx| {
+                s.select_layer(None);
+                s.set_tool(crate::state::EditorTool::Text);
+                cx.notify();
+            });
+        });
+        let _ = cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find("tool_text_color_picker_btn").is_some(),
+                "text color menu needs a custom picker entry"
+            );
+            window.click("tool_text_color_picker_btn", cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("tool_text_color_tab_rgb").is_some(),
+                "the full RGB/HEX/HSV editor must open"
+            );
+        });
+
+        // Effect color rows likewise expose their wheel editor.
+        let eff_id = app_view.update(cx, |view, cx| {
+            view.state().update(cx, |s, _cx| {
+                let lid = s
+                    .add_solid_layer("Picker Solid", project::Color::WHITE, 0, 0)
+                    .expect("solid layer");
+                s.select_layer(Some(lid));
+                s.add_effect_to_selected_layer(project::EffectType::outer_glow(
+                    20.0,
+                    50.0,
+                    100.0,
+                    project::Color::BLUE,
+                    50.0,
+                ))
+                .expect("outer glow")
+            })
+        });
+        let _ = cx.update_window(handle.into(), |_, window, cx| {
+            for _ in 0..8 {
+                window.render_frame(cx);
+                if window
+                    .try_find(SharedString::from(format!("fx_wheel_btn_color_{eff_id}")))
+                    .map(|e| e.visible())
+                    .unwrap_or(false)
+                {
+                    break;
+                }
+                window.scroll(
+                    "properties_inspector",
+                    gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(-300.))),
+                    cx,
+                );
+            }
+            window.render_frame(cx);
+            let btn = format!("fx_wheel_btn_color_{eff_id}");
+            assert!(
+                window.try_find(SharedString::from(btn.clone())).map(|e| e.visible()).unwrap_or(false),
+                "Outer Glow color row needs a visible Edit/picker button"
+            );
+            window.click(SharedString::from(btn), cx);
+            window.render_frame(cx);
+            assert!(
+                window
+                    .try_find(SharedString::from(format!("fx_color_{eff_id}_tab_rgb")))
+                    .is_some(),
+                "Outer Glow picker editor must render on click"
+            );
+        });
+    }
+
     #[gpui_kit::test]
     fn test_tone_curve_effect_renders_curve_editor(cx: &mut TestAppContext) {
         use gpui_kit::test::TestWindowExt;

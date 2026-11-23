@@ -9012,7 +9012,9 @@ fn fx_color_fields(effect: &project::Effect) -> Vec<&'static str> {
         EffectType::GradientRamp { .. } => vec!["color_a", "color_b"],
         EffectType::TextOutline { .. } => vec!["color"],
         EffectType::CelShading { .. } => vec!["highlight_tint", "shadow_tint"],
-        EffectType::InnerGlow { .. } | EffectType::RimLight { .. } => vec!["color"],
+        EffectType::InnerGlow { .. }
+        | EffectType::OuterGlow { .. }
+        | EffectType::RimLight { .. } => vec!["color"],
         _ => effect.color_slots(),
     }
 }
@@ -9158,7 +9160,12 @@ pub(crate) fn fx_swatch_row(
 /// Toolbar tool settings (Properties > Tool Settings): defaults that new
 /// layers are created with, so tools behave consistently across the app.
 /// Pure preset chips/swatches — no steppers anywhere.
-fn render_tool_settings(state: &Entity<EditorState>, cx: &App) -> AnyElement {
+fn render_tool_settings(
+    state: &Entity<EditorState>,
+    window: &mut Window,
+    panel: &Entity<PropertiesPanel>,
+    cx: &mut App,
+) -> AnyElement {
     let (tool, font_size, text_color, shape_fill, solid_color, rotate_step, path_mode, path_width) = {
         let s = state.read(cx);
         (
@@ -9230,6 +9237,60 @@ fn render_tool_settings(state: &Entity<EditorState>, cx: &App) -> AnyElement {
         (a.r - b.r).abs() < 0.01 && (a.g - b.g).abs() < 0.01 && (a.b - b.b).abs() < 0.01
     };
 
+    // Every tool-color menu gets a full picker, not just preset chips.
+    let tool_picker = |key: &'static str,
+                       slot: &'static str,
+                       window: &mut Window,
+                       cx: &mut App| {
+        let st = state.clone();
+        window.use_keyed_state(SharedString::from(key), cx, move |window, cx| {
+            let st = st.clone();
+            InspectorColorPicker::new(window, cx, Some(st.clone()), move |color, cx| {
+                st.update(cx, |s, cx| {
+                    match slot {
+                        "text" => s.tool_text_color = color,
+                        "shape" => s.tool_shape_fill = color,
+                        _ => s.tool_solid_color = color,
+                    }
+                    cx.notify();
+                });
+            })
+        })
+    };
+    let text_picker = tool_picker("tool_text_color_picker", "text", window, cx);
+    let shape_picker = tool_picker("tool_shape_fill_picker", "shape", window, cx);
+    let solid_picker = tool_picker("tool_solid_color_picker", "solid", window, cx);
+    let picker_button = |picker: &Entity<InspectorColorPicker>,
+                         current: Color,
+                         id: &'static str,
+                         cx: &mut App| {
+        let open = picker.read(cx).expanded;
+        let ed = picker.clone();
+        div()
+            .id(SharedString::from(format!("{id}_picker_btn")))
+            .test_support()
+            .cursor_pointer()
+            .px_2()
+            .py_0p5()
+            .rounded_sm()
+            .text_xs()
+            .text_color(if open { cx.theme().accent_foreground } else { cx.theme().muted_foreground })
+            .bg(if open { cx.theme().accent } else { cx.theme().muted })
+            .hover(|s| s.bg(ae::hover()))
+            .on_mouse_down(MouseButton::Left, move |_event, window: &mut Window, cx: &mut App| {
+                let was_open = ed.read(cx).expanded;
+                ed.update(cx, |this, cx| {
+                    this.set_expanded(!was_open, current);
+                    cx.notify();
+                });
+                if !was_open {
+                    InspectorColorPicker::sync_inputs(&ed, None, window, cx);
+                }
+            })
+            .child(if open { "Close Picker" } else { "Custom..." })
+            .into_any_element()
+    };
+
     let mut body = v_flex().gap_2();
     match tool {
         EditorTool::Text => {
@@ -9266,7 +9327,17 @@ fn render_tool_settings(state: &Entity<EditorState>, cx: &App) -> AnyElement {
                 .child(sizes)
                 .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Default color for new text"))
                 .child(cols)
-                .child(
+                .child(picker_button(&text_picker, text_color, "tool_text_color", cx));
+            if text_picker.read(cx).expanded {
+                body = body.child(crate::color_editor::render_color_editor(
+                    &text_picker,
+                    "tool_text_color",
+                    text_color,
+                    panel,
+                    cx,
+                ));
+            }
+            body = body.child(
                     div()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
@@ -9291,7 +9362,17 @@ fn render_tool_settings(state: &Entity<EditorState>, cx: &App) -> AnyElement {
             body = body
                 .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Default fill for new shapes"))
                 .child(cols)
-                .child(
+                .child(picker_button(&shape_picker, shape_fill, "tool_shape_fill", cx));
+            if shape_picker.read(cx).expanded {
+                body = body.child(crate::color_editor::render_color_editor(
+                    &shape_picker,
+                    "tool_shape_fill",
+                    shape_fill,
+                    panel,
+                    cx,
+                ));
+            }
+            body = body.child(
                     div()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
@@ -9341,7 +9422,17 @@ fn render_tool_settings(state: &Entity<EditorState>, cx: &App) -> AnyElement {
             body = body
                 .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Default color for quick-add solids"))
                 .child(cols)
-                .child(
+                .child(picker_button(&solid_picker, solid_color, "tool_solid_color", cx));
+            if solid_picker.read(cx).expanded {
+                body = body.child(crate::color_editor::render_color_editor(
+                    &solid_picker,
+                    "tool_solid_color",
+                    solid_color,
+                    panel,
+                    cx,
+                ));
+            }
+            body = body.child(
                     div()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
@@ -16046,7 +16137,7 @@ impl Render for PropertiesPanel {
                                         .child("Select a layer from the timeline or project panel to inspect its properties.")
                                 )
                                 .into_any_element(),
-                            render_tool_settings(&self.state, cx),
+                            render_tool_settings(&self.state, window, &panel_entity, cx),
                         ]
                     }),
             );
