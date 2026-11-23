@@ -7547,12 +7547,11 @@ where
             let mut val_view = div()
                 .id(edit_id)
                 .test_support()
-                .px_2()
+                .px_1p5()
                 .py_0p5()
                 .border_1()
                 .rounded_sm()
-                .text_xs()
-                .font_medium();
+                .text_xs();
 
             if is_linked {
                 val_view = val_view
@@ -7721,7 +7720,16 @@ where
                     )
                     .into_any_element()
             } else {
-                val_view.child(display_label).into_any_element()
+                // Compact AE-style readout: dim axis prefix, bright number.
+                let mut pill = h_flex().items_center().gap_1();
+                if let Some((axis, value)) = display_label.split_once(": ") {
+                    pill = pill
+                        .child(div().text_color(cx.theme().muted_foreground).child(axis.to_string()))
+                        .child(div().child(value.to_string()));
+                } else {
+                    pill = pill.child(display_label.clone());
+                }
+                val_view.child(pill).into_any_element()
             }
         }
     };
@@ -7958,7 +7966,16 @@ where
                     )
                     .into_any_element()
             } else {
-                val_view.child(display_label).into_any_element()
+                // Compact AE-style readout: dim axis prefix, bright number.
+                let mut pill = h_flex().items_center().gap_1();
+                if let Some((axis, value)) = display_label.split_once(": ") {
+                    pill = pill
+                        .child(div().text_color(cx.theme().muted_foreground).child(axis.to_string()))
+                        .child(div().child(value.to_string()));
+                } else {
+                    pill = pill.child(display_label.clone());
+                }
+                val_view.child(pill).into_any_element()
             }
         }
     };
@@ -8753,28 +8770,45 @@ fn property_keyframe_controls(
         )
     };
 
+    // Prev/next arrows are only shown when there is actually a keyframe to
+    // jump to; the old always-on dimmed arrows were visual noise in every row.
+    let prev_btn = has_prev_kf.then(|| {
+        div()
+            .cursor_pointer()
+            .px_0p5()
+            .text_xs()
+            .text_color(cx.theme().foreground)
+            .hover(|s| s.bg(cx.theme().muted))
+            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                s_prev.update(cx, |s, cx| {
+                    s.seek_previous_keyframe(&lid2, prop_path);
+                    cx.notify();
+                });
+            })
+            .child("◂")
+    });
+    let next_btn = has_next_kf.then(|| {
+        div()
+            .cursor_pointer()
+            .px_0p5()
+            .text_xs()
+            .text_color(cx.theme().foreground)
+            .hover(|s| s.bg(cx.theme().muted))
+            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                s_next.update(cx, |s, cx| {
+                    s.seek_next_keyframe(&lid4, prop_path);
+                    cx.notify();
+                });
+            })
+            .child("▸")
+    });
+
     h_flex()
         .gap_0p5()
         .items_center()
         .child(stopwatch_btn)
         .children(modifier_btn)
-        .child(
-            div()
-                .cursor_pointer()
-                .px_0p5()
-                .text_xs()
-                .text_color(if has_prev_kf { cx.theme().foreground } else { cx.theme().muted_foreground.opacity(0.3) })
-                .hover(|s| s.bg(cx.theme().muted))
-                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                    if has_prev_kf {
-                        s_prev.update(cx, |s, cx| {
-                            s.seek_previous_keyframe(&lid2, prop_path);
-                            cx.notify();
-                        });
-                    }
-                })
-                .child("◂"),
-        )
+        .children(prev_btn)
         .child(
             div()
                 .id(SharedString::from(format!("property_kf_{layer_id}_{prop_path}")))
@@ -8792,23 +8826,7 @@ fn property_keyframe_controls(
                 })
                 .child("◆"),
         )
-        .child(
-            div()
-                .cursor_pointer()
-                .px_0p5()
-                .text_xs()
-                .text_color(if has_next_kf { cx.theme().foreground } else { cx.theme().muted_foreground.opacity(0.3) })
-                .hover(|s| s.bg(cx.theme().muted))
-                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                    if has_next_kf {
-                        s_next.update(cx, |s, cx| {
-                            s.seek_next_keyframe(&lid4, prop_path);
-                            cx.notify();
-                        });
-                    }
-                })
-                .child("▸"),
-        )
+        .children(next_btn)
         .into_any_element()
 }
 
@@ -9419,7 +9437,7 @@ fn render_tool_settings(state: &Entity<EditorState>, cx: &App) -> AnyElement {
 fn prop_section<F>(
     id: &'static str,
     title: String,
-    icon: IconName,
+    _icon: IconName,
     expanded: bool,
     on_toggle: F,
     _cx: &App,
@@ -9431,9 +9449,9 @@ where
     let header_el = h_flex()
         .id(SharedString::from(format!("props_section_{id}")))
         .test_support()
-        .gap_1p5()
+        .gap_1()
         .items_center()
-        .font_semibold()
+        .font_medium()
         .text_xs()
         .text_color(ae::dim())
         .cursor_pointer()
@@ -9441,16 +9459,14 @@ where
             on_toggle(cx);
         })
         .child(div().w(px(10.)).child(if expanded { "▾" } else { "▸" }))
-        .child(icon_box(icon))
-        .child(title.to_uppercase())
+        .child(title)
         .into_any_element();
     let chrome = v_flex()
-        .p_2p5()
-        .rounded_sm()
+        .px_2()
+        .py_1p5()
         .border_b_1()
         .border_color(ae::border())
         .bg(ae::panel())
-        .gap_2()
         .child(header_el)
         .into_any_element();
     let content = body.filter(|_| expanded).unwrap_or_else(|| div().into_any_element());
@@ -13929,8 +13945,9 @@ impl Render for PropertiesPanel {
                     .min_h_0()
                     .overflow_y_scroll()
                     .overflow_x_scroll()
-                    .p_3()
-                    .gap_3()
+                    .px_2()
+                    .pb_3()
+                    .gap_1p5()
                     .children(if let Some(layer) = selected_layer {
                         // Local transform values at the playhead, folded
                         // through modifier graphs/links so the inspector
@@ -15484,12 +15501,13 @@ impl Render for PropertiesPanel {
                         let lid_reset = layer.id.clone();
                         let transform_expanded = self.transform_expanded;
                         let mut transform_card = v_flex()
-                            .p_2p5()
-                            .rounded_md()
-                            .border_1()
-                            .border_color(cx.theme().border)
-                            .bg(cx.theme().secondary)
-                            .gap_2()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .border_b_1()
+                            .border_color(ae::border())
+                            .bg(ae::panel())
+                            .gap_1p5()
                             .child(
                                 h_flex()
                                     .justify_between()
@@ -15531,11 +15549,11 @@ impl Render for PropertiesPanel {
                                     .border_color(cx.theme().border)
                                     .child(
                                         h_flex()
-                                            .w(px(70.))
+                                            .w(px(76.))
+                                            .justify_end()
                                             .gap_1()
                                             .items_center()
                                             .text_color(cx.theme().muted_foreground)
-                                            .child(icon_box(IconName::Move))
                                             .child(property_stopwatch(&self.state, &layer.id, "transform.anchor_point", layer.transform.anchor_point.is_animated(), cx))
                                             .child("Anchor Pt"),
                                     )
@@ -15579,11 +15597,11 @@ impl Render for PropertiesPanel {
                                     .border_color(cx.theme().border)
                                     .child(
                                         h_flex()
-                                            .w(px(70.))
+                                            .w(px(76.))
+                                            .justify_end()
                                             .gap_1()
                                             .items_center()
                                             .text_color(cx.theme().muted_foreground)
-                                            .child(icon_box(IconName::Move))
                                             .child(property_stopwatch(&self.state, &layer.id, "transform.position", layer.transform.position.is_animated(), cx))
                                             .child("Position"),
                                     )
@@ -15627,11 +15645,11 @@ impl Render for PropertiesPanel {
                                     .border_color(cx.theme().border)
                                     .child(
                                         h_flex()
-                                            .w(px(70.))
+                                            .w(px(76.))
+                                            .justify_end()
                                             .gap_1()
                                             .items_center()
                                             .text_color(cx.theme().muted_foreground)
-                                            .child(icon_box(IconName::Maximize2))
                                             .child(property_stopwatch(&self.state, &layer.id, "transform.scale", layer.transform.scale.is_animated(), cx))
                                             .child("Scale"),
                                     )
@@ -15714,27 +15732,30 @@ impl Render for PropertiesPanel {
                                     .border_color(cx.theme().border)
                                     .child(
                                         h_flex()
-                                            .w(px(70.))
+                                            .w(px(76.))
+                                            .justify_end()
                                             .gap_1()
                                             .items_center()
                                             .text_color(cx.theme().muted_foreground)
-                                            .child(icon_box(IconName::RotateCw))
                                             .child(property_stopwatch(&self.state, &layer.id, "transform.rotation", layer.transform.rotation.is_animated(), cx))
                                             .child("Rotation"),
                                     )
-                                    .child(scrub_field(
-                                        "prop_rotation",
-                                        "rotation".to_string(),
-                                        format!("{:.1}°", rot),
-                                        None,
-                                        None,
-                                        &self.state,
-                                        &panel_entity,
-                                        cx,
-                                        move |cx| s_rot_m.update(cx, |s, cx| { s.nudge_rotation(-15.0); cx.notify(); }),
-                                        move |cx| s_rot_p.update(cx, |s, cx| { s.nudge_rotation(15.0); cx.notify(); }),
-                                    )),
-                            )
+                                    .child(
+                                        h_flex()
+                                            .justify_end()
+                                            .child(scrub_field(
+                                                "prop_rotation",
+                                                "rotation".to_string(),
+                                                format!("{:.1}°", rot),
+                                                None,
+                                                None,
+                                                &self.state,
+                                                &panel_entity,
+                                                cx,
+                                                move |cx| s_rot_m.update(cx, |s, cx| { s.nudge_rotation(-15.0); cx.notify(); }),
+                                                move |cx| s_rot_p.update(cx, |s, cx| { s.nudge_rotation(15.0); cx.notify(); }),
+                                            )),
+                                    ))
                             // Opacity
                             .child(
                                 h_flex()
@@ -15745,27 +15766,30 @@ impl Render for PropertiesPanel {
                                     .border_color(cx.theme().border)
                                     .child(
                                         h_flex()
-                                            .w(px(70.))
+                                            .w(px(76.))
+                                            .justify_end()
                                             .gap_1()
                                             .items_center()
                                             .text_color(cx.theme().muted_foreground)
-                                            .child(icon_box(IconName::Sun))
                                             .child(property_stopwatch(&self.state, &layer.id, "opacity", layer.opacity.is_animated(), cx))
                                             .child("Opacity"),
                                     )
-                                    .child(scrub_field(
-                                        "prop_opacity",
-                                        "opacity".to_string(),
-                                        format!("{:.1} %", op),
-                                        None,
-                                        None,
-                                        &self.state,
-                                        &panel_entity,
-                                        cx,
-                                        move |cx| s_op_m.update(cx, |s, cx| { s.nudge_opacity(-10.0); cx.notify(); }),
-                                        move |cx| s_op_p.update(cx, |s, cx| { s.nudge_opacity(10.0); cx.notify(); }),
-                                    )),
-                            );
+                                    .child(
+                                        h_flex()
+                                            .justify_end()
+                                            .child(scrub_field(
+                                                "prop_opacity",
+                                                "opacity".to_string(),
+                                                format!("{:.1} %", op),
+                                                None,
+                                                None,
+                                                &self.state,
+                                                &panel_entity,
+                                                cx,
+                                                move |cx| s_op_m.update(cx, |s, cx| { s.nudge_opacity(-10.0); cx.notify(); }),
+                                                move |cx| s_op_p.update(cx, |s, cx| { s.nudge_opacity(10.0); cx.notify(); }),
+                                            )),
+                                    ));
                         }
 
                         // --- Switches & Modes Card ---

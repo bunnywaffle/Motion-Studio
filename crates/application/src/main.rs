@@ -8707,20 +8707,29 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
             window.render_frame(cx);
             // Scroll the curve plot itself into view, then verify.
             let plot = SharedString::from(format!("curve_plot_effect_curve_{eff_id}"));
+            let readout = SharedString::from(format!("curve_readout_effect_curve_{eff_id}"));
             for _ in 0..16 {
+                window.render_frame(cx);
+                let plot_visible = window
+                    .try_find(plot.clone())
+                    .map(|e| e.visible())
+                    .unwrap_or(false);
+                let readout_visible = window
+                    .try_find(readout.clone())
+                    .map(|e| e.visible())
+                    .unwrap_or(false);
+                if plot_visible && readout_visible {
+                    break;
+                }
                 window.scroll(
                     "properties_inspector",
                     gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(-400.))),
                     cx,
                 );
-                window.render_frame(cx);
-                if window.try_find(plot.clone()).map(|e| e.visible()).unwrap_or(false) {
-                    break;
-                }
             }
             // Linear by default: empty plot + readout render, no points yet.
             assert!(window.find(plot.clone()).visible());
-            assert!(window.find(SharedString::from(format!("curve_readout_effect_curve_{eff_id}"))).visible());
+            assert!(window.find(readout).visible());
         })
         .expect("update_window failed");
     }
