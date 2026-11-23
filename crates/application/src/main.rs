@@ -8768,6 +8768,50 @@ use gpui_kit::component::{ActiveTheme, Root, Theme, ThemeMode};
         });
     }
 
+    /// Keyframe controls must stay inside the inspector: a fixed 76px label
+    /// column used to push the stopwatch and modifier buttons 36px to the
+    /// left of the panel, where they were clipped and unclickable.
+    #[gpui_kit::test]
+    fn test_transform_keyframe_controls_stay_in_panel(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+        cx.update(gpui_kit::init);
+        let mut app_view_entity = None;
+        let handle = cx.open_window(size(px(1280.), px(900.)), |window, cx| {
+            window.activate_window();
+            let view = cx.new(|cx| AppView::new(window, cx));
+            app_view_entity = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let _app_view = app_view_entity.expect("AppView created");
+        let _ = cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let insp = window.find("properties_inspector").bounds();
+            for prop in [
+                "transform.anchor_point",
+                "transform.position",
+                "transform.scale",
+                "transform.rotation",
+                "opacity",
+            ] {
+                for id in [
+                    format!("property_stopwatch_layer_accent_{prop}"),
+                    format!("property_modifier_graph_layer_accent_{prop}"),
+                    format!("property_kf_layer_accent_{prop}"),
+                ] {
+                    let id = SharedString::from(id);
+                    let el = window.try_find(id.clone()).unwrap_or_else(|| panic!("{id} missing"));
+                    assert!(el.visible(), "{id} must be visible, not clipped");
+                    assert!(
+                        el.bounds().origin.x >= insp.origin.x,
+                        "{id} overflows left of the inspector: {:?} < {:?}",
+                        el.bounds().origin.x,
+                        insp.origin.x
+                    );
+                }
+            }
+        });
+    }
+
     #[gpui_kit::test]
     fn test_tone_curve_effect_renders_curve_editor(cx: &mut TestAppContext) {
         use gpui_kit::test::TestWindowExt;

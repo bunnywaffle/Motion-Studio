@@ -15640,7 +15640,7 @@ impl Render for PropertiesPanel {
                                     .border_color(cx.theme().border)
                                     .child(
                                         h_flex()
-                                            .w(px(76.))
+                                            .w(px(120.))
                                             .justify_end()
                                             .gap_1()
                                             .items_center()
@@ -15688,7 +15688,7 @@ impl Render for PropertiesPanel {
                                     .border_color(cx.theme().border)
                                     .child(
                                         h_flex()
-                                            .w(px(76.))
+                                            .w(px(120.))
                                             .justify_end()
                                             .gap_1()
                                             .items_center()
@@ -15736,7 +15736,7 @@ impl Render for PropertiesPanel {
                                     .border_color(cx.theme().border)
                                     .child(
                                         h_flex()
-                                            .w(px(76.))
+                                            .w(px(120.))
                                             .justify_end()
                                             .gap_1()
                                             .items_center()
@@ -15823,7 +15823,7 @@ impl Render for PropertiesPanel {
                                     .border_color(cx.theme().border)
                                     .child(
                                         h_flex()
-                                            .w(px(76.))
+                                            .w(px(120.))
                                             .justify_end()
                                             .gap_1()
                                             .items_center()
@@ -15857,7 +15857,7 @@ impl Render for PropertiesPanel {
                                     .border_color(cx.theme().border)
                                     .child(
                                         h_flex()
-                                            .w(px(76.))
+                                            .w(px(120.))
                                             .justify_end()
                                             .gap_1()
                                             .items_center()
@@ -19858,7 +19858,7 @@ fn render_graph_view(
                                 });
                             }
                         })
-                        .child(Input::new(&editor).id(edit_key.clone()).w(px(76.)))
+                        .child(Input::new(&editor).id(edit_key.clone()).w(px(120.)))
                         .into_any_element(),
                     _ => {
                         let p_v = panel_entity.clone();
